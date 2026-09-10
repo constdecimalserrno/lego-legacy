@@ -17,6 +17,9 @@ use std::path::PathBuf;
 /// got a run says which run it got.
 pub struct Ran {
     pub finish: Finish,
+    /// What the machine looked like when it stopped: the same route on the
+    /// same build must produce the same value.
+    pub digest: String,
     pub host: Headless,
     /// The run log, as text.
     pub log: String,
@@ -135,15 +138,33 @@ fn try_run_on(
         headless: true,
         ..cli.clone()
     };
-    let (finish, log) =
-        crate::run::run(title, &headless, &mut host, budget).map_err(|e| e.to_string())?;
+    let (finish, log, digest) =
+        crate::run::run_digested(title, &headless, &mut host, budget).map_err(|e| e.to_string())?;
     let dir = log.dir().to_path_buf();
     drop(log);
     let text = std::fs::read_to_string(dir.join("log")).unwrap_or_default();
     Ok(Ran {
         finish,
+        digest,
         host,
         log: text,
         dir,
     })
+}
+
+/// Run a title headless against a route, within an instruction budget.
+///
+/// What every route test goes through: a route on disk, a named state to
+/// reach, and a budget to reach it in.
+///
+/// # Panics
+/// When the route cannot be read, or the run could not be set up.
+#[must_use]
+pub fn run_route(title: &'static Title, route: &std::path::Path, budget: u64) -> Ran {
+    let cli = Cli {
+        route: Some(route.to_path_buf()),
+        stub: true,
+        ..Cli::default()
+    };
+    run_headless(title, &cli, budget)
 }

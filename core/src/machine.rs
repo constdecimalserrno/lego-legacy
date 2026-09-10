@@ -81,6 +81,12 @@ pub struct Machine {
     pub tree: crate::install::Tree,
     /// The title this machine was built for.
     title: &'static Title,
+    /// Everything delivered to the guest, in order.
+    pub input: Vec<(u64, crate::host::Input)>,
+    /// The route this run replays, if it is replaying one.
+    pub route: Option<crate::route::Route>,
+    /// What this run did, if it is recording.
+    pub recording: Option<crate::route::Route>,
 }
 
 impl Machine {
@@ -103,6 +109,9 @@ impl Machine {
             state: State::new(),
             tree: crate::install::Tree::new(),
             title,
+            input: Vec::new(),
+            route: None,
+            recording: None,
         })
     }
 
@@ -160,8 +169,23 @@ impl Machine {
             self.clock.cursor()
         ));
         host.pace(self.clock.nanos());
-        for event in host.poll_input(self.flips) {
+
+        // A replaying run takes its input from the route rather than from the
+        // person, and the person's own input is not mixed in: a route replays
+        // what it says and nothing else.
+        let events = match &self.route {
+            Some(route) => {
+                let _ = host.poll_input(self.flips);
+                route.at(self.flips)
+            }
+            None => host.poll_input(self.flips),
+        };
+        for event in events {
             log.line(&format!("input flip {} {event:?}", self.flips));
+            if let Some(recording) = &mut self.recording {
+                recording.push(self.flips, event);
+            }
+            self.input.push((self.flips, event));
         }
         self.flips += 1;
     }
@@ -394,5 +418,51 @@ impl Machine {
         // advances its own clock.
         self.clock.retire();
         Ok(())
+    }
+}
+
+impl Machine {
+    /// A digest of everything a run can be judged by.
+    ///
+    /// Two runs of the same route on the same build must produce the same
+    /// value: the processor, the clock, and the parts of memory anything has
+    /// written to. The whole arena is not hashed, because most of it has never
+    /// been touched and hashing 256 MB to prove that is a slow way to learn
+    /// nothing.
+    #[must_use]
+    pub fn state_digest(&self) -> String {
+        let mut hash = crate::hash::Sha256::new();
+        for value in self.cpu.r {
+            hash.update(&value.to_le_bytes());
+        }
+        hash.update(&self.cpu.eip.to_le_bytes());
+        hash.update(&self.cpu.flags.to_eflags().to_le_bytes());
+        for seg in self.cpu.seg {
+            hash.update(&seg.to_le_bytes());
+        }
+        hash.update(&self.clock.cursor().to_le_bytes());
+        hash.update(&self.flips.to_le_bytes());
+
+        // The regions anything writes to: where the image was placed, how far
+        // the heap has grown, and the stack down to where it stands.
+        let mut region = |start: u32, len: u32| {
+            if len > 0 {
+                if let Ok(bytes) = self.arena.slice(start, len as usize) {
+                    hash.update(bytes);
+                }
+            }
+        };
+        if let Some(image) = &self.image {
+            region(image.base, image.size);
+        }
+        region(crate::guest::heap::HEAP_BASE, self.state.heap.extent());
+        let esp = self.cpu.r[crate::cpu::ESP];
+        if esp < STACK_TOP {
+            region(esp, STACK_TOP - esp);
+        }
+        if let Some(surface) = self.surface {
+            region(surface.addr, surface.pitch * surface.height);
+        }
+        crate::hash::hex(&hash.finish())
     }
 }

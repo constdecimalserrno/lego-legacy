@@ -22,6 +22,19 @@ pub fn run(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog), Box<dyn std::error::Error>> {
+    run_digested(title, cli, host, budget).map(|(finish, log, _)| (finish, log))
+}
+
+/// The run seam, with the digest a determinism gate compares.
+///
+/// # Errors
+/// As [`run`].
+pub fn run_digested(
+    title: &'static Title,
+    cli: &Cli,
+    host: &mut dyn Host,
+    budget: u64,
+) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
     let mut log = RunLog::create(title.key, cli.trace)?;
     log.line(&format!("headless {}", cli.headless));
     let mut machine = Machine::new(title, host)?;
@@ -39,8 +52,46 @@ pub fn run(
             ));
         }
     }
+    // A route is the run's only recorded input (ADR-0003).
+    if let Some(path) = &cli.route {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("no route at {}: {e}", path.display()))?;
+        let route =
+            crate::route::Route::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        log.line(&format!("route {} events {}", path.display(), route.len()));
+        machine.route = Some(route);
+    }
+    if cli.record {
+        machine.recording = Some(crate::route::Route::new());
+    }
+
     let finish = machine.run(host, &mut log, budget);
-    Ok((finish, log))
+
+    // What the route asked for after the run's last flip was never delivered,
+    // and saying so is the difference between a route that ended and one that
+    // was cut short.
+    if let Some(route) = &machine.route {
+        let undelivered = route.after(finish.flips.saturating_sub(1));
+        if !undelivered.is_empty() {
+            log.line(&format!(
+                "route undelivered {} events after flip {}",
+                undelivered.len(),
+                finish.flips
+            ));
+        }
+    }
+    if let Some(recording) = &machine.recording {
+        let path = log.dir().join("route");
+        let _ = std::fs::write(&path, recording.to_text());
+        log.line(&format!(
+            "recorded {} events to {}",
+            recording.len(),
+            path.display()
+        ));
+    }
+    let digest = machine.state_digest();
+    log.line(&format!("digest {digest}"));
+    Ok((finish, log, digest))
 }
 
 /// What a title binary's `main` calls.

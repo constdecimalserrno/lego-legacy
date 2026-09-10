@@ -88,6 +88,13 @@ impl Heap {
         }
     }
 
+    /// How far the heap has grown: everything below this has been handed out
+    /// at least once, and is what a state digest has to cover.
+    #[must_use]
+    pub fn extent(&self) -> u32 {
+        self.next - HEAP_BASE
+    }
+
     /// How much has been handed out and not given back.
     #[must_use]
     pub fn live_bytes(&self) -> u32 {
