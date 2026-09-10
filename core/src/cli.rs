@@ -44,16 +44,28 @@ pub struct Cli {
     pub trace: Trace,
     /// Write a snapshot every this many flips.
     pub snapshot_every: Option<u64>,
-    /// Write these flips into the run directory as pictures.
-    pub screenshots: Vec<u64>,
-    /// And every this many flips.
-    pub screenshot_every: Option<u64>,
+    /// Which flips to write into the run directory as pictures.
+    pub screenshots: Screenshots,
     /// Where the declared install tree and the writable profile live.
     pub data_root: Option<PathBuf>,
     /// Drive the machine from a debugger on standard input.
     pub repl: bool,
     /// Run the stub guest instead of the title: the machine's own test guest.
     pub stub: bool,
+}
+
+/// The flips a run writes as PNG files: named ones, and every so many.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Screenshots {
+    pub at: Vec<u64>,
+    pub every: Option<u64>,
+}
+
+impl Screenshots {
+    #[must_use]
+    pub fn wants(&self, flip: u64) -> bool {
+        self.at.contains(&flip) || self.every.is_some_and(|n| flip.is_multiple_of(n))
+    }
 }
 
 /// A command line this emulator will not act on.
@@ -92,7 +104,8 @@ usage: <title> [flags]
   --audio                  let mixed audio reach a host device
   --trace off|shims|insns  how much the run log keeps (default: off)
   --snapshot-every <flips> write a snapshot this often
-  --screenshot <flip,...>  write these flips as PNGs into the run directory
+  --screenshot <flip,...>  write these flips as PNGs into the run directory,
+                           as shots/<flip, ten digits>.png
   --screenshot-every <n>   write every nth flip as a PNG
   --data-root <dir>        where the install tree and profile live
   --repl                   drive the machine from a debugger on stdin
@@ -133,7 +146,7 @@ impl Cli {
                 "--screenshot" => {
                     let v = value("--screenshot")?;
                     for flip in v.split(',') {
-                        cli.screenshots.push(flip.trim().parse().map_err(|_| {
+                        cli.screenshots.at.push(flip.trim().parse().map_err(|_| {
                             CliError::BadValue {
                                 flag: "--screenshot",
                                 value: v.clone(),
@@ -143,7 +156,7 @@ impl Cli {
                 }
                 "--screenshot-every" => {
                     let v = value("--screenshot-every")?;
-                    cli.screenshot_every = Some(v.parse().ok().filter(|n| *n > 0).ok_or(
+                    cli.screenshots.every = Some(v.parse().ok().filter(|n| *n > 0).ok_or(
                         CliError::BadValue {
                             flag: "--screenshot-every",
                             value: v,
@@ -196,8 +209,8 @@ mod tests {
             "300",
         ])
         .unwrap();
-        assert_eq!(cli.screenshots, [4700, 5450]);
-        assert_eq!(cli.screenshot_every, Some(300));
+        assert_eq!(cli.screenshots.at, [4700, 5450]);
+        assert_eq!(cli.screenshots.every, Some(300));
         assert!(Cli::parse(["--screenshot-every", "0"]).is_err());
         assert!(cli.headless && cli.record && cli.audio && cli.repl && cli.stub);
         assert_eq!(cli.trace, Trace::Insns);

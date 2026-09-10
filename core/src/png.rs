@@ -1,5 +1,9 @@
 //! A frame as a PNG file, stored rather than compressed: a picture a person,
 //! or anything that reads pictures, can open, of exactly what was presented.
+//!
+//! ponytail: stored, a 640x480 frame is about 922 KB and its checksum is
+//! taken a bit at a time; a run writing every flip wants DEFLATE's fixed codes
+//! and a table-driven CRC.
 
 /// A PNG of a frame given as blue, green, red and one more byte a pixel, row
 /// by row from the top.
@@ -86,5 +90,22 @@ mod tests {
         assert_eq!(raw, [0, 0, 0, 255, 0, 255, 0, 0, 255, 0, 0, 255, 255, 255]);
         // The IHDR's CRC, as zlib's crc32 gives it for these bytes.
         assert_eq!(&png[29..33], &[0xfd, 0xd4, 0x9a, 0x73]);
+    }
+
+    #[test]
+    fn a_frame_larger_than_one_stored_block_comes_back_whole_and_checksummed() {
+        // 200 by 120 is 72,120 bytes of rows: two stored blocks.
+        let bgra: Vec<u8> = (0..200u32 * 120 * 4).map(|i| (i % 251) as u8).collect();
+        let png = encode(200, 120, &bgra);
+        let idat_len = u32::from_be_bytes([png[33], png[34], png[35], png[36]]) as usize;
+        let zlib = &png[41..41 + idat_len];
+        let raw = crate::inflate::inflate(&zlib[2..zlib.len() - 4]).expect("it inflates");
+        assert_eq!(raw.len(), (200 * 3 + 1) * 120);
+        assert_eq!(&raw[1..4], [bgra[2], bgra[1], bgra[0]]);
+        assert_eq!(
+            zlib[zlib.len() - 4..],
+            super::adler32(&raw).to_be_bytes(),
+            "the stream ends with its checksum"
+        );
     }
 }

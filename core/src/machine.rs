@@ -99,20 +99,7 @@ pub struct Machine {
     /// What this run did, if it is recording.
     pub recording: Option<crate::route::Route>,
     /// Which flips to write into the run directory as pictures.
-    pub screenshots: Screenshots,
-}
-
-/// The flips a run writes as PNG files: named ones, and every so many.
-#[derive(Clone, Debug, Default)]
-pub struct Screenshots {
-    pub at: Vec<u64>,
-    pub every: Option<u64>,
-}
-
-impl Screenshots {
-    fn wants(&self, flip: u64) -> bool {
-        self.at.contains(&flip) || self.every.is_some_and(|n| flip.is_multiple_of(n))
-    }
+    pub screenshots: crate::cli::Screenshots,
 }
 
 impl Machine {
@@ -142,7 +129,7 @@ impl Machine {
             input: Vec::new(),
             route: None,
             recording: None,
-            screenshots: Screenshots::default(),
+            screenshots: crate::cli::Screenshots::default(),
         })
     }
 
@@ -1093,7 +1080,8 @@ impl Machine {
         host.present(&out);
         if self.screenshots.wants(self.flips) {
             // A picture of exactly what the host was handed, in the run
-            // directory beside the log, named so a listing sorts by flip.
+            // directory beside the log, named with ten digits so a listing
+            // sorts by flip.
             let dir = log.dir().join("shots");
             let png = crate::png::encode(frame.width, frame.height, &self.present_buffer);
             let written = std::fs::create_dir_all(&dir)

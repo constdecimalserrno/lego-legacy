@@ -64,10 +64,7 @@ pub fn run_digested(
     if cli.record {
         machine.recording = Some(crate::route::Route::new());
     }
-    machine.screenshots = crate::machine::Screenshots {
-        at: cli.screenshots.clone(),
-        every: cli.screenshot_every,
-    };
+    machine.screenshots = cli.screenshots.clone();
 
     // Snapshots are off unless asked for: scrubbability costs nothing until a
     // person wants it.
