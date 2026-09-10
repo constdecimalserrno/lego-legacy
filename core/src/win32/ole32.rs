@@ -27,6 +27,9 @@ pub const SHIMS: &[Shim] = &[
 ];
 
 fn initialize(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // S_OK: the library is up for this thread, and this is the first time it
+    // was asked. Nothing is kept, because the classes this machine makes need
+    // no apartment.
     Ok(S_OK)
 }
 

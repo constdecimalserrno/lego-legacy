@@ -442,7 +442,7 @@ pub static DIRECT_DRAW4: Interface = Interface {
         Method {
             name: "EnumDisplayModes",
             args: 4,
-            run: enum_display_modes2,
+            run: enum_display_modes4,
         },
         Method {
             name: "EnumSurfaces",
@@ -817,18 +817,31 @@ fn set_display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
     Ok(S_OK)
 }
 
+/// How often the declared display refreshes: the title's own declaration when
+/// its flips wait for one, and otherwise sixty a second, what a monitor of the
+/// era ran a 640x480 desktop at.
+fn refresh_hz(ctx: &Ctx<'_>) -> u64 {
+    match ctx.title.flip_cost {
+        crate::clock::FlipCost::Refresh(hz) => hz.max(1),
+        _ => 60,
+    }
+}
+
 fn monitor_frequency(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     if args[0] != 0 {
-        ctx.mem.write_u32(args[0], 60).map_err(Stop::Fault)?;
+        let hz = u32::try_from(refresh_hz(ctx)).unwrap_or(60);
+        ctx.mem.write_u32(args[0], hz).map_err(Stop::Fault)?;
     }
     Ok(S_OK)
 }
 
 fn scan_line(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Where the beam is, derived from the declared clock so that a title
-    // waiting for it sees it move at the same rate on every run.
+    // waiting for it sees it move at the declared refresh on every run.
     let (_, height, _) = ctx.state.display_mode;
-    let line = u32::try_from(ctx.clock_millis % 17).unwrap_or(0) * height.max(1) / 17;
+    let period_micros = 1_000_000 / refresh_hz(ctx);
+    let into = (ctx.clock_millis * 1000) % period_micros;
+    let line = u32::try_from(into * u64::from(height.max(1)) / period_micros).unwrap_or(0);
     if args[0] != 0 {
         ctx.mem.write_u32(args[0], line).map_err(Stop::Fault)?;
     }
@@ -909,12 +922,8 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     };
     let depth = screen_depth;
 
-    let object = make_surface(ctx, width, height, depth, primary)?;
+    let (object, pixels) = make_surface(ctx, width, height, depth, primary)?;
     let pitch = width * depth.div_ceil(8);
-    let pixels = match ctx.state.com(object).map(|o| &o.state) {
-        Some(ComState::Surface { pixels, .. }) => *pixels,
-        _ => 0,
-    };
 
     // A surface asked for with a back buffer gets one, attached to it.
     let back_count = if flags & 0x20 != 0 {
@@ -956,6 +965,8 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
 /// A surface of guest memory, as `CreateSurface` makes one and anything
 /// else that hands a guest a surface of its own.
 ///
+/// Answers the object and where its pixels are.
+///
 /// # Errors
 /// When the heap is exhausted or the write faults.
 pub(crate) fn make_surface(
@@ -964,10 +975,10 @@ pub(crate) fn make_surface(
     height: u32,
     depth: u32,
     primary: bool,
-) -> Result<u32, Stop> {
+) -> Result<(u32, u32), Stop> {
     let pitch = width * depth.div_ceil(8);
     let pixels = ctx.state.heap.alloc(pitch * height.max(1));
-    State::make_com(
+    let object = State::make_com(
         ctx,
         &DIRECT_DRAW_SURFACE,
         ComState::Surface {
@@ -980,7 +991,8 @@ pub(crate) fn make_surface(
             back: 0,
         },
     )
-    .map_err(Stop::Fault)
+    .map_err(Stop::Fault)?;
+    Ok((object, pixels))
 }
 
 fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool, u32)> {
@@ -1125,11 +1137,7 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     let from = rect(ctx, args[2], source_w, source_h)?;
-    let key = if flags & DDBLT_KEYSRC != 0 {
-        ctx.state.color_keys.get(&source).copied()
-    } else {
-        None
-    };
+    let key = source_key(ctx, source, flags & DDBLT_KEYSRC != 0);
     transfer(
         ctx,
         Pixels {
@@ -1167,11 +1175,7 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // What lands off the destination's edge is clipped away.
     let w = (from.2 - from.0).min(width - x);
     let h = (from.3 - from.1).min(height - y);
-    let key = if flags & DDBLTFAST_SRCCOLORKEY != 0 {
-        ctx.state.color_keys.get(&source).copied()
-    } else {
-        None
-    };
+    let key = source_key(ctx, source, flags & DDBLTFAST_SRCCOLORKEY != 0);
     transfer(
         ctx,
         Pixels {
@@ -1214,6 +1218,13 @@ fn set_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
         ctx.state.color_keys.insert(pixels, low);
     }
     Ok(S_OK)
+}
+
+/// The colour a keyed blit leaves out, when the blit asks for one.
+fn source_key(ctx: &Ctx<'_>, source: u32, keyed: bool) -> Option<u32> {
+    keyed
+        .then(|| ctx.state.color_keys.get(&source).copied())
+        .flatten()
 }
 
 /// A rectangle the guest passed, or the whole surface when it passed none.
@@ -1304,13 +1315,17 @@ fn transfer(
     Ok(())
 }
 
+/// How long a `DDSURFACEDESC` is, and DirectX 6's `DDSURFACEDESC2`.
+const SURFACE_DESC_BYTES: u32 = 108;
+const SURFACE_DESC2_BYTES: u32 = 124;
+
 fn enum_display_modes(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    enumerate_modes(ctx, args, 108)
+    enumerate_modes(ctx, args, SURFACE_DESC_BYTES)
 }
 
-/// DirectX 6's spelling, whose callback is handed the larger descriptor.
-fn enum_display_modes2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    enumerate_modes(ctx, args, 124)
+/// `IDirectDraw4`'s spelling, whose callback is handed the larger descriptor.
+fn enum_display_modes4(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    enumerate_modes(ctx, args, SURFACE_DESC2_BYTES)
 }
 
 /// EnumDisplayModes(flags, filter, context, callback): the declared machine's

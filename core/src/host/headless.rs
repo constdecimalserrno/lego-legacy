@@ -12,13 +12,13 @@ pub struct Presented {
     pub flip: u64,
     pub width: u32,
     pub height: u32,
-    /// The frame's own bytes, for the first [`KEPT`] frames and the latest
+    /// The frame's own bytes, for the first [`KEPT`] flips and the latest
     /// one; empty for the rest.
     pub pixels: Vec<u8>,
     uniform: bool,
 }
 
-/// How many frames from the start of a run keep their pixels.
+/// How many flips from the start of a run keep their pixels.
 ///
 /// A run that plays its movies presents thousands of 640x480 frames, and
 /// keeping every one would hold gigabytes for tests that look at a handful.

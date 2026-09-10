@@ -199,11 +199,6 @@ impl Mixer {
         self.voices.retain(|v| v.id != id);
     }
 
-    #[must_use]
-    pub fn blocks_mixed(&self) -> u64 {
-        self.blocks
-    }
-
     /// Every block whose last frame the declared clock has passed.
     pub fn due(&mut self, nanos: u64) -> Vec<Vec<i16>> {
         let mut out = Vec::new();

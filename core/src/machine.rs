@@ -456,7 +456,10 @@ impl Machine {
         self.cpu.eip = caller;
         if let Some((function, args)) = call_guest {
             self.call_guest(function, &args, caller, answer)?;
-            if shim.name == "DialogBoxParamA" {
+            // A dialog that has just come up parks its first turn here; the
+            // guest's own callbacks inside it are ordinary calls.
+            if let Some(dialog) = self.state.dialog.as_mut().filter(|d| !d.parked) {
+                dialog.parked = true;
                 self.dialog_turns.push(self.continuations.len());
             }
         }
@@ -742,7 +745,12 @@ impl Machine {
             log.line(&format!("dialog ended with {result}"));
             self.state.dialog = None;
             self.dialog_turns.pop();
-            let (resume_at, _) = self.continuations.pop().unwrap_or((self.cpu.eip, 0));
+            let Some((resume_at, _)) = self.continuations.pop() else {
+                return Err(Stop::NotWritten {
+                    what: "a dialog ended with no call waiting for it".to_owned(),
+                    caller: self.cpu.eip,
+                });
+            };
             self.cpu.r[EAX] = result;
             self.cpu.eip = resume_at;
             self.clock.retire();
@@ -767,19 +775,12 @@ impl Machine {
         log.line("dialog default button pressed");
         let (window, procedure) = (dialog.window, dialog.procedure);
         // WM_COMMAND, IDOK clicked, from the button itself.
-        let args = [window, 0x0111, 1, crate::win32::user32::control(1)];
-        let esp = self.cpu.r[crate::cpu::ESP];
-        let mut at = esp;
-        for value in args.iter().rev() {
-            at = at.wrapping_sub(4);
-            self.arena.write_u32(at, *value).map_err(Stop::Fault)?;
-        }
-        at = at.wrapping_sub(4);
-        self.arena
-            .write_u32(at, crate::shim::RETURN_TO_MACHINE)
-            .map_err(Stop::Fault)?;
-        self.cpu.r[crate::cpu::ESP] = at;
-        self.cpu.eip = procedure;
+        // The dialog's parked call stays where it is: this turn comes back to
+        // it too.
+        self.push_call(
+            procedure,
+            &[window, 0x0111, 1, crate::win32::user32::control(1)],
+        )?;
         self.clock.retire();
         Ok(())
     }
@@ -816,7 +817,14 @@ impl Machine {
         resume_at: u32,
         answer: u32,
     ) -> Result<(), Stop> {
-        // The guest's own stack carries the call, arguments last first.
+        self.push_call(function, args)?;
+        self.continuations.push((resume_at, answer));
+        Ok(())
+    }
+
+    /// Set a call up on the guest's own stack, arguments last first, returning
+    /// into the machine.
+    fn push_call(&mut self, function: u32, args: &[u32]) -> Result<(), Stop> {
         let mut esp = self.cpu.r[crate::cpu::ESP];
         for value in args.iter().rev() {
             esp = esp.wrapping_sub(4);
@@ -828,7 +836,6 @@ impl Machine {
             .map_err(Stop::Fault)?;
         self.cpu.r[crate::cpu::ESP] = esp;
         self.cpu.eip = function;
-        self.continuations.push((resume_at, answer));
         Ok(())
     }
 

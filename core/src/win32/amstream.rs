@@ -183,6 +183,10 @@ pub fn create(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
     Ok(object)
 }
 
+fn movie<'a>(ctx: &'a Ctx<'_>, player: u32) -> Option<&'a Movie> {
+    ctx.state.players.get(&player)?.movie.as_ref()
+}
+
 fn movie_mut(
     players: &mut std::collections::BTreeMap<u32, Player>,
     player: u32,
@@ -329,7 +333,10 @@ fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(S_OK);
     };
     let starting = running && movie.running_since.is_none();
-    movie.running_since = running.then_some(movie.running_since.unwrap_or(now));
+    // A stream set running again carries on from the frame it stopped at, so
+    // its start is put back by however far it had got.
+    let since = now.saturating_sub(movie.due(movie.next));
+    movie.running_since = running.then_some(movie.running_since.unwrap_or(since));
     let line = format!(
         "movie {} {}",
         movie.name,
@@ -340,7 +347,7 @@ fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let sound = if starting { movie.sound()? } else { None };
     ctx.log.line(&line);
     if let Some(samples) = sound {
-        ctx.state.mixer.play(this, samples, now * 1_000_000);
+        ctx.state.mixer.play(this, samples, since * 1_000_000);
     } else if !running {
         ctx.state.mixer.stop(this);
     }
@@ -352,7 +359,7 @@ fn get_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // the screen's own format: what DirectShow would have negotiated with a
     // display in that mode.
     let owner = owner_of(ctx, this);
-    let Some(movie) = ctx.state.players.get(&owner).and_then(|p| p.movie.as_ref()) else {
+    let Some(movie) = movie(ctx, owner) else {
         return Ok(MS_E_NOSTREAM);
     };
     let (width, height) = movie.avi.streams[movie.video].picture_size();
@@ -385,12 +392,12 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     }
     let owner = owner_of(ctx, this);
     let surface = if args[0] == 0 {
-        let Some(movie) = ctx.state.players.get(&owner).and_then(|p| p.movie.as_ref()) else {
+        let Some(movie) = movie(ctx, owner) else {
             return Ok(MS_E_NOSTREAM);
         };
         let (width, height) = movie.avi.streams[movie.video].picture_size();
         let depth = ctx.state.display_mode.2;
-        super::ddraw::make_surface(ctx, width, height, depth, false)?
+        super::ddraw::make_surface(ctx, width, height, depth, false)?.0
     } else {
         args[0]
     };
@@ -455,7 +462,6 @@ fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         movie.picture = picture;
     }
     result?;
-    ctx.state.movie_frames += 1;
     Ok(S_OK)
 }
 
@@ -553,7 +559,7 @@ fn write_stream_time(ctx: &mut Ctx<'_>, at: u32, millis: u64) -> Result<(), Stop
 }
 
 fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(movie) = ctx.state.players.get(&this).and_then(|p| p.movie.as_ref()) else {
+    let Some(movie) = movie(ctx, this) else {
         return Ok(MS_E_NOSTREAM);
     };
     let millis = movie.due(movie.frames());
@@ -564,7 +570,7 @@ fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // How far the running stream has got, on the declared clock.
     let now = ctx.declared_millis();
-    let Some(movie) = ctx.state.players.get(&this).and_then(|p| p.movie.as_ref()) else {
+    let Some(movie) = movie(ctx, this) else {
         return Ok(MS_E_NOSTREAM);
     };
     let millis = movie
@@ -572,4 +578,26 @@ fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         .map_or(0, |since| now.saturating_sub(since));
     write_stream_time(ctx, args[0], millis)?;
     Ok(S_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rgb;
+
+    #[test]
+    fn studio_black_and_white_are_the_ends_of_the_range_and_grey_has_no_colour() {
+        assert_eq!(rgb(16, 128, 128), (0, 0, 0));
+        assert_eq!(rgb(235, 128, 128), (255, 255, 255));
+        let (r, g, b) = rgb(126, 128, 128);
+        assert!(r == g && g == b, "grey came out as {r},{g},{b}");
+    }
+
+    #[test]
+    fn full_red_and_blue_chroma_lean_the_way_bt601_says() {
+        // Studio red is Y 81, U 90, V 240; studio blue is Y 41, U 240, V 110.
+        let (r, g, b) = rgb(81, 90, 240);
+        assert!(r > 250 && g < 5 && b < 5, "red came out as {r},{g},{b}");
+        let (r, g, b) = rgb(41, 240, 110);
+        assert!(r < 5 && g < 5 && b > 250, "blue came out as {r},{g},{b}");
+    }
 }

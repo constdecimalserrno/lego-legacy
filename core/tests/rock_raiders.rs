@@ -301,12 +301,24 @@ fn the_first_movie_frame_is_presented_at_the_same_flip_on_every_run() {
         return;
     };
     assert_eq!(first, again, "the first picture moved between two runs");
-    ran.assert_logged("movie C:\\LEGORR\\Data\\avi\\lmi640.avi running");
+    // It is the movie's picture: presented after the movie was set running,
+    // not something drawn before it.
+    let line = |needle: &str| {
+        ran.log
+            .lines()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("no log line starts `{needle}`"))
+    };
+    let running = line("movie C:\\LEGORR\\Data\\avi\\lmi640.avi running");
+    assert!(
+        line(&format!("flip {first} ")) > running,
+        "flip {first} was presented before the movie started"
+    );
     let frame = &ran.host.frames[first];
     assert_eq!((frame.width, frame.height), (640, 480));
     assert!(
         first < 279,
-        "the picture is one of the logo's frames, not flip {first}"
+        "the picture is one of the logo's 279 frames, not flip {first}"
     );
 }
 

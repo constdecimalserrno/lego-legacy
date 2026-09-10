@@ -353,6 +353,8 @@ pub const SHIMS: &[Shim] = &[
         name: "MoveWindow",
         args: 6,
         convention: Convention::Stdcall,
+        // Nothing on the declared machine is drawn from where a window is, and
+        // the title's own windows cover the screen; the move always succeeds.
         run: succeed,
     },
     Shim {
@@ -644,6 +646,8 @@ pub struct Dialog {
     pub procedure: u32,
     /// How many of the procedure's messages have come back.
     pub turns: u32,
+    /// Whether the machine has parked the call that brought the dialog up.
+    pub parked: bool,
     /// What the procedure ended the dialog with, once it has.
     pub ended: Option<u32>,
     lists: BTreeMap<u32, List>,
@@ -669,6 +673,15 @@ pub const fn control(id: u32) -> u32 {
     0x0002_0000 | (id & 0xffff)
 }
 
+/// The identifier of a dialog control a handle names, if it names one.
+const fn control_id(window: u32) -> Option<u32> {
+    if window >> 16 == 2 {
+        Some(window & 0xffff)
+    } else {
+        None
+    }
+}
+
 fn dialog_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DialogBoxParamA(instance, template, parent, procedure, parameter).
     if ctx.state.dialog.is_some() {
@@ -685,6 +698,7 @@ fn dialog_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         window: DIALOG,
         procedure: args[3],
         turns: 0,
+        parked: false,
         ended: None,
         lists: BTreeMap::new(),
         checks: BTreeMap::new(),
@@ -698,10 +712,9 @@ fn dialog_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn enable_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Answers whether the window was disabled before.
-    let Some(dialog) = ctx.state.dialog.as_mut().filter(|_| args[0] >> 16 == 2) else {
+    let (Some(dialog), Some(id)) = (ctx.state.dialog.as_mut(), control_id(args[0])) else {
         return Ok(0);
     };
-    let id = args[0] & 0xffff;
     let was = if args[1] == 0 {
         !dialog.disabled.insert(id)
     } else {
@@ -740,18 +753,17 @@ fn send_dialog_item_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop
 /// rather than a zero it would believe.
 fn send_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
-    let text = if matches!(message, 0x000c | 0x0180 | 0x018c) && lparam != 0 {
+    let text = if matches!(message, 0x000c | 0x0180) && lparam != 0 {
         ctx.string(lparam).map_err(Stop::Fault)?
     } else {
         String::new()
     };
-    let Some(dialog) = ctx.state.dialog.as_mut().filter(|_| window >> 16 == 2) else {
+    let (Some(dialog), Some(id)) = (ctx.state.dialog.as_mut(), control_id(window)) else {
         return Err(Stop::NotWritten {
             what: format!("USER32.dll!SendMessageA: message {message:#06x} to window {window:#x}"),
             caller: 0,
         });
     };
-    let id = window & 0xffff;
     const LB_ERR: u32 = 0xffff_ffff;
     let list = dialog.lists.entry(id).or_default();
     let answer = match message {

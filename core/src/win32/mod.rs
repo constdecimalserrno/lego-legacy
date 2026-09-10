@@ -122,8 +122,6 @@ pub struct State {
     pub mixer: crate::sound::Mixer,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
-    /// How many movie frames have been put in a guest surface.
-    pub movie_frames: u64,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
@@ -172,7 +170,6 @@ impl State {
             waited_millis: 0,
             players: BTreeMap::new(),
             mixer: crate::sound::Mixer::default(),
-            movie_frames: 0,
             installed_files: 0,
             window_procedure: 0,
             window_made: false,

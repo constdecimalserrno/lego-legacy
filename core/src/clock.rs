@@ -37,7 +37,9 @@ pub enum FlipCost {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
     cursor: u64,
-    flip_cycles: u64,
+    /// Declared cycles charged on top of instructions: presented frames, and
+    /// time the guest spent waiting.
+    charged_cycles: u64,
 }
 
 impl Clock {
@@ -51,7 +53,7 @@ impl Clock {
     pub fn resumed(cursor: u64, cycles: u64) -> Self {
         Self {
             cursor,
-            flip_cycles: cycles.saturating_sub(cursor),
+            charged_cycles: cycles.saturating_sub(cursor),
         }
     }
 
@@ -70,13 +72,11 @@ impl Clock {
     pub fn present(&mut self, cost: FlipCost) {
         match cost {
             FlipCost::Free => {}
-            FlipCost::Cycles(c) => self.flip_cycles += c,
+            FlipCost::Cycles(c) => self.charged_cycles += c,
+            // The next refresh strictly after now, so no two flips share one.
             FlipCost::Refresh(hz) => {
                 let period = DECLARED_HZ / hz.max(1);
-                let into = self.cycles() % period;
-                if into != 0 {
-                    self.flip_cycles += period - into;
-                }
+                self.charged_cycles += period - self.cycles() % period;
             }
         }
     }
@@ -84,14 +84,14 @@ impl Clock {
     /// Charge declared time the guest spent waiting: a sleep, or a blocking
     /// wait for something due later on the declared clock.
     pub fn wait(&mut self, millis: u64) {
-        self.flip_cycles += millis * DECLARED_HZ / 1000;
+        self.charged_cycles += millis * DECLARED_HZ / 1000;
     }
 
     /// Declared cycles spent: one per retired instruction, plus what drawing
     /// and waiting were charged for.
     #[must_use]
     pub fn cycles(self) -> u64 {
-        self.cursor + self.flip_cycles
+        self.cursor + self.charged_cycles
     }
 
     /// Declared nanoseconds elapsed. Computed in `u128` so a long run does not
@@ -142,8 +142,8 @@ mod tests {
         }
         clock.present(FlipCost::Refresh(60));
         assert_eq!(clock.cycles(), DECLARED_HZ / 60);
-        // Already on a refresh: nothing more to wait for.
+        // A second flip straight after waits for the refresh after that.
         clock.present(FlipCost::Refresh(60));
-        assert_eq!(clock.cycles(), DECLARED_HZ / 60);
+        assert_eq!(clock.cycles(), 2 * DECLARED_HZ / 60);
     }
 }

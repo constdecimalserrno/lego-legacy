@@ -7,6 +7,11 @@ throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
 
 ## Consequences
 
+- Time the guest spends waiting on the declared machine is declared time: a `Sleep`, or a call
+  that blocks until something is due on the declared clock (a movie's next frame, #9). The machine
+  charges the wait when the call returns, so waiting costs the host nothing and the clock the time
+  it declares.
+
 - The input script is the only recorded input; the clock is never recorded.
 - The retired-instruction count is observable behaviour: an engine change that alters it changes
   the guest, and must be treated as such.
