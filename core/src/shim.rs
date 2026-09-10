@@ -36,6 +36,9 @@ pub const SHIMS: &[Shim] = &[];
 /// What one address on the boundary stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
+    /// The address a call the machine made into guest code returns to. Always
+    /// the first slot, so its address is known before anything is bound.
+    Return,
     /// A name a title's own image imports.
     Import(Import),
     /// One slot of a COM interface's table.
@@ -51,10 +54,17 @@ pub struct Boundary {
     slots: Vec<Entry>,
 }
 
+/// Where guest code returns to when the machine called it.
+pub const RETURN_TO_MACHINE: u32 = THUNK_BASE;
+
 impl Boundary {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        // The first slot is where a call the machine made comes back to, so
+        // that address exists before any import is bound.
+        Self {
+            slots: vec![Entry::Return],
+        }
     }
 
     /// Give every import an address of its own and write it into the image's
@@ -123,7 +133,7 @@ impl Boundary {
     pub fn imports(&self) -> impl Iterator<Item = &Import> {
         self.slots.iter().filter_map(|e| match e {
             Entry::Import(import) => Some(import),
-            Entry::Method { .. } => None,
+            Entry::Method { .. } | Entry::Return => None,
         })
     }
 }

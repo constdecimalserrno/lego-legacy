@@ -60,16 +60,91 @@ pub const S_OK: u32 = 0;
 /// The answer when the interface asked for is not one this object has.
 pub const E_NOINTERFACE: u32 = 0x8000_4002;
 
+/// Read the sixteen bytes that name an interface.
+///
+/// # Errors
+/// When the address is outside the arena.
+pub fn read_iid(ctx: &Ctx<'_>, at: u32) -> Result<[u8; 16], Stop> {
+    let mut iid = [0u8; 16];
+    iid.copy_from_slice(ctx.mem.slice(at, 16).map_err(Stop::Fault)?);
+    Ok(iid)
+}
+
+/// An interface identifier, spelled the way everyone writes it down.
+#[must_use]
+pub fn iid_text(iid: &[u8; 16]) -> String {
+    let d1 = u32::from_le_bytes([iid[0], iid[1], iid[2], iid[3]]);
+    let d2 = u16::from_le_bytes([iid[4], iid[5]]);
+    let d3 = u16::from_le_bytes([iid[6], iid[7]]);
+    let rest: String = iid[8..].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{d1:08x}-{d2:04x}-{d3:04x}-{}-{}", &rest[..4], &rest[4..])
+}
+
+/// Which faces of an object this machine knows how to hand back.
+///
+/// A later version of an interface is a different table over the same thing,
+/// so the object handed back shares the state of the one asked. A face that is
+/// not here is refused rather than guessed at: a guest that believed a guess
+/// would call through a table meaning something else.
+const FACES: &[(&str, &str, &str)] = &[
+    // DirectX 6's DirectDraw, which is what the roster's titles ask for.
+    (
+        "IDirectDraw",
+        "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
+        "IDirectDraw4",
+    ),
+    (
+        "IDirectDraw4",
+        "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
+        "IDirectDraw4",
+    ),
+    // Its surfaces.
+    (
+        "IDirectDrawSurface",
+        "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
+        "IDirectDrawSurface4",
+    ),
+    (
+        "IDirectDrawSurface4",
+        "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
+        "IDirectDrawSurface4",
+    ),
+];
+
 fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // A guest asking an object for another face of itself. Answering with the
-    // same object would be a guess about what that face does, so it is
-    // refused unless the object itself says otherwise.
     let out = args[1];
     if out != 0 {
         ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
     }
+    let asked = read_iid(ctx, args[0])
+        .map(|iid| iid_text(&iid))
+        .unwrap_or_default();
+    let Some(object) = ctx.state.com(this) else {
+        return Ok(E_NOINTERFACE);
+    };
+    let have = object.interface;
+    let state = object.state.clone();
+
+    if let Some((_, _, give)) = FACES
+        .iter()
+        .find(|(from, iid, _)| *from == have && *iid == asked)
+    {
+        if let Some(interface) = crate::win32::interface_named(give) {
+            let object =
+                crate::win32::State::make_com(ctx, interface, state).map_err(Stop::Fault)?;
+            if out != 0 {
+                ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
+            }
+            ctx.log
+                .line(&format!("com {have} handed back {give} at {object:#010x}"));
+            return Ok(S_OK);
+        }
+    }
+
+    // A guest asking an object for a face nobody wrote. Answering with the
+    // same object would be a guess about what that face does.
     ctx.log
-        .line(&format!("com QueryInterface on {this:#010x} refused"));
+        .line(&format!("com {have} was asked for {asked} and refused"));
     Ok(E_NOINTERFACE)
 }
 

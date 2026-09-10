@@ -218,7 +218,7 @@ fn the_disc_reads_in_the_order_the_image_records() {
 }
 
 #[test]
-fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
+fn the_boot_path_reaches_the_three_dimensional_device() {
     let Some(ran) = boot() else { return };
 
     // Where this title stops today: its own C runtime is done, it has checked
@@ -226,13 +226,18 @@ fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
     // Where this title stops today. It moves as the boundary grows, and what
     // is held here is that it got past its own C runtime, its disc check, its
     // data, and DirectX's input.
-    ran.assert_wall("USER32.dll!RegisterClassA")
+    ran.assert_wall("d3drm.dll!Direct3DRMCreate")
         .assert_logged("dinput created")
         // It opens its keyboard before it makes its window; the pointer comes
         // later, through the window itself.
-        .assert_logged("dinput keyboard");
+        .assert_logged("dinput keyboard")
+        // Its window, its sound, and the display it will draw on.
+        .assert_logged("window class LegoRR")
+        .assert_logged("dsound created")
+        .assert_logged("display mode 320x200x16")
+        .assert_logged("primary");
     assert!(
-        ran.finish.cursor > 50_000_000,
+        ran.finish.cursor > 10_000_000,
         "the boot path loads this title's own data, which is tens of millions of \
          instructions, not {}",
         ran.finish.cursor

@@ -6,7 +6,10 @@
 //! the real library had been there.
 
 pub mod advapi32;
+pub mod ddraw;
 pub mod dinput;
+pub mod dsound;
+pub mod gdi32;
 pub mod kernel32;
 pub mod msvcrt;
 pub mod user32;
@@ -86,6 +89,20 @@ pub struct State {
     pub slept_millis: u64,
     /// How many files the declared install tree holds.
     pub installed_files: usize,
+    /// The window procedure the guest registered, if it has.
+    pub window_procedure: u32,
+    /// Whether the guest has made its window.
+    pub window_made: bool,
+    /// Whether the guest has asked to stop.
+    pub quit_asked: bool,
+    /// Where the pointer is, in the guest's own coordinates.
+    pub pointer: (i32, i32),
+    /// What the screen is, as the guest last set it.
+    pub display_mode: (u32, u32, u32),
+    /// The palette the screen is showing through, if any.
+    pub palette: u32,
+    /// The frame the guest last flipped, waiting to be presented.
+    pub present: Option<Present>,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
@@ -129,6 +146,13 @@ impl State {
             volume_label: String::new(),
             slept_millis: 0,
             installed_files: 0,
+            window_procedure: 0,
+            window_made: false,
+            quit_asked: false,
+            pointer: (0, 0),
+            display_mode: (640, 480, 16),
+            palette: 0,
+            present: None,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_down: false,
@@ -332,6 +356,16 @@ impl State {
     }
 }
 
+/// A frame the guest finished, and where to read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Present {
+    pub pixels: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub depth: u32,
+}
+
 /// One COM object the machine made.
 pub struct ComObject {
     pub interface: &'static str,
@@ -347,6 +381,26 @@ pub enum ComState {
     None,
     /// An input device, and which one.
     Device { keyboard: bool, acquired: bool },
+    /// A sound buffer: where its samples are, how many it holds, and whether
+    /// the guest has started it.
+    Sound {
+        store: u32,
+        bytes: u32,
+        playing: bool,
+    },
+    /// A drawing surface: guest memory, and how to read it.
+    Surface {
+        pixels: u32,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        depth: u32,
+        primary: bool,
+        /// The surface behind this one, when it flips.
+        back: u32,
+    },
+    /// A palette's own 256 entries, in guest memory.
+    Palette { store: u32 },
 }
 
 /// What a shim is given.
@@ -362,6 +416,10 @@ pub struct Ctx<'a> {
     pub clock_millis: u64,
     /// Where an interface's methods get their addresses from.
     pub boundary: &'a mut crate::shim::Boundary,
+    /// Set by a shim that needs the guest's own code run before its call can
+    /// finish: the function to call and what to pass it. The answer the shim
+    /// returned is given to the guest once that call comes back.
+    pub call_guest: Option<(u32, Vec<u32>)>,
 }
 
 impl Ctx<'_> {
@@ -463,8 +521,18 @@ pub fn shims() -> &'static [Shim] {
 
 /// The interfaces this machine can hand the guest.
 #[must_use]
-pub fn interfaces() -> &'static [&'static crate::com::Interface] {
-    dinput::INTERFACES
+pub fn interfaces() -> Vec<&'static crate::com::Interface> {
+    let mut all = Vec::new();
+    all.extend_from_slice(dinput::INTERFACES);
+    all.extend_from_slice(dsound::INTERFACES);
+    all.extend_from_slice(ddraw::INTERFACES);
+    all
+}
+
+/// One interface, by the name it is declared under.
+#[must_use]
+pub fn interface_named(name: &str) -> Option<&'static crate::com::Interface> {
+    interfaces().into_iter().find(|i| i.name == name)
 }
 
 /// One method of one interface, if it is declared.
@@ -489,6 +557,9 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         msvcrt::SHIMS,
         advapi32::SHIMS,
         dinput::SHIMS,
+        dsound::SHIMS,
+        ddraw::SHIMS,
+        gdi32::SHIMS,
     ] {
         if let Some(shim) = table
             .iter()

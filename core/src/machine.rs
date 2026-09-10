@@ -13,10 +13,11 @@ use crate::win32::{self, Convention, Ctx, State};
 use crate::Title;
 use std::fmt;
 
-/// How much address space the declared machine has. 256 MB covers every
-/// address the roster's titles form, and an anonymous mapping costs only what
-/// is touched.
-pub const ARENA_BYTES: usize = 256 * 1024 * 1024;
+/// How much address space the declared machine has.
+///
+/// A gigabyte: the heap alone is half of it, and an anonymous mapping costs
+/// only the pages something writes to, so the rest is free until it is used.
+pub const ARENA_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Where the guest's presentable pixels are, and how they are laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +84,10 @@ pub struct Machine {
     title: &'static Title,
     /// Everything delivered to the guest, in order.
     pub input: Vec<(u64, crate::host::Input)>,
+    /// Where a guest frame is turned into something the host can show.
+    present_buffer: Vec<u8>,
+    /// Calls the machine made into guest code, waiting to come back.
+    continuations: Vec<(u32, u32)>,
     /// The route this run replays, if it is replaying one.
     pub route: Option<crate::route::Route>,
     /// What this run did, if it is recording.
@@ -109,6 +114,8 @@ impl Machine {
             state: State::new(),
             tree: crate::install::Tree::new(),
             title,
+            present_buffer: Vec::new(),
+            continuations: Vec::new(),
             input: Vec::new(),
             route: None,
             recording: None,
@@ -219,6 +226,11 @@ impl Machine {
                 self.cpu.eip,
                 self.cpu.r[EAX]
             ));
+        }
+        // A frame the guest finished is presented before the next instruction
+        // runs, so what the host shows is what the guest had when it flipped.
+        if let Some(frame) = self.state.present.take() {
+            self.present_guest(&frame, host, log);
         }
         match self.engine.step(&mut self.cpu, &mut self.arena) {
             Ok(()) => {
@@ -363,6 +375,9 @@ impl Machine {
     fn cross(&mut self, log: &mut RunLog) -> Result<(), Stop> {
         let addr = self.cpu.eip;
         let entry = self.boundary.at(addr).cloned();
+        if let Some(crate::shim::Entry::Return) = entry {
+            return self.guest_returned(log);
+        }
         if let Some(crate::shim::Entry::Method { interface, slot }) = entry {
             return self.cross_com(interface, slot, log);
         }
@@ -414,8 +429,10 @@ impl Machine {
             tree: &mut self.tree,
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
+            call_guest: None,
         };
         let answer = (shim.run)(&mut ctx, &args)?;
+        let call_guest = ctx.call_guest.take();
 
         // The call returns: the return address comes off the stack, the
         // arguments come off with it when the callee owns them, and the answer
@@ -427,6 +444,9 @@ impl Machine {
         self.cpu.r[crate::cpu::ESP] = esp.wrapping_add(popped);
         self.cpu.r[crate::cpu::EAX] = answer;
         self.cpu.eip = caller;
+        if let Some((function, args)) = call_guest {
+            self.call_guest(function, &args, caller, answer)?;
+        }
         // A call across the boundary costs the declared clock what an
         // instruction costs, so a title that spends its time in shims still
         // advances its own clock.
@@ -663,14 +683,181 @@ impl Machine {
             tree: &mut self.tree,
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
+            call_guest: None,
         };
         let answer = (method.run)(&mut ctx, this, &args)?;
+        let call_guest = ctx.call_guest.take();
 
         // Every COM method is stdcall, and the object counts as an argument.
         self.cpu.r[crate::cpu::ESP] = esp.wrapping_add(4 + (method.args + 1) * 4);
         self.cpu.r[crate::cpu::EAX] = answer;
         self.cpu.eip = caller;
+        if let Some((function, args)) = call_guest {
+            self.call_guest(function, &args, caller, answer)?;
+        }
         self.clock.retire();
         Ok(())
+    }
+}
+
+impl Machine {
+    /// Run the guest's own code from inside a call it made.
+    ///
+    /// The machine cannot hold a Rust frame across guest execution, so what
+    /// happens instead is a parked continuation: the call is set up on the
+    /// guest's stack with a return address inside the boundary, and when the
+    /// guest returns to it the machine puts back what the original call was
+    /// going to answer with (ADR-0002).
+    fn call_guest(
+        &mut self,
+        function: u32,
+        args: &[u32],
+        resume_at: u32,
+        answer: u32,
+    ) -> Result<(), Stop> {
+        // The guest's own stack carries the call, arguments last first.
+        let mut esp = self.cpu.r[crate::cpu::ESP];
+        for value in args.iter().rev() {
+            esp = esp.wrapping_sub(4);
+            self.arena.write_u32(esp, *value).map_err(Stop::Fault)?;
+        }
+        esp = esp.wrapping_sub(4);
+        self.arena
+            .write_u32(esp, crate::shim::RETURN_TO_MACHINE)
+            .map_err(Stop::Fault)?;
+        self.cpu.r[crate::cpu::ESP] = esp;
+        self.cpu.eip = function;
+        self.continuations.push((resume_at, answer));
+        Ok(())
+    }
+
+    /// The guest has returned from something the machine called.
+    fn guest_returned(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let Some((resume_at, answer)) = self.continuations.pop() else {
+            return Err(Stop::NotWritten {
+                what: "a return into the machine with nothing waiting for it".to_owned(),
+                caller: self.cpu.eip,
+            });
+        };
+        log.at(
+            Trace::Shims,
+            &format!(
+                "guest returned {:#x} cursor {}",
+                self.cpu.r[EAX],
+                self.clock.cursor()
+            ),
+        );
+        // The callback's own answer is discarded: what the guest is waiting
+        // for is the answer to the call it made.
+        self.cpu.r[EAX] = answer;
+        self.cpu.eip = resume_at;
+        self.clock.retire();
+        Ok(())
+    }
+}
+
+impl Machine {
+    /// Show the guest a frame it has finished with.
+    ///
+    /// The surface is the guest's own memory, in whatever format it declared,
+    /// and the host takes four bytes a pixel: the conversion is this machine's
+    /// last act before the frame leaves it.
+    fn present_guest(
+        &mut self,
+        frame: &crate::win32::Present,
+        host: &mut dyn Host,
+        log: &mut RunLog,
+    ) {
+        let want = (frame.width * frame.height * 4) as usize;
+        self.present_buffer.resize(want, 0);
+        let source = match self
+            .arena
+            .slice(frame.pixels, (frame.pitch * frame.height) as usize)
+        {
+            Ok(bytes) => bytes,
+            Err(fault) => {
+                log.line(&format!("flip refused: {fault}"));
+                return;
+            }
+        };
+
+        match frame.depth {
+            32 => {
+                for y in 0..frame.height as usize {
+                    let from = y * frame.pitch as usize;
+                    let to = y * frame.width as usize * 4;
+                    let width = frame.width as usize * 4;
+                    self.present_buffer[to..to + width]
+                        .copy_from_slice(&source[from..from + width]);
+                }
+            }
+            16 => {
+                // Five-six-five, which is what a title of this era declares.
+                for y in 0..frame.height as usize {
+                    for x in 0..frame.width as usize {
+                        let at = y * frame.pitch as usize + x * 2;
+                        let pixel = u16::from_le_bytes([source[at], source[at + 1]]);
+                        let r = ((pixel >> 11) & 0x1f) as u8;
+                        let g = ((pixel >> 5) & 0x3f) as u8;
+                        let b = (pixel & 0x1f) as u8;
+                        let out = (y * frame.width as usize + x) * 4;
+                        // Widened by repeating the top bits, so white stays
+                        // white rather than landing just short of it.
+                        self.present_buffer[out] = (b << 3) | (b >> 2);
+                        self.present_buffer[out + 1] = (g << 2) | (g >> 4);
+                        self.present_buffer[out + 2] = (r << 3) | (r >> 2);
+                        self.present_buffer[out + 3] = 0xff;
+                    }
+                }
+            }
+            8 => {
+                // Through the palette the guest set.
+                let palette = self.state.palette;
+                for y in 0..frame.height as usize {
+                    for x in 0..frame.width as usize {
+                        let index = source[y * frame.pitch as usize + x];
+                        let entry = self
+                            .arena
+                            .read_u32(palette + u32::from(index) * 4)
+                            .unwrap_or(0);
+                        let out = (y * frame.width as usize + x) * 4;
+                        let [r, g, b, _] = entry.to_le_bytes();
+                        self.present_buffer[out] = b;
+                        self.present_buffer[out + 1] = g;
+                        self.present_buffer[out + 2] = r;
+                        self.present_buffer[out + 3] = 0xff;
+                    }
+                }
+            }
+            other => {
+                log.line(&format!(
+                    "flip refused: {other} bits a pixel is not a declared format"
+                ));
+                return;
+            }
+        }
+
+        let out = Frame {
+            width: frame.width,
+            height: frame.height,
+            pitch: frame.width * 4,
+            pixels: &self.present_buffer,
+        };
+        host.present(&out);
+        self.clock.present(self.flip_cost);
+        log.line(&format!(
+            "flip {} cursor {} {}x{}x{}",
+            self.flips,
+            self.clock.cursor(),
+            frame.width,
+            frame.height,
+            frame.depth
+        ));
+        host.pace(self.clock.nanos());
+        for event in host.poll_input(self.flips) {
+            log.line(&format!("input flip {} {event:?}", self.flips));
+            self.input.push((self.flips, event));
+        }
+        self.flips += 1;
     }
 }

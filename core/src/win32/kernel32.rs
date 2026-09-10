@@ -689,6 +689,15 @@ fn heap_destroy(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn heap_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (flags, size) = (args[1], args[2]);
     let addr = ctx.state.heap.alloc(size);
+    if addr == 0 {
+        // A guest handed a zero happily uses it as an address, so an exhausted
+        // heap is said out loud rather than left to become a null jump later.
+        ctx.log.line(&format!(
+            "heap exhausted asking for {size} bytes: {} handed out, {} live",
+            ctx.state.heap.extent(),
+            ctx.state.heap.live_bytes()
+        ));
+    }
     // HEAP_ZERO_MEMORY. The heap hands out memory that was zero to begin
     // with, but a block handed back and given out again is not, so the zeros
     // are written rather than assumed.
@@ -724,15 +733,32 @@ fn heap_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The guest asks for pages; it gets heap, because the declared machine's
-    // whole address space is already mapped and the difference it could
-    // measure is protection, which this machine does not have.
-    let size = args[1];
-    Ok(ctx.state.heap.alloc(size.next_multiple_of(0x1000)))
+    // VirtualAlloc(address, size, type, protection).
+    //
+    // The declared machine's whole address space is already mapped, so
+    // committing memory inside a region the guest already reserved is nothing
+    // to do: the address it asked about is the address it gets back. Handing
+    // out new memory for each commit is how a title that suballocates its own
+    // four megabytes eats a heap five hundred megabytes wide.
+    let (address, size) = (args[0], args[1]);
+    if address != 0 {
+        return Ok(address);
+    }
+    let at = ctx.state.heap.alloc(size.next_multiple_of(0x1000));
+    if at == 0 {
+        ctx.log.line(&format!("no room to reserve {size} bytes"));
+    }
+    Ok(at)
 }
 
 fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    Ok(u32::from(ctx.state.heap.free(args[0])))
+    // Only a release gives the memory back; decommitting leaves the region
+    // reserved, and the declared machine has nothing to take away.
+    const MEM_RELEASE: u32 = 0x8000;
+    if args[2] & MEM_RELEASE != 0 {
+        ctx.state.heap.free(args[0]);
+    }
+    Ok(1)
 }
 
 fn get_std_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

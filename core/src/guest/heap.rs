@@ -11,8 +11,11 @@ use std::collections::BTreeMap;
 ///
 /// Declared values: the address is chosen so that it sits above every image
 /// the roster's titles ask to be loaded at and below the boundary's own range.
-pub const HEAP_BASE: u32 = 0x0100_0000;
-pub const HEAP_BYTES: u32 = 0x0400_0000;
+pub const HEAP_BASE: u32 = 0x1000_0000;
+/// Half a gigabyte. Rock Raiders alone reads 79 MB of archives into memory on
+/// the way to its front end, and a heap that runs out hands back zero, which a
+/// guest happily uses as an address.
+pub const HEAP_BYTES: u32 = 0x2000_0000;
 
 /// A bump allocator with a free list.
 ///
