@@ -1,0 +1,123 @@
+//! The headless host: no window, no device, uncapped.
+//!
+//! What it presents and mixes is recorded rather than shown, which is what
+//! makes it the host every test runs on. Input comes from a route, so a
+//! headless run is a function of that route alone.
+
+use super::{sys, Frame, Host, HostError, Input, Mapping};
+use std::time::Instant;
+
+/// One frame this host was asked to present, kept as its own bytes.
+pub struct Presented {
+    pub flip: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl Presented {
+    /// Whether every pixel in the frame is the same. A uniform frame is what a
+    /// cleared surface looks like, so first light is the first frame that is
+    /// not one.
+    #[must_use]
+    pub fn is_uniform(&self) -> bool {
+        self.pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p == &self.pixels[..4])
+    }
+}
+
+/// A host that records instead of showing.
+pub struct Headless {
+    started: Instant,
+    flips: u64,
+    /// Every frame presented, in order.
+    pub frames: Vec<Presented>,
+    /// Every audio block mixed, in order. Mixing runs whether or not a device
+    /// would have taken the samples.
+    pub audio_blocks: Vec<Vec<i16>>,
+    /// Input still to deliver, newest last, each keyed to the flip it belongs
+    /// to.
+    pending: Vec<(u64, Input)>,
+}
+
+impl Headless {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            flips: 0,
+            frames: Vec::new(),
+            audio_blocks: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Queue the input a route asks for. Events are delivered at the flip they
+    /// name; one that names a flip the run never reaches stays here, and the
+    /// run reports it rather than losing it.
+    pub fn queue(&mut self, events: Vec<(u64, Input)>) {
+        self.pending.extend(events);
+        self.pending.sort_by_key(|(flip, _)| *flip);
+    }
+
+    /// Route events that named a flip this run never reached.
+    #[must_use]
+    pub fn undelivered(&self) -> &[(u64, Input)] {
+        &self.pending
+    }
+
+    #[must_use]
+    pub fn flips(&self) -> u64 {
+        self.flips
+    }
+}
+
+impl Default for Headless {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Host for Headless {
+    fn present(&mut self, frame: &Frame<'_>) {
+        let mut pixels = Vec::with_capacity((frame.width * frame.height * 4) as usize);
+        for row in 0..frame.height {
+            let start = (row * frame.pitch) as usize;
+            let end = start + (frame.width * 4) as usize;
+            pixels.extend_from_slice(&frame.pixels[start..end]);
+        }
+        self.frames.push(Presented {
+            flip: self.flips,
+            width: frame.width,
+            height: frame.height,
+            pixels,
+        });
+        self.flips += 1;
+    }
+
+    fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+        let take = self.pending.partition_point(|(f, _)| *f <= flip);
+        self.pending.drain(..take).map(|(_, e)| e).collect()
+    }
+
+    fn audio(&mut self, samples: &[i16]) {
+        self.audio_blocks.push(samples.to_vec());
+    }
+
+    fn wall_nanos(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+        let (ptr, len) = sys::map_anon(len)?;
+        // Safety: the mapping is live and this is its only owner.
+        Ok(unsafe { Mapping::from_raw(ptr, len) })
+    }
+
+    fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError> {
+        sys::Library::open(name)
+    }
+}

@@ -1,0 +1,18 @@
+//! lego-legacy core: the engine shared by every title on the roster.
+//!
+//! Nothing here is keyed to a title. A title crate supplies a [`Title`] and
+//! calls [`run::main`]; everything else in a run happens through this crate.
+
+pub mod cli;
+pub mod clock;
+pub mod cpu;
+pub mod guest;
+pub mod host;
+pub mod machine;
+pub mod run;
+pub mod runlog;
+pub mod stub;
+pub mod testkit;
+pub mod title;
+
+pub use title::Title;

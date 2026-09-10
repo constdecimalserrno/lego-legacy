@@ -1,0 +1,13 @@
+[package]
+name = "lego-legacy-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lego-legacy"
+path = "src/main.rs"
+
+[dependencies]
+lego-legacy-core = { path = "../core" }

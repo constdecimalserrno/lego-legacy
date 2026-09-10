@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["core", "launcher", "titles/lego-rock-raiders"]
+
+# ADR-0001: zero external crates, forever. Nothing may appear here or in any
+# member's [dependencies] but path entries to workspace members, and
+# `core/tests/zero_crates.rs` holds Cargo.lock to exactly that.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+
+[profile.release]
+opt-level = 3
+debug = true
+codegen-units = 1

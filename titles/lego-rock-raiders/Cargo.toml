@@ -1,0 +1,13 @@
+[package]
+name = "lego-rock-raiders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lego-rock-raiders"
+path = "src/main.rs"
+
+[dependencies]
+lego-legacy-core = { path = "../../core" }
