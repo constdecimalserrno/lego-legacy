@@ -12,6 +12,86 @@ use std::fmt;
 /// bytes.
 pub const MAGIC: &str = "#lego-legacy-route 1";
 
+/// The keys a route names, with the DirectInput number each one is.
+///
+/// A key with no name here is written as its number, and read back from it.
+const KEYS: &[(u32, &str)] = &[
+    (0x01, "Escape"),
+    (0x02, "1"),
+    (0x03, "2"),
+    (0x04, "3"),
+    (0x05, "4"),
+    (0x06, "5"),
+    (0x07, "6"),
+    (0x08, "7"),
+    (0x09, "8"),
+    (0x0a, "9"),
+    (0x0b, "0"),
+    (0x0c, "Minus"),
+    (0x0d, "Equals"),
+    (0x0e, "Backspace"),
+    (0x0f, "Tab"),
+    (0x10, "Q"),
+    (0x11, "W"),
+    (0x12, "E"),
+    (0x13, "R"),
+    (0x14, "T"),
+    (0x15, "Y"),
+    (0x16, "U"),
+    (0x17, "I"),
+    (0x18, "O"),
+    (0x19, "P"),
+    (0x1a, "LeftBracket"),
+    (0x1b, "RightBracket"),
+    (0x1c, "Return"),
+    (0x1e, "A"),
+    (0x1f, "S"),
+    (0x20, "D"),
+    (0x21, "F"),
+    (0x22, "G"),
+    (0x23, "H"),
+    (0x24, "J"),
+    (0x25, "K"),
+    (0x26, "L"),
+    (0x27, "Semicolon"),
+    (0x28, "Apostrophe"),
+    (0x29, "Grave"),
+    (0x2b, "Backslash"),
+    (0x2c, "Z"),
+    (0x2d, "X"),
+    (0x2e, "C"),
+    (0x2f, "V"),
+    (0x30, "B"),
+    (0x31, "N"),
+    (0x32, "M"),
+    (0x33, "Comma"),
+    (0x34, "Period"),
+    (0x35, "Slash"),
+    (0x39, "Space"),
+    (0x3b, "F1"),
+    (0x3c, "F2"),
+    (0x3d, "F3"),
+    (0x3e, "F4"),
+    (0x3f, "F5"),
+    (0x40, "F6"),
+    (0x41, "F7"),
+    (0x42, "F8"),
+    (0x43, "F9"),
+    (0x44, "F10"),
+    (0x57, "F11"),
+    (0x58, "F12"),
+    (0xc8, "Up"),
+    (0xcb, "Left"),
+    (0xcd, "Right"),
+    (0xd0, "Down"),
+];
+
+/// The name a route writes a key under.
+#[must_use]
+pub fn key_name(code: u32) -> Option<&'static str> {
+    KEYS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+}
+
 /// A line a route reader would not act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
@@ -121,8 +201,13 @@ impl Route {
                 "key" => {
                     let code = words
                         .next()
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| fail("`key` needs a code"))?;
+                        .and_then(|w| {
+                            KEYS.iter()
+                                .find(|(_, n)| n.eq_ignore_ascii_case(w))
+                                .map(|(c, _)| *c)
+                                .or_else(|| w.parse().ok())
+                        })
+                        .ok_or_else(|| fail("`key` needs a key's name"))?;
                     let down = match words.next() {
                         Some("down") => true,
                         Some("up") => false,
@@ -152,8 +237,9 @@ impl Route {
                 Input::Down => format!("flip {flip} down"),
                 Input::Up => format!("flip {flip} up"),
                 Input::Key { code, down } => {
+                    let key = key_name(*code).map_or_else(|| code.to_string(), str::to_owned);
                     format!(
-                        "flip {flip} key {code} {}",
+                        "flip {flip} key {key} {}",
                         if *down { "down" } else { "up" }
                     )
                 }
@@ -178,8 +264,15 @@ mod tests {
         route.push(
             9012,
             Input::Key {
-                code: 53,
+                code: 0x01,
                 down: true,
+            },
+        );
+        route.push(
+            9012,
+            Input::Key {
+                code: 0xff,
+                down: false,
             },
         );
         route.push(9013, Input::Up);
@@ -191,7 +284,20 @@ mod tests {
         );
         assert!(text.starts_with("#lego-legacy-route 1\n"));
         assert!(text.contains("flip 9000 move 320 213"));
-        assert!(text.contains("flip 9012 key 53 down"));
+        assert!(text.contains("flip 9012 key Escape down"));
+        assert!(
+            text.contains("flip 9012 key 255 up"),
+            "a key with no name is its number"
+        );
+        assert_eq!(
+            Route::parse("flip 1 key return down\n")
+                .expect("names read in any case")
+                .at(1),
+            [Input::Key {
+                code: 0x1c,
+                down: true
+            }]
+        );
     }
 
     #[test]
@@ -207,7 +313,11 @@ mod tests {
             ("flip up\n", "a flip is a whole number"),
             ("flip 3 sideways\n", "no such event"),
             ("flip 3 move 4\n", "`move` needs two coordinates"),
-            ("flip 3 key 53 sideways\n", "`key` ends with `down` or `up`"),
+            (
+                "flip 3 key Escape sideways\n",
+                "`key` ends with `down` or `up`",
+            ),
+            ("flip 3 key Hyper down\n", "`key` needs a key's name"),
             ("flip 3 up now\n", "an event ends where its own words end"),
             ("press 3 up\n", "an event starts with `flip`"),
         ] {

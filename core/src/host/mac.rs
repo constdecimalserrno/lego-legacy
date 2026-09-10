@@ -553,6 +553,12 @@ mod tests {
         assert_eq!(direct_input_key(0x24), Some(0x1c)); // Return
         assert_eq!(direct_input_key(0x7e), Some(0xc8)); // Up
         assert_eq!(direct_input_key(0x3a), None); // Option, a modifier
+                                                  // Every key a person can press here, a route can write by name.
+        for key in 0..=0x7f {
+            if let Some(code) = direct_input_key(key) {
+                assert!(crate::route::key_name(code).is_some(), "{key:#x}");
+            }
+        }
     }
 
     #[test]

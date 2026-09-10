@@ -34,7 +34,8 @@ pub enum Input {
     },
     Down,
     Up,
-    /// A key, numbered as DirectInput numbers the keyboard's keys.
+    /// A key, numbered as DirectInput numbers the keyboard's keys; a route
+    /// names it ([`crate::route::key_name`]).
     Key {
         code: u32,
         down: bool,

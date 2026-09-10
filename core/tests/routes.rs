@@ -68,7 +68,7 @@ fn a_recorded_run_writes_a_route_that_replays_as_itself() {
         (
             0,
             Input::Key {
-                code: 53,
+                code: 0x01,
                 down: true,
             },
         ),
@@ -85,7 +85,7 @@ fn a_recorded_run_writes_a_route_that_replays_as_itself() {
     let text = std::fs::read_to_string(&written).expect("the recorder wrote a route");
     assert!(text.starts_with("#lego-legacy-route 1"), "route:\n{text}");
     assert!(text.contains("flip 0 down"), "route:\n{text}");
-    assert!(text.contains("flip 0 key 53 down"), "route:\n{text}");
+    assert!(text.contains("flip 0 key Escape down"), "route:\n{text}");
 
     // And replaying it produces the same run.
     let replayed = testkit::run_route(&STUB, &written, 1_000);
