@@ -77,6 +77,8 @@ pub struct Machine {
     pub image: Option<crate::pe::Image>,
     /// Everything the guest holds that is not memory.
     pub state: State,
+    /// What the declared machine has on its disc.
+    pub tree: crate::install::Tree,
     /// The title this machine was built for.
     title: &'static Title,
 }
@@ -99,6 +101,7 @@ impl Machine {
             boundary: Boundary::new(),
             image: None,
             state: State::new(),
+            tree: crate::install::Tree::new(),
             title,
         })
     }
@@ -263,6 +266,7 @@ impl Machine {
     pub fn load_title(&mut self, title: &Title) -> Result<(), Box<dyn std::error::Error>> {
         let mut iso = crate::disc::open_pressing(title.image.disc_dir, title.image.pressing)?;
         let bytes = iso.read(title.image.path)?;
+        let iso = iso;
 
         // A title is the bytes it is made of. A pressing that has been patched
         // or is simply the other one is refused by name rather than run.
@@ -278,7 +282,16 @@ impl Machine {
             .into());
         }
 
+        // The pressing stays in the declared machine's drive for the whole
+        // run: a title reads its own disc, and the label it checks is the
+        // label the image carries.
+        self.state.volume_label = iso.label.clone();
+        self.tree.set_disc(iso);
+
         let image = crate::pe::load(&bytes, &mut self.arena)?;
+        // The guest starts where it was installed, as a player double-clicking
+        // it would.
+        self.state.current_directory = title.install_dir.to_owned();
         self.boundary.bind(&image.imports, &mut self.arena)?;
         self.cpu = Cpu {
             eip: image.base.wrapping_add(image.entry),
@@ -347,6 +360,8 @@ impl Machine {
             state: &mut self.state,
             title: self.title,
             log,
+            tree: &mut self.tree,
+            clock_millis: self.clock.millis(),
         };
         let answer = (shim.run)(&mut ctx, &args)?;
 

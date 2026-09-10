@@ -1,0 +1,120 @@
+//! The declared install tree (ADR-0002's other half).
+//!
+//! What a title's installer would have put on the machine's disc, declared
+//! rather than produced by running the installer. Every file the guest can
+//! open is one the pressing carries; nothing on the host is reachable, because
+//! the guest is not on the host.
+
+use crate::disc::Iso;
+use std::collections::BTreeMap;
+
+/// Where one of the guest's files comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A file inside the pressing's own image.
+    Disc(String),
+    /// Bytes the machine makes up, because the installer would have written
+    /// them rather than copied them.
+    Declared(Vec<u8>),
+}
+
+/// The declared machine's disc.
+pub struct Tree {
+    /// Guest paths, upper-cased and with their separators normalised, to what
+    /// stands behind them.
+    files: BTreeMap<String, Source>,
+    iso: Option<Iso>,
+    /// Every path the guest asked for and did not find, in the order it asked.
+    pub missing: Vec<String>,
+}
+
+impl Default for Tree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tree {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            iso: None,
+            missing: Vec::new(),
+        }
+    }
+
+    /// Give the tree the pressing its files come from.
+    pub fn set_disc(&mut self, iso: Iso) {
+        self.iso = Some(iso);
+    }
+
+    /// The form a guest path is looked up by: case does not matter on the
+    /// declared machine, and neither does which way the separators lean.
+    fn key(path: &str) -> String {
+        path.trim().replace('/', "\\").to_uppercase()
+    }
+
+    /// Declare that a guest path holds one of the pressing's files.
+    pub fn map(&mut self, guest_path: &str, disc_path: &str) {
+        self.files
+            .insert(Self::key(guest_path), Source::Disc(disc_path.to_owned()));
+    }
+
+    /// Declare a file the installer would have written rather than copied.
+    pub fn declare(&mut self, guest_path: &str, bytes: Vec<u8>) {
+        self.files
+            .insert(Self::key(guest_path), Source::Declared(bytes));
+    }
+
+    /// Whether the tree holds a path.
+    #[must_use]
+    pub fn holds(&self, guest_path: &str) -> bool {
+        self.files.contains_key(&Self::key(guest_path))
+    }
+
+    /// Read a file the guest named, recording a miss so the tree can be told
+    /// about it.
+    pub fn read(&mut self, guest_path: &str) -> Option<Vec<u8>> {
+        let key = Self::key(guest_path);
+        match self.files.get(&key).cloned() {
+            Some(Source::Declared(bytes)) => Some(bytes),
+            Some(Source::Disc(path)) => {
+                let iso = self.iso.as_mut()?;
+                match iso.read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => {
+                        self.missing.push(guest_path.to_owned());
+                        None
+                    }
+                }
+            }
+            None => {
+                // The declared machine has the pressing in its CD drive, so a
+                // path on D: is a path on the disc, spelled the way the disc
+                // spells it.
+                if let Some(rest) = key.strip_prefix("D:\\") {
+                    let on_disc = rest.replace('\\', "/");
+                    if let Some(iso) = self.iso.as_mut() {
+                        if let Ok(bytes) = iso.read(&on_disc) {
+                            return Some(bytes);
+                        }
+                    }
+                }
+                self.missing.push(guest_path.to_owned());
+                None
+            }
+        }
+    }
+
+    /// How many files the tree holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}

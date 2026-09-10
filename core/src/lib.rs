@@ -10,6 +10,7 @@ pub mod disc;
 pub mod guest;
 pub mod hash;
 pub mod host;
+pub mod install;
 pub mod machine;
 pub mod pe;
 pub mod run;

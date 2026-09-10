@@ -23,6 +23,31 @@ pub struct EntryImage {
     pub why: &'static str,
 }
 
+/// The machine a title is told it is running on.
+///
+/// Every field is a declared value: chosen for this title, carried with the
+/// reason for that value, and never measured from the host. A run that read
+/// the host's own processor or memory would replay differently on another
+/// machine.
+pub struct Declared {
+    /// What `GetVersion` answers with, packed as Windows packs it.
+    pub windows: u32,
+    /// How much memory the machine says it has.
+    pub megabytes: u32,
+    /// The screen sizes the machine offers, as width, height and bit depth.
+    pub modes: &'static [(u32, u32, u32)],
+    /// What the machine calls itself.
+    pub computer: &'static str,
+    /// Who it says is using it.
+    pub user: &'static str,
+    /// Why these values and no others.
+    pub why: &'static str,
+}
+
+/// Windows 98 Second Edition: major 4, minor 10, build 2222, with the top bit
+/// clear to say it is not Windows NT.
+pub const WINDOWS_98_SE: u32 = 0x0a04 | (2222 << 16);
+
 /// One supported game, identified by the bytes of its entry image.
 ///
 /// The roster key is the name of the title's binary and of its data-root
@@ -38,6 +63,14 @@ pub struct Title {
     pub image: EntryImage,
     /// The pressing whose audio tracks this title plays, when it has any.
     pub red_book: Option<&'static str>,
+    /// The machine this title is told it is running on.
+    pub declared: Declared,
+    /// Where the declared machine has this title installed.
+    ///
+    /// A declared value: the guest reads this path back from the machine and
+    /// resolves its own files against it, so it has to be the same on every
+    /// run and on every host.
+    pub install_dir: &'static str,
 }
 
 impl Title {
@@ -57,5 +90,15 @@ impl Title {
             why: "the stub guest is assembled by hand in this crate and comes off no disc",
         },
         red_book: None,
+        declared: Declared {
+            windows: WINDOWS_98_SE,
+            megabytes: 128,
+            modes: &[(640, 480, 16)],
+            computer: "LEGO-LEGACY",
+            user: "LEGO-LEGACY",
+            why: "the stub guest asks the machine nothing, and these are the roster's own \
+                  baseline values rather than anything measured for it",
+        },
+        install_dir: "C:\\STUB",
     };
 }

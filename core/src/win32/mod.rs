@@ -5,6 +5,7 @@
 //! arrives through the boundary, the shim answers, and the call returns as if
 //! the real library had been there.
 
+pub mod advapi32;
 pub mod kernel32;
 pub mod msvcrt;
 pub mod user32;
@@ -56,6 +57,8 @@ pub enum Object {
     },
     /// Something named that only has to be distinct: an event, a mutex.
     Named { kind: &'static str, name: String },
+    /// A registry key the guest has open.
+    Key { path: String },
 }
 
 /// Everything the guest holds that is not memory.
@@ -72,6 +75,19 @@ pub struct State {
     pub last_call: Option<String>,
     /// What the guest will read from `GetLastError`.
     pub last_error: u32,
+    /// Where the guest believes it is.
+    pub current_directory: String,
+    /// The label on the disc in the declared machine's drive.
+    pub volume_label: String,
+    /// How long the guest has asked to wait for, in declared milliseconds.
+    pub slept_millis: u64,
+    /// Settings files, by path, section and key.
+    profiles: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
+    /// The registry, as a flat map from a key's whole path to its values.
+    ///
+    /// Seeded with what a title's installer would have written, and added to
+    /// by whatever the guest writes back.
+    registry: BTreeMap<String, BTreeMap<String, (u32, Vec<u8>)>>,
 }
 
 impl Default for State {
@@ -94,6 +110,11 @@ impl State {
             command_line: None,
             last_call: None,
             last_error: 0,
+            current_directory: String::new(),
+            volume_label: String::new(),
+            slept_millis: 0,
+            profiles: BTreeMap::new(),
+            registry: BTreeMap::new(),
         }
     }
 
@@ -119,6 +140,64 @@ impl State {
         self.handles.remove(&handle).is_some()
     }
 
+    /// One setting out of a file the guest reads.
+    #[must_use]
+    pub fn profile_value(&self, path: &str, section: &str, key: &str) -> Option<String> {
+        self.profiles.get(path)?.get(section)?.get(key).cloned()
+    }
+
+    /// Write a setting the guest gave us.
+    pub fn set_profile_value(&mut self, path: &str, section: &str, key: &str, value: String) {
+        self.profiles
+            .entry(path.to_owned())
+            .or_default()
+            .entry(section.to_owned())
+            .or_default()
+            .insert(key.to_owned(), value);
+    }
+
+    /// Give the guest a handle to a registry key, making the key if the guest
+    /// is creating it.
+    pub fn open_key(&mut self, path: &str) -> u32 {
+        self.registry.entry(path.to_owned()).or_default();
+        self.give(Object::Key {
+            path: path.to_owned(),
+        })
+    }
+
+    /// Which key a handle names.
+    #[must_use]
+    pub fn key_of(&self, handle: u32) -> Option<String> {
+        match self.object(handle) {
+            Some(Object::Key { path }) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn registry_has(&self, path: &str) -> bool {
+        self.registry.contains_key(path)
+    }
+
+    /// One value out of the registry, by key and name.
+    #[must_use]
+    pub fn registry_value(&self, path: &str, name: &str) -> Option<(u32, Vec<u8>)> {
+        self.registry.get(path)?.get(name).cloned()
+    }
+
+    /// Write a value the guest gave us.
+    pub fn set_registry_value(&mut self, path: &str, name: &str, kind: u32, bytes: Vec<u8>) {
+        self.registry
+            .entry(path.to_owned())
+            .or_default()
+            .insert(name.to_owned(), (kind, bytes));
+    }
+
+    /// Seed a declared key, as a title's installer would have left it.
+    pub fn declare_registry(&mut self, path: &str, name: &str, kind: u32, bytes: Vec<u8>) {
+        self.set_registry_value(path, name, kind, bytes);
+    }
+
     /// The handle a module already has, if it has one.
     #[must_use]
     pub fn module(&self, name: &str) -> Option<u32> {
@@ -136,6 +215,10 @@ pub struct Ctx<'a> {
     pub state: &'a mut State,
     pub title: &'a Title,
     pub log: &'a mut RunLog,
+    /// What the declared machine has on its disc.
+    pub tree: &'a mut crate::install::Tree,
+    /// What the declared clock reads, in milliseconds.
+    pub clock_millis: u64,
 }
 
 impl Ctx<'_> {
@@ -182,6 +265,21 @@ impl Ctx<'_> {
         Ok(u32::try_from(take).unwrap_or(0))
     }
 
+    /// Open a file the guest named, through the declared install tree.
+    ///
+    /// The tree says which of the pressing's own files appear where on the
+    /// declared machine's disc. Nothing outside it is reachable: the guest
+    /// cannot open the host's files, because it is not on the host.
+    pub fn open_guest_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.tree.read(path)
+    }
+
+    /// The declared clock, in milliseconds, as the guest reads it.
+    #[must_use]
+    pub fn declared_millis(&self) -> u64 {
+        self.clock_millis
+    }
+
     /// Put a string somewhere the guest can keep reading it.
     ///
     /// # Errors
@@ -214,7 +312,12 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         .strip_suffix(".dll")
         .or_else(|| dll.strip_suffix(".DLL"))
         .unwrap_or(dll);
-    for table in [kernel32::SHIMS, user32::SHIMS, msvcrt::SHIMS] {
+    for table in [
+        kernel32::SHIMS,
+        user32::SHIMS,
+        msvcrt::SHIMS,
+        advapi32::SHIMS,
+    ] {
         if let Some(shim) = table
             .iter()
             .find(|s| s.dll.eq_ignore_ascii_case(bare) && s.name == name)

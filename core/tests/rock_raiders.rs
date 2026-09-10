@@ -6,7 +6,7 @@
 
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::clock::FlipCost;
-use lego_legacy_core::title::EntryImage;
+use lego_legacy_core::title::{Declared, EntryImage, WINDOWS_98_SE};
 use lego_legacy_core::{disc, testkit, Title};
 
 /// The title as its own crate declares it.
@@ -21,6 +21,15 @@ const ROCK_RAIDERS: Title = Title {
         why: "the Masterpiece pressing ships the game unwrapped (ADR-0006)",
     },
     red_book: Some("rock-raiders"),
+    declared: Declared {
+        windows: WINDOWS_98_SE,
+        megabytes: 128,
+        modes: &[(640, 480, 16)],
+        computer: "LEGO-LEGACY",
+        user: "LEGO-LEGACY",
+        why: "the title crate's own values",
+    },
+    install_dir: "C:\\LEGORR",
 };
 
 /// The same title pointed at the pressing whose executable is wrapped.
@@ -35,6 +44,15 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
         why: "the original pressing, whose executable is a SafeDisc wrapper",
     },
     red_book: Some("rock-raiders"),
+    declared: Declared {
+        windows: WINDOWS_98_SE,
+        megabytes: 128,
+        modes: &[(640, 480, 16)],
+        computer: "LEGO-LEGACY",
+        user: "LEGO-LEGACY",
+        why: "the title crate's own values",
+    },
+    install_dir: "C:\\LEGORR",
 };
 
 /// Point the run at the checkout's rips and keep run directories out of it.
@@ -177,4 +195,88 @@ fn the_disc_reads_in_the_order_the_image_records() {
     assert_eq!(key.len(), 2, "the disc key is two bytes");
     assert!(iso.has("EXE/LEGORR.EXE").unwrap_or(false));
     assert!(!iso.has("EXE/NOTHERE.EXE").unwrap_or(true));
+}
+
+#[test]
+fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
+    if !scratch() {
+        return;
+    }
+    let cli = Cli {
+        trace: Trace::Shims,
+        ..Cli::default()
+    };
+    let ran = testkit::try_run_headless(&ROCK_RAIDERS, &cli, 10_000_000).expect("the rip loads");
+
+    // Where this title stops today: its own C runtime is done, it has checked
+    // the disc, and it is asking DirectX for an input device.
+    ran.assert_wall("DINPUT.dll!DirectInputCreateA");
+    assert!(
+        ran.finish.cursor > 50_000,
+        "the boot path should retire tens of thousands of instructions, not {}",
+        ran.finish.cursor
+    );
+}
+
+#[test]
+fn the_disc_in_the_declared_drive_is_the_pressing_itself() {
+    if !scratch() {
+        return;
+    }
+    let cli = Cli {
+        trace: Trace::Shims,
+        ..Cli::default()
+    };
+    let ran = testkit::try_run_headless(&ROCK_RAIDERS, &cli, 10_000_000).expect("the rip loads");
+
+    // The title checks its own disc by opening a file on D:, which the
+    // declared machine answers out of the pressing in its drive.
+    ran.assert_logged("call KERNEL32.dll!CreateFileA");
+    assert!(
+        !ran.log.contains("file missing D:\\Data\\cd.key"),
+        "the disc check should find the pressing's own key file\nlog:\n{}",
+        ran.log
+    );
+}
+
+#[test]
+fn a_second_flow_of_control_is_a_wall_rather_than_a_thread_that_never_runs() {
+    // ADR-0005: a machine that grew a thread the host scheduled would stop
+    // replaying. Nothing on the roster has needed one, so asking for one stops
+    // the run and says so.
+    assert!(
+        lego_legacy_core::win32::find("KERNEL32.dll", "CreateThread").is_some(),
+        "the entry point is declared, so that asking for it is a wall with a reason \
+         rather than an import nobody wrote"
+    );
+}
+
+#[test]
+fn what_the_machine_declares_is_what_the_guest_reads_back() {
+    if !scratch() {
+        return;
+    }
+    // The declared machine is the title crate's own, and nothing in it comes
+    // from the host.
+    assert_eq!(ROCK_RAIDERS.declared.megabytes, 128);
+    assert_eq!(ROCK_RAIDERS.declared.computer, "LEGO-LEGACY");
+    assert_eq!(
+        ROCK_RAIDERS.declared.windows & 0xff,
+        4,
+        "Windows 98 is major version four"
+    );
+    assert_eq!(
+        (ROCK_RAIDERS.declared.windows >> 8) & 0xff,
+        10,
+        "and minor version ten"
+    );
+    assert_eq!(
+        ROCK_RAIDERS.declared.windows >> 16,
+        2222,
+        "build 2222 is Second Edition"
+    );
+    assert!(
+        !ROCK_RAIDERS.declared.why.is_empty(),
+        "a declared value carries its reason"
+    );
 }
