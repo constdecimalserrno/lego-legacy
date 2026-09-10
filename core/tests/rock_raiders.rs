@@ -1023,8 +1023,8 @@ const IN_THE_MISSION: u64 = 5450;
 const A_MINUTE_OF_THE_MISSION: u64 = 60 * 60;
 
 /// Enough instructions for the mission's load, its brief, and a minute of it
-/// playing, at a little over a million instructions a flip.
-const FIRST_MISSION_BUDGET: u64 = 13_000_000_000;
+/// playing, at about 1.4 million instructions a flip with its raiders at work.
+const FIRST_MISSION_BUDGET: u64 = 14_500_000_000;
 
 /// The committed route into the first mission.
 fn to_the_first_mission(

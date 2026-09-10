@@ -95,6 +95,19 @@ impl X87 {
         }
     }
 
+    /// Round to a whole number the way the control word's rounding field
+    /// says: to nearest with ties to even, down, up, or toward zero. The C
+    /// library's `_ftol` sets toward zero for every `(int)` cast it makes.
+    #[must_use]
+    pub fn to_whole(&self, x: f64) -> f64 {
+        match (self.control >> 10) & 3 {
+            0 => round_half_to_even(x),
+            1 => x.floor(),
+            2 => x.ceil(),
+            _ => x.trunc(),
+        }
+    }
+
     /// Round a result to the precision the guest asked for.
     fn round(&self, value: f64) -> f64 {
         match self.precision() {
@@ -710,10 +723,9 @@ pub fn execute(
             cpu.fpu.push(maths::cos(x));
         }
         (0xd9, 0xfc) => {
-            // Round to a whole number, to nearest with ties to even, which is
-            // the rounding mode every one of these titles leaves set.
+            // Round to a whole number, the way the control word says.
             let x = cpu.fpu.st(0);
-            let rounded = round_half_to_even(x);
+            let rounded = cpu.fpu.to_whole(x);
             cpu.fpu.set_st(0, rounded);
         }
         (0xd9, 0xfd) => {
@@ -949,7 +961,7 @@ fn memory_form(
         }
         // Store as an integer, rounding the way the control word says.
         (0xdb | 0xdf, 2 | 3) => {
-            let value = round_half_to_even(cpu.fpu.st(0));
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0));
             if escape == 0xdf {
                 let short = value as i32 as i16;
                 mem.write(at, &short.to_le_bytes()).map_err(Stop::Fault)?;
@@ -962,7 +974,7 @@ fn memory_form(
             }
         }
         (0xdf, 7) => {
-            let value = round_half_to_even(cpu.fpu.st(0)) as i64;
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0)) as i64;
             mem.write_u32(at, value as u32).map_err(Stop::Fault)?;
             mem.write_u32(at + 4, (value >> 32) as u32)
                 .map_err(Stop::Fault)?;
@@ -1007,10 +1019,8 @@ fn memory_form(
     Ok(())
 }
 
-/// Round to a whole number, ties going to the even one.
-///
-/// The rounding mode every title on the roster leaves set, and the one the
-/// control word's default names.
+/// Round to a whole number, ties going to the even one: the control word's
+/// default rounding.
 #[must_use]
 pub fn round_half_to_even(x: f64) -> f64 {
     let rounded = x.round();

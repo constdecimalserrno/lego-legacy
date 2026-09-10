@@ -216,6 +216,48 @@ fn the_register_forms_subtract_and_divide_the_way_round_intel_documents() {
 }
 
 #[test]
+fn an_integer_store_rounds_the_way_the_control_word_says() {
+    // fldcw [DATA]; fld qword [DATA+8]; fistp dword [DATA+16];
+    // fld qword [DATA+8]; fistp qword [DATA+20]; fld qword [DATA+8];
+    // frndint; fstp qword [DATA+28]. The C library's _ftol sets truncation
+    // for every (int) cast, and Rock Raiders' positions are cast that way.
+    let code = [
+        0xd9, 0x2d, 0x00, 0x00, 0x50, 0x00, // fldcw [DATA]
+        0xdd, 0x05, 0x08, 0x00, 0x50, 0x00, // fld qword [DATA+8]
+        0xdb, 0x1d, 0x10, 0x00, 0x50, 0x00, // fistp dword [DATA+16]
+        0xdd, 0x05, 0x08, 0x00, 0x50, 0x00, // fld qword [DATA+8]
+        0xdf, 0x3d, 0x14, 0x00, 0x50, 0x00, // fistp qword [DATA+20]
+        0xdd, 0x05, 0x08, 0x00, 0x50, 0x00, // fld qword [DATA+8]
+        0xd9, 0xfc, // frndint
+        0xdd, 0x1d, 0x1c, 0x00, 0x50, 0x00, // fstp qword [DATA+28]
+    ];
+    // Rounding control is bits ten and eleven: nearest, down, up, toward zero.
+    for (control, value, expected) in [
+        (0x037f, 2.5, 2),
+        (0x037f, -2.7, -3),
+        (0x077f, -2.3, -3),
+        (0x077f, 2.7, 2),
+        (0x0b7f, 2.3, 3),
+        (0x0b7f, -2.7, -2),
+        (0x0f7f, 4.7, 4),
+        (0x0f7f, -4.7, -4),
+    ] {
+        let (_cpu, mem) = run(&code, |mem| {
+            mem.write_u32(DATA, control).expect("in the arena");
+            put_double(mem, DATA + 8, value);
+        });
+        let dword = mem.read_u32(DATA + 16).expect("in the arena") as i32;
+        let qword = mem.read_u32(DATA + 20).expect("in the arena") as i32;
+        let whole = get_double(&mem, DATA + 28);
+        assert_eq!(
+            (dword, qword, whole),
+            (expected, expected, f64::from(expected)),
+            "{value} under control word {control:#06x}"
+        );
+    }
+}
+
+#[test]
 fn single_precision_control_rounds_what_the_unit_computes() {
     // With the precision field set to single, a third computed in the unit
     // must equal a third computed in a float.
