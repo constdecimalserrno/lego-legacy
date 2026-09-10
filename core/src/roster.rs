@@ -1,0 +1,113 @@
+//! The roster: which titles this emulator serves.
+//!
+//! A title's own crate declares the machine it runs on; what a title *is* — its
+//! key, its binary, and the bytes of the image that makes it itself — is here,
+//! because the launcher needs it too and it must not be written down twice.
+
+use crate::title::EntryImage;
+
+/// One title, as everything outside its own crate needs to know it.
+pub struct Entry {
+    /// Roster key, which is also the name of the title's binary.
+    pub key: &'static str,
+    /// What a person calls it.
+    pub name: &'static str,
+    /// The image it runs.
+    pub image: EntryImage,
+    /// The pressing whose audio tracks it plays, when it has any.
+    pub red_book: Option<&'static str>,
+}
+
+/// LEGO Rock Raiders, the roster's first title.
+pub const ROCK_RAIDERS: Entry = Entry {
+    key: "lego-rock-raiders",
+    name: "LEGO Rock Raiders",
+    image: EntryImage {
+        disc_dir: "rock-raiders",
+        pressing: "masterpiece-rock-raiders",
+        path: "EXE/LEGORR.EXE",
+        sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
+        why: "the original pressing's EXE/LEGORR.EXE is a 280 KB SafeDisc wrapper beside a \
+              737 KB LEGORR.ICD holding the encrypted game; the Masterpiece pressing ships \
+              that same game unwrapped, with an empty .ICD left behind (ADR-0006)",
+    },
+    // The original pressing carries three audio tracks and the Masterpiece
+    // pressing carries none, so the music comes off the disc the executable
+    // does not (ADR-0006).
+    red_book: Some("rock-raiders"),
+};
+
+/// The whole roster, in the order the titles are being taken.
+///
+/// Three of the four are not here yet: a title joins when its own crate does,
+/// so the launcher never offers something that cannot be started.
+pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS];
+
+/// What the launcher found when it went looking for a title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// The declared image is there and is the right bytes.
+    Runnable { pressing: String },
+    /// The image is there and is wrapped in copy protection (ADR-0006).
+    Wrapped { pressing: String, scheme: String },
+    /// The image is there and is not the one this title declares.
+    WrongBytes { pressing: String, found: String },
+    /// No rip where one was expected, and where that was.
+    Absent { looked_at: String },
+}
+
+impl std::fmt::Display for Found {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runnable { pressing } => write!(f, "ready, from {pressing}"),
+            Self::Wrapped { pressing, scheme } => {
+                write!(f, "{pressing} is wrapped in {scheme} and will not be run")
+            }
+            Self::WrongBytes { pressing, found } => {
+                write!(
+                    f,
+                    "{pressing} holds different bytes ({}…)",
+                    &found[..16.min(found.len())]
+                )
+            }
+            Self::Absent { looked_at } => write!(f, "no rip at {looked_at}"),
+        }
+    }
+}
+
+/// Go looking for a title's image.
+#[must_use]
+pub fn look_for(entry: &Entry) -> Found {
+    let path = crate::disc::pressing_path(entry.image.disc_dir, entry.image.pressing);
+    let mut iso = match crate::disc::Iso::open(&path) {
+        Ok(iso) => iso,
+        Err(_) => {
+            return Found::Absent {
+                looked_at: path.display().to_string(),
+            };
+        }
+    };
+    let Ok(bytes) = iso.read(entry.image.path) else {
+        return Found::Absent {
+            looked_at: format!("{}!{}", path.display(), entry.image.path),
+        };
+    };
+    let pressing = entry.image.pressing.to_owned();
+    if let Ok(image) = crate::pe::inspect(&bytes) {
+        if let Some(scheme) = crate::pe::wrapper_scheme(&image.sections) {
+            return Found::Wrapped {
+                pressing,
+                scheme: scheme.to_owned(),
+            };
+        }
+    }
+    let digest = crate::hash::sha256_hex(&bytes);
+    if digest == entry.image.sha256 {
+        Found::Runnable { pressing }
+    } else {
+        Found::WrongBytes {
+            pressing,
+            found: digest,
+        }
+    }
+}

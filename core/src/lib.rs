@@ -14,6 +14,7 @@ pub mod install;
 pub mod machine;
 pub mod pe;
 pub mod repl;
+pub mod roster;
 pub mod route;
 pub mod run;
 pub mod runlog;

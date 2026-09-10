@@ -1,7 +1,8 @@
 //! LEGO Rock Raiders: the roster's first title.
 
 use lego_legacy_core::clock::FlipCost;
-use lego_legacy_core::title::{Declared, EntryImage, WINDOWS_98_SE};
+use lego_legacy_core::roster::ROCK_RAIDERS as ENTRY;
+use lego_legacy_core::title::{Declared, WINDOWS_98_SE};
 use lego_legacy_core::{run, Title};
 use std::process::ExitCode;
 
@@ -10,24 +11,15 @@ use std::process::ExitCode;
 /// Every value here is a declared value: chosen for this title, carried with
 /// its reason, never measured from the host.
 pub const ROCK_RAIDERS: Title = Title {
-    key: "lego-rock-raiders",
+    key: ENTRY.key,
     // UNMEASURED. This title's drawing has not been priced yet, and a made-up
     // price would be a fact the clock spends. #9 measures it, against the first
     // movie frame this title presents.
     flip_cost: FlipCost::Free,
-    image: EntryImage {
-        disc_dir: "rock-raiders",
-        pressing: "masterpiece-rock-raiders",
-        path: "EXE/LEGORR.EXE",
-        sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
-        why: "the original pressing's EXE/LEGORR.EXE is a 280 KB SafeDisc wrapper beside a \
-              737 KB LEGORR.ICD holding the encrypted game; the Masterpiece pressing ships \
-              that same game unwrapped, with an empty .ICD left behind (ADR-0006)",
-    },
-    // The original pressing carries three audio tracks and the Masterpiece
-    // pressing carries none, so the music comes off the disc the executable
-    // does not (ADR-0006).
-    red_book: Some("rock-raiders"),
+    // What this title is, rather than what machine it runs on: the launcher
+    // needs the same facts, so they live in the roster and are read from here.
+    image: ENTRY.image,
+    red_book: ENTRY.red_book,
     declared: Declared {
         windows: WINDOWS_98_SE,
         // A Pentium II era machine with 128 MB: what the box asked for, and
