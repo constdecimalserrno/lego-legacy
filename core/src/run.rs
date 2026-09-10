@@ -65,7 +65,34 @@ pub fn run_digested(
         machine.recording = Some(crate::route::Route::new());
     }
 
-    let finish = machine.run(host, &mut log, budget);
+    // Snapshots are off unless asked for: scrubbability costs nothing until a
+    // person wants it.
+    let finish = if let Some(every) = cli.snapshot_every {
+        run_with_snapshots(&mut machine, host, &mut log, budget, every)
+    } else {
+        machine.run(host, &mut log, budget)
+    };
+
+    // A run that stopped at a wall leaves behind everything needed to reach it
+    // again: what was done, where it stopped, and the last snapshot before it.
+    if let crate::machine::Outcome::Wall { what } = &finish.outcome {
+        let dir = log.dir().to_path_buf();
+        let mut report = format!(
+            "#lego-legacy-crash 1\ntitle {}\nwall {what}\ncursor {}\nflips {}\n",
+            title.key, finish.cursor, finish.flips
+        );
+        let mut route = crate::route::Route::new();
+        for (flip, event) in &machine.input {
+            route.push(*flip, *event);
+        }
+        report.push('\n');
+        report.push_str(&route.to_text());
+        let _ = std::fs::write(dir.join("crash"), report);
+        if let Ok(bytes) = machine.snapshot() {
+            let _ = std::fs::write(dir.join("crash.snapshot"), bytes);
+        }
+        log.line("crash written");
+    }
 
     // What the route asked for after the run's last flip was never delivered,
     // and saying so is the difference between a route that ended and one that
@@ -213,4 +240,39 @@ fn debugger(title: &'static Title, cli: &Cli) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Run, writing a snapshot every so many flips.
+fn run_with_snapshots(
+    machine: &mut crate::machine::Machine,
+    host: &mut dyn Host,
+    log: &mut RunLog,
+    budget: u64,
+    every: u64,
+) -> Finish {
+    let dir = log.dir().to_path_buf();
+    let mut next_at = every.max(1);
+    let outcome = loop {
+        if machine.clock.cursor() >= budget {
+            break Outcome::BudgetExhausted;
+        }
+        if machine.flips() >= next_at {
+            match machine.snapshot() {
+                Ok(bytes) => {
+                    let name = format!("flip-{}.snapshot", machine.flips());
+                    let _ = std::fs::write(dir.join(&name), bytes);
+                    log.line(&format!(
+                        "snapshot {name} cursor {}",
+                        machine.clock.cursor()
+                    ));
+                }
+                Err(fault) => log.line(&format!("snapshot refused: {fault}")),
+            }
+            next_at += every.max(1);
+        }
+        if let Some(outcome) = machine.tick(host, log) {
+            break outcome;
+        }
+    };
+    machine.finish(outcome)
 }

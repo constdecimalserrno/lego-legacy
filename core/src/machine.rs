@@ -466,3 +466,139 @@ impl Machine {
         crate::hash::hex(&hash.finish())
     }
 }
+
+impl Machine {
+    /// What this run is, for a snapshot to be keyed by.
+    #[must_use]
+    pub fn provenance(&self) -> crate::snap::Provenance {
+        let route = match &self.route {
+            Some(route) => crate::hash::sha256_hex(route.to_text().as_bytes()),
+            None => crate::hash::sha256_hex(b""),
+        };
+        crate::snap::Provenance {
+            build: crate::snap::build_digest(),
+            title: self.title.key.to_owned(),
+            route,
+        }
+    }
+
+    /// The regions of guest memory a snapshot carries.
+    ///
+    // ponytail: the declared regions rather than every page. A guest that
+    // wrote outside its own image, heap, stack and surface would resume with
+    // that writing lost. Upgrade path: a dirty-page map in the arena, which
+    // the engine's unchecked path would have to go through.
+    fn snapshot_regions(&self) -> Vec<(u32, u32)> {
+        let mut regions = Vec::new();
+        if let Some(image) = &self.image {
+            regions.push((image.base, image.size));
+        }
+        regions.push((crate::guest::heap::HEAP_BASE, self.state.heap.extent()));
+        let esp = self.cpu.r[crate::cpu::ESP];
+        if esp < STACK_TOP {
+            regions.push((esp, STACK_TOP - esp));
+        }
+        if let Some(surface) = self.surface {
+            regions.push((surface.addr, surface.pitch * surface.height));
+        }
+        regions.retain(|(_, len)| *len > 0);
+        regions
+    }
+
+    /// Write the machine's state, keyed by what produced it.
+    ///
+    /// # Errors
+    /// When guest memory cannot be read.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, crate::guest::Fault> {
+        use crate::snap::{Snap, Visitor, Writer, MAGIC};
+
+        let mut out = Vec::from(*MAGIC);
+        let provenance = self.provenance();
+        for part in [&provenance.build, &provenance.title, &provenance.route] {
+            out.extend_from_slice(&u32::try_from(part.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(part.as_bytes());
+        }
+
+        let mut writer = Writer::new();
+        self.cpu.snap(&mut writer);
+        self.clock.snap(&mut writer);
+        let mut flips = self.flips;
+        writer.u64(&mut flips);
+
+        let regions = self.snapshot_regions();
+        let mut count = u32::try_from(regions.len()).unwrap_or(0);
+        writer.u32(&mut count);
+        for (start, len) in regions {
+            let (mut start, mut len) = (start, len);
+            writer.u32(&mut start);
+            writer.u32(&mut len);
+            let bytes = self.arena.slice(start, len as usize)?.to_vec();
+            writer.out.extend_from_slice(&bytes);
+        }
+        out.extend_from_slice(&writer.out);
+        Ok(out)
+    }
+
+    /// Put the machine back where a snapshot left it.
+    ///
+    /// # Errors
+    /// When the snapshot came from another build, title or route, or when it
+    /// is not a snapshot at all.
+    pub fn resume(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::snap::{Reader, Snap, SnapError, Visitor, MAGIC};
+
+        if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
+            return Err(SnapError::NotASnapshot.into());
+        }
+        let mut at = MAGIC.len();
+        let mut part = || -> Result<String, SnapError> {
+            let len = bytes
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                .ok_or(SnapError::Truncated("provenance"))?;
+            at += 4;
+            let text = bytes
+                .get(at..at + len)
+                .ok_or(SnapError::Truncated("provenance"))?;
+            at += len;
+            Ok(String::from_utf8_lossy(text).into_owned())
+        };
+        let found = crate::snap::Provenance {
+            build: part()?,
+            title: part()?,
+            route: part()?,
+        };
+        self.provenance().accepts(&found)?;
+
+        let mut reader = Reader::new(&bytes[at..]);
+        self.cpu.snap(&mut reader);
+        self.clock.snap(&mut reader);
+        let mut flips = 0u64;
+        reader.u64(&mut flips);
+        self.flips = flips;
+
+        let mut count = 0u32;
+        reader.u32(&mut count);
+        for _ in 0..count {
+            let (mut start, mut len) = (0u32, 0u32);
+            reader.u32(&mut start);
+            reader.u32(&mut len);
+            let mut region = vec![0u8; len as usize];
+            reader.bytes(&mut region);
+            self.arena.write(start, &region)?;
+        }
+        if reader.short {
+            return Err(SnapError::Truncated("state").into());
+        }
+        // Nothing decoded before the resume describes the memory that is here
+        // now.
+        self.forget_decoded();
+        Ok(())
+    }
+
+    /// Throw away every decoded instruction, after memory has changed under
+    /// the engine.
+    pub fn forget_decoded(&mut self) {
+        self.engine = Box::new(Interp::new(Mode::FLAT));
+    }
+}

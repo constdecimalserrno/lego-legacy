@@ -43,6 +43,15 @@ impl Clock {
         Self::default()
     }
 
+    /// Put a clock back where a snapshot left it.
+    #[must_use]
+    pub fn resumed(cursor: u64, cycles: u64) -> Self {
+        Self {
+            cursor,
+            flip_cycles: cycles.saturating_sub(cursor),
+        }
+    }
+
     /// Instructions retired so far.
     #[must_use]
     pub fn cursor(self) -> u64 {

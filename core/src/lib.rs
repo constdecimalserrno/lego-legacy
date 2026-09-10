@@ -19,6 +19,7 @@ pub mod route;
 pub mod run;
 pub mod runlog;
 pub mod shim;
+pub mod snap;
 pub mod stub;
 pub mod testkit;
 pub mod title;
