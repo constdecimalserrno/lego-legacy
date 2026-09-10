@@ -227,6 +227,9 @@ impl X87 {
     /// is more to do; a guest loops on it. Here the reduction is exact in one
     /// step, so C2 is always clear, and C0, C3 and C1 are the quotient's three
     /// low bits, as the unit reports them.
+    // ponytail: the unit sets C2 and stops part way when the operands' exponents
+    // are more than 63 apart; a guest's loop copes with either, so the whole
+    // reduction happens at once here.
     pub fn remainder(&mut self, nearest: bool) {
         let (value, divisor) = (self.st(0), self.st(1));
         let d = divisor.abs();

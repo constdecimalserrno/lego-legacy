@@ -85,13 +85,23 @@ pub struct Texture<'a> {
     /// The texel value, in the texture's own format, that is not drawn when
     /// colour keying is on.
     pub colour_key: Option<u32>,
+    /// Across and down, whether coordinates past the edge stop at it rather
+    /// than wrapping round.
+    pub clamp: [bool; 2],
 }
 
 impl Texture<'_> {
     /// The texel at a position, wrapped, and whether it is the colour key.
     fn texel(&self, x: i32, y: i32) -> ([u8; 4], bool) {
         let (w, h) = (self.width.max(1) as i32, self.height.max(1) as i32);
-        let (x, y) = (x.rem_euclid(w) as usize, y.rem_euclid(h) as usize);
+        let address = |at: i32, size: i32, clamp: bool| {
+            if clamp {
+                at.clamp(0, size - 1) as usize
+            } else {
+                at.rem_euclid(size) as usize
+            }
+        };
+        let (x, y) = (address(x, w, self.clamp[0]), address(y, h, self.clamp[1]));
         let bytes = self.format.bytes();
         let at = y * self.pitch as usize + x * bytes;
         let Some(raw) = self.bytes.get(at..at + bytes) else {
@@ -311,9 +321,10 @@ impl Default for States {
 
 /// Draw one triangle.
 ///
-/// Pixels whose centres fall inside it are drawn; an edge shared by two
-/// triangles belongs to whichever it is the top or left edge of, so neither
-/// draws it twice nor leaves a gap.
+/// Pixels whose centres fall inside it are drawn, a pixel's centre being its
+/// whole coordinates, as Direct3D before version 10 puts it; an edge shared by
+/// two triangles belongs to whichever it is the top or left edge of, so
+/// neither draws it twice nor leaves a gap.
 pub fn triangle(
     target: &mut Target<'_>,
     v: [Vertex; 3],
@@ -346,7 +357,7 @@ pub fn triangle(
     let flat = (a.diffuse, a.specular);
     for py in top..bottom {
         for px in left..right {
-            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
+            let (x, y) = (px as f32, py as f32);
             let (w0, w1, w2) = (edge(b, c, x, y), edge(c, a, x, y), edge(a, b, x, y));
             if !(covers(w0, b, c) && covers(w1, c, a) && covers(w2, a, b)) {
                 continue;
@@ -580,7 +591,22 @@ mod tests {
         for tri in square(0.7, [1.0, 0.0, 0.0, 1.0]) {
             triangle(&mut target, tri, None, &States::default());
         }
-        assert!(pixels.chunks(2).all(|p| p == [0x1f, 0x00]), "all blue");
+        assert!(
+            target.pixels.chunks(2).all(|p| p == [0x1f, 0x00]),
+            "near first: all blue"
+        );
+        // Far first, then near: the near one still wins.
+        target.depth.fill(1.0);
+        for tri in square(0.7, [1.0, 0.0, 0.0, 1.0]) {
+            triangle(&mut target, tri, None, &States::default());
+        }
+        for tri in square(0.2, [0.0, 0.0, 1.0, 1.0]) {
+            triangle(&mut target, tri, None, &States::default());
+        }
+        assert!(
+            pixels.chunks(2).all(|p| p == [0x1f, 0x00]),
+            "far first: all blue"
+        );
     }
 
     #[test]
@@ -595,6 +621,7 @@ mod tests {
             format: PixelFormat::RGB565,
             palette: None,
             colour_key: Some(0),
+            clamp: [false; 2],
         };
         let mut pixels = vec![0x55u8; 4 * 2 * 2];
         let mut depth = vec![1.0f32; 8];

@@ -534,6 +534,10 @@ fn stage_state_at_start(state: u32, stage: u32) -> Option<u32> {
         (4, _) => 1,
         (5, _) => 2,
         (6, _) => 1,
+        // D3DTSS_ADDRESSU and ADDRESSV: wrap.
+        (13 | 14, _) => 1,
+        // D3DTSS_MAGFILTER and MINFILTER: point. MIPFILTER: none.
+        (16..=18, _) => 1,
         _ => return None,
     })
 }
@@ -782,9 +786,14 @@ fn clear_rects(
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
-    let depth = format.bits;
-    let bits = depth;
-    let bytes = bits.div_ceil(8);
+    if colour.is_some() && format.masks == [0; 4] {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DViewport3::Clear: an indexed surface".to_owned(),
+            caller: 0,
+        });
+    }
+    let bytes = format.bits.div_ceil(8);
+    let mut depth = depth_value.map(|_| take_depth(ctx.state, device, width, height));
     for i in 0..count {
         // D3DRECT: x1, y1, x2, y2.
         let at = rects + i * 16;
@@ -792,7 +801,9 @@ fn clear_rects(
         let (x1, y1) = (read(0)?.min(width), read(4)?.min(height));
         let (x2, y2) = (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1));
         if let Some(colour) = colour {
-            let one = super::pixel(colour, bits);
+            let [b, g, r, a] = colour.to_le_bytes();
+            let value = format.encode([r, g, b, a]).to_le_bytes();
+            let one = &value[..bytes as usize];
             let row: Vec<u8> = (x1..x2).flat_map(|_| one.iter().copied()).collect();
             for y in y1..y2 {
                 ctx.mem
@@ -800,13 +811,15 @@ fn clear_rects(
                     .map_err(Stop::Fault)?;
             }
         }
-        if let Some(z) = depth_value {
-            let buffer = depth_buffer(ctx, device, width, height);
+        if let (Some(z), Some(buffer)) = (depth_value, depth.as_mut()) {
             for y in y1..y2 {
                 let row = (y * width) as usize;
                 buffer[row + x1 as usize..row + x2 as usize].fill(z);
             }
         }
+    }
+    if let Some(buffer) = depth {
+        device_of(ctx.state, device).depth = buffer;
     }
     if colour.is_some() {
         ctx.state.cleared += 1;
@@ -850,17 +863,6 @@ fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     clear_rects(ctx, this, args[0], args[1], colour, depth)
 }
 
-/// A device's depth buffer, the size of its surface, made far the first time
-/// it is needed.
-fn depth_buffer<'a>(ctx: &'a mut Ctx<'_>, device: u32, width: u32, height: u32) -> &'a mut [f32] {
-    let buffer = &mut self::device(ctx, device).depth;
-    let len = (width * height) as usize;
-    if buffer.len() != len {
-        *buffer = vec![1.0; len];
-    }
-    buffer
-}
-
 fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // DrawPrimitive(type, format, vertices, count, flags).
     let indices: Vec<u32> = (0..args[3]).collect();
@@ -890,24 +892,135 @@ fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<
 /// `D3DDP_DONOTLIGHT`: the vertices are lit already.
 const D3DDP_DONOTLIGHT: u32 = 0x10;
 
-/// A value of a render state, set or as it starts.
-fn render_state(device: &Device, state: u32) -> u32 {
+/// The render states a draw reads, by Direct3D's numbers for them.
+mod rs {
+    pub const TEXTUREHANDLE: u32 = 1;
+    pub const TEXTUREADDRESS: u32 = 3;
+    pub const WRAPU: u32 = 5;
+    pub const WRAPV: u32 = 6;
+    pub const ZENABLE: u32 = 7;
+    pub const FILLMODE: u32 = 8;
+    pub const SHADEMODE: u32 = 9;
+    pub const ZWRITEENABLE: u32 = 14;
+    pub const ALPHATESTENABLE: u32 = 15;
+    pub const TEXTUREMAG: u32 = 17;
+    pub const SRCBLEND: u32 = 19;
+    pub const DESTBLEND: u32 = 20;
+    pub const TEXTUREMAPBLEND: u32 = 21;
+    pub const CULLMODE: u32 = 22;
+    pub const ZFUNC: u32 = 23;
+    pub const ALPHAREF: u32 = 24;
+    pub const ALPHAFUNC: u32 = 25;
+    pub const ALPHABLENDENABLE: u32 = 27;
+    pub const FOGENABLE: u32 = 28;
+    pub const SPECULARENABLE: u32 = 29;
+    pub const COLORKEYENABLE: u32 = 41;
+    pub const TEXTUREADDRESSU: u32 = 44;
+    pub const TEXTUREADDRESSV: u32 = 45;
+    pub const WRAP0: u32 = 128;
+}
+
+/// The first texture stage's states a draw reads.
+mod tss {
+    pub const COLOROP: u32 = 1;
+    pub const COLORARG1: u32 = 2;
+    pub const COLORARG2: u32 = 3;
+    pub const ALPHAOP: u32 = 4;
+    pub const ALPHAARG1: u32 = 5;
+    pub const ALPHAARG2: u32 = 6;
+    pub const ADDRESSU: u32 = 13;
+    pub const ADDRESSV: u32 = 14;
+    pub const MAGFILTER: u32 = 16;
+}
+
+/// `D3DTRANSFORMSTATE_WORLD`, `_VIEW` and `_PROJECTION`.
+const WORLD: u32 = 1;
+const VIEW: u32 = 2;
+const PROJECTION: u32 = 3;
+
+/// `D3DLIGHTSTATE_MATERIAL` and `_AMBIENT`.
+const LIGHT_MATERIAL: u32 = 1;
+const LIGHT_AMBIENT: u32 = 2;
+
+fn unwritten(what: String) -> Stop {
+    Stop::NotWritten { what, caller: 0 }
+}
+
+/// A render state's value, set or as it starts; one with no declared start
+/// value is a wall rather than a guess.
+fn render_state(device: &Device, state: u32) -> Result<u32, Stop> {
     device
         .render
         .get(&state)
         .copied()
         .or_else(|| render_state_at_start(state))
-        .unwrap_or(0)
+        .ok_or_else(|| {
+            unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: render state {state}, never set and not declared"
+            ))
+        })
 }
 
-/// A value of the first texture stage's state, set or as it starts.
-fn stage_state(device: &Device, state: u32) -> u32 {
+/// The first texture stage's state, set or as it starts.
+fn stage_state(device: &Device, state: u32) -> Result<u32, Stop> {
     device
         .stages
         .get(&(0, state))
         .copied()
         .or_else(|| stage_state_at_start(state, 0))
-        .unwrap_or(0)
+        .ok_or_else(|| unwritten(format!("IDirect3DDevice3::DrawPrimitive: texture stage state {state}, never set and not declared")))
+}
+
+/// A transform as a device keeps it, as a matrix.
+fn matrix_of(device: &Device, which: u32) -> super::scene::Matrix {
+    device.transforms.get(&which).map_or(IDENTITY, |bits| {
+        std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(bits[r * 4 + c])))
+    })
+}
+
+/// How a texture stage combines a texel and the vertex colour, for the
+/// arguments a draw here understands: the texture, and the diffuse or current
+/// colour, which on the first stage are the same.
+fn combine(op: u32, arg1: u32, arg2: u32) -> Option<crate::raster::Combine> {
+    use crate::raster::Combine;
+    const DIFFUSE: u32 = 0;
+    const CURRENT: u32 = 1;
+    const TEXTURE: u32 = 2;
+    let texture = |a: u32| a == TEXTURE;
+    let colour = |a: u32| a == DIFFUSE || a == CURRENT;
+    match op {
+        // D3DTOP_DISABLE.
+        1 => Some(Combine::Diffuse),
+        // D3DTOP_SELECTARG1 and SELECTARG2.
+        2 | 3 => {
+            let a = if op == 2 { arg1 } else { arg2 };
+            if texture(a) {
+                Some(Combine::Texture)
+            } else if colour(a) {
+                Some(Combine::Diffuse)
+            } else {
+                None
+            }
+        }
+        // D3DTOP_MODULATE and ADD, of a texel and a colour.
+        4 | 7 if (texture(arg1) && colour(arg2)) || (colour(arg1) && texture(arg2)) => {
+            Some(if op == 4 {
+                Combine::Modulate
+            } else {
+                Combine::Add
+            })
+        }
+        _ => None,
+    }
+}
+
+/// How a texture is addressed past its edge: `D3DTADDRESS_WRAP` or `_CLAMP`.
+fn clamps(address: u32) -> Option<bool> {
+    match address {
+        1 => Some(false),
+        3 => Some(true),
+        _ => None,
+    }
 }
 
 /// Draw primitives through a device: every vertex through the pipeline, and
@@ -924,11 +1037,10 @@ fn draw(
     flags: u32,
 ) -> Result<u32, Stop> {
     use super::pipeline::{self, fvf, Clipped};
-    use crate::raster::{self, Combine, Compare, States};
+    use crate::raster::{self, Blend, Combine, Compare, States};
 
-    let wall = |what: String| Stop::NotWritten { what, caller: 0 };
     let Some(size) = pipeline::vertex_size(format) else {
-        return Err(wall(format!(
+        return Err(unwritten(format!(
             "IDirect3DDevice3::DrawPrimitive: vertex format {format:#x}"
         )));
     };
@@ -946,6 +1058,11 @@ fn draw(
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
+    if pixel_format.masks == [0; 4] {
+        return Err(unwritten(
+            "IDirect3DDevice3::DrawPrimitive: into an indexed surface".to_owned(),
+        ));
+    }
 
     // The vertices as the title wrote them.
     let bytes = ctx
@@ -957,84 +1074,138 @@ fn draw(
         .map(|v| pipeline::read_vertex(format, v))
         .collect();
 
-    // What the device draws them with.
-    let identity = ctx.state.identity(this);
-    let device = ctx.state.immediate.devices.entry(identity).or_default();
-    let matrix = |which: u32| -> super::scene::Matrix {
-        device.transforms.get(&which).map_or(IDENTITY, |bits| {
-            std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(bits[r * 4 + c])))
-        })
-    };
-    let world = matrix(1);
-    let clip_from_world = super::scene::multiply(&matrix(2), &matrix(3));
+    // What the device draws them with. A state this pipeline does not honour
+    // is a wall once a title turns it on, not a frame drawn as if it had not.
+    let device = device_of(ctx.state, this);
+    let state = |s: u32| render_state(device, s);
+    let stage = |s: u32| stage_state(device, s);
+    for (what, on) in [
+        ("fog", state(rs::FOGENABLE)? != 0),
+        ("a texture by handle", state(rs::TEXTUREHANDLE)? != 0),
+        (
+            "wrapping across texture edges",
+            state(rs::WRAPU)? != 0 || state(rs::WRAPV)? != 0 || state(rs::WRAP0)? != 0,
+        ),
+        (
+            "a texture map blend",
+            device.render.contains_key(&rs::TEXTUREMAPBLEND),
+        ),
+        ("a fill that is not solid", state(rs::FILLMODE)? != 3),
+    ] {
+        if on {
+            return Err(unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: {what}"
+            )));
+        }
+    }
+    let world = matrix_of(device, WORLD);
+    let clip_from_world =
+        super::scene::multiply(&matrix_of(device, VIEW), &matrix_of(device, PROJECTION));
     let clip_from_model = super::scene::multiply(&world, &clip_from_world);
     let viewport = device.current_viewport;
     let texture = device.textures.get(&0).copied().unwrap_or(0);
-    let material_handle = device.light.get(&1).copied().unwrap_or(0);
-    let ambient = pipeline::colour(device.light.get(&2).copied().unwrap_or(0));
-    let state = |s: u32| render_state(device, s);
-    if state(8) != 3 {
-        return Err(wall(format!(
-            "IDirect3DDevice3::DrawPrimitive: fill mode {}",
-            state(8)
-        )));
-    }
-    let blend = (state(27) != 0).then(|| {
-        (
-            raster::Blend::from_d3d(state(19)).unwrap_or(raster::Blend::One),
-            raster::Blend::from_d3d(state(20)).unwrap_or(raster::Blend::Zero),
-        )
-    });
-    let cull = state(22);
-    let mut states = States {
-        depth_test: (state(7) != 0)
-            .then(|| Compare::from_d3d(state(23)).unwrap_or(Compare::LessEqual)),
-        depth_write: state(7) != 0 && state(14) != 0,
-        flat: state(9) == 1,
-        colour: Combine::Modulate,
-        alpha: Combine::Modulate,
-        linear: state(17) != 1,
-        colour_key: state(41) != 0,
-        alpha_test: (state(15) != 0).then(|| {
-            (
-                Compare::from_d3d(state(25)).unwrap_or(Compare::Always),
-                (state(24) & 0xff) as u8,
-            )
-        }),
-        blend,
-        specular: state(29) != 0,
+    let material_handle = device.light.get(&LIGHT_MATERIAL).copied().unwrap_or(0);
+    let ambient = pipeline::colour(device.light.get(&LIGHT_AMBIENT).copied().unwrap_or(0));
+    let compare = |value: u32| {
+        Compare::from_d3d(value).ok_or_else(|| {
+            unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: comparison {value}"
+            ))
+        })
     };
-    let combine = |op: u32, arg1: u32, arg2: u32| -> Option<Combine> {
-        const TEXTURE: u32 = 2;
-        let arg = |a: u32| match a & 0xf {
-            TEXTURE => Some(Combine::Texture),
-            0 | 1 => Some(Combine::Diffuse),
-            _ => None,
-        };
-        match op {
-            1 => Some(Combine::Diffuse),
-            2 => arg(arg1),
-            3 => arg(arg2),
-            4 if arg1 & 0xf == TEXTURE || arg2 & 0xf == TEXTURE => Some(Combine::Modulate),
-            4 => Some(Combine::Diffuse),
-            7 => Some(Combine::Add),
-            _ => None,
+    let blend = |value: u32| {
+        Blend::from_d3d(value).ok_or_else(|| {
+            unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: blend factor {value}"
+            ))
+        })
+    };
+    let depth_on = state(rs::ZENABLE)? != 0;
+    // The magnification filter: the legacy render state when a title set it,
+    // the stage's own otherwise. One filter serves for minification too.
+    // ponytail: no mip maps and one filter both ways; a title that minifies a
+    // detailed texture far away shimmers where the card would have blurred.
+    let linear = if device.render.contains_key(&rs::TEXTUREMAG) {
+        match state(rs::TEXTUREMAG)? {
+            1 | 3 | 4 => false,
+            2 | 5 | 6 => true,
+            other => {
+                return Err(unwritten(format!(
+                    "IDirect3DDevice3::DrawPrimitive: texture filter {other}"
+                )))
+            }
+        }
+    } else {
+        match stage(tss::MAGFILTER)? {
+            1 => false,
+            2 => true,
+            other => {
+                return Err(unwritten(format!(
+                    "IDirect3DDevice3::DrawPrimitive: magnification filter {other}"
+                )))
+            }
         }
     };
+    let address = |legacy: u32, own: u32| -> Result<bool, Stop> {
+        let value = if device.render.contains_key(&legacy) {
+            state(legacy)?
+        } else if device.render.contains_key(&rs::TEXTUREADDRESS) {
+            state(rs::TEXTUREADDRESS)?
+        } else {
+            stage(own)?
+        };
+        clamps(value).ok_or_else(|| {
+            unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: texture address {value}"
+            ))
+        })
+    };
+    let clamp = [
+        address(rs::TEXTUREADDRESSU, tss::ADDRESSU)?,
+        address(rs::TEXTUREADDRESSV, tss::ADDRESSV)?,
+    ];
+    let mut states = States {
+        depth_test: if depth_on {
+            Some(compare(state(rs::ZFUNC)?)?)
+        } else {
+            None
+        },
+        depth_write: depth_on && state(rs::ZWRITEENABLE)? != 0,
+        flat: state(rs::SHADEMODE)? == 1,
+        colour: Combine::Modulate,
+        alpha: Combine::Modulate,
+        linear,
+        colour_key: state(rs::COLORKEYENABLE)? != 0,
+        alpha_test: if state(rs::ALPHATESTENABLE)? != 0 {
+            Some((
+                compare(state(rs::ALPHAFUNC)?)?,
+                (state(rs::ALPHAREF)? & 0xff) as u8,
+            ))
+        } else {
+            None
+        },
+        blend: if state(rs::ALPHABLENDENABLE)? != 0 {
+            Some((blend(state(rs::SRCBLEND)?)?, blend(state(rs::DESTBLEND)?)?))
+        } else {
+            None
+        },
+        specular: state(rs::SPECULARENABLE)? != 0,
+    };
+    let cull = state(rs::CULLMODE)?;
     let (op, a1, a2) = (
-        stage_state(device, 1),
-        stage_state(device, 2),
-        stage_state(device, 3),
+        stage(tss::COLOROP)?,
+        stage(tss::COLORARG1)?,
+        stage(tss::COLORARG2)?,
     );
     let (aop, aa1, aa2) = (
-        stage_state(device, 4),
-        stage_state(device, 5),
-        stage_state(device, 6),
+        stage(tss::ALPHAOP)?,
+        stage(tss::ALPHAARG1)?,
+        stage(tss::ALPHAARG2)?,
     );
     let (Some(colour_combine), Some(alpha_combine)) = (combine(op, a1, a2), combine(aop, aa1, aa2))
     else {
-        return Err(wall(format!(
-            "IDirect3DDevice3::DrawPrimitive: texture stage colour {op} ({a1}, {a2}), alpha {aop} ({aa1}, {aa2})"
+        return Err(unwritten(format!(
+            "IDirect3DDevice3::DrawPrimitive: texture stage colour {op} ({a1:#x}, {a2:#x}), alpha {aop} ({aa1:#x}, {aa2:#x})"
         )));
     };
     states.colour = colour_combine;
@@ -1057,15 +1228,20 @@ fn draw(
             pipeline::Viewport::whole(x, y, w, h)
         }
         _ => {
-            return Err(wall(
+            return Err(unwritten(
                 "IDirect3DDevice3::DrawPrimitive: a viewport the title described itself".to_owned(),
             ))
         }
     };
 
-    // The lights, when the vertices are to be lit.
+    // The material and the lights, when the vertices are to be lit.
     let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
     let lighting = untransformed && format & fvf::NORMAL != 0 && flags & D3DDP_DONOTLIGHT == 0;
+    if lighting && states.specular {
+        return Err(unwritten(
+            "IDirect3DDevice3::DrawPrimitive: specular highlights on lit vertices".to_owned(),
+        ));
+    }
     let material = if lighting {
         let bytes = ctx
             .state
@@ -1076,7 +1252,7 @@ fn draw(
         match bytes.and_then(|b| pipeline::Material::read(b)) {
             Some(m) => Some(m),
             None => {
-                return Err(wall(format!(
+                return Err(unwritten(format!(
                     "IDirect3DDevice3::DrawPrimitive: lit vertices with material handle {material_handle}"
                 )))
             }
@@ -1084,27 +1260,24 @@ fn draw(
     } else {
         None
     };
-    let lights = ctx
-        .state
-        .render
-        .as_ref()
-        .map(super::d3drm::RenderPass::lights)
-        .unwrap_or_default();
+    let lights = super::d3drm::current_lights(ctx.state);
 
-    // Every vertex into clip space, coloured.
-    let clipped: Vec<Clipped> = inputs
+    // Every vertex into clip space, coloured; a vertex already on the screen
+    // stays where it is.
+    let prepared: Vec<Clipped> = inputs
         .iter()
         .map(|v| {
             let diffuse = match (&material, v.normal) {
                 (Some(material), Some(normal)) => {
                     let at = pipeline::project(&world, v.position);
-                    let turned = [
-                        normal[0] * world[0][0] + normal[1] * world[1][0] + normal[2] * world[2][0],
-                        normal[0] * world[0][1] + normal[1] * world[1][1] + normal[2] * world[2][1],
-                        normal[0] * world[0][2] + normal[1] * world[1][2] + normal[2] * world[2][2],
-                    ];
                     let [r, g, b, _] = ambient;
-                    pipeline::light([at[0], at[1], at[2]], turned, material, [r, g, b], &lights)
+                    pipeline::light(
+                        [at[0], at[1], at[2]],
+                        super::scene::direct(&world, normal),
+                        material,
+                        [r, g, b],
+                        &lights,
+                    )
                 }
                 _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
             };
@@ -1126,7 +1299,7 @@ fn draw(
     let corner = |i: u32| {
         indices
             .get(i as usize)
-            .and_then(|&n| clipped.get(n as usize))
+            .and_then(|&n| prepared.get(n as usize))
             .copied()
     };
     let n = indices.len() as u32;
@@ -1143,7 +1316,7 @@ fn draw(
             .collect(),
         6 => (1..n.saturating_sub(1)).map(|t| [0, t, t + 1]).collect(),
         other => {
-            return Err(wall(format!(
+            return Err(unwritten(format!(
                 "IDirect3DDevice3::DrawPrimitive: primitive type {other}"
             )))
         }
@@ -1175,6 +1348,12 @@ fn draw(
                     }
                     Some(out)
                 }
+                _ if tf.masks == [0; 4] => {
+                    return Err(unwritten(
+                        "IDirect3DDevice3::DrawPrimitive: an indexed texture with no palette"
+                            .to_owned(),
+                    ))
+                }
                 _ => None,
             };
             let key = ctx.state.color_keys.get(&at).copied();
@@ -1183,8 +1362,9 @@ fn draw(
         _ => (Vec::new(), None),
     };
     if texture_info.is_none() {
+        // With no texture, what a stage takes from it is the colour alone.
         let untextured = |c: Combine| {
-            if matches!(c, Combine::Texture | Combine::Modulate) {
+            if matches!(c, Combine::Texture | Combine::Modulate | Combine::Add) {
                 Combine::Diffuse
             } else {
                 c
@@ -1203,15 +1383,11 @@ fn draw(
             format: *tf,
             palette: palette.as_ref(),
             colour_key: *key,
+            clamp,
         });
 
     // Into the surface, through the depth buffer.
-    let device = device_of(ctx.state, this);
-    let len = (width * height) as usize;
-    if device.depth.len() != len {
-        device.depth = vec![1.0; len];
-    }
-    let mut depth = std::mem::take(&mut device.depth);
+    let mut depth = take_depth(ctx.state, this, width, height);
     let target_pixels = ctx
         .mem
         .slice_mut(pixels, (pitch * height) as usize)
@@ -1231,13 +1407,25 @@ fn draw(
         ],
     };
     for [i, j, k] in triangles {
-        let (Some(a), Some(b), Some(c)) = (corner(i), corner(j), corner(k)) else {
+        let (Some(a), Some(mut b), Some(mut c)) = (corner(i), corner(j), corner(k)) else {
             continue;
         };
-        let polygon: Vec<raster::Vertex> = pipeline::clip(&[a, b, c])
-            .iter()
-            .map(|v| place.place(v))
-            .collect();
+        if states.flat {
+            // A flat triangle is the first vertex's colour throughout, which
+            // clipping must not blend away.
+            for v in [&mut b, &mut c] {
+                v.diffuse = a.diffuse;
+                v.specular = a.specular;
+            }
+        }
+        let polygon: Vec<raster::Vertex> = if untransformed {
+            pipeline::clip(&[a, b, c])
+                .iter()
+                .map(|v| place.place(v))
+                .collect()
+        } else {
+            [a, b, c].iter().map(pipeline::Clipped::on_screen).collect()
+        };
         if polygon.len() < 3 {
             continue;
         }
@@ -1264,4 +1452,16 @@ fn draw(
     }
     device_of(ctx.state, this).depth = depth;
     Ok(S_OK)
+}
+
+/// A device's depth buffer, taken out of the device for a draw to use and
+/// hand back: the size of its surface, made far the first time it is needed.
+fn take_depth(state: &mut State, device: u32, width: u32, height: u32) -> Vec<f32> {
+    let buffer = std::mem::take(&mut device_of(state, device).depth);
+    let len = (width * height) as usize;
+    if buffer.len() == len {
+        buffer
+    } else {
+        vec![1.0; len]
+    }
 }

@@ -1061,17 +1061,33 @@ pub struct RenderPass {
     pub parked: bool,
 }
 
-impl RenderPass {
-    /// The lights on the visual being drawn.
-    #[must_use]
-    pub fn lights(&self) -> Vec<super::pipeline::Light> {
-        let frame = self.visits.get(self.next).map_or(0, |v| v.frame);
-        self.lights
-            .iter()
-            .filter(|(only, _)| *only == 0 || *only == frame)
-            .map(|(_, light)| *light)
-            .collect()
-    }
+/// The lights on the visual a render pass is drawing: every light in its
+/// scene, less those enabled only for a frame this visual's is not under.
+/// Outside a render pass there are none.
+#[must_use]
+pub fn current_lights(state: &State) -> Vec<super::pipeline::Light> {
+    let Some(pass) = state.render.as_ref() else {
+        return Vec::new();
+    };
+    let frame = pass.visits.get(pass.next).map_or(0, |v| v.frame);
+    let under = |only: u32| {
+        let mut at = frame;
+        for _ in 0..=state.scene.frames.len() {
+            if at == only {
+                return true;
+            }
+            match state.scene.frame(at) {
+                Some(f) if f.parent != 0 => at = f.parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    pass.lights
+        .iter()
+        .filter(|(only, _)| *only == 0 || under(*only))
+        .map(|(_, light)| *light)
+        .collect()
 }
 
 /// One user visual, on the frame it hangs from.
@@ -1111,12 +1127,17 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     ) else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let camera_world = ctx
+    let Some(camera_world) = ctx
         .state
         .scene
         .world(ctx.state.identity(camera))
         .and_then(|m| super::scene::invert(&m))
-        .unwrap_or(super::scene::IDENTITY);
+    else {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Render: a camera with no place in a scene".to_owned(),
+            caller: 0,
+        });
+    };
     let identity = ctx.state.identity(this);
     let view = ctx
         .state
@@ -1181,19 +1202,21 @@ fn collect_lights(
     let Some(node) = ctx.state.scene.frame(frame) else {
         return Ok(());
     };
-    if depth > ctx.state.scene.frames.len() {
+    // The visits have been walked already, so every frame here has a place.
+    let (Some(world), false) = (
+        ctx.state.scene.world(frame),
+        depth > ctx.state.scene.frames.len(),
+    ) else {
         return Ok(());
-    }
-    let world = ctx
-        .state
-        .scene
-        .world(frame)
-        .unwrap_or(super::scene::IDENTITY);
+    };
     let position = [world[3][0], world[3][1], world[3][2]];
     let direction = [world[2][0], world[2][1], world[2][2]];
     for id in &node.lights {
         let Some(light) = ctx.state.scene.lights.get(id) else {
-            continue;
+            return Err(Stop::NotWritten {
+                what: format!("IDirect3DRMViewport2::Render: a light at {id:#x} nothing here made"),
+                caller: 0,
+            });
         };
         let [r, g, b, _] = super::pipeline::colour(light.colour);
         let colour = [r, g, b];
@@ -1206,6 +1229,9 @@ fn collect_lights(
         let half_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle) / 2.0) as f32;
         let converted = match light.kind {
             0 => Light::Ambient { colour },
+            // ponytail: a parallel point light shines as a point light does,
+            // attenuated by distance, where retained mode's shines in parallel
+            // from where it is; nothing on the roster has been seen to use one.
             1 | 4 => Light::Point {
                 colour,
                 position,
@@ -1229,7 +1255,7 @@ fn collect_lights(
                 })
             }
         };
-        lights.push((light.enable_frame, converted));
+        lights.push((ctx.state.identity(light.enable_frame), converted));
     }
     for &child in &node.children {
         collect_lights(ctx, child, lights, depth + 1)?;
@@ -1248,8 +1274,11 @@ fn collect_visits(
         return Ok(());
     };
     // A frame that is its own ancestor has no place in any scene.
-    if depth > ctx.state.scene.frames.len() {
-        return Ok(());
+    if depth > ctx.state.scene.frames.len() || ctx.state.scene.world(frame).is_none() {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Render: a frame that is its own ancestor".to_owned(),
+            caller: 0,
+        });
     }
     for &visual in &node.visuals {
         match ctx.state.com(visual).map(|o| &o.state) {

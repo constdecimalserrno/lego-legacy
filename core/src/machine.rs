@@ -790,7 +790,10 @@ impl Machine {
     fn render_turn(&mut self, stack: u32) -> Result<(), Stop> {
         self.cpu.r[crate::cpu::ESP] = stack;
         match crate::win32::d3drm::render_turn(&mut self.state, self.cpu.r[EAX]) {
-            Some((function, args)) => self.push_call(function, &args),
+            Some((function, args)) => {
+                self.clock.retire();
+                self.push_call(function, &args)
+            }
             None => {
                 self.render_turns.pop();
                 let Some((resume_at, answer)) = self.continuations.pop() else {

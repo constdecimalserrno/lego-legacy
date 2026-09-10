@@ -872,11 +872,12 @@ pub(crate) fn screen_format(depth: u32) -> PixelFormat {
 
 /// Bytes a surface's pixels are followed by that belong to nobody else.
 ///
-/// Rock Raiders converts its textures four pixels at a time, a whole word a
-/// pixel, so a texture whose width is not a multiple of four is written up to
-/// eight bytes past its last row. On DirectDraw that lands in the allocator's
-/// own slack; here it would land on the next thing allocated.
-const SURFACE_SLACK: u32 = 16;
+/// A title that converts its textures four pixels at a time, a whole word a
+/// pixel, writes a texture whose width is not a multiple of four up to six
+/// bytes past its last row; Rock Raiders does. On DirectDraw that lands in the
+/// allocator's own slack; here it would land on the next thing allocated. Two
+/// bytes more round it to a word.
+const SURFACE_SLACK: u32 = 8;
 
 /// How many bytes a row of a surface takes: its pixels, padded to a whole
 /// number of four-byte words, as DirectDraw lays out a surface in system
@@ -1030,7 +1031,7 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     }
 
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
-    let asked = if flags & 0x1000 != 0 {
+    let asked = if flags & DDSD_PIXELFORMAT != 0 && ctx.log.trace() >= crate::cli::Trace::Shims {
         let read = |o: u32| ctx.mem.read_u32(at + 0x48 + o).unwrap_or(0);
         format!(
             " asked for format {:#x} {} bits {:#x}/{:#x}/{:#x}/{:#x} caps {caps:#x}",
@@ -1242,9 +1243,13 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(S_OK);
     };
-    if source_depth != depth {
+    let (from_format, to_format) = (format_of(ctx, args[1]), format_of(ctx, this));
+    if from_format != to_format {
         return Err(Stop::NotWritten {
-            what: format!("IDirectDrawSurface::Blt: from {source_depth} bits to {depth}"),
+            what: format!(
+                "IDirectDrawSurface::Blt: from {source_depth} bits {:x?} to {depth} bits {:x?}",
+                from_format.masks, to_format.masks
+            ),
             caller: 0,
         });
     }
@@ -1282,6 +1287,16 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some((source, source_w, source_h, source_pitch, _, _, _)) = surface_of(ctx, args[2]) else {
         return Ok(S_OK);
     };
+    let (from_format, to_format) = (format_of(ctx, args[2]), format_of(ctx, this));
+    if from_format != to_format {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirectDrawSurface::BltFast: from {} bits {:x?} to {} bits {:x?}",
+                from_format.bits, from_format.masks, to_format.bits, to_format.masks
+            ),
+            caller: 0,
+        });
+    }
     let from = rect(ctx, args[3], source_w, source_h)?;
     let (x, y) = (args[0].min(width), args[1].min(height));
     // What lands off the destination's edge is clipped away.

@@ -174,6 +174,13 @@ pub fn project(m: &Matrix, p: [f32; 4]) -> [f32; 4] {
 /// A vertex's colour under the lights, in the world: what the material gives
 /// off, what it takes from the ambient light, and what each light puts on it
 /// by how squarely it faces it.
+///
+/// There is no specular term: a draw that asks for highlights on lit
+/// vertices stops at a wall before it gets here.
+// ponytail: the normal is turned by the world matrix rather than its inverse
+// transpose, which is only right while a title's frames scale evenly; and a
+// spot light's cone falls off in a straight line, Direct3D's default falloff
+// of one, which retained mode has no way to change.
 #[must_use]
 pub fn light(
     position: [f32; 3],
@@ -273,6 +280,23 @@ pub struct Clipped {
     pub diffuse: [f32; 4],
     pub specular: [f32; 3],
     pub uv: [f32; 2],
+}
+
+impl Clipped {
+    /// A vertex a title put on the screen itself: its position is pixels,
+    /// depth and the reciprocal of its distance already.
+    #[must_use]
+    pub fn on_screen(&self) -> Vertex {
+        Vertex {
+            x: self.clip[0],
+            y: self.clip[1],
+            z: self.clip[2],
+            rhw: self.clip[3],
+            diffuse: self.diffuse,
+            specular: self.specular,
+            uv: self.uv,
+        }
+    }
 }
 
 fn lerp(a: &Clipped, b: &Clipped, t: f32) -> Clipped {

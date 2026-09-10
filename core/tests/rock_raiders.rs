@@ -503,7 +503,10 @@ fn wad_names() -> std::collections::BTreeSet<String> {
 const MENU: u64 = 4603;
 
 /// Enough instructions to reach the menu and a couple of hundred flips of it:
-/// the movies, the loading, and the menu waiting for a person.
+/// the movies, the loading, and the menu waiting for a person. The loading
+/// takes the title's own texture conversion, which runs now that its 8-bit
+/// images are the 8-bit surfaces it asked for (#18): about 115 million
+/// instructions more than when every surface was the screen's.
 const FIRST_LIGHT_BUDGET: u64 = 7_770_000_000;
 
 /// The flip the pointer has been on Start Game long enough to be drawn.
@@ -669,8 +672,11 @@ const ROCKFALL: u64 = 4648;
 /// A flip well after the level select came in, with nothing clicked since.
 const WAITING_IN_THE_LEVEL_SELECT: u64 = 4700;
 
-/// Enough instructions for the level select and a few dozen flips of it.
-const LEVEL_SELECT_BUDGET: u64 = 7_770_000_000;
+/// Enough instructions for the level select and a few dozen flips of it: the
+/// rockfall is fifty flips after the menu and the level select waits at tens
+/// of thousands of instructions a flip, where the menu's first-light budget
+/// already leaves room.
+const LEVEL_SELECT_BUDGET: u64 = FIRST_LIGHT_BUDGET;
 
 /// The committed route to the level select, replayed, keeping the frames the
 /// tests look at.
@@ -700,22 +706,23 @@ fn to_the_level_select(
     .as_ref()
 }
 
-static THIRD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
-static FOURTH: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static LEVEL_SELECT_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static LEVEL_SELECT_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
-/// How many different colours a rectangle of a frame holds.
-fn colours(frame: &Presented, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> usize {
+/// What share of a rectangle's pixels differ from the one to their right.
+fn busy(frame: &Presented, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> f64 {
     let stride = frame.width as usize;
-    (y0..y1)
-        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
-        .map(|at| &frame.pixels[at..at + 3])
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
+    let pixel = |x: usize, y: usize| &frame.pixels[(y * stride + x) * 4..(y * stride + x) * 4 + 3];
+    let pairs = (y0..y1).flat_map(|y| (x0..x1 - 1).map(move |x| (x, y)));
+    let (differ, all) = pairs.fold((0, 0), |(d, a), (x, y)| {
+        (d + usize::from(pixel(x, y) != pixel(x + 1, y)), a + 1)
+    });
+    differ as f64 / all.max(1) as f64
 }
 
 #[test]
 fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
-    let Some(ran) = to_the_level_select(&THIRD) else {
+    let Some(ran) = to_the_level_select(&LEVEL_SELECT_FIRST) else {
         return;
     };
 
@@ -745,16 +752,19 @@ fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
         "the level select stays up"
     );
 
-    // On the way, rocks cover much of the screen, drawn from textures: a rock
-    // is dozens of colours, where a flat triangle would be one.
-    const ROCKS_COVER: usize = 640 * 480 / 10;
-    assert!(
-        differing(level_select, rockfall, SCREEN) > ROCKS_COVER,
-        "flip {ROCKFALL} should have rocks in front of the level select"
-    );
+    // On the way, rocks come down in front of the level select: where a big
+    // one is, the frame is neither the menu nor the level select, and it is
+    // textured, most neighbouring pixels differing where a flat or smoothly
+    // shaded triangle would leave them the same.
     let big_rock = (120, 120, 240, 240);
+    let area = 120 * 120;
     assert!(
-        colours(rockfall, big_rock) > 50,
+        differing(level_select, rockfall, big_rock) > area * 9 / 10
+            && differing(menu, rockfall, big_rock) > area * 9 / 10,
+        "flip {ROCKFALL} should have a rock in front of both screens"
+    );
+    assert!(
+        busy(rockfall, big_rock) > 0.3,
         "a rock is textured, and a flat colour is not"
     );
 }
@@ -762,9 +772,9 @@ fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
 #[test]
 fn the_level_select_route_replays_to_the_same_machine_every_time() {
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| to_the_level_select(&FOURTH));
+        let second = scope.spawn(|| to_the_level_select(&LEVEL_SELECT_SECOND));
         (
-            to_the_level_select(&THIRD),
+            to_the_level_select(&LEVEL_SELECT_FIRST),
             second.join().expect("the second replay ran"),
         )
     });
