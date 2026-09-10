@@ -296,7 +296,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         Method {
             name: "SetClipper",
             args: 1,
-            run: ok,
+            run: set_clipper,
         },
         Method {
             name: "SetColorKey",
@@ -678,7 +678,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         Method {
             name: "SetClipper",
             args: 1,
-            run: ok,
+            run: set_clipper,
         },
         Method {
             name: "SetColorKey",
@@ -1228,6 +1228,11 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(S_OK);
     };
     let to = rect(ctx, args[0], width, height)?;
+    // A blit reaching past its destination's edge is clipped when a clipper
+    // is attached, and refused when none is, as DirectDraw does.
+    if !ctx.state.clipped.contains(&pixels) && !within(to, width, height) {
+        return Ok(DDERR_INVALIDRECT);
+    }
     // DDBLT_COLORFILL: the fill value is the effects block's own first word.
     if flags & DDBLT_COLORFILL != 0 {
         let colour = if args[4] == 0 {
@@ -1235,7 +1240,16 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         } else {
             ctx.mem.read_u32(args[4] + 0x14).map_err(Stop::Fault)?
         };
-        fill(ctx, pixels, pitch, depth, to, colour)?;
+        let clip = |v: i64, edge: u32| v.clamp(0, i64::from(edge)) as u32;
+        let area = (
+            clip(to.0, width),
+            clip(to.1, height),
+            clip(to.2, width),
+            clip(to.3, height),
+        );
+        if area.0 < area.2 && area.1 < area.3 {
+            fill(ctx, pixels, pitch, depth, area, colour)?;
+        }
         return Ok(S_OK);
     }
     let Some((source, source_w, source_h, source_pitch, source_depth, _, _)) =
@@ -1254,9 +1268,14 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     let from = rect(ctx, args[2], source_w, source_h)?;
+    // Only the destination is clipped: a source rectangle is the guest's to
+    // keep inside its surface.
+    if !within(from, source_w, source_h) {
+        return Ok(DDERR_INVALIDRECT);
+    }
     let key = source_key(ctx, source, flags & DDBLT_KEYSRC != 0);
     transfer(
-        ctx,
+        ctx.mem,
         Pixels {
             at: source,
             pitch: source_pitch,
@@ -1264,9 +1283,40 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         from,
         Pixels { at: pixels, pitch },
         to,
+        (width, height),
         depth,
         key,
     )?;
+    Ok(S_OK)
+}
+
+/// `DDERR_INVALIDRECT`.
+const DDERR_INVALIDRECT: u32 = 0x8876_0096;
+
+/// Whether a rectangle is the right way round and inside a surface.
+fn within((left, top, right, bottom): (i64, i64, i64, i64), width: u32, height: u32) -> bool {
+    0 <= left
+        && left <= right
+        && right <= i64::from(width)
+        && 0 <= top
+        && top <= bottom
+        && bottom <= i64::from(height)
+}
+
+fn set_clipper(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetClipper(clipper): a clipper attached clips what is blitted to the
+    // surface; none, and a blit past its edge is refused.
+    // ponytail: a clipper clips to its surface, not to its clip list's own
+    // rectangles; a title that clips to less than the whole surface needs
+    // the list kept and read.
+    let Some((pixels, ..)) = surface_of(ctx, this) else {
+        return Ok(S_OK);
+    };
+    if args[0] == 0 {
+        ctx.state.clipped.remove(&pixels);
+    } else {
+        ctx.state.clipped.insert(pixels);
+    }
     Ok(S_OK)
 }
 
@@ -1298,20 +1348,22 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     let from = rect(ctx, args[3], source_w, source_h)?;
-    let (x, y) = (args[0].min(width), args[1].min(height));
-    // What lands off the destination's edge is clipped away.
-    let w = (from.2 - from.0).min(width - x);
-    let h = (from.3 - from.1).min(height - y);
+    if !within(from, source_w, source_h) {
+        return Ok(DDERR_INVALIDRECT);
+    }
+    let (x, y) = (i64::from(args[0]), i64::from(args[1]));
     let key = source_key(ctx, source, flags & DDBLTFAST_SRCCOLORKEY != 0);
+    // What lands off the destination's edge is clipped away.
     transfer(
-        ctx,
+        ctx.mem,
         Pixels {
             at: source,
             pitch: source_pitch,
         },
-        (from.0, from.1, from.0 + w, from.1 + h),
+        from,
         Pixels { at: pixels, pitch },
-        (x, y, x + w, y + h),
+        (x, y, x + from.2 - from.0, y + from.3 - from.1),
+        (width, height),
         depth,
         key,
     )?;
@@ -1354,18 +1406,18 @@ fn source_key(ctx: &Ctx<'_>, source: u32, keyed: bool) -> Option<u32> {
         .flatten()
 }
 
-/// A rectangle the guest passed, or the whole surface when it passed none.
-fn rect(ctx: &Ctx<'_>, at: u32, width: u32, height: u32) -> Result<(u32, u32, u32, u32), Stop> {
+/// A rectangle the guest passed, its edges signed as a `RECT`'s are, or the
+/// whole surface when it passed none.
+fn rect(ctx: &Ctx<'_>, at: u32, width: u32, height: u32) -> Result<(i64, i64, i64, i64), Stop> {
     if at == 0 {
-        return Ok((0, 0, width, height));
+        return Ok((0, 0, i64::from(width), i64::from(height)));
     }
-    let left = ctx.mem.read_u32(at).map_err(Stop::Fault)?;
-    let top = ctx.mem.read_u32(at + 4).map_err(Stop::Fault)?;
-    let right = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
-    let bottom = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
-    let right = right.min(width);
-    let bottom = bottom.min(height);
-    Ok((left.min(right), top.min(bottom), right, bottom))
+    let edge = |offset: u32| -> Result<i64, Stop> {
+        Ok(i64::from(
+            ctx.mem.read_u32(at + offset).map_err(Stop::Fault)? as i32,
+        ))
+    };
+    Ok((edge(0)?, edge(4)?, edge(8)?, edge(12)?))
 }
 
 fn fill(
@@ -1395,49 +1447,56 @@ struct Pixels {
     pitch: u32,
 }
 
-/// Copy one rectangle into another, stretching when their sizes differ.
+/// Copy one rectangle into another, stretching when their sizes differ, and
+/// leaving out whatever of the destination falls outside its surface.
 ///
 /// A stretch takes the nearest source pixel, which is what DirectDraw's own
-/// software blitter does for a surface in system memory. A source colour key
-/// leaves the pixels that match it untouched.
+/// software blitter does for a surface in system memory; a clipped pixel takes
+/// the one it would have had unclipped. A source colour key leaves the pixels
+/// that match it untouched.
+#[allow(clippy::too_many_arguments)]
 fn transfer(
-    ctx: &mut Ctx<'_>,
+    mem: &mut crate::guest::Arena,
     source: Pixels,
-    (sx0, sy0, sx1, sy1): (u32, u32, u32, u32),
+    (sx0, sy0, sx1, sy1): (i64, i64, i64, i64),
     destination: Pixels,
-    (dx0, dy0, dx1, dy1): (u32, u32, u32, u32),
+    (dx0, dy0, dx1, dy1): (i64, i64, i64, i64),
+    (width, height): (u32, u32),
     depth: u32,
     key: Option<u32>,
 ) -> Result<(), Stop> {
     let bytes = depth.div_ceil(8) as usize;
     let (sw, sh) = (sx1 - sx0, sy1 - sy0);
     let (dw, dh) = (dx1 - dx0, dy1 - dy0);
-    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+    // What of the destination is on its surface.
+    let (cx0, cy0) = (dx0.max(0), dy0.max(0));
+    let (cx1, cy1) = (dx1.min(i64::from(width)), dy1.min(i64::from(height)));
+    if sw <= 0 || sh <= 0 || cx1 <= cx0 || cy1 <= cy0 {
         return Ok(());
     }
     let key = key.map(|k| k.to_le_bytes());
-    let mut row = vec![0u8; dw as usize * bytes];
-    for y in 0..dh {
-        let sy = sy0 + y * sh / dh;
-        let line = ctx
-            .mem
-            .slice(source.at + sy * source.pitch, (sx1 as usize) * bytes)
+    let mut row = vec![0u8; (cx1 - cx0) as usize * bytes];
+    for y in cy0..cy1 {
+        let sy = (sy0 + (y - dy0) * sh / dh) as u32;
+        let line = mem
+            .slice(source.at + sy * source.pitch, sx1 as usize * bytes)
             .map_err(Stop::Fault)?
             .to_vec();
-        let at = destination.at + (dy0 + y) * destination.pitch + dx0 * bytes as u32;
+        let at = destination.at + y as u32 * destination.pitch + cx0 as u32 * bytes as u32;
         if key.is_some() {
             let len = row.len();
-            row.copy_from_slice(ctx.mem.slice(at, len).map_err(Stop::Fault)?);
+            row.copy_from_slice(mem.slice(at, len).map_err(Stop::Fault)?);
         }
-        for x in 0..dw as usize {
-            let sx = (sx0 as usize + x * sw as usize / dw as usize) * bytes;
+        for x in cx0..cx1 {
+            let sx = (sx0 + (x - dx0) * sw / dw) as usize * bytes;
             let pixel = &line[sx..sx + bytes];
             if key.is_some_and(|k| k[..bytes] == *pixel) {
                 continue;
             }
-            row[x * bytes..(x + 1) * bytes].copy_from_slice(pixel);
+            let out = (x - cx0) as usize * bytes;
+            row[out..out + bytes].copy_from_slice(pixel);
         }
-        ctx.mem.write(at, &row).map_err(Stop::Fault)?;
+        mem.write(at, &row).map_err(Stop::Fault)?;
     }
     Ok(())
 }
@@ -1596,4 +1655,63 @@ fn uniqueness(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> 
         ctx.mem.write_u32(args[0], 1).map_err(Stop::Fault)?;
     }
     Ok(S_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{transfer, Pixels};
+    use crate::guest::{Arena, GuestMem};
+    use crate::host::headless::Headless;
+
+    #[test]
+    fn a_blit_past_the_top_left_of_its_destination_draws_what_is_still_on_it() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).expect("an arena");
+        // A two by two source of one byte a pixel, and a four by four
+        // destination of zeros.
+        mem.write(0x100, &[1, 2, 3, 4]).expect("fits");
+        let (source, destination) = (
+            Pixels {
+                at: 0x100,
+                pitch: 2,
+            },
+            Pixels {
+                at: 0x200,
+                pitch: 4,
+            },
+        );
+        // One pixel up and to the left of the corner: only the source's
+        // bottom right pixel lands, at the destination's top left.
+        transfer(
+            &mut mem,
+            source,
+            (0, 0, 2, 2),
+            destination,
+            (-1, -1, 1, 1),
+            (4, 4),
+            8,
+            None,
+        )
+        .expect("in memory");
+        assert_eq!(
+            mem.slice(0x200, 16).expect("in memory"),
+            [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // Stretched to four by four from two pixels past the bottom right:
+        // what is on the surface is what those pixels would have been.
+        transfer(
+            &mut mem,
+            source,
+            (0, 0, 2, 2),
+            destination,
+            (2, 2, 6, 6),
+            (4, 4),
+            8,
+            None,
+        )
+        .expect("in memory");
+        assert_eq!(
+            &mem.slice(0x200, 16).expect("in memory")[10..],
+            [1, 1, 0, 0, 1, 1]
+        );
+    }
 }

@@ -123,6 +123,8 @@ pub struct State {
     pub display_mode: (u32, u32, u32),
     /// Each surface's source colour key, by where its pixels are.
     pub color_keys: BTreeMap<u32, u32>,
+    /// The surfaces with a clipper attached, by where their pixels are.
+    pub clipped: std::collections::BTreeSet<u32>,
     /// The palette the screen is showing through, if any.
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
@@ -208,6 +210,7 @@ impl State {
             last_move: (0, 0),
             display_mode: (640, 480, 16),
             color_keys: BTreeMap::new(),
+            clipped: std::collections::BTreeSet::new(),
             palette: 0,
             present: None,
             cleared: 0,
