@@ -62,8 +62,7 @@ pub fn main(title: &'static Title) -> ExitCode {
         }
     };
     if cli.repl {
-        eprintln!("lego-legacy: the debugger is not built yet (#14)");
-        return ExitCode::FAILURE;
+        return debugger(title, &cli);
     }
     if !cli.headless {
         return windowed(title, &cli);
@@ -145,4 +144,22 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
 fn windowed(_title: &'static Title, _cli: &Cli) -> ExitCode {
     eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
     ExitCode::FAILURE
+}
+
+/// Drive a title from the debugger on standard input.
+fn debugger(title: &'static Title, cli: &Cli) -> ExitCode {
+    let mut host = crate::host::headless::Headless::new();
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut output = std::io::stdout();
+    match crate::repl::drive(title, cli, &mut host, &mut input, &mut output) {
+        Ok(finish) => {
+            println!("{}: {}", title.key, finish.outcome);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("lego-legacy: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

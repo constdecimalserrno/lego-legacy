@@ -166,6 +166,73 @@ impl Machine {
         self.flips += 1;
     }
 
+    /// Take the machine one instruction further, or say why it stopped.
+    ///
+    /// Returns `None` while there is more to do. The debugger and the run loop
+    /// share this, so what a person steps through is what a route replays.
+    pub fn tick(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
+        // A person closing the window ends the run there and then, with the
+        // log written up to the instruction it stopped on.
+        if host.closed() {
+            return Some(Outcome::Closed);
+        }
+        // A call that lands on the boundary is a call into something Microsoft
+        // wrote. Either it is implemented here, or the run stops and names
+        // what was asked for, who asked, and where.
+        if self.boundary.holds(self.cpu.eip) {
+            return match self.cross(log) {
+                Ok(()) => None,
+                Err(Stop::Exited { code }) => Some(Outcome::Exited { code }),
+                Err(stop) => Some(Outcome::Wall {
+                    what: stop.to_string(),
+                }),
+            };
+        }
+        if log.trace() >= Trace::Insns {
+            log.line(&format!(
+                "insn cursor {} eip {:#010x} eax {:#010x}",
+                self.clock.cursor(),
+                self.cpu.eip,
+                self.cpu.r[EAX]
+            ));
+        }
+        match self.engine.step(&mut self.cpu, &mut self.arena) {
+            Ok(()) => {
+                self.clock.retire();
+                None
+            }
+            Err(Stop::Interrupt(n)) => {
+                self.clock.retire();
+                match (self.stub, n) {
+                    (true, stub::INT_PRESENT) => {
+                        self.present(host, log);
+                        None
+                    }
+                    (true, stub::INT_EXIT) => Some(Outcome::Exited {
+                        code: self.cpu.r[EAX],
+                    }),
+                    _ => Some(Outcome::Wall {
+                        what: format!("int {n:#04x}"),
+                    }),
+                }
+            }
+            Err(stop) => Some(Outcome::Wall {
+                what: stop.to_string(),
+            }),
+        }
+    }
+
+    /// What the machine has spent so far.
+    #[must_use]
+    pub fn finish(&self, outcome: Outcome) -> Finish {
+        Finish {
+            outcome,
+            cursor: self.clock.cursor(),
+            flips: self.flips,
+            declared_millis: self.clock.millis(),
+        }
+    }
+
     /// Run until the guest ends the run, the machine hits a wall, or the
     /// budget runs out.
     pub fn run(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Finish {
@@ -174,64 +241,11 @@ impl Machine {
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
             }
-            // A person closing the window ends the run there and then, with
-            // the log written up to the instruction it stopped on.
-            if host.closed() {
-                break Outcome::Closed;
-            }
-            // A call that lands on the boundary is a call into something
-            // Microsoft wrote. Either it is implemented here, or the run stops
-            // and names what was asked for, who asked, and where.
-            if self.boundary.holds(self.cpu.eip) {
-                match self.cross(log) {
-                    Ok(()) => continue,
-                    Err(Stop::Exited { code }) => break Outcome::Exited { code },
-                    Err(stop) => {
-                        break Outcome::Wall {
-                            what: stop.to_string(),
-                        }
-                    }
-                }
-            }
-            if log.trace() >= Trace::Insns {
-                log.line(&format!(
-                    "insn cursor {} eip {:#010x} eax {:#010x}",
-                    self.clock.cursor(),
-                    self.cpu.eip,
-                    self.cpu.r[EAX]
-                ));
-            }
-            match self.engine.step(&mut self.cpu, &mut self.arena) {
-                Ok(()) => self.clock.retire(),
-                Err(Stop::Interrupt(n)) => {
-                    self.clock.retire();
-                    match (self.stub, n) {
-                        (true, stub::INT_PRESENT) => self.present(host, log),
-                        (true, stub::INT_EXIT) => {
-                            break Outcome::Exited {
-                                code: self.cpu.r[EAX],
-                            }
-                        }
-                        _ => {
-                            break Outcome::Wall {
-                                what: format!("int {n:#04x}"),
-                            }
-                        }
-                    }
-                }
-                Err(stop) => {
-                    break Outcome::Wall {
-                        what: stop.to_string(),
-                    }
-                }
+            if let Some(outcome) = self.tick(host, log) {
+                break outcome;
             }
         };
-        let finish = Finish {
-            outcome,
-            cursor: self.clock.cursor(),
-            flips: self.flips,
-            declared_millis: self.clock.millis(),
-        };
+        let finish = self.finish(outcome);
         log.line(&format!(
             "regs {}",
             REG_NAMES
