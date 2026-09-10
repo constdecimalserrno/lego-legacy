@@ -18,6 +18,7 @@ pub mod install;
 pub mod iv50;
 pub mod machine;
 pub mod pe;
+pub mod png;
 pub mod raster;
 pub mod repl;
 pub mod roster;

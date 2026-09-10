@@ -44,6 +44,10 @@ pub struct Cli {
     pub trace: Trace,
     /// Write a snapshot every this many flips.
     pub snapshot_every: Option<u64>,
+    /// Write these flips into the run directory as pictures.
+    pub screenshots: Vec<u64>,
+    /// And every this many flips.
+    pub screenshot_every: Option<u64>,
     /// Where the declared install tree and the writable profile live.
     pub data_root: Option<PathBuf>,
     /// Drive the machine from a debugger on standard input.
@@ -88,6 +92,8 @@ usage: <title> [flags]
   --audio                  let mixed audio reach a host device
   --trace off|shims|insns  how much the run log keeps (default: off)
   --snapshot-every <flips> write a snapshot this often
+  --screenshot <flip,...>  write these flips as PNGs into the run directory
+  --screenshot-every <n>   write every nth flip as a PNG
   --data-root <dir>        where the install tree and profile live
   --repl                   drive the machine from a debugger on stdin
   --stub                   run the machine's own stub guest
@@ -123,6 +129,26 @@ impl Cli {
                         flag: "--trace",
                         value: v,
                     })?;
+                }
+                "--screenshot" => {
+                    let v = value("--screenshot")?;
+                    for flip in v.split(',') {
+                        cli.screenshots.push(flip.trim().parse().map_err(|_| {
+                            CliError::BadValue {
+                                flag: "--screenshot",
+                                value: v.clone(),
+                            }
+                        })?);
+                    }
+                }
+                "--screenshot-every" => {
+                    let v = value("--screenshot-every")?;
+                    cli.screenshot_every = Some(v.parse().ok().filter(|n| *n > 0).ok_or(
+                        CliError::BadValue {
+                            flag: "--screenshot-every",
+                            value: v,
+                        },
+                    )?);
                 }
                 "--snapshot-every" => {
                     let v = value("--snapshot-every")?;
@@ -164,8 +190,15 @@ mod tests {
             "/tmp/dr",
             "--repl",
             "--stub",
+            "--screenshot",
+            "4700,5450",
+            "--screenshot-every",
+            "300",
         ])
         .unwrap();
+        assert_eq!(cli.screenshots, [4700, 5450]);
+        assert_eq!(cli.screenshot_every, Some(300));
+        assert!(Cli::parse(["--screenshot-every", "0"]).is_err());
         assert!(cli.headless && cli.record && cli.audio && cli.repl && cli.stub);
         assert_eq!(cli.trace, Trace::Insns);
         assert_eq!(cli.snapshot_every, Some(64));
