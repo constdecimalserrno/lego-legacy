@@ -19,10 +19,16 @@ use std::io::{BufRead, Write};
 enum Command {
     Step(u64),
     Regs,
-    Mem { addr: u32, len: u32 },
+    Mem {
+        addr: u32,
+        len: u32,
+    },
     Break(u32),
     UntilFlip(u64),
     UntilCursor(u64),
+    /// Stop as soon as the guest is running somewhere that is not its own
+    /// image: the first instruction of a run that has gone wild.
+    UntilWild,
     Continue,
     Snapshot,
     Help,
@@ -63,6 +69,7 @@ fn parse(line: &str) -> Option<Command> {
         "until" | "u" => match words.next() {
             Some("flip") => Command::UntilFlip(words.next().and_then(number).unwrap_or(0)),
             Some("cursor") => Command::UntilCursor(words.next().and_then(number).unwrap_or(0)),
+            Some("wild") => Command::UntilWild,
             _ => Command::Unknown(line.trim().to_owned()),
         },
         "continue" | "c" => Command::Continue,
@@ -80,6 +87,7 @@ mem <addr> [len]   guest bytes, as hexadecimal
 break <addr>       stop when the instruction pointer reaches this
 until flip <n>     stop when the guest has presented n frames
 until cursor <n>   stop when n instructions have retired
+until wild         stop where the guest first runs outside its own image
 continue           run until the guest stops, or a break is reached
 snapshot           write the machine's state
 quit               end the run";
@@ -182,7 +190,10 @@ pub fn drive(
                     let _ = writeln!(output, "stopped: {o}");
                 }
             }
-            Command::Continue | Command::UntilFlip(_) | Command::UntilCursor(_) => {
+            Command::Continue
+            | Command::UntilFlip(_)
+            | Command::UntilCursor(_)
+            | Command::UntilWild => {
                 let target = command.clone();
                 while outcome.is_none() {
                     // A break is checked before the instruction at it runs, so
@@ -194,6 +205,10 @@ pub fn drive(
                     match &target {
                         Command::UntilFlip(n) if machine.flips() >= *n => break,
                         Command::UntilCursor(n) if machine.clock.cursor() >= *n => break,
+                        Command::UntilWild if machine.is_wild() => {
+                            let _ = writeln!(output, "wild at {:#010x}", machine.cpu.eip);
+                            break;
+                        }
                         _ => {}
                     }
                     outcome = machine.tick(host, &mut log);

@@ -6,6 +6,8 @@
 //! the real library had been there.
 
 pub mod advapi32;
+pub mod avifile;
+pub mod d3d;
 pub mod d3drm;
 pub mod ddraw;
 pub mod dinput;
@@ -104,6 +106,12 @@ pub struct State {
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
     pub present: Option<Present>,
+    /// Which viewport the three-dimensional device is drawing through.
+    pub current_viewport: u32,
+    /// How many times a viewport has been cleared.
+    pub cleared: u64,
+    /// How many movies the machine could not decode.
+    pub movies_refused: u64,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
@@ -154,6 +162,9 @@ impl State {
             display_mode: (640, 480, 16),
             palette: 0,
             present: None,
+            current_viewport: 0,
+            cleared: 0,
+            movies_refused: 0,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_down: false,
@@ -225,9 +236,14 @@ impl State {
         let vtable = match ctx.state.vtable(interface.name) {
             Some(at) => at,
             None => {
-                let addresses = ctx
-                    .boundary
-                    .bind_interface(interface.name, interface.methods.len());
+                // The table is bound wider than the methods that are
+                // written, so a call into a slot nobody declared arrives at
+                // the boundary and stops with a name. A vtable that ended
+                // where the written methods end would have the guest read
+                // whatever is next in the heap and call it, which is a jump
+                // into nothing half a million instructions later.
+                let slots = interface.methods.len().max(SLOTS_PER_INTERFACE);
+                let addresses = ctx.boundary.bind_interface(interface.name, slots);
                 let at = ctx
                     .state
                     .heap
@@ -252,6 +268,7 @@ impl State {
             ComObject {
                 interface,
                 refs: 1,
+                app_data: 0,
                 state,
             },
         );
@@ -367,10 +384,19 @@ pub struct Present {
     pub depth: u32,
 }
 
+/// How many slots every interface's table is given.
+///
+/// Larger than any interface on the roster, so that a call past what is
+/// written lands on the boundary rather than in the heap.
+pub const SLOTS_PER_INTERFACE: usize = 128;
+
 /// One COM object the machine made.
 pub struct ComObject {
     pub interface: &'static str,
     pub refs: i32,
+    /// What the guest hung on this object with `SetAppData`. Its own pointer,
+    /// which it expects to read back unchanged.
+    pub app_data: u32,
     /// Whatever the interface keeps about this particular object.
     pub state: ComState,
 }
@@ -539,6 +565,7 @@ pub fn interfaces() -> Vec<&'static crate::com::Interface> {
     all.extend_from_slice(dsound::INTERFACES);
     all.extend_from_slice(ddraw::INTERFACES);
     all.extend_from_slice(d3drm::INTERFACES);
+    all.extend_from_slice(d3d::INTERFACES);
     all
 }
 
@@ -574,6 +601,7 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         ddraw::SHIMS,
         gdi32::SHIMS,
         d3drm::SHIMS,
+        avifile::SHIMS,
     ] {
         if let Some(shim) = table
             .iter()

@@ -861,3 +861,26 @@ impl Machine {
         self.flips += 1;
     }
 }
+
+impl Machine {
+    /// Whether the processor is running somewhere that is not the guest's own
+    /// code.
+    ///
+    /// The image it loaded, and the boundary it calls across, are the only two
+    /// places a healthy run ever executes. Anything else is a return address
+    /// that was not one.
+    #[must_use]
+    pub fn is_wild(&self) -> bool {
+        if crate::shim::Boundary::in_range(self.cpu.eip) {
+            return false;
+        }
+        match &self.image {
+            Some(image) => {
+                let eip = self.cpu.eip;
+                eip < image.base || eip >= image.base.wrapping_add(image.size)
+            }
+            // The stub guest is its own small thing and is never wild.
+            None => false,
+        }
+    }
+}

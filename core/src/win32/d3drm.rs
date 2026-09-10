@@ -1220,8 +1220,63 @@ pub static VIEWPORT2: Interface = Interface {
     ],
 };
 
+/// `IDirect3DRMFrame3`: a node in the scene a title builds.
+///
+/// The eight methods every retained-mode object has are written; the rest of
+/// its table is bound to the boundary, so a call into one stops the run and
+/// names the slot rather than reading the heap and jumping into it. Filling
+/// them in is the next thing this title needs.
+pub static FRAME3: Interface = Interface {
+    name: "IDirect3DRMFrame3",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        Method {
+            name: "Clone",
+            args: 3,
+            run: unsupported,
+        },
+        Method {
+            name: "AddDestroyCallback",
+            args: 2,
+            run: ok,
+        },
+        Method {
+            name: "DeleteDestroyCallback",
+            args: 2,
+            run: ok,
+        },
+        Method {
+            name: "SetAppData",
+            args: 1,
+            run: set_app_data,
+        },
+        Method {
+            name: "GetAppData",
+            args: 0,
+            run: get_app_data,
+        },
+        Method {
+            name: "SetName",
+            args: 1,
+            run: ok,
+        },
+        Method {
+            name: "GetName",
+            args: 2,
+            run: ok,
+        },
+        Method {
+            name: "GetClassName",
+            args: 2,
+            run: ok,
+        },
+    ],
+};
+
 pub static INTERFACES: &[&Interface] = &[
-    &D3DRM, &D3DRM3, &DEVICE, &DEVICE3, &VIEWPORT, &VIEWPORT2, &OBJECT,
+    &D3DRM, &FRAME3, &D3DRM3, &DEVICE, &DEVICE3, &VIEWPORT, &VIEWPORT2, &OBJECT,
 ];
 
 fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
@@ -1230,6 +1285,22 @@ fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
 
 fn one(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
+}
+
+/// What a title hangs on one of these objects, and reads back later.
+///
+/// It is the title's own pointer: giving it back a zero is how a guest ends up
+/// dereferencing one.
+fn set_app_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let previous = ctx.state.com(this).map_or(0, |o| o.app_data);
+    if let Some(object) = ctx.state.com_mut(this) {
+        object.app_data = args[0];
+    }
+    Ok(previous)
+}
+
+fn get_app_data(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(ctx.state.com(this).map_or(0, |o| o.app_data))
 }
 
 fn shades(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
@@ -1265,13 +1336,20 @@ fn unsupported(ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop
 /// so it would call through the pointer it did not get and end up executing
 /// its own stack. Stopping names what is missing instead (ADR-0003's stub
 /// policy).
-fn missing(ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Err(Stop::NotWritten {
-        what: "IDirect3DRMDevice3::GetDirect3DDevice2: this title draws through Direct3D's \
-               immediate mode, which is not written yet"
-            .to_owned(),
-        caller: ctx.cpu.eip,
-    })
+fn missing(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // The device underneath retained mode: what this title actually draws
+    // through. It shares the surface, because there is only one.
+    let surface = match ctx.state.com(this).map(|o| o.state.clone()) {
+        Some(ComState::Device3D { surface }) => surface,
+        _ => 0,
+    };
+    let object = State::make_com(ctx, &super::d3d::DEVICE2, ComState::Device3D { surface })
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3d immediate device at {object:#010x} on surface {surface:#010x}"
+    ));
+    Ok(S_OK)
 }
 
 fn make_object(ctx: &mut Ctx<'_>, out: u32) -> Result<u32, Stop> {
@@ -1283,7 +1361,11 @@ fn make_object(ctx: &mut Ctx<'_>, out: u32) -> Result<u32, Stop> {
 }
 
 fn create_frame(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[1])
+    let object = State::make_com(ctx, &FRAME3, ComState::None).map_err(Stop::Fault)?;
+    if args[1] != 0 {
+        ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
 }
 
 fn create_mesh(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {

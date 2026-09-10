@@ -81,6 +81,12 @@ impl Boundary {
         Ok(())
     }
 
+    /// Whether an address is anywhere in the boundary's range at all.
+    #[must_use]
+    pub fn in_range(addr: u32) -> bool {
+        (THUNK_BASE..THUNK_BASE + 0x0010_0000).contains(&addr)
+    }
+
     /// Whether an address is a call across the boundary.
     #[must_use]
     pub fn holds(&self, addr: u32) -> bool {

@@ -218,7 +218,7 @@ fn the_disc_reads_in_the_order_the_image_records() {
 }
 
 #[test]
-fn the_boot_path_builds_a_three_dimensional_device_on_a_real_surface() {
+fn the_boot_path_builds_a_three_dimensional_device_and_starts_its_scene() {
     let Some(ran) = boot() else { return };
 
     // Where this title stops today: its own C runtime is done, it has checked
@@ -226,7 +226,9 @@ fn the_boot_path_builds_a_three_dimensional_device_on_a_real_surface() {
     // Where this title stops today. It moves as the boundary grows, and what
     // is held here is that it got past its own C runtime, its disc check, its
     // data, and DirectX's input.
-    ran.assert_wall("immediate mode, which is not written yet")
+    // Where it stops today: building its scene, on a slot of a retained-mode
+    // frame that nobody has written yet. It moves as the boundary grows.
+    ran.assert_wall("IDirect3DRMFrame3 slot")
         .assert_logged("dinput created")
         // It opens its keyboard before it makes its window; the pointer comes
         // later, through the window itself.
@@ -239,7 +241,9 @@ fn the_boot_path_builds_a_three_dimensional_device_on_a_real_surface() {
         // The retained-mode device, drawing into a surface that is guest
         // memory rather than a null pointer.
         .assert_logged("d3drm created")
-        .assert_logged("d3drm device");
+        .assert_logged("d3drm device")
+        // And the device underneath it, which is what this title draws with.
+        .assert_logged("d3d immediate device");
     assert!(
         !ran.log.contains("drawing into surface 0x00000000"),
         "the device draws into real guest memory\nlog:\n{}",

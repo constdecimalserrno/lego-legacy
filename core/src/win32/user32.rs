@@ -387,6 +387,90 @@ pub const SHIMS: &[Shim] = &[
         convention: Convention::Stdcall,
         run: succeed_zero,
     },
+    Shim {
+        dll: "USER32",
+        name: "SetWindowTextA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
+        name: "GetWindowTextA",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "IsWindow",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
+        name: "GetParent",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "SetCapture",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "ReleaseCapture",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
+        name: "GetSystemMenu",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "LoadStringA",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "CharUpperA",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: identity,
+    },
+    Shim {
+        dll: "USER32",
+        name: "CharLowerA",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: identity,
+    },
+    Shim {
+        dll: "USER32",
+        name: "wvsprintfA",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
+        name: "GetMenu",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
 ];
 
 /// The one window the declared machine has.
@@ -546,4 +630,10 @@ fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // The declared machine's screen, as a window handle. Distinct from the
     // title's own so that a guest comparing them can tell them apart.
     Ok(0x0001_0001)
+}
+
+fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The character functions hand back what they were given; case folding is
+    // the C runtime's, and this machine's strings are already in one case.
+    Ok(args[0])
 }
