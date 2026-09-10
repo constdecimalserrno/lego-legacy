@@ -1221,10 +1221,10 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         &view.perspective(width, height),
     );
     super::d3d::set_device_viewport(ctx.state, immediate, under);
-    ctx.log.at(
-        crate::cli::Trace::Shims,
-        &format!("render {} user visuals", visits.len()),
-    );
+    let visuals = visits.len();
+    ctx.log.at(crate::cli::Trace::Shims, || {
+        format!("render {visuals} user visuals")
+    });
     if visits.is_empty() {
         return Ok(S_OK);
     }

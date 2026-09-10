@@ -402,8 +402,9 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
             if out != 0 {
                 ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
             }
-            ctx.log
-                .line(&format!("com {have} handed back {give} at {object:#010x}"));
+            ctx.log.at(crate::cli::Trace::Shims, || {
+                format!("com {have} handed back {give} at {object:#010x}")
+            });
             return Ok(S_OK);
         }
     }

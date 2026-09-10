@@ -75,9 +75,12 @@ impl Interp {
     /// The instruction at a linear address, decoding it if this is the first
     /// time the engine has stood there.
     fn at(&mut self, lin: u32, mem: &Arena) -> Result<&Insn, Stop> {
-        if self.cache.contains_key(&lin) {
-            return Ok(&self.cache[&lin]);
-        }
+        // One lookup, whether the instruction is there or not: this is paid
+        // for every instruction retired.
+        let vacant = match self.cache.entry(lin) {
+            std::collections::hash_map::Entry::Occupied(hit) => return Ok(hit.into_mut()),
+            std::collections::hash_map::Entry::Vacant(vacant) => vacant,
+        };
         // The window is as much as an instruction can be, or as much as is
         // left before the end of the arena.
         let room = (mem.len() - (lin as usize).min(mem.len())).min(MAX_INSN);
@@ -94,7 +97,7 @@ impl Interp {
                 len: usize::from(insn.len),
             }));
         }
-        Ok(self.cache.entry(lin).or_insert(insn))
+        Ok(vacant.insert(insn))
     }
 }
 

@@ -81,10 +81,13 @@ impl RunLog {
         let _ = writeln!(self.file, "{line}");
     }
 
-    /// Write one line only at or above a trace level.
-    pub fn at(&mut self, level: Trace, line: &str) {
+    /// Write one line only at or above a trace level. The line is made only
+    /// when it will be written: a shim call is made hundreds of thousands of
+    /// times a second, and formatting one that nobody asked for is most of
+    /// what it costs.
+    pub fn at(&mut self, level: Trace, line: impl FnOnce() -> String) {
         if self.trace >= level {
-            self.line(line);
+            self.line(&line());
         }
     }
 }

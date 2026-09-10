@@ -417,36 +417,36 @@ impl Machine {
                 why: "an address inside the boundary that no import was bound to",
             });
         };
-        let what = format!("{}!{}", import.dll, import.name);
+        let what = || format!("{}!{}", import.dll, import.name);
         let esp = self.cpu.r[crate::cpu::ESP];
         let caller = self.arena.read_u32(esp).map_err(Stop::Fault)?;
 
         let Some(shim) = win32::find(&import.dll, &import.name) else {
-            log.at(
-                Trace::Shims,
-                &format!(
-                    "wall {what} from {caller:#010x} cursor {}",
-                    self.clock.cursor()
-                ),
-            );
-            return Err(Stop::NotWritten { what, caller });
+            let cursor = self.clock.cursor();
+            log.at(Trace::Shims, || {
+                format!("wall {} from {caller:#010x} cursor {cursor}", what())
+            });
+            return Err(Stop::NotWritten {
+                what: what(),
+                caller,
+            });
         };
 
         let mut args = Vec::with_capacity(shim.args as usize);
         for i in 0..shim.args {
             args.push(self.arena.read_u32(esp + 4 + i * 4).map_err(Stop::Fault)?);
         }
-        log.at(
-            Trace::Shims,
-            &format!(
-                "call {what}({}) from {caller:#010x} cursor {}",
+        let cursor = self.clock.cursor();
+        log.at(Trace::Shims, || {
+            format!(
+                "call {}({}) from {caller:#010x} cursor {cursor}",
+                what(),
                 args.iter()
                     .map(|a| format!("{a:#x}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                self.clock.cursor()
-            ),
-        );
+            )
+        });
 
         let mut ctx = Ctx {
             cpu: &mut self.cpu,
@@ -726,18 +726,17 @@ impl Machine {
         for i in 0..method.args {
             args.push(self.arena.read_u32(esp + 8 + i * 4).map_err(Stop::Fault)?);
         }
-        log.at(
-            Trace::Shims,
-            &format!(
-                "call {interface}::{}({}) on {this:#010x} from {caller:#010x} cursor {}",
+        let cursor = self.clock.cursor();
+        log.at(Trace::Shims, || {
+            format!(
+                "call {interface}::{}({}) on {this:#010x} from {caller:#010x} cursor {cursor}",
                 method.name,
                 args.iter()
                     .map(|a| format!("{a:#x}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                self.clock.cursor()
-            ),
-        );
+            )
+        });
 
         let mut ctx = Ctx {
             cpu: &mut self.cpu,
@@ -973,14 +972,10 @@ impl Machine {
                 caller: self.cpu.eip,
             });
         };
-        log.at(
-            Trace::Shims,
-            &format!(
-                "guest returned {:#x} cursor {}",
-                self.cpu.r[EAX],
-                self.clock.cursor()
-            ),
-        );
+        let (eax, cursor) = (self.cpu.r[EAX], self.clock.cursor());
+        log.at(Trace::Shims, || {
+            format!("guest returned {eax:#x} cursor {cursor}")
+        });
         // The callback's own answer is discarded: what the guest is waiting
         // for is the answer to the call it made.
         self.cpu.r[EAX] = answer;

@@ -329,7 +329,7 @@ fn mmio_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let base = ctx.state.heap.alloc(len.max(1));
     ctx.mem.write(base, &bytes).map_err(Stop::Fault)?;
     ctx.log
-        .at(crate::cli::Trace::Shims, &format!("mmio opened {path}"));
+        .at(crate::cli::Trace::Shims, || format!("mmio opened {path}"));
     Ok(ctx.state.give(Object::Mmio {
         base,
         len,
