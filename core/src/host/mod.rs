@@ -28,10 +28,17 @@ pub struct Frame<'a> {
 /// One thing a person did, delivered to the guest at a flip boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
-    Move { x: i32, y: i32 },
+    Move {
+        x: i32,
+        y: i32,
+    },
     Down,
     Up,
-    Key { code: u32, down: bool },
+    /// A key, numbered as DirectInput numbers the keyboard's keys.
+    Key {
+        code: u32,
+        down: bool,
+    },
 }
 
 /// A region of host memory the guest's arena lives in.

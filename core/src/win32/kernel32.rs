@@ -1255,7 +1255,7 @@ fn get_volume_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
 
 fn get_tick_count(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // The declared clock, not the host's (ADR-0003).
-    Ok(u32::try_from(ctx.declared_millis() % u64::from(u32::MAX)).unwrap_or(0))
+    Ok(u32::try_from(ctx.declared_millis() & 0xffff_ffff).unwrap_or(0))
 }
 
 fn query_performance_counter(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

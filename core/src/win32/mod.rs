@@ -106,6 +106,10 @@ pub struct State {
     pub quit_asked: bool,
     /// Where the pointer is, in the guest's own coordinates.
     pub pointer: (i32, i32),
+    /// Where a person last put the pointer, which is what the mouse moved
+    /// from: a title that sets the pointer somewhere else has not moved the
+    /// mouse.
+    pub last_move: (i32, i32),
     /// What the screen is, as the guest last set it.
     pub display_mode: (u32, u32, u32),
     /// Each surface's source colour key, by where its pixels are.
@@ -184,6 +188,7 @@ impl State {
             window_made: false,
             quit_asked: false,
             pointer: (0, 0),
+            last_move: (0, 0),
             display_mode: (640, 480, 16),
             color_keys: BTreeMap::new(),
             palette: 0,
@@ -204,59 +209,6 @@ impl State {
             profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
-    }
-
-    /// What a person did, as the declared machine's devices and its message
-    /// queue see it: the pointer, the button and the keys change, and the
-    /// title's window is sent what Windows would send it.
-    pub fn deliver(&mut self, event: crate::host::Input, millis: u32) {
-        use crate::host::Input;
-        const WM_MOUSEMOVE: u32 = 0x0200;
-        const WM_LBUTTONDOWN: u32 = 0x0201;
-        const WM_LBUTTONUP: u32 = 0x0202;
-        const MK_LBUTTON: u32 = 0x0001;
-        match event {
-            Input::Move { x, y } => {
-                self.mouse_delta.0 += x - self.pointer.0;
-                self.mouse_delta.1 += y - self.pointer.1;
-                self.pointer = (x, y);
-                let buttons = if self.mouse_down { MK_LBUTTON } else { 0 };
-                self.post(WM_MOUSEMOVE, buttons, millis);
-            }
-            Input::Down => {
-                self.mouse_down = true;
-                self.post(WM_LBUTTONDOWN, MK_LBUTTON, millis);
-            }
-            Input::Up => {
-                self.mouse_down = false;
-                self.post(WM_LBUTTONUP, 0, millis);
-            }
-            Input::Key { code, down } => {
-                // Keys reach a title through DirectInput's keyboard, by the
-                // device's own numbering.
-                self.keys_down.retain(|k| *k != code);
-                if down {
-                    self.keys_down.push(code);
-                }
-            }
-        }
-    }
-
-    /// Queue a mouse message for the title's window, where the pointer is.
-    fn post(&mut self, message: u32, wparam: u32, time: u32) {
-        if !self.window_made {
-            return;
-        }
-        let (x, y) = self.pointer;
-        let lparam = (u32::from(y as u16) << 16) | u32::from(x as u16);
-        self.messages.push_back(Message {
-            window: user32::WINDOW,
-            message,
-            wparam,
-            lparam,
-            time,
-            point: self.pointer,
-        });
     }
 
     /// Give the guest a handle to something.
@@ -295,13 +247,14 @@ impl State {
     }
 
     /// What the guest reads out of the mouse device: three axes and four
-    /// buttons, as DirectInput lays them out.
-    #[must_use]
-    pub fn mouse_state(&self) -> Vec<u8> {
+    /// buttons, as DirectInput lays them out. The axes are how far the mouse
+    /// moved since the guest last looked, so looking takes them.
+    pub fn take_mouse_state(&mut self) -> Vec<u8> {
         let mut state = vec![0u8; 16];
-        state[..4].copy_from_slice(&self.mouse_delta.0.to_le_bytes());
-        state[4..8].copy_from_slice(&self.mouse_delta.1.to_le_bytes());
-        state[12] = u8::from(self.mouse_down);
+        let (dx, dy) = std::mem::take(&mut self.mouse_delta);
+        state[..4].copy_from_slice(&dx.to_le_bytes());
+        state[4..8].copy_from_slice(&dy.to_le_bytes());
+        state[12] = if self.mouse_down { 0x80 } else { 0 };
         state
     }
 

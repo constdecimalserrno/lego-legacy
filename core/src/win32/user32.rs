@@ -535,6 +535,68 @@ fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(if ctx.state.window_made { WINDOW } else { 0 })
 }
 
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const MK_LBUTTON: u32 = 0x0001;
+
+/// What a person did, as the declared machine's devices and its message queue
+/// see it: the pointer, the button and the keys change, and the title's window
+/// is sent what Windows would send it.
+pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
+    use crate::host::Input;
+    match event {
+        Input::Move { x, y } => {
+            state.mouse_delta.0 += x - state.last_move.0;
+            state.mouse_delta.1 += y - state.last_move.1;
+            state.last_move = (x, y);
+            state.pointer = (x, y);
+            let buttons = if state.mouse_down { MK_LBUTTON } else { 0 };
+            post(state, WM_MOUSEMOVE, buttons, time);
+        }
+        Input::Down => {
+            state.mouse_down = true;
+            post(state, WM_LBUTTONDOWN, MK_LBUTTON, time);
+        }
+        Input::Up => {
+            state.mouse_down = false;
+            post(state, WM_LBUTTONUP, 0, time);
+        }
+        Input::Key { code, down } => {
+            // Keys reach a title through DirectInput's keyboard, numbered as
+            // that device numbers them.
+            state.keys_down.retain(|k| *k != code);
+            if down {
+                state.keys_down.push(code);
+            }
+        }
+    }
+}
+
+/// Queue a mouse message for the title's window, where the pointer is.
+///
+/// Before the title has a window there is nothing to send one to, as there is
+/// on Windows. A move that finds the last message still waiting a move takes
+/// its place, as Windows keeps only the latest.
+fn post(state: &mut super::State, message: u32, wparam: u32, time: u32) {
+    if !state.window_made {
+        return;
+    }
+    let (x, y) = state.pointer;
+    let queued = super::Message {
+        window: WINDOW,
+        message,
+        wparam,
+        lparam: (u32::from(y as u16) << 16) | u32::from(x as u16),
+        time,
+        point: state.pointer,
+    };
+    match state.messages.back_mut() {
+        Some(last) if message == WM_MOUSEMOVE && last.message == WM_MOUSEMOVE => *last = queued,
+        _ => state.messages.push_back(queued),
+    }
+}
+
 /// The first waiting message a filter takes: a window, and a range of
 /// messages where zero to zero is all of them.
 fn waiting(ctx: &Ctx<'_>, window: u32, first: u32, last: u32) -> Option<usize> {
@@ -560,24 +622,34 @@ fn write_message(ctx: &mut Ctx<'_>, at: u32, m: &super::Message) -> Result<(), S
     Ok(())
 }
 
+/// Find the first message the filter `(msg, window, first, last)` takes, write
+/// it to `msg` unless that is null, and take it off the queue if `remove`.
+/// Whether there was one.
+fn take_message(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool, Stop> {
+    let msg = filter[0];
+    let Some(index) = waiting(ctx, filter[1], filter[2], filter[3]) else {
+        return Ok(false);
+    };
+    let message = ctx.state.messages[index];
+    if remove {
+        ctx.state.messages.remove(index);
+    }
+    if msg != 0 {
+        write_message(ctx, msg, &message)?;
+    }
+    Ok(true)
+}
+
 fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // PeekMessageA(msg, window, first, last, remove). What a person did is
     // posted at the flip boundary; a title that finds nothing here gets on
     // with drawing.
     const PM_REMOVE: u32 = 0x0001;
-    let (msg, window, first, last, remove) = (args[0], args[1], args[2], args[3], args[4]);
-    let Some(index) = waiting(ctx, window, first, last) else {
-        return Ok(0);
-    };
-    let message = if remove & PM_REMOVE != 0 {
-        ctx.state.messages.remove(index)
-    } else {
-        ctx.state.messages.get(index).copied()
-    };
-    if let (Some(message), true) = (message, msg != 0) {
-        write_message(ctx, msg, &message)?;
-    }
-    Ok(1)
+    Ok(u32::from(take_message(
+        ctx,
+        args,
+        args[4] & PM_REMOVE != 0,
+    )?))
 }
 
 fn translate_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -603,6 +675,8 @@ fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
+    ctx.log
+        .line(&format!("window procedure given message {message:#06x}"));
     ctx.call_guest = Some((procedure, vec![window, message, wparam, lparam]));
     Ok(0)
 }
@@ -619,15 +693,10 @@ fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // title that waits for one on an empty queue would wait forever on a
     // machine that only takes input at a flip, so it is given the one message
     // that ends a loop: quit.
-    let msg = args[0];
-    if let Some(index) = waiting(ctx, args[1], args[2], args[3]) {
-        if let Some(message) = ctx.state.messages.remove(index) {
-            if msg != 0 {
-                write_message(ctx, msg, &message)?;
-            }
-            return Ok(1);
-        }
+    if take_message(ctx, args, true)? {
+        return Ok(1);
     }
+    let msg = args[0];
     if msg != 0 {
         ctx.mem.write_u32(msg, 0).map_err(Stop::Fault)?;
         // WM_QUIT.
@@ -919,4 +988,60 @@ fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The character functions hand back what they were given; case folding is
     // the C runtime's, and this machine's strings are already in one case.
     Ok(args[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deliver, WINDOW};
+    use crate::host::Input;
+    use crate::win32::State;
+
+    #[test]
+    fn a_persons_mouse_reaches_the_window_as_windows_would_send_it() {
+        let mut state = State::new();
+        // No window yet, so nowhere to send anything.
+        deliver(&mut state, Input::Move { x: 5, y: 6 }, 1);
+        assert!(state.messages.is_empty());
+
+        state.window_made = true;
+        deliver(&mut state, Input::Move { x: 10, y: 20 }, 2);
+        deliver(&mut state, Input::Move { x: 320, y: 222 }, 3);
+        // Moves still waiting are one move, to where the pointer ended up.
+        assert_eq!(state.messages.len(), 1);
+        let moved = state.messages[0];
+        assert_eq!((moved.window, moved.message), (WINDOW, 0x0200));
+        assert_eq!(moved.lparam, (222 << 16) | 320);
+        assert_eq!((moved.time, moved.point), (3, (320, 222)));
+
+        deliver(&mut state, Input::Down, 4);
+        deliver(&mut state, Input::Move { x: 321, y: 222 }, 5);
+        deliver(&mut state, Input::Up, 6);
+        let kinds: Vec<(u32, u32)> = state
+            .messages
+            .iter()
+            .map(|m| (m.message, m.wparam))
+            .collect();
+        assert_eq!(
+            kinds,
+            [(0x0200, 0), (0x0201, 1), (0x0200, 1), (0x0202, 0)],
+            "a move with the button held says so"
+        );
+    }
+
+    #[test]
+    fn directinput_reads_how_far_the_mouse_moved_since_it_last_looked() {
+        let mut state = State::new();
+        deliver(&mut state, Input::Move { x: 10, y: 20 }, 0);
+        deliver(&mut state, Input::Down, 0);
+        let first = state.take_mouse_state();
+        assert_eq!(first[..8], [10, 0, 0, 0, 20, 0, 0, 0]);
+        assert_eq!(first[12], 0x80, "a button held reads as its top bit");
+
+        // The title putting the pointer somewhere is not the mouse moving.
+        state.pointer = (300, 300);
+        deliver(&mut state, Input::Move { x: 12, y: 19 }, 0);
+        let second = state.take_mouse_state();
+        assert_eq!(second[..8], [2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(state.take_mouse_state()[..8], [0; 8], "looking took it");
+    }
 }

@@ -23,7 +23,7 @@ pub struct Presented {
 /// A run that plays its movies presents thousands of 640x480 frames, and
 /// keeping every one would hold gigabytes for tests that look at a handful.
 // ponytail: the first frames, the latest, and the flips a test names with
-// `keep`. A test that wants every frame of a long run wants a digest instead.
+// `keeping`. A test that wants every frame of a long run wants a digest instead.
 pub const KEPT: usize = 16;
 
 impl Presented {

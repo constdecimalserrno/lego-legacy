@@ -150,6 +150,87 @@ pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i
     (gx as i32, gy as i32)
 }
 
+/// The DirectInput key number for a Mac key, by where the key sits on the
+/// keyboard rather than what it types.
+///
+/// Letters, digits, punctuation, the arrows, the function keys and the few keys
+/// around them. The modifiers come as flag changes rather than key presses and
+/// are not here yet; a key that is not here reaches the guest as nothing.
+#[must_use]
+pub fn direct_input_key(key_code: u64) -> Option<u32> {
+    Some(match key_code {
+        0x00 => 0x1e, // A
+        0x01 => 0x1f, // S
+        0x02 => 0x20, // D
+        0x03 => 0x21, // F
+        0x04 => 0x23, // H
+        0x05 => 0x22, // G
+        0x06 => 0x2c, // Z
+        0x07 => 0x2d, // X
+        0x08 => 0x2e, // C
+        0x09 => 0x2f, // V
+        0x0b => 0x30, // B
+        0x0c => 0x10, // Q
+        0x0d => 0x11, // W
+        0x0e => 0x12, // E
+        0x0f => 0x13, // R
+        0x10 => 0x15, // Y
+        0x11 => 0x14, // T
+        0x12 => 0x02, // 1
+        0x13 => 0x03, // 2
+        0x14 => 0x04, // 3
+        0x15 => 0x05, // 4
+        0x16 => 0x07, // 6
+        0x17 => 0x06, // 5
+        0x18 => 0x0d, // =
+        0x19 => 0x0a, // 9
+        0x1a => 0x08, // 7
+        0x1b => 0x0c, // -
+        0x1c => 0x09, // 8
+        0x1d => 0x0b, // 0
+        0x1e => 0x1b, // ]
+        0x1f => 0x18, // O
+        0x20 => 0x16, // U
+        0x21 => 0x1a, // [
+        0x22 => 0x17, // I
+        0x23 => 0x19, // P
+        0x24 => 0x1c, // Return
+        0x25 => 0x26, // L
+        0x26 => 0x24, // J
+        0x27 => 0x28, // '
+        0x28 => 0x25, // K
+        0x29 => 0x27, // ;
+        0x2a => 0x2b, // \
+        0x2b => 0x33, // ,
+        0x2c => 0x35, // /
+        0x2d => 0x31, // N
+        0x2e => 0x32, // M
+        0x2f => 0x34, // .
+        0x30 => 0x0f, // Tab
+        0x31 => 0x39, // Space
+        0x32 => 0x29, // `
+        0x33 => 0x0e, // Backspace
+        0x35 => 0x01, // Escape
+        0x60 => 0x3f, // F5
+        0x61 => 0x40, // F6
+        0x62 => 0x41, // F7
+        0x63 => 0x3d, // F3
+        0x64 => 0x42, // F8
+        0x65 => 0x43, // F9
+        0x67 => 0x57, // F11
+        0x6d => 0x44, // F10
+        0x6f => 0x58, // F12
+        0x76 => 0x3e, // F4
+        0x78 => 0x3c, // F2
+        0x7a => 0x3b, // F1
+        0x7b => 0xcb, // Left
+        0x7c => 0xcd, // Right
+        0x7d => 0xd0, // Down
+        0x7e => 0xc8, // Up
+        _ => return None,
+    })
+}
+
 /// Hand a presented frame's copy back once Core Graphics is done with it.
 ///
 /// Core Graphics calls this with the pointer given as the provider's `info`,
@@ -176,8 +257,6 @@ pub struct MacWindow {
     pending: Vec<Input>,
     /// Whether the person closed the window.
     closed: bool,
-    /// The wall time presentation is being held back to.
-    next_flip_nanos: u64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -291,7 +370,6 @@ impl MacWindow {
                 started: Instant::now(),
                 pending: Vec::new(),
                 closed: false,
-                next_flip_nanos: 0,
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -346,11 +424,13 @@ impl MacWindow {
                     }
                     // Key down and key up.
                     10 | 11 => {
-                        let code: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("keyCode"));
-                        self.pending.push(Input::Key {
-                            code: u32::try_from(code).unwrap_or(0),
-                            down: kind == 10,
-                        });
+                        let key: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("keyCode"));
+                        if let Some(code) = direct_input_key(key) {
+                            self.pending.push(Input::Key {
+                                code,
+                                down: kind == 10,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -429,7 +509,7 @@ impl Host for MacWindow {
     }
 
     fn audio(&mut self, _samples: &[i16]) {
-        // The host audio device is #12's; mixing runs either way.
+        // No host audio device yet; the machine mixes either way.
     }
 
     fn closed(&self) -> bool {
@@ -456,7 +536,6 @@ impl Host for MacWindow {
         let wall = self.wall_nanos();
         self.lag_nanos = self.lag_nanos.max(wall.saturating_sub(declared_nanos));
         let due = declared_nanos + self.lag_nanos;
-        self.next_flip_nanos = due;
         if due > wall {
             std::thread::sleep(std::time::Duration::from_nanos(due - wall));
         }
@@ -465,7 +544,16 @@ impl Host for MacWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::guest_point;
+    use super::{direct_input_key, guest_point};
+
+    #[test]
+    fn a_mac_key_reaches_the_guest_as_the_key_in_the_same_place() {
+        assert_eq!(direct_input_key(0x35), Some(0x01)); // Escape
+        assert_eq!(direct_input_key(0x00), Some(0x1e)); // A
+        assert_eq!(direct_input_key(0x24), Some(0x1c)); // Return
+        assert_eq!(direct_input_key(0x7e), Some(0xc8)); // Up
+        assert_eq!(direct_input_key(0x3a), None); // Option, a modifier
+    }
 
     #[test]
     fn the_vertical_axis_turns_over_between_the_window_and_the_guest() {

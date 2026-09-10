@@ -205,7 +205,7 @@ impl Machine {
                 recording.push(self.flips, event);
             }
             self.input.push((self.flips, event));
-            self.state.deliver(event, millis);
+            crate::win32::user32::deliver(&mut self.state, event, millis);
         }
     }
 
@@ -510,6 +510,29 @@ impl Machine {
         }
         hash.update(&self.clock.cursor().to_le_bytes());
         hash.update(&self.flips.to_le_bytes());
+
+        // What a person did that the guest has not taken yet: the devices'
+        // state and the messages still waiting.
+        let input = &self.state;
+        for value in [
+            input.pointer.0,
+            input.pointer.1,
+            input.last_move.0,
+            input.last_move.1,
+            input.mouse_delta.0,
+            input.mouse_delta.1,
+            i32::from(input.mouse_down),
+        ] {
+            hash.update(&value.to_le_bytes());
+        }
+        for key in &input.keys_down {
+            hash.update(&key.to_le_bytes());
+        }
+        for m in &input.messages {
+            for value in [m.window, m.message, m.wparam, m.lparam, m.time] {
+                hash.update(&value.to_le_bytes());
+            }
+        }
 
         // The regions anything writes to: where the image was placed, how far
         // the heap has grown, and the stack down to where it stands.

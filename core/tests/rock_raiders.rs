@@ -6,7 +6,7 @@
 
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::clock::FlipCost;
-use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::host::headless::{Headless, Presented};
 use lego_legacy_core::title::{Declared, EntryImage, WINDOWS_98_SE};
 use lego_legacy_core::{disc, testkit, Title};
 
@@ -497,16 +497,30 @@ fn wad_names() -> std::collections::BTreeSet<String> {
     names
 }
 
-/// Where the committed route says first light is: the flip the title first
-/// presents its main menu at.
-const FIRST_LIGHT: u64 = 4603;
+/// The flip the title first presents its main menu at, which #12 calls Rock
+/// Raiders' first light. #1's letter, the first frame the title presents after
+/// its intro movies, is the loading screen before it at flip 4135.
+const MENU: u64 = 4603;
 
-/// Enough instructions to reach first light and a hundred flips of menu past
-/// it: the movies, the loading, and the menu waiting for a person.
+/// Enough instructions to reach the menu and a couple of hundred flips of it:
+/// the movies, the loading, and the menu waiting for a person.
 const FIRST_LIGHT_BUDGET: u64 = 7_650_000_000;
 
 /// The flip the pointer has been on Start Game long enough to be drawn.
 const HOVERED: u64 = 4615;
+
+/// A few flips after the route has clicked in an empty part of the menu.
+const CLICKED: u64 = 4630;
+
+/// The whole of a 640x480 screen.
+const SCREEN: (usize, usize, usize, usize) = (0, 0, 640, 480);
+
+/// More than half the screen changes when the title puts up a new one.
+const A_NEW_SCREEN: usize = 640 * 480 / 2;
+
+/// Less than a twentieth changes when all that moved is the pointer and what
+/// it was over.
+const THE_SAME_SCREEN: usize = 640 * 480 / 20;
 
 fn first_light_route() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -524,7 +538,7 @@ fn replay(
         if !scratch() {
             return None;
         }
-        let host = Headless::new().keeping(&[FIRST_LIGHT - 1, FIRST_LIGHT, HOVERED]);
+        let host = Headless::new().keeping(&[MENU - 1, MENU, HOVERED, CLICKED]);
         let cli = Cli {
             route: Some(first_light_route()),
             ..Cli::default()
@@ -542,11 +556,16 @@ fn replay(
 static FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 static SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
-/// How many pixels two frames disagree on, within a rectangle.
-fn differing(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> usize {
+/// How many pixels two frames of the same size disagree on, within a rectangle.
+fn differing(
+    a: &Presented,
+    b: &Presented,
+    (x0, y0, x1, y1): (usize, usize, usize, usize),
+) -> usize {
+    let stride = a.width as usize;
     (y0..y1)
-        .flat_map(|y| (x0..x1).map(move |x| (y * 640 + x) * 4))
-        .filter(|at| a[*at..at + 3] != b[*at..at + 3])
+        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
+        .filter(|at| a.pixels[*at..at + 3] != b.pixels[*at..at + 3])
         .count()
 }
 
@@ -559,14 +578,8 @@ fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
         lego_legacy_core::machine::Outcome::BudgetExhausted,
         "nothing on the way to the menu stops the run"
     );
-    let menu = ran
-        .host
-        .frame(FIRST_LIGHT)
-        .expect("first light is presented");
-    let loading = ran
-        .host
-        .frame(FIRST_LIGHT - 1)
-        .expect("the frame before it");
+    let menu = ran.host.frame(MENU).expect("the menu is presented");
+    let loading = ran.host.frame(MENU - 1).expect("the frame before it");
     assert_eq!((menu.width, menu.height), (640, 480));
     assert!(
         !menu.is_uniform(),
@@ -575,12 +588,15 @@ fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
     // A different screen, not the loading screen drawn again: most of the
     // picture changes between them.
     assert!(
-        differing(&loading.pixels, &menu.pixels, (0, 0, 640, 480)) > 640 * 480 / 2,
-        "flip {FIRST_LIGHT} should be a new screen, not the loading screen"
+        differing(loading, menu, SCREEN) > A_NEW_SCREEN,
+        "flip {MENU} should be a new screen, not the loading screen"
     );
-    // And from first light on, the title is waiting in its menu: a frame
-    // every few tens of thousands of instructions, where loading took
-    // millions between frames.
+    // And from then on, the title is waiting in its menu: a flip every few
+    // tens of thousands of instructions, where loading took millions between
+    // flips.
+    // ponytail: measured under 50,000 a flip in the menu; loading takes
+    // millions.
+    const WAITING: u64 = 200_000;
     let cursors: Vec<(u64, u64)> = ran
         .log
         .lines()
@@ -590,12 +606,12 @@ fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
             let cursor = w.nth(1)?.parse().ok()?;
             Some((flip, cursor))
         })
-        .filter(|(flip, _)| (FIRST_LIGHT..=HOVERED).contains(flip))
+        .filter(|(flip, _)| (MENU..=HOVERED).contains(flip))
         .collect();
     assert!(cursors.len() > 10, "the menu is presented flip after flip");
     for pair in cursors.windows(2) {
         assert!(
-            pair[1].1 - pair[0].1 < 200_000,
+            pair[1].1 - pair[0].1 < WAITING,
             "flip {} took {} instructions, which is not a menu waiting",
             pair[1].0,
             pair[1].1 - pair[0].1
@@ -608,21 +624,39 @@ fn a_persons_pointer_reaches_the_menu_and_lights_up_what_it_is_over() {
     let Some(ran) = replay(&FIRST) else { return };
 
     ran.assert_logged("input flip 4610 Move { x: 320, y: 222 }");
-    let before = ran.host.frame(FIRST_LIGHT).expect("first light is kept");
+    let before = ran.host.frame(MENU).expect("the menu is kept");
     let after = ran.host.frame(HOVERED).expect("the hovered frame is kept");
     // Start Game is drawn in another colour with the pointer on it, and the
     // pointer itself has moved there from the corner.
+    // Start Game's lettering, lit, covers more than this many pixels.
+    const LIT: usize = 500;
     let start_game = (200, 200, 440, 240);
     assert!(
-        differing(&before.pixels, &after.pixels, start_game) > 500,
+        differing(before, after, start_game) > LIT,
         "Start Game should light up under the pointer"
     );
     // The rest of the menu is left as it was.
     let quit_game = (200, 360, 440, 400);
     assert_eq!(
-        differing(&before.pixels, &after.pixels, quit_game),
+        differing(before, after, quit_game),
         0,
         "only what the pointer is over changes"
+    );
+}
+
+#[test]
+fn a_persons_click_reaches_the_title_through_its_window_procedure() {
+    let Some(ran) = replay(&FIRST) else { return };
+
+    // The pointer's move is read with GetCursorPos as well as sent; the button
+    // arrives only as the window's messages.
+    ran.assert_logged("window procedure given message 0x0201");
+    ran.assert_logged("window procedure given message 0x0202");
+    let menu = ran.host.frame(MENU).expect("the menu is kept");
+    let clicked = ran.host.frame(CLICKED).expect("the clicked frame is kept");
+    assert!(
+        differing(menu, clicked, SCREEN) < THE_SAME_SCREEN,
+        "a click on nothing leaves the title in its menu"
     );
 }
 
@@ -653,5 +687,9 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
         first.host.frame(HOVERED).map(|f| &f.pixels),
         second.host.frame(HOVERED).map(|f| &f.pixels),
         "including what it presented"
+    );
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks,
+        "and what it mixed"
     );
 }

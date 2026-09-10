@@ -232,7 +232,7 @@ fn device_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     let state = if keyboard {
         ctx.state.keyboard_state()
     } else {
-        ctx.state.mouse_state()
+        ctx.state.take_mouse_state()
     };
     let take = (size as usize).min(state.len());
     ctx.mem.write(out, &state[..take]).map_err(Stop::Fault)?;
