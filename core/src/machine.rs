@@ -362,7 +362,11 @@ impl Machine {
     /// would have left it.
     fn cross(&mut self, log: &mut RunLog) -> Result<(), Stop> {
         let addr = self.cpu.eip;
-        let Some(import) = self.boundary.at(addr).cloned() else {
+        let entry = self.boundary.at(addr).cloned();
+        if let Some(crate::shim::Entry::Method { interface, slot }) = entry {
+            return self.cross_com(interface, slot, log);
+        }
+        let Some(crate::shim::Entry::Import(import)) = entry else {
             return Err(Stop::Undecoded {
                 eip: addr,
                 byte: 0,
@@ -409,6 +413,7 @@ impl Machine {
             log,
             tree: &mut self.tree,
             clock_millis: self.clock.millis(),
+            boundary: &mut self.boundary,
         };
         let answer = (shim.run)(&mut ctx, &args)?;
 
@@ -609,5 +614,63 @@ impl Machine {
     /// the engine.
     pub fn forget_decoded(&mut self) {
         self.engine = Box::new(Interp::new(Mode::FLAT));
+    }
+}
+
+impl Machine {
+    /// Answer a call the guest made through a COM object's own table.
+    fn cross_com(
+        &mut self,
+        interface: &'static str,
+        slot: usize,
+        log: &mut RunLog,
+    ) -> Result<(), Stop> {
+        let esp = self.cpu.r[crate::cpu::ESP];
+        let caller = self.arena.read_u32(esp).map_err(Stop::Fault)?;
+        // Every COM method is called with the object first.
+        let this = self.arena.read_u32(esp + 4).map_err(Stop::Fault)?;
+
+        let Some(method) = crate::win32::com_method(interface, slot) else {
+            return Err(Stop::NotWritten {
+                what: format!("{interface} slot {slot}"),
+                caller,
+            });
+        };
+
+        let mut args = Vec::with_capacity(method.args as usize);
+        for i in 0..method.args {
+            args.push(self.arena.read_u32(esp + 8 + i * 4).map_err(Stop::Fault)?);
+        }
+        log.at(
+            Trace::Shims,
+            &format!(
+                "call {interface}::{}({}) on {this:#010x} from {caller:#010x} cursor {}",
+                method.name,
+                args.iter()
+                    .map(|a| format!("{a:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.clock.cursor()
+            ),
+        );
+
+        let mut ctx = Ctx {
+            cpu: &mut self.cpu,
+            mem: &mut self.arena,
+            state: &mut self.state,
+            title: self.title,
+            log,
+            tree: &mut self.tree,
+            clock_millis: self.clock.millis(),
+            boundary: &mut self.boundary,
+        };
+        let answer = (method.run)(&mut ctx, this, &args)?;
+
+        // Every COM method is stdcall, and the object counts as an argument.
+        self.cpu.r[crate::cpu::ESP] = esp.wrapping_add(4 + (method.args + 1) * 4);
+        self.cpu.r[crate::cpu::EAX] = answer;
+        self.cpu.eip = caller;
+        self.clock.retire();
+        Ok(())
     }
 }

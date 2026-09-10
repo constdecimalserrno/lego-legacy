@@ -33,10 +33,22 @@ pub struct Shim {
 /// fills this in #8.
 pub const SHIMS: &[Shim] = &[];
 
+/// What one address on the boundary stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// A name a title's own image imports.
+    Import(Import),
+    /// One slot of a COM interface's table.
+    Method {
+        interface: &'static str,
+        slot: usize,
+    },
+}
+
 /// The addresses a title's imports were bound to, and what stands behind each.
 #[derive(Default)]
 pub struct Boundary {
-    slots: Vec<Import>,
+    slots: Vec<Entry>,
 }
 
 impl Boundary {
@@ -54,7 +66,7 @@ impl Boundary {
         for import in imports {
             let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
             mem.write_u32(import.iat, addr)?;
-            self.slots.push(import.clone());
+            self.slots.push(Entry::Import(import.clone()));
         }
         Ok(())
     }
@@ -69,12 +81,24 @@ impl Boundary {
 
     /// What a boundary address stands for.
     #[must_use]
-    pub fn at(&self, addr: u32) -> Option<&Import> {
+    pub fn at(&self, addr: u32) -> Option<&Entry> {
         if !self.holds(addr) {
             return None;
         }
         self.slots
             .get(((addr - THUNK_BASE) / THUNK_STRIDE) as usize)
+    }
+
+    /// Give an interface's slots addresses of their own, and hand back the
+    /// address of each in slot order. What a vtable is filled with.
+    pub fn bind_interface(&mut self, interface: &'static str, slots: usize) -> Vec<u32> {
+        let mut out = Vec::with_capacity(slots);
+        for slot in 0..slots {
+            let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
+            self.slots.push(Entry::Method { interface, slot });
+            out.push(addr);
+        }
+        out
     }
 
     /// Whether an entry point is written rather than only named.
@@ -96,8 +120,10 @@ impl Boundary {
     }
 
     /// Every import, in the order the image named them.
-    #[must_use]
-    pub fn imports(&self) -> &[Import] {
-        &self.slots
+    pub fn imports(&self) -> impl Iterator<Item = &Import> {
+        self.slots.iter().filter_map(|e| match e {
+            Entry::Import(import) => Some(import),
+            Entry::Method { .. } => None,
+        })
     }
 }

@@ -223,10 +223,18 @@ fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
 
     // Where this title stops today: its own C runtime is done, it has checked
     // the disc, and it is asking DirectX for an input device.
-    ran.assert_wall("DINPUT.dll!DirectInputCreateA");
+    // Where this title stops today. It moves as the boundary grows, and what
+    // is held here is that it got past its own C runtime, its disc check, its
+    // data, and DirectX's input.
+    ran.assert_wall("USER32.dll!RegisterClassA")
+        .assert_logged("dinput created")
+        // It opens its keyboard before it makes its window; the pointer comes
+        // later, through the window itself.
+        .assert_logged("dinput keyboard");
     assert!(
-        ran.finish.cursor > 50_000,
-        "the boot path should retire tens of thousands of instructions, not {}",
+        ran.finish.cursor > 50_000_000,
+        "the boot path loads this title's own data, which is tens of millions of \
+         instructions, not {}",
         ran.finish.cursor
     );
 }

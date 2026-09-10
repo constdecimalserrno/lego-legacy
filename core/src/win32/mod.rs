@@ -6,6 +6,7 @@
 //! the real library had been there.
 
 pub mod advapi32;
+pub mod dinput;
 pub mod kernel32;
 pub mod msvcrt;
 pub mod user32;
@@ -59,6 +60,8 @@ pub enum Object {
     Named { kind: &'static str, name: String },
     /// A registry key the guest has open.
     Key { path: String },
+    /// A COM object the guest holds a pointer to.
+    Com { interface: &'static str, refs: i32 },
 }
 
 /// Everything the guest holds that is not memory.
@@ -83,6 +86,16 @@ pub struct State {
     pub slept_millis: u64,
     /// How many files the declared install tree holds.
     pub installed_files: usize,
+    /// Which keys are down, as the guest's own device numbers them.
+    pub keys_down: Vec<u32>,
+    /// How far the pointer moved since the guest last looked.
+    pub mouse_delta: (i32, i32),
+    /// Whether the pointer's button is down.
+    pub mouse_down: bool,
+    /// COM objects, by the guest pointer that names them.
+    com: BTreeMap<u32, ComObject>,
+    /// Which vtable an interface's methods live behind, once one is made.
+    vtables: BTreeMap<&'static str, u32>,
     /// Settings files, by path, section and key.
     profiles: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
     /// The registry, as a flat map from a key's whole path to its values.
@@ -116,6 +129,11 @@ impl State {
             volume_label: String::new(),
             slept_millis: 0,
             installed_files: 0,
+            keys_down: Vec::new(),
+            mouse_delta: (0, 0),
+            mouse_down: false,
+            com: BTreeMap::new(),
+            vtables: BTreeMap::new(),
             profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
@@ -141,6 +159,109 @@ impl State {
     /// Take a handle back.
     pub fn close(&mut self, handle: u32) -> bool {
         self.handles.remove(&handle).is_some()
+    }
+
+    /// What the guest reads out of the keyboard device: one byte per key, the
+    /// top bit set on the ones that are down.
+    #[must_use]
+    pub fn keyboard_state(&self) -> Vec<u8> {
+        let mut state = vec![0u8; 256];
+        for code in &self.keys_down {
+            if let Some(byte) = state.get_mut(*code as usize) {
+                *byte = 0x80;
+            }
+        }
+        state
+    }
+
+    /// What the guest reads out of the mouse device: three axes and four
+    /// buttons, as DirectInput lays them out.
+    #[must_use]
+    pub fn mouse_state(&self) -> Vec<u8> {
+        let mut state = vec![0u8; 16];
+        state[..4].copy_from_slice(&self.mouse_delta.0.to_le_bytes());
+        state[4..8].copy_from_slice(&self.mouse_delta.1.to_le_bytes());
+        state[12] = u8::from(self.mouse_down);
+        state
+    }
+
+    /// Make a COM object the guest can call through.
+    ///
+    /// The object is one word of guest memory pointing at the interface's
+    /// table, which is itself guest memory full of boundary addresses.
+    ///
+    /// # Errors
+    /// When the heap is exhausted or the write faults.
+    pub fn make_com(
+        ctx: &mut Ctx<'_>,
+        interface: &'static crate::com::Interface,
+        state: ComState,
+    ) -> Result<u32, Fault> {
+        let vtable = match ctx.state.vtable(interface.name) {
+            Some(at) => at,
+            None => {
+                let addresses = ctx
+                    .boundary
+                    .bind_interface(interface.name, interface.methods.len());
+                let at = ctx
+                    .state
+                    .heap
+                    .alloc(u32::try_from(addresses.len() * 4).unwrap_or(4));
+                for (i, address) in addresses.iter().enumerate() {
+                    ctx.mem.write_u32(at + (i as u32) * 4, *address)?;
+                }
+                ctx.state.set_vtable(interface.name, at);
+                at
+            }
+        };
+        let object = ctx.state.heap.alloc(8);
+        ctx.mem.write_u32(object, vtable)?;
+        ctx.state.add_com(object, interface.name, state);
+        Ok(object)
+    }
+
+    /// Remember a COM object the machine handed out.
+    pub fn add_com(&mut self, at: u32, interface: &'static str, state: ComState) {
+        self.com.insert(
+            at,
+            ComObject {
+                interface,
+                refs: 1,
+                state,
+            },
+        );
+    }
+
+    /// What interface a guest pointer is, if the machine made it.
+    #[must_use]
+    pub fn com(&self, at: u32) -> Option<&ComObject> {
+        self.com.get(&at)
+    }
+
+    pub fn com_mut(&mut self, at: u32) -> Option<&mut ComObject> {
+        self.com.get_mut(&at)
+    }
+
+    /// Count a reference in or out, and answer with what is left.
+    pub fn com_ref(&mut self, at: u32, by: i32) -> u32 {
+        match self.com.get_mut(&at) {
+            Some(object) => {
+                object.refs = (object.refs + by).max(0);
+                u32::try_from(object.refs).unwrap_or(0)
+            }
+            None => 0,
+        }
+    }
+
+    /// The vtable an interface's objects share, once it has one.
+    #[must_use]
+    pub fn vtable(&self, interface: &'static str) -> Option<u32> {
+        self.vtables.get(interface).copied()
+    }
+
+    /// Remember where an interface's vtable was put.
+    pub fn set_vtable(&mut self, interface: &'static str, at: u32) {
+        self.vtables.insert(interface, at);
     }
 
     /// One setting out of a file the guest reads.
@@ -211,6 +332,23 @@ impl State {
     }
 }
 
+/// One COM object the machine made.
+pub struct ComObject {
+    pub interface: &'static str,
+    pub refs: i32,
+    /// Whatever the interface keeps about this particular object.
+    pub state: ComState,
+}
+
+/// What an interface remembers about one of its objects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ComState {
+    #[default]
+    None,
+    /// An input device, and which one.
+    Device { keyboard: bool, acquired: bool },
+}
+
 /// What a shim is given.
 pub struct Ctx<'a> {
     pub cpu: &'a mut Cpu,
@@ -222,6 +360,8 @@ pub struct Ctx<'a> {
     pub tree: &'a mut crate::install::Tree,
     /// What the declared clock reads, in milliseconds.
     pub clock_millis: u64,
+    /// Where an interface's methods get their addresses from.
+    pub boundary: &'a mut crate::shim::Boundary,
 }
 
 impl Ctx<'_> {
@@ -321,6 +461,21 @@ pub fn shims() -> &'static [Shim] {
     kernel32::SHIMS
 }
 
+/// The interfaces this machine can hand the guest.
+#[must_use]
+pub fn interfaces() -> &'static [&'static crate::com::Interface] {
+    dinput::INTERFACES
+}
+
+/// One method of one interface, if it is declared.
+#[must_use]
+pub fn com_method(interface: &str, slot: usize) -> Option<&'static crate::com::Method> {
+    interfaces()
+        .iter()
+        .find(|i| i.name == interface)?
+        .method(slot)
+}
+
 /// Find the shim behind an import, if one is written.
 #[must_use]
 pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
@@ -333,6 +488,7 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         user32::SHIMS,
         msvcrt::SHIMS,
         advapi32::SHIMS,
+        dinput::SHIMS,
     ] {
         if let Some(shim) = table
             .iter()
