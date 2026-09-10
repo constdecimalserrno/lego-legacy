@@ -84,6 +84,38 @@ const KEYS: &[(u32, &str)] = &[
     (0xcb, "Left"),
     (0xcd, "Right"),
     (0xd0, "Down"),
+    (0x2a, "LeftShift"),
+    (0x36, "RightShift"),
+    (0x1d, "LeftControl"),
+    (0x9d, "RightControl"),
+    (0x38, "LeftAlt"),
+    (0xb8, "RightAlt"),
+    (0xdb, "LeftWindows"),
+    (0xdc, "RightWindows"),
+    (0x52, "Keypad0"),
+    (0x4f, "Keypad1"),
+    (0x50, "Keypad2"),
+    (0x51, "Keypad3"),
+    (0x4b, "Keypad4"),
+    (0x4c, "Keypad5"),
+    (0x4d, "Keypad6"),
+    (0x47, "Keypad7"),
+    (0x48, "Keypad8"),
+    (0x49, "Keypad9"),
+    (0x53, "KeypadPeriod"),
+    (0x37, "KeypadStar"),
+    (0x4e, "KeypadPlus"),
+    (0x4a, "KeypadMinus"),
+    (0xb5, "KeypadSlash"),
+    (0x9c, "KeypadEnter"),
+    (0x8d, "KeypadEquals"),
+    (0x45, "NumLock"),
+    (0xd2, "Insert"),
+    (0xc7, "Home"),
+    (0xc9, "PageUp"),
+    (0xd3, "Delete"),
+    (0xcf, "End"),
+    (0xd1, "PageDown"),
 ];
 
 /// The name a route writes a key under.
@@ -298,6 +330,16 @@ mod tests {
                 down: true
             }]
         );
+    }
+
+    #[test]
+    fn every_key_has_one_name_and_every_name_one_key() {
+        for (i, (code, name)) in super::KEYS.iter().enumerate() {
+            for (other_code, other_name) in &super::KEYS[i + 1..] {
+                assert_ne!(code, other_code, "{name} and {other_name}");
+                assert!(!name.eq_ignore_ascii_case(other_name), "{name}");
+            }
+        }
     }
 
     #[test]

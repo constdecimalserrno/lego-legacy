@@ -153,9 +153,10 @@ pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i
 /// The DirectInput key number for a Mac key, by where the key sits on the
 /// keyboard rather than what it types.
 ///
-/// Letters, digits, punctuation, the arrows, the function keys and the few keys
-/// around them. The modifiers come as flag changes rather than key presses and
-/// are not here yet; a key that is not here reaches the guest as nothing.
+/// Letters, digits, punctuation, the arrows, the function keys, the keypad
+/// and the keys above the arrows. The modifiers come as flag changes rather
+/// than key presses ([`direct_input_modifier`]); a key that is not here reaches
+/// the guest as nothing.
 #[must_use]
 pub fn direct_input_key(key_code: u64) -> Option<u32> {
     Some(match key_code {
@@ -211,6 +212,24 @@ pub fn direct_input_key(key_code: u64) -> Option<u32> {
         0x32 => 0x29, // `
         0x33 => 0x0e, // Backspace
         0x35 => 0x01, // Escape
+        0x41 => 0x53, // Keypad .
+        0x43 => 0x37, // Keypad *
+        0x45 => 0x4e, // Keypad +
+        0x47 => 0x45, // Keypad Clear, where a PC keypad has Num Lock
+        0x4b => 0xb5, // Keypad /
+        0x4c => 0x9c, // Keypad Enter
+        0x4e => 0x4a, // Keypad -
+        0x51 => 0x8d, // Keypad =
+        0x52 => 0x52, // Keypad 0
+        0x53 => 0x4f, // Keypad 1
+        0x54 => 0x50, // Keypad 2
+        0x55 => 0x51, // Keypad 3
+        0x56 => 0x4b, // Keypad 4
+        0x57 => 0x4c, // Keypad 5
+        0x58 => 0x4d, // Keypad 6
+        0x59 => 0x47, // Keypad 7
+        0x5b => 0x48, // Keypad 8
+        0x5c => 0x49, // Keypad 9
         0x60 => 0x3f, // F5
         0x61 => 0x40, // F6
         0x62 => 0x41, // F7
@@ -220,6 +239,12 @@ pub fn direct_input_key(key_code: u64) -> Option<u32> {
         0x67 => 0x57, // F11
         0x6d => 0x44, // F10
         0x6f => 0x58, // F12
+        0x72 => 0xd2, // Help, where a PC keyboard has Insert
+        0x73 => 0xc7, // Home
+        0x74 => 0xc9, // Page Up
+        0x75 => 0xd3, // Forward Delete
+        0x77 => 0xcf, // End
+        0x79 => 0xd1, // Page Down
         0x76 => 0x3e, // F4
         0x78 => 0x3c, // F2
         0x7a => 0x3b, // F1
@@ -229,6 +254,29 @@ pub fn direct_input_key(key_code: u64) -> Option<u32> {
         0x7e => 0xc8, // Up
         _ => return None,
     })
+}
+
+/// The DirectInput key a modifier's flag change is about, and whether it is
+/// now down.
+///
+/// A flag change names the key that changed; the device-dependent bits of the
+/// flags say which side of the keyboard is held, so left and right stay apart.
+/// Caps Lock locks rather than holds and Fn has no DirectInput key: neither is
+/// here.
+#[must_use]
+pub fn direct_input_modifier(key_code: u64, flags: u64) -> Option<(u32, bool)> {
+    let (code, held) = match key_code {
+        0x38 => (0x2a, 0x0000_0002), // Left Shift
+        0x3c => (0x36, 0x0000_0004), // Right Shift
+        0x3b => (0x1d, 0x0000_0001), // Left Control
+        0x3e => (0x9d, 0x0000_2000), // Right Control
+        0x3a => (0x38, 0x0000_0020), // Left Option, as Left Alt
+        0x3d => (0xb8, 0x0000_0040), // Right Option, as Right Alt
+        0x37 => (0xdb, 0x0000_0008), // Left Command, as Left Windows
+        0x36 => (0xdc, 0x0000_0010), // Right Command, as Right Windows
+        _ => return None,
+    };
+    Some((code, flags & held != 0))
 }
 
 /// Hand a presented frame's copy back once Core Graphics is done with it.
@@ -432,6 +480,15 @@ impl MacWindow {
                             });
                         }
                     }
+                    // A modifier pressed or let go.
+                    12 => {
+                        let key: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("keyCode"));
+                        let flags: u64 =
+                            self.rt.send::<MsgU64>()(event, self.rt.sel("modifierFlags"));
+                        if let Some((code, down)) = direct_input_modifier(key, flags) {
+                            self.pending.push(Input::Key { code, down });
+                        }
+                    }
                     _ => {}
                 }
                 self.rt.send::<MsgVoidId>()(self.app, self.rt.sel("sendEvent:"), event);
@@ -544,7 +601,7 @@ impl Host for MacWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, guest_point};
+    use super::{direct_input_key, direct_input_modifier, guest_point};
 
     #[test]
     fn a_mac_key_reaches_the_guest_as_the_key_in_the_same_place() {
@@ -553,12 +610,36 @@ mod tests {
         assert_eq!(direct_input_key(0x24), Some(0x1c)); // Return
         assert_eq!(direct_input_key(0x7e), Some(0xc8)); // Up
         assert_eq!(direct_input_key(0x3a), None); // Option, a modifier
-                                                  // Every key a person can press here, a route can write by name.
+        assert_eq!(direct_input_key(0x4c), Some(0x9c)); // Keypad Enter
+        assert_eq!(direct_input_key(0x73), Some(0xc7)); // Home
+                                                        // Every key a person can press here, a route can write by name.
         for key in 0..=0x7f {
-            if let Some(code) = direct_input_key(key) {
+            for code in [
+                direct_input_key(key),
+                direct_input_modifier(key, 0).map(|(code, _)| code),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 assert!(crate::route::key_name(code).is_some(), "{key:#x}");
             }
         }
+    }
+
+    #[test]
+    fn a_modifier_is_down_while_its_own_side_is_held() {
+        // Left Shift pressed: the flags carry Shift and the left device bit.
+        assert_eq!(direct_input_modifier(0x38, 0x0002_0002), Some((0x2a, true)));
+        // Right Shift pressed with the left still held: the right one is down.
+        assert_eq!(direct_input_modifier(0x3c, 0x0002_0006), Some((0x36, true)));
+        // Left Shift let go while the right is still held: Shift is still in
+        // the flags, but the left one is up.
+        assert_eq!(
+            direct_input_modifier(0x38, 0x0002_0004),
+            Some((0x2a, false))
+        );
+        assert_eq!(direct_input_modifier(0x3e, 0x2000), Some((0x9d, true)));
+        assert_eq!(direct_input_modifier(0x39, 0x0001_0000), None); // Caps Lock
     }
 
     #[test]
