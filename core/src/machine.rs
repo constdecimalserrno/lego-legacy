@@ -3,7 +3,7 @@
 
 use crate::cli::Trace;
 use crate::clock::{Clock, FlipCost};
-use crate::cpu::{interp::Interp, CpuEngine, Regs, Stop, EAX, REG_NAMES};
+use crate::cpu::{interp::Interp, Cpu, CpuEngine, Mode, Stop, EAX, REG_NAMES};
 use crate::guest::{Arena, GuestMem};
 use crate::host::{Frame, Host};
 use crate::runlog::RunLog;
@@ -59,7 +59,7 @@ pub struct Finish {
 /// The whole machine.
 pub struct Machine {
     pub arena: Arena,
-    pub regs: Regs,
+    pub cpu: Cpu,
     pub clock: Clock,
     engine: Box<dyn CpuEngine>,
     flip_cost: FlipCost,
@@ -76,9 +76,9 @@ impl Machine {
     pub fn new(title: &Title, host: &mut dyn Host) -> Result<Self, crate::host::HostError> {
         Ok(Self {
             arena: Arena::new(host, ARENA_BYTES)?,
-            regs: Regs::default(),
+            cpu: Cpu::default(),
             clock: Clock::new(),
-            engine: Box::new(Interp::new()),
+            engine: Box::new(Interp::new(Mode::FLAT)),
             flip_cost: title.flip_cost,
             surface: None,
             stub: false,
@@ -92,9 +92,9 @@ impl Machine {
     /// When the arena will not take the program.
     pub fn load_stub(&mut self) -> Result<(), crate::guest::Fault> {
         self.arena.write(stub::ENTRY, stub::program())?;
-        self.regs = Regs {
+        self.cpu = Cpu {
             eip: stub::ENTRY,
-            ..Regs::default()
+            ..Cpu::default()
         };
         self.surface = Some(stub::surface());
         self.stub = true;
@@ -158,11 +158,11 @@ impl Machine {
                 log.line(&format!(
                     "insn cursor {} eip {:#010x} eax {:#010x}",
                     self.clock.cursor(),
-                    self.regs.eip,
-                    self.regs.r[EAX]
+                    self.cpu.eip,
+                    self.cpu.r[EAX]
                 ));
             }
-            match self.engine.step(&mut self.regs, &mut self.arena) {
+            match self.engine.step(&mut self.cpu, &mut self.arena) {
                 Ok(()) => self.clock.retire(),
                 Err(Stop::Interrupt(n)) => {
                     self.clock.retire();
@@ -170,7 +170,7 @@ impl Machine {
                         (true, stub::INT_PRESENT) => self.present(host, log),
                         (true, stub::INT_EXIT) => {
                             break Outcome::Exited {
-                                code: self.regs.r[EAX],
+                                code: self.cpu.r[EAX],
                             }
                         }
                         _ => {
@@ -197,7 +197,7 @@ impl Machine {
             "regs {}",
             REG_NAMES
                 .iter()
-                .zip(self.regs.r)
+                .zip(self.cpu.r)
                 .map(|(n, v)| format!("{n}={v:#010x}"))
                 .collect::<Vec<_>>()
                 .join(" ")
