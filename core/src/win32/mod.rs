@@ -17,6 +17,7 @@ pub mod gdi32;
 pub mod kernel32;
 pub mod msvcrt;
 pub mod ole32;
+pub mod pipeline;
 pub mod scene;
 pub mod user32;
 pub mod winmm;
@@ -143,6 +144,8 @@ pub struct State {
     pub immediate: d3d::Immediate,
     /// The scene retained mode is building.
     pub scene: scene::Scene,
+    /// A viewport rendering, while its visuals are being called.
+    pub render: Option<d3drm::RenderPass>,
     /// COM objects, by the guest pointer that names them.
     com: BTreeMap<u32, ComObject>,
     /// Every face of every object, by the object and the interface.
@@ -203,6 +206,7 @@ impl State {
             set_values: BTreeMap::new(),
             immediate: d3d::Immediate::default(),
             scene: scene::Scene::default(),
+            render: None,
             com: BTreeMap::new(),
             faces: BTreeMap::new(),
             vtables: BTreeMap::new(),
@@ -520,10 +524,13 @@ pub enum ComState {
         width: u32,
         height: u32,
         pitch: u32,
-        depth: u32,
+        /// How a pixel is laid out: what the title asked for, or the screen's.
+        format: crate::raster::PixelFormat,
         primary: bool,
         /// The surface behind this one, when it flips.
         back: u32,
+        /// The palette an indexed surface's pixels are looked up in.
+        palette: u32,
     },
     /// A palette's own 256 entries, in guest memory.
     Palette { store: u32 },
@@ -557,6 +564,9 @@ pub enum ComState {
         width: u32,
         height: u32,
         background: u32,
+        /// The immediate-mode viewport underneath a retained-mode one, once
+        /// a title has asked for it.
+        immediate: u32,
     },
 }
 

@@ -90,6 +90,10 @@ pub struct Machine {
     continuations: Vec<(u32, u32)>,
     /// Which parked calls are a modal dialog's turns, by their depth.
     dialog_turns: Vec<usize>,
+    /// Which parked calls are a render pass's turns, by their depth, with
+    /// where the stack stood before the pass's first call: the title's
+    /// callbacks leave their arguments for the caller to take.
+    render_turns: Vec<(usize, u32)>,
     /// The route this run replays, if it is replaying one.
     pub route: Option<crate::route::Route>,
     /// What this run did, if it is recording.
@@ -119,6 +123,7 @@ impl Machine {
             present_buffer: Vec::new(),
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
+            render_turns: Vec::new(),
             input: Vec::new(),
             route: None,
             recording: None,
@@ -767,11 +772,39 @@ impl Machine {
         self.cpu.r[crate::cpu::EAX] = answer;
         self.cpu.eip = caller;
         if let Some((function, args)) = call_guest {
+            let stack = self.cpu.r[crate::cpu::ESP];
             self.call_guest(function, &args, caller, answer)?;
+            // A render pass that has just begun parks its first turn here.
+            if let Some(pass) = self.state.render.as_mut().filter(|p| !p.parked) {
+                pass.parked = true;
+                self.render_turns.push((self.continuations.len(), stack));
+            }
         }
         self.clock.retire();
         self.charge_waiting();
         Ok(())
+    }
+
+    /// One of a render pass's calls into the title has returned: the next
+    /// one, or the pass is over and `Render` returns.
+    fn render_turn(&mut self, stack: u32) -> Result<(), Stop> {
+        self.cpu.r[crate::cpu::ESP] = stack;
+        match crate::win32::d3drm::render_turn(&mut self.state, self.cpu.r[EAX]) {
+            Some((function, args)) => self.push_call(function, &args),
+            None => {
+                self.render_turns.pop();
+                let Some((resume_at, answer)) = self.continuations.pop() else {
+                    return Err(Stop::NotWritten {
+                        what: "a render pass ended with no call waiting for it".to_owned(),
+                        caller: self.cpu.eip,
+                    });
+                };
+                self.cpu.r[EAX] = answer;
+                self.cpu.eip = resume_at;
+                self.clock.retire();
+                Ok(())
+            }
+        }
     }
 
     /// A modal dialog's procedure has returned from a message.
@@ -920,6 +953,13 @@ impl Machine {
     fn guest_returned(&mut self, log: &mut RunLog) -> Result<(), Stop> {
         if self.dialog_turns.last() == Some(&self.continuations.len()) {
             return self.dialog_turn(log);
+        }
+        if let Some(&(_, stack)) = self
+            .render_turns
+            .last()
+            .filter(|(depth, _)| *depth == self.continuations.len())
+        {
+            return self.render_turn(stack);
         }
         let Some((resume_at, answer)) = self.continuations.pop() else {
             return Err(Stop::NotWritten {

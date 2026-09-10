@@ -96,6 +96,13 @@ pub trait GuestMem {
     /// # Errors
     /// When the range is outside the arena.
     fn slice(&self, addr: u32, len: usize) -> Result<&[u8], Fault>;
+
+    /// Borrow a run of guest bytes to change in place: a surface the
+    /// rasteriser draws into.
+    ///
+    /// # Errors
+    /// When the range is outside the arena.
+    fn slice_mut(&mut self, addr: u32, len: usize) -> Result<&mut [u8], Fault>;
 }
 
 impl GuestMem for Arena {
@@ -131,6 +138,21 @@ impl GuestMem for Arena {
         // readable for its whole length, and the borrow cannot outlive it.
         unsafe {
             Ok(core::slice::from_raw_parts(
+                self.mapping.as_ptr().add(addr as usize),
+                len,
+            ))
+        }
+    }
+
+    fn slice_mut(&mut self, addr: u32, len: usize) -> Result<&mut [u8], Fault> {
+        if !self.in_bounds(addr, len) {
+            return Err(Fault { addr, len });
+        }
+        // Safety: bounds checked directly above; the mapping is live and
+        // writable for its whole length, and the borrow is the arena's only
+        // one for as long as it lasts.
+        unsafe {
+            Ok(core::slice::from_raw_parts_mut(
                 self.mapping.as_ptr().add(addr as usize),
                 len,
             ))

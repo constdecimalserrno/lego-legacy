@@ -220,6 +220,44 @@ impl X87 {
         }
     }
 
+    /// `fprem` and `fprem1`: `st(0)` less a whole number of `st(1)`s, the
+    /// quotient rounded toward zero or to nearest.
+    ///
+    /// The unit reduces a remainder a step at a time and sets C2 while there
+    /// is more to do; a guest loops on it. Here the reduction is exact in one
+    /// step, so C2 is always clear, and C0, C3 and C1 are the quotient's three
+    /// low bits, as the unit reports them.
+    pub fn remainder(&mut self, nearest: bool) {
+        let (value, divisor) = (self.st(0), self.st(1));
+        let d = divisor.abs();
+        let mut rest = value % divisor;
+        // What a reduction by eight divisors leaves, less what a reduction by
+        // one does, is the quotient's low three bits in divisors.
+        let mut low = if rest.is_finite() && (8.0 * d).is_finite() && d > 0.0 {
+            ((((value % (8.0 * d)).abs() - rest.abs()) / d).round() as u32) % 8
+        } else {
+            0
+        };
+        if nearest && rest.is_finite() {
+            let half = d / 2.0;
+            if rest.abs() > half || (rest.abs() == half && low % 2 == 1) {
+                rest -= d.copysign(rest);
+                low = (low + 1) % 8;
+            }
+        }
+        self.set_st(0, rest);
+        self.status &= !0x4700;
+        for (set, bit) in [
+            (low & 4 != 0, 0x0100),
+            (low & 2 != 0, 0x0200),
+            (low & 1 != 0, 0x4000),
+        ] {
+            if set {
+                self.status |= bit;
+            }
+        }
+    }
+
     /// Set the flags a comparison against the integer unit writes.
     ///
     /// `fcomi` puts the answer in the processor's own flags instead of the
@@ -652,15 +690,8 @@ pub fn execute(
             cpu.fpu.set_st(0, exponent);
             cpu.fpu.push(significand);
         }
-        (0xd9, 0xf5 | 0xf8) => {
-            // The remainder, which both forms compute the same way here: the
-            // difference between them is the rounding of the quotient, and
-            // this one rounds toward zero.
-            let divisor = cpu.fpu.st(1);
-            let value = cpu.fpu.st(0);
-            let quotient = (value / divisor).trunc();
-            cpu.fpu.set_st(0, value - quotient * divisor);
-        }
+        (0xd9, 0xf5) => cpu.fpu.remainder(true),
+        (0xd9, 0xf8) => cpu.fpu.remainder(false),
         (0xd9, 0xf6) => cpu.fpu.decrement_top(),
         (0xd9, 0xf7) => cpu.fpu.increment_top(),
         (0xd9, 0xf9) => {
@@ -988,6 +1019,27 @@ pub fn round_half_to_even(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{maths, X87};
+
+    #[test]
+    fn a_remainder_is_complete_in_one_step_and_says_its_quotient() {
+        let mut fpu = X87::new();
+        fpu.push(2.0);
+        fpu.push(7.0);
+        // A normal number examined leaves C2 set, as a guest's loop may find it.
+        fpu.examine();
+        fpu.remainder(false);
+        assert_eq!(fpu.st(0), 1.0);
+        // Quotient three: C3 and C1, and C2 clear so a guest's loop ends.
+        assert_eq!(fpu.status() & 0x4700, 0x4200);
+        fpu.set_st(0, 7.0);
+        fpu.remainder(true);
+        // To nearest, seven is four twos less one: quotient four, C0.
+        assert_eq!((fpu.st(0), fpu.status() & 0x4700), (-1.0, 0x0100));
+        fpu.set_st(0, f64::INFINITY);
+        fpu.remainder(false);
+        assert!(fpu.st(0).is_nan());
+        assert_eq!(fpu.status() & 0x0400, 0, "nothing more to reduce");
+    }
 
     /// Close enough that a double cannot tell the difference that matters.
     fn near(a: f64, b: f64, tolerance: f64) -> bool {

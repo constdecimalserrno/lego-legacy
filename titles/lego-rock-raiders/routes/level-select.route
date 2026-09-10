@@ -1,0 +1,12 @@
+#lego-legacy-route 1
+# LEGO Rock Raiders, from its boot through its main menu to its level select.
+#
+# The boot is first-light.route's: the setup dialog, both movies, the loading
+# screen, and the main menu at flip 4603. The pointer moves onto Start Game and
+# clicks it. The title brings a fall of rocks down over the menu, drawn in 3D:
+# retained mode calls the title's own visuals, and they draw textured triangles
+# through the Direct3D device underneath. By flip 4656 the rocks have passed
+# and the level select is up, waiting for a cavern to be chosen.
+flip 4610 move 320 222
+flip 4620 down
+flip 4622 up

@@ -504,7 +504,7 @@ const MENU: u64 = 4603;
 
 /// Enough instructions to reach the menu and a couple of hundred flips of it:
 /// the movies, the loading, and the menu waiting for a person.
-const FIRST_LIGHT_BUDGET: u64 = 7_650_000_000;
+const FIRST_LIGHT_BUDGET: u64 = 7_770_000_000;
 
 /// The flip the pointer has been on Start Game long enough to be drawn.
 const HOVERED: u64 = 4615;
@@ -657,6 +657,143 @@ fn a_persons_click_reaches_the_title_through_its_window_procedure() {
     assert!(
         differing(menu, clicked, SCREEN) < THE_SAME_SCREEN,
         "a click on nothing leaves the title in its menu"
+    );
+}
+
+/// The flip the level select has come in by, after Start Game is clicked.
+const LEVEL_SELECT: u64 = 4656;
+
+/// A flip in the fall of rocks between the menu and the level select.
+const ROCKFALL: u64 = 4648;
+
+/// A flip well after the level select came in, with nothing clicked since.
+const WAITING_IN_THE_LEVEL_SELECT: u64 = 4700;
+
+/// Enough instructions for the level select and a few dozen flips of it.
+const LEVEL_SELECT_BUDGET: u64 = 7_770_000_000;
+
+/// The committed route to the level select, replayed, keeping the frames the
+/// tests look at.
+fn to_the_level_select(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let host =
+            Headless::new().keeping(&[MENU, ROCKFALL, LEVEL_SELECT, WAITING_IN_THE_LEVEL_SELECT]);
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../titles/lego-rock-raiders/routes/level-select.route"),
+            ),
+            ..Cli::default()
+        };
+        Some(testkit::run_on(
+            host,
+            &ROCK_RAIDERS,
+            &cli,
+            LEVEL_SELECT_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+static THIRD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static FOURTH: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// How many different colours a rectangle of a frame holds.
+fn colours(frame: &Presented, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> usize {
+    let stride = frame.width as usize;
+    (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
+        .map(|at| &frame.pixels[at..at + 3])
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+#[test]
+fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
+    let Some(ran) = to_the_level_select(&THIRD) else {
+        return;
+    };
+
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing between the menu and the level select stops the run"
+    );
+    let menu = ran.host.frame(MENU).expect("the menu is kept");
+    let rockfall = ran.host.frame(ROCKFALL).expect("the rockfall is kept");
+    let level_select = ran
+        .host
+        .frame(LEVEL_SELECT)
+        .expect("the level select is kept");
+    let later = ran
+        .host
+        .frame(WAITING_IN_THE_LEVEL_SELECT)
+        .expect("the level select, later, is kept");
+
+    // A new screen, and the title waits in it.
+    assert!(
+        differing(menu, level_select, SCREEN) > A_NEW_SCREEN,
+        "flip {LEVEL_SELECT} should be the level select, not the menu"
+    );
+    assert!(
+        differing(level_select, later, SCREEN) < THE_SAME_SCREEN,
+        "the level select stays up"
+    );
+
+    // On the way, rocks cover much of the screen, drawn from textures: a rock
+    // is dozens of colours, where a flat triangle would be one.
+    const ROCKS_COVER: usize = 640 * 480 / 10;
+    assert!(
+        differing(level_select, rockfall, SCREEN) > ROCKS_COVER,
+        "flip {ROCKFALL} should have rocks in front of the level select"
+    );
+    let big_rock = (120, 120, 240, 240);
+    assert!(
+        colours(rockfall, big_rock) > 50,
+        "a rock is textured, and a flat colour is not"
+    );
+}
+
+#[test]
+fn the_level_select_route_replays_to_the_same_machine_every_time() {
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| to_the_level_select(&FOURTH));
+        (
+            to_the_level_select(&THIRD),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    assert_eq!(
+        (
+            first.finish.cursor,
+            first.finish.flips,
+            first.finish.declared_millis
+        ),
+        (
+            second.finish.cursor,
+            second.finish.flips,
+            second.finish.declared_millis
+        )
+    );
+    assert_eq!(first.digest, second.digest, "the machine ends the same way");
+    for flip in [ROCKFALL, LEVEL_SELECT] {
+        assert_eq!(
+            first.host.frame(flip).map(|f| &f.pixels),
+            second.host.frame(flip).map(|f| &f.pixels),
+            "and presents flip {flip} the same way"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks,
+        "and mixes the same"
     );
 }
 

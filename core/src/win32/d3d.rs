@@ -46,6 +46,10 @@ struct Device {
     current_viewport: u32,
     in_scene: bool,
     direct3d: u32,
+    /// The depth buffer, a value a pixel, row by row across the surface. The
+    /// guest never locks it, so it is the machine's own rather than guest
+    /// memory.
+    depth: Vec<f32>,
 }
 
 /// `IDirect3DDevice2`: DirectX 5's face of the device underneath retained mode, which is what retained mode hands a title.
@@ -120,8 +124,8 @@ pub static DEVICE3: Interface = Interface {
         method("SetTransform", 2, set_transform),
         method("GetTransform", 2, get_transform),
         wall("MultiplyTransform", 2),
-        wall("DrawPrimitive", 5),
-        wall("DrawIndexedPrimitive", 7),
+        method("DrawPrimitive", 5, draw_primitive),
+        method("DrawIndexedPrimitive", 7, draw_indexed_primitive),
         wall("SetClipStatus", 1),
         wall("GetClipStatus", 1),
         wall("DrawPrimitiveStrided", 5),
@@ -244,8 +248,27 @@ pub static INTERFACES: &[&Interface] = &[
 ];
 
 fn device<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> &'a mut Device {
-    let identity = ctx.state.identity(this);
-    ctx.state.immediate.devices.entry(identity).or_default()
+    device_of(ctx.state, this)
+}
+
+fn device_of(state: &mut State, this: u32) -> &mut Device {
+    let identity = state.identity(this);
+    state.immediate.devices.entry(identity).or_default()
+}
+
+/// Set one of a device's transforms, as `SetTransform` would: what retained
+/// mode does to the device underneath before a visual draws through it.
+pub fn set_device_transform(state: &mut State, device: u32, which: u32, m: &super::scene::Matrix) {
+    let cells: Vec<u32> = m.iter().flatten().map(|c| c.to_bits()).collect();
+    let mut bits = [0u32; 16];
+    bits.copy_from_slice(&cells);
+    device_of(state, device).transforms.insert(which, bits);
+}
+
+/// Make a viewport the one a device draws through, as `SetCurrentViewport`
+/// would.
+pub fn set_device_viewport(state: &mut State, device: u32, viewport: u32) {
+    device_of(state, device).current_viewport = viewport;
 }
 
 fn add_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -317,16 +340,34 @@ fn end_scene(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 /// documentation of each state.
 fn render_state_at_start(state: u32) -> Option<u32> {
     Some(match state {
+        // D3DRENDERSTATE_TEXTUREHANDLE: no texture. ANTIALIAS: none.
+        1 | 2 => 0,
+        // D3DRENDERSTATE_TEXTUREADDRESS: wrap.
+        3 => 1,
         // D3DRENDERSTATE_TEXTUREPERSPECTIVE: on, in DirectX 6.
         4 => 1,
+        // D3DRENDERSTATE_WRAPU and WRAPV: off.
+        5 | 6 => 0,
+        // D3DRENDERSTATE_ZENABLE: on, because retained mode's device has a
+        // depth buffer.
+        7 => 1,
         // D3DRENDERSTATE_FILLMODE: solid.
         8 => 3,
         // D3DRENDERSTATE_SHADEMODE: Gouraud.
         9 => 2,
+        // D3DRENDERSTATE_LINEPATTERN and MONOENABLE: nothing.
+        10 | 11 => 0,
+        // D3DRENDERSTATE_ROP2: copy the pen. PLANEMASK: every bit.
+        12 => 13,
+        13 => u32::MAX,
         // D3DRENDERSTATE_ZWRITEENABLE: on.
         14 => 1,
         // D3DRENDERSTATE_ALPHATESTENABLE: off.
         15 => 0,
+        // D3DRENDERSTATE_LASTPIXEL: on.
+        16 => 1,
+        // D3DRENDERSTATE_TEXTUREMAG and TEXTUREMIN: nearest.
+        17 | 18 => 1,
         // D3DRENDERSTATE_SRCBLEND and DESTBLEND: one and zero.
         19 => 2,
         20 => 1,
@@ -340,10 +381,31 @@ fn render_state_at_start(state: u32) -> Option<u32> {
         24 => 0,
         25 => 8,
         // D3DRENDERSTATE_DITHERENABLE, ALPHABLENDENABLE, FOGENABLE,
-        // SPECULARENABLE: all off.
-        26..=29 => 0,
-        // D3DRENDERSTATE_COLORKEYENABLE: off.
-        41 => 0,
+        // SPECULARENABLE, ZVISIBLE, SUBPIXEL, SUBPIXELX, STIPPLEDALPHA: all
+        // off. FOGCOLOR: black. FOGTABLEMODE: none. FOGTABLESTART: 0.0.
+        26..=36 => 0,
+        // D3DRENDERSTATE_FOGTABLEEND and FOGTABLEDENSITY: 1.0.
+        37 | 38 => 1.0f32.to_bits(),
+        // D3DRENDERSTATE_STIPPLEENABLE, EDGEANTIALIAS, COLORKEYENABLE: off.
+        39..=41 => 0,
+        // D3DRENDERSTATE_BORDERCOLOR: black.
+        43 => 0,
+        // D3DRENDERSTATE_TEXTUREADDRESSU and V: wrap.
+        44 | 45 => 1,
+        // D3DRENDERSTATE_MIPMAPLODBIAS, ZBIAS, RANGEFOGENABLE: nothing.
+        46..=48 => 0,
+        // D3DRENDERSTATE_ANISOTROPY: one.
+        49 => 1,
+        // D3DRENDERSTATE_TRANSLUCENTSORTINDEPENDENT, STENCILENABLE: off.
+        51 | 52 => 0,
+        // D3DRENDERSTATE_STENCILFAIL, ZFAIL, PASS: keep. STENCILFUNC: always.
+        53..=55 => 1,
+        56 => 8,
+        // D3DRENDERSTATE_STENCILREF: zero. STENCILMASK, WRITEMASK: every bit.
+        57 => 0,
+        58 | 59 => u32::MAX,
+        // D3DRENDERSTATE_WRAP0 to WRAP7: off.
+        128..=135 => 0,
         _ => return None,
     })
 }
@@ -544,6 +606,7 @@ fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, S
             width: 0,
             height: 0,
             background: 0,
+            immediate: 0,
         },
     )
     .map_err(Stop::Fault)?;
@@ -689,12 +752,15 @@ fn material_colour(ctx: &Ctx<'_>, handle: u32) -> u32 {
 }
 
 /// Fill rectangles of a viewport's device surface with a colour.
-fn fill_rects(
+/// Clear rectangles of a viewport's device: the surface to a colour, the
+/// depth buffer to a depth, or both.
+fn clear_rects(
     ctx: &mut Ctx<'_>,
     this: u32,
     count: u32,
     rects: u32,
-    colour: u32,
+    colour: Option<u32>,
+    depth_value: Option<f32>,
 ) -> Result<u32, Stop> {
     let Some(ComState::Viewport { device, .. }) = ctx.state.com(this).map(|o| o.state.clone())
     else {
@@ -710,37 +776,52 @@ fn fill_rects(
         width,
         height,
         pitch,
-        depth,
+        format,
         ..
     }) = ctx.state.com(surface).map(|o| o.state.clone())
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
-    let bytes = depth.div_ceil(8);
-    let one = super::pixel(colour, depth);
+    let depth = format.bits;
+    let bits = depth;
+    let bytes = bits.div_ceil(8);
     for i in 0..count {
         // D3DRECT: x1, y1, x2, y2.
         let at = rects + i * 16;
         let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
         let (x1, y1) = (read(0)?.min(width), read(4)?.min(height));
         let (x2, y2) = (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1));
-        let row: Vec<u8> = (x1..x2).flat_map(|_| one.iter().copied()).collect();
-        for y in y1..y2 {
-            ctx.mem
-                .write(pixels + y * pitch + x1 * bytes, &row)
-                .map_err(Stop::Fault)?;
+        if let Some(colour) = colour {
+            let one = super::pixel(colour, bits);
+            let row: Vec<u8> = (x1..x2).flat_map(|_| one.iter().copied()).collect();
+            for y in y1..y2 {
+                ctx.mem
+                    .write(pixels + y * pitch + x1 * bytes, &row)
+                    .map_err(Stop::Fault)?;
+            }
+        }
+        if let Some(z) = depth_value {
+            let buffer = depth_buffer(ctx, device, width, height);
+            for y in y1..y2 {
+                let row = (y * width) as usize;
+                buffer[row + x1 as usize..row + x2 as usize].fill(z);
+            }
         }
     }
-    ctx.state.cleared += 1;
+    if colour.is_some() {
+        ctx.state.cleared += 1;
+    }
     Ok(S_OK)
 }
 
 /// What a clear may ask for that is written: the target.
 const D3DCLEAR_TARGET: u32 = 0x1;
+const D3DCLEAR_ZBUFFER: u32 = 0x2;
 
 fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Clear(count, rects, flags): to the background material's colour.
-    if args[2] & !D3DCLEAR_TARGET != 0 {
+    // Clear(count, rects, flags): to the background material's colour, and
+    // the depth buffer to as far as it goes.
+    if args[2] & !(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER) != 0 {
         return Err(Stop::NotWritten {
             what: format!("IDirect3DViewport3::Clear: flags {:#x}", args[2]),
             caller: 0,
@@ -750,17 +831,437 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         Some(ComState::Viewport { background, .. }) => *background,
         _ => 0,
     };
-    let colour = material_colour(ctx, handle);
-    fill_rects(ctx, this, args[0], args[1], colour)
+    let colour = (args[2] & D3DCLEAR_TARGET != 0).then(|| material_colour(ctx, handle));
+    let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then_some(1.0);
+    clear_rects(ctx, this, args[0], args[1], colour, depth)
 }
 
 fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Clear2(count, rects, flags, colour, z, stencil).
-    if args[2] & !D3DCLEAR_TARGET != 0 {
+    // Clear2(count, rects, flags, colour, z, stencil). There is no stencil
+    // buffer on the declared card's modes this title asks for.
+    if args[2] & !(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER) != 0 {
         return Err(Stop::NotWritten {
             what: format!("IDirect3DViewport3::Clear2: flags {:#x}", args[2]),
             caller: 0,
         });
     }
-    fill_rects(ctx, this, args[0], args[1], args[3])
+    let colour = (args[2] & D3DCLEAR_TARGET != 0).then_some(args[3]);
+    let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then(|| f32::from_bits(args[4]));
+    clear_rects(ctx, this, args[0], args[1], colour, depth)
+}
+
+/// A device's depth buffer, the size of its surface, made far the first time
+/// it is needed.
+fn depth_buffer<'a>(ctx: &'a mut Ctx<'_>, device: u32, width: u32, height: u32) -> &'a mut [f32] {
+    let buffer = &mut self::device(ctx, device).depth;
+    let len = (width * height) as usize;
+    if buffer.len() != len {
+        *buffer = vec![1.0; len];
+    }
+    buffer
+}
+
+fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // DrawPrimitive(type, format, vertices, count, flags).
+    let indices: Vec<u32> = (0..args[3]).collect();
+    draw(
+        ctx, this, args[0], args[1], args[2], args[3], &indices, args[4],
+    )
+}
+
+fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // DrawIndexedPrimitive(type, format, vertices, count, indices, index
+    // count, flags): sixteen-bit indices into the vertices.
+    let bytes = ctx
+        .mem
+        .slice(args[4], args[5] as usize * 2)
+        .map_err(Stop::Fault)?;
+    let indices: Vec<u32> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|w| u32::from(u16::from_le_bytes(*w)))
+        .collect();
+    draw(
+        ctx, this, args[0], args[1], args[2], args[3], &indices, args[6],
+    )
+}
+
+/// `D3DDP_DONOTLIGHT`: the vertices are lit already.
+const D3DDP_DONOTLIGHT: u32 = 0x10;
+
+/// A value of a render state, set or as it starts.
+fn render_state(device: &Device, state: u32) -> u32 {
+    device
+        .render
+        .get(&state)
+        .copied()
+        .or_else(|| render_state_at_start(state))
+        .unwrap_or(0)
+}
+
+/// A value of the first texture stage's state, set or as it starts.
+fn stage_state(device: &Device, state: u32) -> u32 {
+    device
+        .stages
+        .get(&(0, state))
+        .copied()
+        .or_else(|| stage_state_at_start(state, 0))
+        .unwrap_or(0)
+}
+
+/// Draw primitives through a device: every vertex through the pipeline, and
+/// every triangle into the device's surface.
+#[allow(clippy::too_many_arguments)]
+fn draw(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    kind: u32,
+    format: u32,
+    vertices_at: u32,
+    count: u32,
+    indices: &[u32],
+    flags: u32,
+) -> Result<u32, Stop> {
+    use super::pipeline::{self, fvf, Clipped};
+    use crate::raster::{self, Combine, Compare, States};
+
+    let wall = |what: String| Stop::NotWritten { what, caller: 0 };
+    let Some(size) = pipeline::vertex_size(format) else {
+        return Err(wall(format!(
+            "IDirect3DDevice3::DrawPrimitive: vertex format {format:#x}"
+        )));
+    };
+    let Some(ComState::Device3D { surface }) = ctx.state.com(this).map(|o| o.state.clone()) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let Some(ComState::Surface {
+        pixels,
+        width,
+        height,
+        pitch,
+        format: pixel_format,
+        ..
+    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+
+    // The vertices as the title wrote them.
+    let bytes = ctx
+        .mem
+        .slice(vertices_at, count as usize * size)
+        .map_err(Stop::Fault)?;
+    let inputs: Vec<pipeline::Input> = bytes
+        .chunks_exact(size)
+        .map(|v| pipeline::read_vertex(format, v))
+        .collect();
+
+    // What the device draws them with.
+    let identity = ctx.state.identity(this);
+    let device = ctx.state.immediate.devices.entry(identity).or_default();
+    let matrix = |which: u32| -> super::scene::Matrix {
+        device.transforms.get(&which).map_or(IDENTITY, |bits| {
+            std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(bits[r * 4 + c])))
+        })
+    };
+    let world = matrix(1);
+    let clip_from_world = super::scene::multiply(&matrix(2), &matrix(3));
+    let clip_from_model = super::scene::multiply(&world, &clip_from_world);
+    let viewport = device.current_viewport;
+    let texture = device.textures.get(&0).copied().unwrap_or(0);
+    let material_handle = device.light.get(&1).copied().unwrap_or(0);
+    let ambient = pipeline::colour(device.light.get(&2).copied().unwrap_or(0));
+    let state = |s: u32| render_state(device, s);
+    if state(8) != 3 {
+        return Err(wall(format!(
+            "IDirect3DDevice3::DrawPrimitive: fill mode {}",
+            state(8)
+        )));
+    }
+    let blend = (state(27) != 0).then(|| {
+        (
+            raster::Blend::from_d3d(state(19)).unwrap_or(raster::Blend::One),
+            raster::Blend::from_d3d(state(20)).unwrap_or(raster::Blend::Zero),
+        )
+    });
+    let cull = state(22);
+    let mut states = States {
+        depth_test: (state(7) != 0)
+            .then(|| Compare::from_d3d(state(23)).unwrap_or(Compare::LessEqual)),
+        depth_write: state(7) != 0 && state(14) != 0,
+        flat: state(9) == 1,
+        colour: Combine::Modulate,
+        alpha: Combine::Modulate,
+        linear: state(17) != 1,
+        colour_key: state(41) != 0,
+        alpha_test: (state(15) != 0).then(|| {
+            (
+                Compare::from_d3d(state(25)).unwrap_or(Compare::Always),
+                (state(24) & 0xff) as u8,
+            )
+        }),
+        blend,
+        specular: state(29) != 0,
+    };
+    let combine = |op: u32, arg1: u32, arg2: u32| -> Option<Combine> {
+        const TEXTURE: u32 = 2;
+        let arg = |a: u32| match a & 0xf {
+            TEXTURE => Some(Combine::Texture),
+            0 | 1 => Some(Combine::Diffuse),
+            _ => None,
+        };
+        match op {
+            1 => Some(Combine::Diffuse),
+            2 => arg(arg1),
+            3 => arg(arg2),
+            4 if arg1 & 0xf == TEXTURE || arg2 & 0xf == TEXTURE => Some(Combine::Modulate),
+            4 => Some(Combine::Diffuse),
+            7 => Some(Combine::Add),
+            _ => None,
+        }
+    };
+    let (op, a1, a2) = (
+        stage_state(device, 1),
+        stage_state(device, 2),
+        stage_state(device, 3),
+    );
+    let (aop, aa1, aa2) = (
+        stage_state(device, 4),
+        stage_state(device, 5),
+        stage_state(device, 6),
+    );
+    let (Some(colour_combine), Some(alpha_combine)) = (combine(op, a1, a2), combine(aop, aa1, aa2))
+    else {
+        return Err(wall(format!(
+            "IDirect3DDevice3::DrawPrimitive: texture stage colour {op} ({a1}, {a2}), alpha {aop} ({aa1}, {aa2})"
+        )));
+    };
+    states.colour = colour_combine;
+    states.alpha = alpha_combine;
+
+    // Where the viewport puts the view volume.
+    let place = match ctx.state.com(viewport).map(|o| o.state.clone()) {
+        Some(ComState::Viewport {
+            x,
+            y,
+            width: w,
+            height: h,
+            ..
+        }) if !ctx
+            .state
+            .immediate
+            .viewports
+            .contains_key(&ctx.state.identity(viewport)) =>
+        {
+            pipeline::Viewport::whole(x, y, w, h)
+        }
+        _ => {
+            return Err(wall(
+                "IDirect3DDevice3::DrawPrimitive: a viewport the title described itself".to_owned(),
+            ))
+        }
+    };
+
+    // The lights, when the vertices are to be lit.
+    let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
+    let lighting = untransformed && format & fvf::NORMAL != 0 && flags & D3DDP_DONOTLIGHT == 0;
+    let material = if lighting {
+        let bytes = ctx
+            .state
+            .immediate
+            .handles
+            .get(&material_handle)
+            .and_then(|m| ctx.state.immediate.materials.get(m));
+        match bytes.and_then(|b| pipeline::Material::read(b)) {
+            Some(m) => Some(m),
+            None => {
+                return Err(wall(format!(
+                    "IDirect3DDevice3::DrawPrimitive: lit vertices with material handle {material_handle}"
+                )))
+            }
+        }
+    } else {
+        None
+    };
+    let lights = ctx
+        .state
+        .render
+        .as_ref()
+        .map(super::d3drm::RenderPass::lights)
+        .unwrap_or_default();
+
+    // Every vertex into clip space, coloured.
+    let clipped: Vec<Clipped> = inputs
+        .iter()
+        .map(|v| {
+            let diffuse = match (&material, v.normal) {
+                (Some(material), Some(normal)) => {
+                    let at = pipeline::project(&world, v.position);
+                    let turned = [
+                        normal[0] * world[0][0] + normal[1] * world[1][0] + normal[2] * world[2][0],
+                        normal[0] * world[0][1] + normal[1] * world[1][1] + normal[2] * world[2][1],
+                        normal[0] * world[0][2] + normal[1] * world[1][2] + normal[2] * world[2][2],
+                    ];
+                    let [r, g, b, _] = ambient;
+                    pipeline::light([at[0], at[1], at[2]], turned, material, [r, g, b], &lights)
+                }
+                _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
+            };
+            let [sr, sg, sb, _] = v.specular.map_or([0.0; 4], pipeline::colour);
+            Clipped {
+                clip: if untransformed {
+                    pipeline::project(&clip_from_model, v.position)
+                } else {
+                    v.position
+                },
+                diffuse,
+                specular: [sr, sg, sb],
+                uv: v.uv,
+            }
+        })
+        .collect();
+
+    // The triangles, by the primitive's kind, wound as the title wound them.
+    let corner = |i: u32| {
+        indices
+            .get(i as usize)
+            .and_then(|&n| clipped.get(n as usize))
+            .copied()
+    };
+    let n = indices.len() as u32;
+    let triangles: Vec<[u32; 3]> = match kind {
+        4 => (0..n / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]).collect(),
+        5 => (0..n.saturating_sub(2))
+            .map(|t| {
+                if t % 2 == 0 {
+                    [t, t + 1, t + 2]
+                } else {
+                    [t + 1, t, t + 2]
+                }
+            })
+            .collect(),
+        6 => (1..n.saturating_sub(1)).map(|t| [0, t, t + 1]).collect(),
+        other => {
+            return Err(wall(format!(
+                "IDirect3DDevice3::DrawPrimitive: primitive type {other}"
+            )))
+        }
+    };
+
+    // The texture the first stage samples, in its own format.
+    let texture_state = ctx.state.com(texture).map(|o| o.state.clone());
+    let (texels, texture_info) = match texture_state {
+        Some(ComState::Surface {
+            pixels: at,
+            width: tw,
+            height: th,
+            pitch: tp,
+            format: tf,
+            palette,
+            ..
+        }) => {
+            let texels = ctx
+                .mem
+                .slice(at, (tp * th) as usize)
+                .map_err(Stop::Fault)?
+                .to_vec();
+            let palette = match ctx.state.com(palette).map(|o| &o.state) {
+                Some(ComState::Palette { store }) => {
+                    let entries = ctx.mem.slice(*store, 256 * 4).map_err(Stop::Fault)?;
+                    let mut out = [[0u8; 4]; 256];
+                    for (o, e) in out.iter_mut().zip(entries.as_chunks::<4>().0) {
+                        *o = [e[0], e[1], e[2], 0xff];
+                    }
+                    Some(out)
+                }
+                _ => None,
+            };
+            let key = ctx.state.color_keys.get(&at).copied();
+            (texels, Some((tw, th, tp, tf, palette, key)))
+        }
+        _ => (Vec::new(), None),
+    };
+    if texture_info.is_none() {
+        let untextured = |c: Combine| {
+            if matches!(c, Combine::Texture | Combine::Modulate) {
+                Combine::Diffuse
+            } else {
+                c
+            }
+        };
+        states.colour = untextured(states.colour);
+        states.alpha = untextured(states.alpha);
+    }
+    let texture = texture_info
+        .as_ref()
+        .map(|(tw, th, tp, tf, palette, key)| raster::Texture {
+            bytes: &texels,
+            width: *tw,
+            height: *th,
+            pitch: *tp,
+            format: *tf,
+            palette: palette.as_ref(),
+            colour_key: *key,
+        });
+
+    // Into the surface, through the depth buffer.
+    let device = device_of(ctx.state, this);
+    let len = (width * height) as usize;
+    if device.depth.len() != len {
+        device.depth = vec![1.0; len];
+    }
+    let mut depth = std::mem::take(&mut device.depth);
+    let target_pixels = ctx
+        .mem
+        .slice_mut(pixels, (pitch * height) as usize)
+        .map_err(Stop::Fault)?;
+    let mut target = raster::Target {
+        pixels: target_pixels,
+        width,
+        height,
+        pitch,
+        format: pixel_format,
+        depth: &mut depth,
+        clip: [
+            place.x as i32,
+            place.y as i32,
+            (place.x + place.width) as i32,
+            (place.y + place.height) as i32,
+        ],
+    };
+    for [i, j, k] in triangles {
+        let (Some(a), Some(b), Some(c)) = (corner(i), corner(j), corner(k)) else {
+            continue;
+        };
+        let polygon: Vec<raster::Vertex> = pipeline::clip(&[a, b, c])
+            .iter()
+            .map(|v| place.place(v))
+            .collect();
+        if polygon.len() < 3 {
+            continue;
+        }
+        // Twice the polygon's area on the screen: positive when it is wound
+        // clockwise, with y running down.
+        let area: f32 = (0..polygon.len())
+            .map(|p| {
+                let (u, v) = (polygon[p], polygon[(p + 1) % polygon.len()]);
+                u.x * v.y - v.x * u.y
+            })
+            .sum();
+        // D3DCULL_CW and D3DCULL_CCW.
+        if (cull == 2 && area > 0.0) || (cull == 3 && area < 0.0) {
+            continue;
+        }
+        for p in 1..polygon.len() - 1 {
+            raster::triangle(
+                &mut target,
+                [polygon[0], polygon[p], polygon[p + 1]],
+                texture.as_ref(),
+                &states,
+            );
+        }
+    }
+    device_of(ctx.state, this).depth = depth;
+    Ok(S_OK)
 }

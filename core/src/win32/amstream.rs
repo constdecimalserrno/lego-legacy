@@ -366,7 +366,14 @@ fn get_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let depth = ctx.state.display_mode.2;
     for at in [args[0], args[2]] {
         if at != 0 {
-            super::ddraw::write_surface_desc(ctx, at, width, height, depth, 0)?;
+            super::ddraw::write_surface_desc(
+                ctx,
+                at,
+                width,
+                height,
+                super::ddraw::screen_format(depth),
+                0,
+            )?;
             // DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN.
             ctx.mem.write_u32(at + 0x68, 0x840).map_err(Stop::Fault)?;
         }
@@ -476,7 +483,7 @@ fn put_picture(
         width,
         height,
         pitch,
-        depth,
+        format,
         ..
     }) = ctx.state.com(surface).map(|o| o.state.clone())
     else {
@@ -485,6 +492,7 @@ fn put_picture(
             caller: 0,
         });
     };
+    let depth = format.bits;
     if depth != 16 {
         return Err(Stop::NotWritten {
             what: format!("IDirectDrawStreamSample::Update: a {depth}-bit surface"),

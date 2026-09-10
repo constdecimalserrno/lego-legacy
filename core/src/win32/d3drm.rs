@@ -219,7 +219,7 @@ pub static VIEWPORT2: Interface = Interface {
         method("GetBack", 0, viewport_get_back),
         method("GetFront", 0, viewport_get_front),
         method("GetProjection", 0, viewport_get_projection),
-        wall("GetDirect3DViewport", 1),
+        method("GetDirect3DViewport", 1, direct3d_viewport),
         wall("TransformVectors", 3),
         wall("InverseTransformVectors", 3),
     ],
@@ -794,6 +794,7 @@ fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, S
             width: args[4],
             height: args[5],
             background: 0,
+            immediate: 0,
         },
     )
     .map_err(Stop::Fault)?;
@@ -855,31 +856,95 @@ fn get_buffer_count(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, 
 
 fn direct3d_device2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The immediate-mode device underneath: what this title actually draws
-    // through. It shares the surface, because there is only one, and it is
-    // the same device every time it is asked for.
-    let Some(ComState::RetainedDevice {
-        surface, immediate, ..
-    }) = ctx.state.com(this).map(|o| o.state.clone())
-    else {
+    // through.
+    let Some(device) = immediate_device(ctx, this)? else {
         return Ok(D3DRMERR_BADOBJECT);
     };
+    let face = State::face(ctx, device, &super::d3d::DEVICE2).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], face).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// The immediate-mode device under a retained-mode one, made the first time it
+/// is needed. It shares the surface, because there is only one, and it is the
+/// same device every time.
+fn immediate_device(ctx: &mut Ctx<'_>, retained: u32) -> Result<Option<u32>, Stop> {
+    let Some(ComState::RetainedDevice {
+        surface, immediate, ..
+    }) = ctx.state.com(retained).map(|o| o.state.clone())
+    else {
+        return Ok(None);
+    };
     if immediate != 0 {
-        let face = State::face(ctx, immediate, &super::d3d::DEVICE2).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(args[0], face).map_err(Stop::Fault)?;
-        return Ok(S_OK);
+        return Ok(Some(immediate));
     }
     let object = State::make_com(ctx, &super::d3d::DEVICE2, ComState::Device3D { surface })
         .map_err(Stop::Fault)?;
     if let Some(ComState::RetainedDevice { immediate, .. }) =
+        ctx.state.com_mut(retained).map(|o| &mut o.state)
+    {
+        *immediate = object;
+    }
+    ctx.log.line(&format!(
+        "d3d immediate device at {object:#010x} on surface {surface:#010x}"
+    ));
+    Ok(Some(object))
+}
+
+fn direct3d_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetDirect3DViewport(out): the immediate-mode viewport underneath, with a
+    // reference for the caller.
+    let Some(under) = immediate_viewport(ctx, this)? else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    ctx.state.com_ref(under, 1);
+    ctx.mem.write_u32(args[0], under).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// The immediate-mode viewport under a retained-mode one, on the device
+/// underneath, over the same part of its surface: made the first time it is
+/// needed, and the same one every time.
+fn immediate_viewport(ctx: &mut Ctx<'_>, this: u32) -> Result<Option<u32>, Stop> {
+    let Some(ComState::Viewport {
+        device,
+        x,
+        y,
+        width,
+        height,
+        immediate,
+        ..
+    }) = viewport_state(ctx, this)
+    else {
+        return Ok(None);
+    };
+    if immediate != 0 {
+        return Ok(Some(immediate));
+    }
+    let Some(under) = immediate_device(ctx, device)? else {
+        return Ok(None);
+    };
+    let object = State::make_com(
+        ctx,
+        &super::d3d::VIEWPORT3,
+        ComState::Viewport {
+            device: under,
+            camera: 0,
+            x,
+            y,
+            width,
+            height,
+            background: 0,
+            immediate: 0,
+        },
+    )
+    .map_err(Stop::Fault)?;
+    if let Some(ComState::Viewport { immediate, .. }) =
         ctx.state.com_mut(this).map(|o| &mut o.state)
     {
         *immediate = object;
     }
-    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
-    ctx.log.line(&format!(
-        "d3d immediate device at {object:#010x} on surface {surface:#010x}"
-    ));
-    Ok(S_OK)
+    Ok(Some(object))
 }
 
 fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -958,7 +1023,7 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(ComState::Surface {
         pixels,
         pitch,
-        depth,
+        format,
         width: sw,
         height: sh,
         ..
@@ -966,6 +1031,7 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
+    let depth = format.bits;
     super::fill(
         ctx,
         (pixels, pitch, depth),
@@ -975,17 +1041,278 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn render(_ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Rendering a scene walks its frames and calls each visual, which is the
-    // rasteriser's and nothing on the way to this title's menu asks for it.
-    // Answering that it rendered would be a frame nobody drew.
-    Err(Stop::NotWritten {
-        what: format!(
-            "IDirect3DRMViewport2::Render: the scene at {:#x}, which nothing here draws yet",
-            args[0]
-        ),
-        caller: 0,
-    })
+/// A viewport rendering a frame's tree: the title's own visuals, each asked
+/// whether it can be seen and then told to draw, one call into the guest at a
+/// time.
+#[derive(Debug)]
+pub struct RenderPass {
+    visits: Vec<Visit>,
+    /// The visit being called.
+    next: usize,
+    /// Whether that visit has said it can be seen and been told to draw.
+    drawing: bool,
+    device: u32,
+    viewport: u32,
+    immediate: u32,
+    /// The scene's lights, where they are in the world, each with the one
+    /// frame it lights if it lights only one.
+    lights: Vec<(u32, super::pipeline::Light)>,
+    /// Whether the machine has taken the pass's first call.
+    pub parked: bool,
+}
+
+impl RenderPass {
+    /// The lights on the visual being drawn.
+    #[must_use]
+    pub fn lights(&self) -> Vec<super::pipeline::Light> {
+        let frame = self.visits.get(self.next).map_or(0, |v| v.frame);
+        self.lights
+            .iter()
+            .filter(|(only, _)| *only == 0 || *only == frame)
+            .map(|(_, light)| *light)
+            .collect()
+    }
+}
+
+/// One user visual, on the frame it hangs from.
+#[derive(Clone, Copy, Debug)]
+struct Visit {
+    frame: u32,
+    callback: u32,
+    argument: u32,
+    visual: u32,
+}
+
+/// `D3DRMUSERVISUAL_CANSEE` and `D3DRMUSERVISUAL_RENDER`.
+const CAN_SEE: u32 = 0;
+const DRAW: u32 = 1;
+
+/// `D3DTRANSFORMSTATE_WORLD`, `_VIEW` and `_PROJECTION`.
+const WORLD: u32 = 1;
+const VIEW: u32 = 2;
+const PROJECTION: u32 = 3;
+
+fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Render(frame): every visual in the frame's tree, through the device
+    // under this viewport, seen from its camera. Retained mode sets the
+    // device's view and projection, makes this viewport's own the current
+    // one, and puts each visual's frame in the world before calling it.
+    let Some(ComState::Viewport { device, camera, .. }) = viewport_state(ctx, this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let mut visits = Vec::new();
+    let scene = ctx.state.identity(args[0]);
+    collect_visits(ctx, scene, &mut visits, 0)?;
+    let mut lights = Vec::new();
+    collect_lights(ctx, scene, &mut lights, 0)?;
+    let (Some(immediate), Some(under)) = (
+        immediate_device(ctx, device)?,
+        immediate_viewport(ctx, this)?,
+    ) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let camera_world = ctx
+        .state
+        .scene
+        .world(ctx.state.identity(camera))
+        .and_then(|m| super::scene::invert(&m))
+        .unwrap_or(super::scene::IDENTITY);
+    let identity = ctx.state.identity(this);
+    let view = ctx
+        .state
+        .scene
+        .viewports
+        .get(&identity)
+        .cloned()
+        .unwrap_or_default();
+    if view.projection != 0 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMViewport2::Render: projection {}, which is not perspective",
+                view.projection
+            ),
+            caller: 0,
+        });
+    }
+    let (_, _, width, height) = viewport_rect(ctx, this);
+    super::d3d::set_device_transform(ctx.state, immediate, VIEW, &camera_world);
+    super::d3d::set_device_transform(
+        ctx.state,
+        immediate,
+        PROJECTION,
+        &view.perspective(width, height),
+    );
+    super::d3d::set_device_viewport(ctx.state, immediate, under);
+    ctx.log.at(
+        crate::cli::Trace::Shims,
+        &format!("render {} user visuals", visits.len()),
+    );
+    if visits.is_empty() {
+        return Ok(S_OK);
+    }
+    ctx.state.render = Some(RenderPass {
+        visits,
+        next: 0,
+        drawing: false,
+        device,
+        viewport: this,
+        immediate,
+        lights,
+        parked: false,
+    });
+    ctx.call_guest = render_call(ctx.state);
+    Ok(S_OK)
+}
+
+/// Every light in a frame's tree, put in the world by the frame it hangs on:
+/// at the frame's origin, shining down its z axis.
+///
+/// What a title has not told a light is what DirectX 6's documentation says
+/// retained mode starts one with: constant attenuation of one and none
+/// otherwise, a range as far as a float goes, an umbra of 0.4 radians and a
+/// penumbra of 0.8.
+fn collect_lights(
+    ctx: &Ctx<'_>,
+    frame: u32,
+    lights: &mut Vec<(u32, super::pipeline::Light)>,
+    depth: usize,
+) -> Result<(), Stop> {
+    use super::pipeline::Light;
+    let Some(node) = ctx.state.scene.frame(frame) else {
+        return Ok(());
+    };
+    if depth > ctx.state.scene.frames.len() {
+        return Ok(());
+    }
+    let world = ctx
+        .state
+        .scene
+        .world(frame)
+        .unwrap_or(super::scene::IDENTITY);
+    let position = [world[3][0], world[3][1], world[3][2]];
+    let direction = [world[2][0], world[2][1], world[2][2]];
+    for id in &node.lights {
+        let Some(light) = ctx.state.scene.lights.get(id) else {
+            continue;
+        };
+        let [r, g, b, _] = super::pipeline::colour(light.colour);
+        let colour = [r, g, b];
+        let range = light.range.unwrap_or(f32::MAX.sqrt());
+        let attenuation = [
+            light.attenuation[0].unwrap_or(1.0),
+            light.attenuation[1].unwrap_or(0.0),
+            light.attenuation[2].unwrap_or(0.0),
+        ];
+        let half_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle) / 2.0) as f32;
+        let converted = match light.kind {
+            0 => Light::Ambient { colour },
+            1 | 4 => Light::Point {
+                colour,
+                position,
+                range,
+                attenuation,
+            },
+            2 => Light::Spot {
+                colour,
+                position,
+                direction,
+                range,
+                attenuation,
+                inner: half_cos(light.umbra.unwrap_or(0.4)),
+                outer: half_cos(light.penumbra.unwrap_or(0.8)),
+            },
+            3 => Light::Directional { colour, direction },
+            other => {
+                return Err(Stop::NotWritten {
+                    what: format!("IDirect3DRMViewport2::Render: a light of kind {other}"),
+                    caller: 0,
+                })
+            }
+        };
+        lights.push((light.enable_frame, converted));
+    }
+    for &child in &node.children {
+        collect_lights(ctx, child, lights, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// Every user visual in a frame's tree: the frame's own, then its children's.
+fn collect_visits(
+    ctx: &Ctx<'_>,
+    frame: u32,
+    visits: &mut Vec<Visit>,
+    depth: usize,
+) -> Result<(), Stop> {
+    let Some(node) = ctx.state.scene.frame(frame) else {
+        return Ok(());
+    };
+    // A frame that is its own ancestor has no place in any scene.
+    if depth > ctx.state.scene.frames.len() {
+        return Ok(());
+    }
+    for &visual in &node.visuals {
+        match ctx.state.com(visual).map(|o| &o.state) {
+            Some(&ComState::UserVisual { callback, argument }) => visits.push(Visit {
+                frame,
+                callback,
+                argument,
+                visual,
+            }),
+            _ => {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "IDirect3DRMViewport2::Render: a {} visual, which nothing here draws",
+                        ctx.state.interface_of(visual).unwrap_or("foreign")
+                    ),
+                    caller: 0,
+                })
+            }
+        }
+    }
+    for &child in &node.children {
+        collect_visits(ctx, child, visits, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// The call the render pass makes next: the visit's frame is put in the
+/// world, and its callback is asked or told.
+fn render_call(state: &mut State) -> Option<(u32, Vec<u32>)> {
+    let pass = state.render.as_ref()?;
+    let visit = *pass.visits.get(pass.next)?;
+    let (reason, device, viewport, immediate) = (
+        if pass.drawing { DRAW } else { CAN_SEE },
+        pass.device,
+        pass.viewport,
+        pass.immediate,
+    );
+    let world = state
+        .scene
+        .world(visit.frame)
+        .unwrap_or(super::scene::IDENTITY);
+    super::d3d::set_device_transform(state, immediate, WORLD, &world);
+    Some((
+        visit.callback,
+        vec![visit.visual, visit.argument, reason, device, viewport],
+    ))
+}
+
+/// The guest has returned from a render pass's call with `answered`: the
+/// next call, or `None` once every visual has had its turn.
+pub fn render_turn(state: &mut State, answered: u32) -> Option<(u32, Vec<u32>)> {
+    let pass = state.render.as_mut()?;
+    if !pass.drawing && answered != 0 {
+        pass.drawing = true;
+    } else {
+        pass.drawing = false;
+        pass.next += 1;
+    }
+    if pass.next >= pass.visits.len() {
+        state.render = None;
+        return None;
+    }
+    render_call(state)
 }
 
 /// A frame the guest holds, to be changed.

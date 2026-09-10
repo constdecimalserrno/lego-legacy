@@ -8,6 +8,7 @@ use super::{ComState, Convention, Ctx, Shim, State};
 use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use crate::raster::PixelFormat;
 
 pub const SHIMS: &[Shim] = &[
     Shim {
@@ -802,7 +803,7 @@ fn display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop
     let (width, height, depth) = ctx.state.display_mode;
     let at = args[0];
     if at != 0 {
-        write_surface_desc(ctx, at, width, height, depth, 0)?;
+        write_surface_desc(ctx, at, width, height, screen_format(depth), 0)?;
     }
     Ok(S_OK)
 }
@@ -855,16 +856,77 @@ fn vertical_blank(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     Ok(S_OK)
 }
 
+/// The pixel format a surface of the screen's depth has: 5-6-5 at sixteen
+/// bits, eight bits a channel above that, and indexed at eight.
+#[must_use]
+pub(crate) fn screen_format(depth: u32) -> PixelFormat {
+    PixelFormat {
+        bits: depth,
+        masks: match depth {
+            16 => PixelFormat::RGB565.masks,
+            24 | 32 => [0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0],
+            _ => [0; 4],
+        },
+    }
+}
+
+/// Bytes a surface's pixels are followed by that belong to nobody else.
+///
+/// Rock Raiders converts its textures four pixels at a time, a whole word a
+/// pixel, so a texture whose width is not a multiple of four is written up to
+/// eight bytes past its last row. On DirectDraw that lands in the allocator's
+/// own slack; here it would land on the next thing allocated.
+const SURFACE_SLACK: u32 = 16;
+
+/// How many bytes a row of a surface takes: its pixels, padded to a whole
+/// number of four-byte words, as DirectDraw lays out a surface in system
+/// memory. Rock Raiders copies its images in padded rows and relies on it.
+#[must_use]
+pub(crate) fn pitch_for(width: u32, bits: u32) -> u32 {
+    (width * bits.div_ceil(8)).next_multiple_of(4)
+}
+
+/// `DDPF_ALPHAPIXELS`, `DDPF_PALETTEINDEXED8` and `DDPF_RGB`.
+const DDPF_ALPHAPIXELS: u32 = 0x1;
+const DDPF_PALETTEINDEXED8: u32 = 0x20;
+const DDPF_RGB: u32 = 0x40;
+
+/// Write a `DDPIXELFORMAT`: size, flags, no FourCC, bits, and masks.
+fn write_pixel_format(ctx: &mut Ctx<'_>, at: u32, format: PixelFormat) -> Result<(), Stop> {
+    let indexed = format.bits == 8 && format.masks == [0; 4];
+    let flags = DDPF_RGB
+        | if indexed { DDPF_PALETTEINDEXED8 } else { 0 }
+        | if format.masks[3] != 0 {
+            DDPF_ALPHAPIXELS
+        } else {
+            0
+        };
+    let [r, g, b, a] = format.masks;
+    for (offset, value) in [
+        (0, 32),
+        (4, flags),
+        (8, 0),
+        (12, format.bits),
+        (16, r),
+        (20, g),
+        (24, b),
+        (28, a),
+    ] {
+        ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
 /// Write a DDSURFACEDESC the way a guest reads one back.
 pub(crate) fn write_surface_desc(
     ctx: &mut Ctx<'_>,
     at: u32,
     width: u32,
     height: u32,
-    depth: u32,
+    format: PixelFormat,
     pixels: u32,
 ) -> Result<(), Stop> {
-    let pitch = width * depth.div_ceil(8);
+    let pitch = pitch_for(width, format.bits);
     // dwSize, dwFlags, dwHeight, dwWidth, lPitch, ... lpSurface at 0x24.
     for (offset, value) in [
         (0, 108),
@@ -876,28 +938,8 @@ pub(crate) fn write_surface_desc(
     ] {
         ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
     }
-    // The pixel format, at 0x48: size, flags, and the bit count.
-    ctx.mem.write_u32(at + 0x48, 32).map_err(Stop::Fault)?;
-    // DDPF_RGB.
-    ctx.mem.write_u32(at + 0x4c, 0x40).map_err(Stop::Fault)?;
-    ctx.mem.write_u32(at + 0x54, depth).map_err(Stop::Fault)?;
-    if depth == 16 {
-        // The masks a 5-6-5 screen has.
-        ctx.mem.write_u32(at + 0x58, 0xf800).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 0x5c, 0x07e0).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 0x60, 0x001f).map_err(Stop::Fault)?;
-    } else if depth == 32 {
-        ctx.mem
-            .write_u32(at + 0x58, 0x00ff_0000)
-            .map_err(Stop::Fault)?;
-        ctx.mem
-            .write_u32(at + 0x5c, 0x0000_ff00)
-            .map_err(Stop::Fault)?;
-        ctx.mem
-            .write_u32(at + 0x60, 0x0000_00ff)
-            .map_err(Stop::Fault)?;
-    }
-    Ok(())
+    // The pixel format, at 0x48.
+    write_pixel_format(ctx, at + 0x48, format)
 }
 
 fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -920,10 +962,42 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     } else {
         ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?
     };
-    let depth = screen_depth;
+    // A surface asked for in a pixel format of its own has it: a title's
+    // textures and the images it converts them from are not the screen's.
+    const DDSD_PIXELFORMAT: u32 = 0x1000;
+    let format = if primary || flags & DDSD_PIXELFORMAT == 0 {
+        screen_format(screen_depth)
+    } else {
+        let read = |o: u32| ctx.mem.read_u32(at + 0x48 + o).map_err(Stop::Fault);
+        let (pf_flags, bits) = (read(4)?, read(12)?);
+        let alpha = if pf_flags & DDPF_ALPHAPIXELS != 0 {
+            read(28)?
+        } else {
+            0
+        };
+        if pf_flags & DDPF_PALETTEINDEXED8 != 0 && bits == 8 {
+            PixelFormat {
+                bits: 8,
+                masks: [0; 4],
+            }
+        } else if pf_flags & !(DDPF_RGB | DDPF_ALPHAPIXELS) == 0 && matches!(bits, 16 | 24 | 32) {
+            PixelFormat {
+                bits,
+                masks: [read(16)?, read(20)?, read(24)?, alpha],
+            }
+        } else {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "IDirectDraw::CreateSurface: pixel format flags {pf_flags:#x}, {bits} bits"
+                ),
+                caller: 0,
+            });
+        }
+    };
+    let depth = format.bits;
 
-    let (object, pixels) = make_surface(ctx, width, height, depth, primary)?;
-    let pitch = width * depth.div_ceil(8);
+    let (object, pixels) = make_surface_as(ctx, width, height, format, primary)?;
+    let pitch = pitch_for(width, depth);
 
     // A surface asked for with a back buffer gets one, attached to it.
     let back_count = if flags & 0x20 != 0 {
@@ -932,7 +1006,7 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
         0
     };
     if back_count > 0 {
-        let back_pixels = ctx.state.heap.alloc(pitch * height.max(1));
+        let back_pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
         let back = State::make_com(
             ctx,
             &DIRECT_DRAW_SURFACE,
@@ -941,9 +1015,10 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
                 width,
                 height,
                 pitch,
-                depth,
+                format,
                 primary: false,
                 back: 0,
+                palette: 0,
             },
         )
         .map_err(Stop::Fault)?;
@@ -955,8 +1030,22 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     }
 
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
+    let asked = if flags & 0x1000 != 0 {
+        let read = |o: u32| ctx.mem.read_u32(at + 0x48 + o).unwrap_or(0);
+        format!(
+            " asked for format {:#x} {} bits {:#x}/{:#x}/{:#x}/{:#x} caps {caps:#x}",
+            read(4),
+            read(12),
+            read(16),
+            read(20),
+            read(24),
+            read(28)
+        )
+    } else {
+        String::new()
+    };
     ctx.log.line(&format!(
-        "surface {width}x{height}x{depth} at {pixels:#010x}{}",
+        "surface {width}x{height}x{depth} at {pixels:#010x}{}{asked}",
         if primary { " primary" } else { "" }
     ));
     Ok(S_OK)
@@ -976,8 +1065,19 @@ pub(crate) fn make_surface(
     depth: u32,
     primary: bool,
 ) -> Result<(u32, u32), Stop> {
-    let pitch = width * depth.div_ceil(8);
-    let pixels = ctx.state.heap.alloc(pitch * height.max(1));
+    make_surface_as(ctx, width, height, screen_format(depth), primary)
+}
+
+/// A surface in a pixel format of its own.
+fn make_surface_as(
+    ctx: &mut Ctx<'_>,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    primary: bool,
+) -> Result<(u32, u32), Stop> {
+    let pitch = pitch_for(width, format.bits);
+    let pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
     let object = State::make_com(
         ctx,
         &DIRECT_DRAW_SURFACE,
@@ -986,9 +1086,10 @@ pub(crate) fn make_surface(
             width,
             height,
             pitch,
-            depth,
+            format,
             primary,
             back: 0,
+            palette: 0,
         },
     )
     .map_err(Stop::Fault)?;
@@ -1002,19 +1103,37 @@ fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool
             width,
             height,
             pitch,
-            depth,
+            format,
             primary,
             back,
-        }) => Some((*pixels, *width, *height, *pitch, *depth, *primary, *back)),
+            ..
+        }) => Some((
+            *pixels,
+            *width,
+            *height,
+            *pitch,
+            format.bits,
+            *primary,
+            *back,
+        )),
         _ => None,
     }
 }
 
+/// A surface's pixel format.
+fn format_of(ctx: &Ctx<'_>, this: u32) -> PixelFormat {
+    match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::Surface { format, .. }) => *format,
+        _ => screen_format(16),
+    }
+}
+
 fn surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some((pixels, width, height, _, depth, _, _)) = surface_of(ctx, this) else {
+    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    write_surface_desc(ctx, args[0], width, height, depth, pixels)?;
+    let format = format_of(ctx, this);
+    write_surface_desc(ctx, args[0], width, height, format, pixels)?;
     Ok(S_OK)
 }
 
@@ -1030,26 +1149,19 @@ fn surface_caps(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 }
 
 fn pixel_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let depth = surface_of(ctx, this).map_or(16, |s| s.4);
-    let at = args[0];
-    ctx.mem.write_u32(at, 32).map_err(Stop::Fault)?;
-    ctx.mem.write_u32(at + 4, 0x40).map_err(Stop::Fault)?;
-    ctx.mem.write_u32(at + 12, depth).map_err(Stop::Fault)?;
-    if depth == 16 {
-        ctx.mem.write_u32(at + 16, 0xf800).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 20, 0x07e0).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 24, 0x001f).map_err(Stop::Fault)?;
-    }
+    let format = format_of(ctx, this);
+    write_pixel_format(ctx, args[0], format)?;
     Ok(S_OK)
 }
 
 fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Lock(rect, descriptor, flags, event). The guest is given the address of
     // its own pixels: the surface is guest memory and always was.
-    let Some((pixels, width, height, _, depth, _, _)) = surface_of(ctx, this) else {
+    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    write_surface_desc(ctx, args[1], width, height, depth, pixels)?;
+    let format = format_of(ctx, this);
+    write_surface_desc(ctx, args[1], width, height, format, pixels)?;
     Ok(S_OK)
 }
 
@@ -1350,7 +1462,7 @@ fn enumerate_modes(ctx: &mut Ctx<'_>, args: &[u32], size: u32) -> Result<u32, St
     ctx.mem
         .write(desc, &vec![0; size as usize])
         .map_err(Stop::Fault)?;
-    write_surface_desc(ctx, desc, *width, *height, *depth, 0)?;
+    write_surface_desc(ctx, desc, *width, *height, screen_format(*depth), 0)?;
     ctx.mem.write_u32(desc, size).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "ddraw modes: {width}x{height}x{depth}, the only one declared"
@@ -1410,9 +1522,19 @@ fn get_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 }
 
 fn set_palette(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(ComState::Palette { store }) = ctx.state.com(args[0]).map(|o| o.state.clone()) {
-        ctx.state.palette = store;
-        let _ = this;
+    // The surface's pixels are looked up in the palette from now on; the
+    // primary's is what the screen shows through.
+    let Some(ComState::Palette { store }) = ctx.state.com(args[0]).map(|o| o.state.clone()) else {
+        return Ok(S_OK);
+    };
+    if let Some(ComState::Surface {
+        palette, primary, ..
+    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    {
+        *palette = args[0];
+        if *primary {
+            ctx.state.palette = store;
+        }
     }
     Ok(S_OK)
 }
