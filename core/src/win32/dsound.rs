@@ -886,8 +886,8 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 /// Put a playing buffer's sound in the mixer, from where it is now.
 ///
-/// ponytail: the whole buffer is decoded and taken to the mix's rate, nearest
-/// sample by nearest sample, each time it starts; and its volume, pan and
+/// ponytail: the whole buffer is decoded and taken to the mix's rate each time
+/// it starts; and its volume, pan and
 /// position are taken then, so a title moving a sound while it plays is heard
 /// where it last started. A buffer changed often while it plays wants the
 /// mixer to read it and weigh it as it goes.
@@ -919,20 +919,30 @@ fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// Stereo samples at one rate taken to the mix's, nearest sample by nearest
-/// sample, and weighed on each side.
+/// Stereo samples at one rate taken to the mix's, each output sample drawn
+/// straight between the two input samples either side of it, and weighed on
+/// each side.
 fn resample(stereo: &[i16], rate: u32, left: f64, right: f64) -> Vec<i16> {
     let frames = stereo.len() / 2;
     if frames == 0 {
         return Vec::new();
     }
-    let out_frames = (frames as u64 * u64::from(RATE) / u64::from(rate.max(1))) as usize;
-    let weigh = |s: i16, w: f64| (f64::from(s) * w).round().clamp(-32768.0, 32767.0) as i16;
-    (0..out_frames)
+    let (rate, mix) = (u64::from(rate.max(1)), u64::from(RATE));
+    let out_frames = (frames as u64 * mix / rate) as usize;
+    let weigh = |s: f64, w: f64| (s * w).round().clamp(-32768.0, 32767.0) as i16;
+    (0..out_frames as u64)
         .flat_map(|n| {
-            let from =
-                ((n as u64 * u64::from(rate) / u64::from(RATE)) as usize).min(frames - 1) * 2;
-            [weigh(stereo[from], left), weigh(stereo[from + 1], right)]
+            // Where this output frame falls in the input, in whole frames and
+            // the part of a frame past them, exactly.
+            let (whole, part) = (
+                (n * rate / mix) as usize,
+                (n * rate % mix) as f64 / mix as f64,
+            );
+            let (this, next) = (whole.min(frames - 1) * 2, (whole + 1).min(frames - 1) * 2);
+            let between = |i: usize| {
+                f64::from(stereo[this + i]) * (1.0 - part) + f64::from(stereo[next + i]) * part
+            };
+            [weigh(between(0), left), weigh(between(1), right)]
         })
         .collect()
 }
@@ -1035,11 +1045,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sound_at_half_the_rate_takes_twice_as_long() {
+    fn a_sound_at_half_the_rate_takes_twice_as_long_and_is_drawn_between() {
         let stereo = [100, -100, 200, -200];
         assert_eq!(
             resample(&stereo, 11_025, 1.0, 0.5),
-            [100, -50, 100, -50, 200, -100, 200, -100]
+            [100, -50, 150, -75, 200, -100, 200, -100]
         );
     }
 }

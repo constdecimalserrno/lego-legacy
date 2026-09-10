@@ -131,6 +131,11 @@ impl Runtime {
     }
 }
 
+/// How Core Graphics is told to read a presented frame: four bytes a pixel,
+/// little-endian, so blue first, and the top byte skipped rather than taken
+/// as alpha: `kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst`.
+const PRESENT_BITMAP_INFO: u32 = (2 << 12) | 6;
+
 /// Where a point in the window's content is on the guest's screen.
 ///
 /// The window shows the guest's frame scaled to fit and centred, its aspect
@@ -592,7 +597,7 @@ impl Host for MacWindow {
             let provider = (self.cg_provider)(owned, pixels, len, release_pixels as *mut c_void);
             // The guest's surfaces are 32 bits a pixel, blue first, with the
             // top byte ignored: what DirectDraw calls RGB32.
-            let bitmap_info = 1 << 14 | 2; // little-endian, no alpha
+            let bitmap_info = PRESENT_BITMAP_INFO;
             let image = (self.cg_image_create)(
                 frame.width as usize,
                 frame.height as usize,
@@ -658,8 +663,94 @@ impl Host for MacWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, direct_input_modifier, guest_point};
-    use crate::host::Input;
+    use super::{direct_input_key, direct_input_modifier, guest_point, Rect, PRESENT_BITMAP_INFO};
+    use crate::host::{sys, Input};
+    use std::ffi::{c_char, c_void};
+
+    #[test]
+    fn a_presented_pixel_reaches_core_graphics_as_the_colour_it_is() {
+        // An orange as the machine presents it: blue, green, red, and a byte
+        // Core Graphics is to skip.
+        let pixel: [u8; 4] = [0x10, 0x80, 0xf0, 0x00];
+        let graphics =
+            sys::Library::open("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+                .expect("Core Graphics is on every Mac");
+        // Safety: each type is the signature CoreGraphics' headers give it,
+        // and each object is released once, after its last use.
+        unsafe {
+            let space_named: unsafe extern "C" fn(*const c_char) -> *mut c_void =
+                graphics.function("CGColorSpaceCreateWithName").unwrap();
+            let provider_with: unsafe extern "C" fn(
+                *mut c_void,
+                *const u8,
+                usize,
+                *mut c_void,
+            ) -> *mut c_void = graphics.function("CGDataProviderCreateWithData").unwrap();
+            let image_create: unsafe extern "C" fn(
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+                *mut c_void,
+                u32,
+                *mut c_void,
+                *mut c_void,
+                bool,
+                i32,
+            ) -> *mut c_void = graphics.function("CGImageCreate").unwrap();
+            let context_create: unsafe extern "C" fn(
+                *mut u8,
+                usize,
+                usize,
+                usize,
+                usize,
+                *mut c_void,
+                u32,
+            ) -> *mut c_void = graphics.function("CGBitmapContextCreate").unwrap();
+            let draw: unsafe extern "C" fn(*mut c_void, Rect, *mut c_void) =
+                graphics.function("CGContextDrawImage").unwrap();
+            let release: unsafe extern "C" fn(*mut c_void) =
+                graphics.function("CFRelease").unwrap();
+
+            let srgb = graphics.symbol("kCGColorSpaceSRGB").unwrap();
+            let space = space_named(*srgb.cast::<*const c_char>());
+            let provider = provider_with(
+                std::ptr::null_mut(),
+                pixel.as_ptr(),
+                4,
+                std::ptr::null_mut(),
+            );
+            let image = image_create(
+                1,
+                1,
+                8,
+                32,
+                4,
+                space,
+                PRESENT_BITMAP_INFO,
+                provider,
+                std::ptr::null_mut(),
+                false,
+                0,
+            );
+            // Drawn into red, green, blue and alpha, in that order.
+            let mut out = [0u8; 4];
+            const PREMULTIPLIED_LAST: u32 = 1;
+            let context = context_create(out.as_mut_ptr(), 1, 1, 8, 4, space, PREMULTIPLIED_LAST);
+            let whole = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            };
+            draw(context, whole, image);
+            for object in [context, image, provider, space] {
+                release(object);
+            }
+            assert_eq!(out, [0xf0, 0x80, 0x10, 0xff], "orange, and opaque");
+        }
+    }
 
     #[test]
     fn a_mac_key_reaches_the_guest_as_the_key_in_the_same_place() {

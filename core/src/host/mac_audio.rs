@@ -25,11 +25,18 @@ const BUFFER_FRAMES: u32 = 512;
 /// Buffers the queue holds at once.
 const BUFFERS: usize = 3;
 
-/// Samples kept waiting before the oldest are dropped: two of the mix's
-/// blocks, about 93 ms. The mix hands over a block at a time, so this much
-/// comes and goes on its own; more than it means the run stalled and then
-/// caught up, and what a person hears catches up with it.
-const MOST_WAITING: usize = 2 * BLOCK_FRAMES * 2;
+/// Samples kept waiting before the oldest are dropped: eight of the mix's
+/// blocks, about 370 ms. The mix reaches the host a flip at a time, and a
+/// title playing a movie flips at its frame rate, fifteen a second: a block
+/// and a half at once, every 67 ms. Two blocks' room was too little and
+/// skipped; eight only drops what a run that stalled and caught up has
+/// piled up.
+const MOST_WAITING: usize = 8 * BLOCK_FRAMES * 2;
+
+/// Samples waited for before the device plays, and after it has run dry:
+/// three blocks, about 139 ms, which rides out a movie's bursts and a late
+/// flip without running dry again straight away.
+const ENOUGH_TO_PLAY: usize = 3 * BLOCK_FRAMES * 2;
 
 /// `AudioQueueDispose`'s "stop now, not after what is queued".
 const IMMEDIATELY: u8 = 1;
@@ -78,14 +85,21 @@ type Dispose = unsafe extern "C" fn(Queue, u8) -> i32;
 
 /// What the queue's thread and the run share: the samples waiting to be heard.
 struct Shared {
-    waiting: Mutex<VecDeque<i16>>,
+    waiting: Mutex<Waiting>,
     enqueue: EnqueueBuffer,
 }
 
 impl Shared {
-    fn waiting(&self) -> MutexGuard<'_, VecDeque<i16>> {
+    fn waiting(&self) -> MutexGuard<'_, Waiting> {
         self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The samples waiting to be heard, and whether enough have waited to play.
+#[derive(Debug, Default)]
+struct Waiting {
+    samples: VecDeque<i16>,
+    playing: bool,
 }
 
 /// The Mac's default output, playing the mix.
@@ -127,7 +141,7 @@ impl MacAudio {
             reserved: 0,
         };
         let shared = Box::into_raw(Box::new(Shared {
-            waiting: Mutex::new(VecDeque::new()),
+            waiting: Mutex::new(Waiting::default()),
             enqueue,
         }));
         let mut queue: Queue = std::ptr::null_mut();
@@ -229,23 +243,32 @@ unsafe extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut Buffer
 }
 
 /// Add samples to those waiting, dropping the oldest whole frames past
-/// [`MOST_WAITING`].
-fn add_waiting(waiting: &mut VecDeque<i16>, samples: &[i16]) {
-    waiting.extend(samples);
-    let over = waiting.len().saturating_sub(MOST_WAITING) & !1;
-    waiting.drain(..over);
+/// [`MOST_WAITING`], and letting the device play once
+/// [`ENOUGH_TO_PLAY`] have waited.
+fn add_waiting(waiting: &mut Waiting, samples: &[i16]) {
+    waiting.samples.extend(samples);
+    let over = waiting.samples.len().saturating_sub(MOST_WAITING) & !1;
+    waiting.samples.drain(..over);
+    if waiting.samples.len() >= ENOUGH_TO_PLAY {
+        waiting.playing = true;
+    }
 }
 
-/// Fill `bytes` with whole frames of what is waiting, and silence where there
-/// is not a whole frame to take, so the channels never swap.
-fn fill_frames(waiting: &mut VecDeque<i16>, bytes: &mut [u8]) {
+/// Fill `bytes` with whole frames of what is waiting, so the channels never
+/// swap. Until enough has waited, and from when it runs dry until enough has
+/// waited again, the device plays silence.
+fn fill_frames(waiting: &mut Waiting, bytes: &mut [u8]) {
     for frame in bytes.as_chunks_mut::<{ FRAME_BYTES as usize }>().0 {
-        let (left, right) = match (waiting.front(), waiting.get(1)) {
-            (Some(&left), Some(&right)) => {
-                waiting.drain(..2);
+        let samples = &mut waiting.samples;
+        let (left, right) = match (waiting.playing, samples.front(), samples.get(1)) {
+            (true, Some(&left), Some(&right)) => {
+                samples.drain(..2);
                 (left, right)
             }
-            _ => (0, 0),
+            _ => {
+                waiting.playing = false;
+                (0, 0)
+            }
         };
         frame[..2].copy_from_slice(&left.to_le_bytes());
         frame[2..].copy_from_slice(&right.to_le_bytes());
@@ -254,42 +277,68 @@ fn fill_frames(waiting: &mut VecDeque<i16>, bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_waiting, fill_frames, MacAudio, MOST_WAITING};
-    use std::collections::VecDeque;
+    use super::{add_waiting, fill_frames, MacAudio, Waiting, ENOUGH_TO_PLAY, MOST_WAITING};
 
     #[test]
-    fn a_buffer_takes_whole_frames_and_is_silent_past_them() {
-        let mut waiting = VecDeque::from([1, -1, 2, -2, 3]);
-        let mut bytes = [0xaa; 12];
+    fn the_device_waits_for_enough_to_play_and_again_after_running_dry() {
+        let mut waiting = Waiting::default();
+        let mut bytes = [0xaa; 8];
+        // Two frames waiting is not enough to start on.
+        add_waiting(&mut waiting, &[1, -1, 2, -2]);
         fill_frames(&mut waiting, &mut bytes);
-        assert_eq!(bytes, [1, 0, 0xff, 0xff, 2, 0, 0xfe, 0xff, 0, 0, 0, 0]);
-        assert_eq!(waiting, [3], "half a frame waits for its other half");
+        assert_eq!(bytes, [0; 8], "silence until enough has waited");
+        // Enough, less one sample: still not.
+        let more: Vec<i16> = (0..(ENOUGH_TO_PLAY - 5) as i16).collect();
+        add_waiting(&mut waiting, &more);
+        assert!(!waiting.playing);
+        add_waiting(&mut waiting, &[7, 7]);
+        assert!(waiting.playing);
+        fill_frames(&mut waiting, &mut bytes);
+        assert_eq!(
+            bytes,
+            [1, 0, 0xff, 0xff, 2, 0, 0xfe, 0xff],
+            "whole frames, in order"
+        );
+        // Played dry, it falls silent and waits again.
+        let mut rest = vec![0u8; ENOUGH_TO_PLAY * 2 + 8];
+        fill_frames(&mut waiting, &mut rest);
+        assert!(!waiting.playing);
+        add_waiting(&mut waiting, &[5, 5]);
+        fill_frames(&mut waiting, &mut bytes);
+        assert_eq!(bytes, [0; 8], "a dry device waits for enough again");
     }
 
     #[test]
     fn a_run_that_stalls_and_catches_up_drops_its_oldest_frames() {
-        let mut waiting = VecDeque::new();
+        let mut waiting = Waiting::default();
         let block: Vec<i16> = (0..2048).collect();
-        for _ in 0..5 {
+        for _ in 0..(MOST_WAITING / block.len() + 3) {
             add_waiting(&mut waiting, &block);
         }
-        assert_eq!(waiting.len(), MOST_WAITING);
-        assert_eq!(waiting.back(), Some(&2047), "the newest is kept");
-        assert_eq!(waiting.front().map(|s| s % 2), Some(0), "a frame's left");
+        assert_eq!(waiting.samples.len(), MOST_WAITING);
+        assert_eq!(waiting.samples.back(), Some(&2047), "the newest is kept");
+        assert_eq!(
+            waiting.samples.front().map(|s| s % 2),
+            Some(0),
+            "a frame's left"
+        );
     }
 
     #[test]
     #[ignore = "starts the real audio device; run with --ignored to check the queue"]
     fn the_device_pulls_what_it_is_given() {
         let audio = MacAudio::open().expect("the default output opens");
-        // Silence: a tenth of a second of it.
-        audio.play(&[0; 4410]);
+        // Silence: enough of it to start playing.
+        audio.play(&[0; ENOUGH_TO_PLAY]);
         // Safety: the shared state lives as long as `audio`.
         let shared = unsafe { &*audio.shared };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !shared.waiting().is_empty() && std::time::Instant::now() < deadline {
+        while !shared.waiting().samples.is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(shared.waiting().is_empty(), "the queue took the samples");
+        assert!(
+            shared.waiting().samples.is_empty(),
+            "the queue took the samples"
+        );
     }
 }

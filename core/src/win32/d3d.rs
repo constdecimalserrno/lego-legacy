@@ -1405,7 +1405,9 @@ fn draw(
             (place.x + place.width) as i32,
             (place.y + place.height) as i32,
         ],
+        first_row: 0,
     };
+    let mut list = Vec::new();
     for [i, j, k] in triangles {
         let (Some(a), Some(mut b), Some(mut c)) = (corner(i), corner(j), corner(k)) else {
             continue;
@@ -1442,14 +1444,10 @@ fn draw(
             continue;
         }
         for p in 1..polygon.len() - 1 {
-            raster::triangle(
-                &mut target,
-                [polygon[0], polygon[p], polygon[p + 1]],
-                texture.as_ref(),
-                &states,
-            );
+            list.push([polygon[0], polygon[p], polygon[p + 1]]);
         }
     }
+    raster::triangles(&mut target, &list, texture.as_ref(), &states);
     device_of(ctx.state, this).depth = depth;
     Ok(S_OK)
 }
