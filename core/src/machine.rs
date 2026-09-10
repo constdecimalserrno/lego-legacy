@@ -88,6 +88,8 @@ pub struct Machine {
     present_buffer: Vec<u8>,
     /// Calls the machine made into guest code, waiting to come back.
     continuations: Vec<(u32, u32)>,
+    /// Which parked calls are a modal dialog's turns, by their depth.
+    dialog_turns: Vec<usize>,
     /// The route this run replays, if it is replaying one.
     pub route: Option<crate::route::Route>,
     /// What this run did, if it is recording.
@@ -116,6 +118,7 @@ impl Machine {
             title,
             present_buffer: Vec::new(),
             continuations: Vec::new(),
+            dialog_turns: Vec::new(),
             input: Vec::new(),
             route: None,
             recording: None,
@@ -281,6 +284,7 @@ impl Machine {
                 break outcome;
             }
         };
+        self.mix(host);
         let finish = self.finish(outcome);
         log.line(&format!(
             "regs {}",
@@ -431,7 +435,13 @@ impl Machine {
             boundary: &mut self.boundary,
             call_guest: None,
         };
-        let answer = (shim.run)(&mut ctx, &args)?;
+        let answer = match (shim.run)(&mut ctx, &args) {
+            // A shim that stops the run cannot see who called it.
+            Err(Stop::NotWritten { what, caller: 0 }) => {
+                return Err(Stop::NotWritten { what, caller });
+            }
+            other => other?,
+        };
         let call_guest = ctx.call_guest.take();
 
         // The call returns: the return address comes off the stack, the
@@ -446,11 +456,15 @@ impl Machine {
         self.cpu.eip = caller;
         if let Some((function, args)) = call_guest {
             self.call_guest(function, &args, caller, answer)?;
+            if shim.name == "DialogBoxParamA" {
+                self.dialog_turns.push(self.continuations.len());
+            }
         }
         // A call across the boundary costs the declared clock what an
         // instruction costs, so a title that spends its time in shims still
         // advances its own clock.
         self.clock.retire();
+        self.charge_waiting();
         Ok(())
     }
 }
@@ -685,7 +699,20 @@ impl Machine {
             boundary: &mut self.boundary,
             call_guest: None,
         };
-        let answer = (method.run)(&mut ctx, this, &args)?;
+        let answer = match (method.run)(&mut ctx, this, &args) {
+            // A slot the header declares and nothing has written: the wall
+            // names it the way the interface does.
+            Err(Stop::NotWritten { what, .. }) if what.is_empty() => {
+                return Err(Stop::NotWritten {
+                    what: format!("{interface}::{}", method.name),
+                    caller,
+                });
+            }
+            Err(Stop::NotWritten { what, caller: 0 }) => {
+                return Err(Stop::NotWritten { what, caller });
+            }
+            other => other?,
+        };
         let call_guest = ctx.call_guest.take();
 
         // Every COM method is stdcall, and the object counts as an argument.
@@ -696,7 +723,81 @@ impl Machine {
             self.call_guest(function, &args, caller, answer)?;
         }
         self.clock.retire();
+        self.charge_waiting();
         Ok(())
+    }
+
+    /// A modal dialog's procedure has returned from a message.
+    ///
+    /// If it ended the dialog, `DialogBoxParamA` returns what it ended with.
+    /// If not, the dialog is still up, and the next thing that happens to it
+    /// is what a person pressing Enter does: the default button, `IDOK`.
+    fn dialog_turn(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let Some(dialog) = self.state.dialog.as_mut() else {
+            self.dialog_turns.pop();
+            return self.guest_returned(log);
+        };
+        dialog.turns += 1;
+        if let Some(result) = dialog.ended {
+            log.line(&format!("dialog ended with {result}"));
+            self.state.dialog = None;
+            self.dialog_turns.pop();
+            let (resume_at, _) = self.continuations.pop().unwrap_or((self.cpu.eip, 0));
+            self.cpu.r[EAX] = result;
+            self.cpu.eip = resume_at;
+            self.clock.retire();
+            return Ok(());
+        }
+        if dialog.turns > 1 {
+            return Err(Stop::NotWritten {
+                what: "USER32.dll!DialogBoxParamA: the dialog did not end when its default \
+                       button was pressed"
+                    .to_owned(),
+                caller: self.cpu.eip,
+            });
+        }
+        if dialog.disabled.contains(&1) {
+            return Err(Stop::NotWritten {
+                what: "USER32.dll!DialogBoxParamA: the dialog's default button is disabled, \
+                       so nobody can press it"
+                    .to_owned(),
+                caller: self.cpu.eip,
+            });
+        }
+        log.line("dialog default button pressed");
+        let (window, procedure) = (dialog.window, dialog.procedure);
+        // WM_COMMAND, IDOK clicked, from the button itself.
+        let args = [window, 0x0111, 1, crate::win32::user32::control(1)];
+        let esp = self.cpu.r[crate::cpu::ESP];
+        let mut at = esp;
+        for value in args.iter().rev() {
+            at = at.wrapping_sub(4);
+            self.arena.write_u32(at, *value).map_err(Stop::Fault)?;
+        }
+        at = at.wrapping_sub(4);
+        self.arena
+            .write_u32(at, crate::shim::RETURN_TO_MACHINE)
+            .map_err(Stop::Fault)?;
+        self.cpu.r[crate::cpu::ESP] = at;
+        self.cpu.eip = procedure;
+        self.clock.retire();
+        Ok(())
+    }
+
+    /// Hand the host every block of the mix the declared clock has passed.
+    /// Mixing runs whether or not a device takes the samples.
+    fn mix(&mut self, host: &mut dyn Host) {
+        for block in self.state.mixer.due(self.clock.nanos()) {
+            host.audio(&block);
+        }
+    }
+
+    /// What a call spent waiting becomes declared time.
+    fn charge_waiting(&mut self) {
+        let millis = std::mem::take(&mut self.state.waited_millis);
+        if millis > 0 {
+            self.clock.wait(millis);
+        }
     }
 }
 
@@ -733,6 +834,9 @@ impl Machine {
 
     /// The guest has returned from something the machine called.
     fn guest_returned(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        if self.dialog_turns.last() == Some(&self.continuations.len()) {
+            return self.dialog_turn(log);
+        }
         let Some((resume_at, answer)) = self.continuations.pop() else {
             return Err(Stop::NotWritten {
                 what: "a return into the machine with nothing waiting for it".to_owned(),
@@ -854,6 +958,7 @@ impl Machine {
             frame.depth
         ));
         host.pace(self.clock.nanos());
+        self.mix(host);
         for event in host.poll_input(self.flips) {
             log.line(&format!("input flip {} {event:?}", self.flips));
             self.input.push((self.flips, event));

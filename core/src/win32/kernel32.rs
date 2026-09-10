@@ -1096,6 +1096,8 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
     match ctx.open_guest_file(&path) {
         Some(bytes) => {
+            ctx.log
+                .at(crate::cli::Trace::Shims, &format!("file opened {path}"));
             ctx.state.last_error = 0;
             Ok(ctx.state.give(Object::File { path, bytes, at: 0 }))
         }
@@ -1276,7 +1278,7 @@ fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn sleep(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The declared clock moves; the host is not asked to wait, because
     // presentation is what paces a run (ADR-0003).
-    ctx.state.slept_millis += u64::from(args[0]);
+    ctx.state.waited_millis += u64::from(args[0]);
     Ok(0)
 }
 

@@ -24,6 +24,9 @@ pub enum FlipCost {
     Free,
     /// Drawing costs this many declared cycles per presented frame.
     Cycles(u64),
+    /// A presented frame waits for the declared display's next refresh, at
+    /// this many per second: what a flip does by default on real hardware.
+    Refresh(u64),
 }
 
 /// Instructions retired, and the declared time that implies.
@@ -65,13 +68,27 @@ impl Clock {
 
     /// Charge a presented frame at the title's declared flip cost.
     pub fn present(&mut self, cost: FlipCost) {
-        if let FlipCost::Cycles(c) = cost {
-            self.flip_cycles += c;
+        match cost {
+            FlipCost::Free => {}
+            FlipCost::Cycles(c) => self.flip_cycles += c,
+            FlipCost::Refresh(hz) => {
+                let period = DECLARED_HZ / hz.max(1);
+                let into = self.cycles() % period;
+                if into != 0 {
+                    self.flip_cycles += period - into;
+                }
+            }
         }
     }
 
+    /// Charge declared time the guest spent waiting: a sleep, or a blocking
+    /// wait for something due later on the declared clock.
+    pub fn wait(&mut self, millis: u64) {
+        self.flip_cycles += millis * DECLARED_HZ / 1000;
+    }
+
     /// Declared cycles spent: one per retired instruction, plus what drawing
-    /// was charged for.
+    /// and waiting were charged for.
     #[must_use]
     pub fn cycles(self) -> u64 {
         self.cursor + self.flip_cycles
@@ -115,5 +132,18 @@ mod tests {
         let mut priced = Clock::new();
         priced.present(FlipCost::Cycles(4_500_000));
         assert_eq!(priced.millis(), 10);
+    }
+
+    #[test]
+    fn a_frame_waiting_for_the_refresh_lands_on_the_next_one() {
+        let mut clock = Clock::new();
+        for _ in 0..1000 {
+            clock.retire();
+        }
+        clock.present(FlipCost::Refresh(60));
+        assert_eq!(clock.cycles(), DECLARED_HZ / 60);
+        // Already on a refresh: nothing more to wait for.
+        clock.present(FlipCost::Refresh(60));
+        assert_eq!(clock.cycles(), DECLARED_HZ / 60);
     }
 }

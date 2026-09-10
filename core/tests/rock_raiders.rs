@@ -12,7 +12,7 @@ use lego_legacy_core::{disc, testkit, Title};
 /// The title as its own crate declares it.
 const ROCK_RAIDERS: Title = Title {
     key: "lego-rock-raiders",
-    flip_cost: FlipCost::Free,
+    flip_cost: FlipCost::Refresh(60),
     image: EntryImage {
         disc_dir: "rock-raiders",
         pressing: "masterpiece-rock-raiders",
@@ -218,42 +218,112 @@ fn the_disc_reads_in_the_order_the_image_records() {
 }
 
 #[test]
-fn the_boot_path_builds_a_three_dimensional_device_and_starts_its_scene() {
+fn the_boot_path_plays_its_movies_and_goes_on_to_build_its_scene() {
     let Some(ran) = boot() else { return };
 
-    // Where this title stops today: its own C runtime is done, it has checked
-    // the disc, and it is asking DirectX for an input device.
-    // Where this title stops today. It moves as the boundary grows, and what
-    // is held here is that it got past its own C runtime, its disc check, its
-    // data, and DirectX's input.
-    // Where it stops today: building its scene, on a slot of a retained-mode
-    // frame that nobody has written yet. It moves as the boundary grows.
-    ran.assert_wall("IDirect3DRMFrame3 slot")
+    // Where this title stops today: past both its movies, building its scene
+    // on a retained-mode frame method nobody has written yet. It moves as the
+    // boundary grows; what is held is everything on the way.
+    ran.assert_wall("IDirect3DRMFrame3::")
         .assert_logged("dinput created")
         // It opens its keyboard before it makes its window; the pointer comes
         // later, through the window itself.
         .assert_logged("dinput keyboard")
-        // Its window, its sound, and the display it will draw on.
+        // Its window, its sound, and the display its own dialog chose.
         .assert_logged("window class LegoRR")
         .assert_logged("dsound created")
-        .assert_logged("display mode 320x200x16")
+        .assert_logged("display mode 640x480x16")
         .assert_logged("primary")
-        // The retained-mode device, drawing into a surface that is guest
-        // memory rather than a null pointer.
+        // The retained-mode device, and the device underneath it, which is
+        // what this title draws with.
         .assert_logged("d3drm created")
         .assert_logged("d3drm device")
-        // And the device underneath it, which is what this title draws with.
-        .assert_logged("d3d immediate device");
+        .assert_logged("d3d immediate device")
+        // Its two movies, played to the end.
+        .assert_logged("movie C:\\LEGORR\\Data\\avi\\lmi640.avi opened: 640x480 IV50, 279 frames")
+        .assert_logged("movie C:\\LEGORR\\Data\\avi\\intro.avi opened: 320x200 IV50, 3821 frames");
     assert!(
         !ran.log.contains("drawing into surface 0x00000000"),
-        "the device draws into real guest memory\nlog:\n{}",
-        ran.log
+        "the device draws into real guest memory"
     );
     assert!(
-        ran.finish.cursor > 10_000_000,
-        "the boot path loads this title's own data, which is tens of millions of \
-         instructions, not {}",
-        ran.finish.cursor
+        ran.finish.flips > 279 + 3821,
+        "both movies are presented frame by frame, not {} flips",
+        ran.finish.flips
+    );
+    // Four minutes and a half of movie is four minutes and a half of the
+    // declared clock, however fast the host decodes it.
+    assert!(
+        ran.finish.declared_millis > (279 * 1000 / 15) + (3821 * 1000 / 15),
+        "the movies take their own time on the declared clock, not {} ms",
+        ran.finish.declared_millis
+    );
+}
+
+#[test]
+fn the_screen_mode_is_the_one_the_titles_own_dialog_chose() {
+    let Some(ran) = boot() else { return };
+
+    // Its setup dialog lists the modes the declared machine has and selects
+    // the first; a person pressing Enter takes it. The title set 320x200 when
+    // its dialog was skipped, which is not what anyone playing it saw.
+    ran.assert_logged("ddraw modes: 640x480x16")
+        .assert_logged("dialog default button pressed")
+        .assert_logged("dialog ended with 1")
+        .assert_logged("display mode 640x480x16");
+}
+
+/// Where the first movie's first picture that is not all one colour lands.
+fn first_movie_picture(budget: u64) -> Option<(usize, testkit::Ran)> {
+    if !scratch() {
+        return None;
+    }
+    let ran =
+        testkit::try_run_headless(&ROCK_RAIDERS, &Cli::default(), budget).expect("the rip loads");
+    let first = ran
+        .host
+        .frames
+        .iter()
+        .position(|f| !f.is_uniform())
+        .unwrap_or_else(|| panic!("no picture within the budget\n{:?}", ran));
+    Some((first, ran))
+}
+
+#[test]
+fn the_first_movie_frame_is_presented_at_the_same_flip_on_every_run() {
+    // The logo's movie starts sixty million instructions in and plays through
+    // in a million more: the waiting is declared time, not instructions.
+    let budget = 61_000_000;
+    let Some((first, ran)) = first_movie_picture(budget) else {
+        return;
+    };
+    let Some((again, _)) = first_movie_picture(budget) else {
+        return;
+    };
+    assert_eq!(first, again, "the first picture moved between two runs");
+    ran.assert_logged("movie C:\\LEGORR\\Data\\avi\\lmi640.avi running");
+    let frame = &ran.host.frames[first];
+    assert_eq!((frame.width, frame.height), (640, 480));
+    assert!(
+        first < 279,
+        "the picture is one of the logo's frames, not flip {first}"
+    );
+}
+
+#[test]
+fn a_movies_sound_is_mixed_whether_or_not_anyone_is_listening() {
+    let Some((_, ran)) = first_movie_picture(61_000_000) else {
+        return;
+    };
+    // `--audio` is off, and the mix still runs: the logo's sound track is in
+    // the blocks the host was handed.
+    assert!(!ran.host.audio_blocks.is_empty(), "no audio was mixed");
+    assert!(
+        ran.host
+            .audio_blocks
+            .iter()
+            .any(|block| block.iter().any(|s| *s != 0)),
+        "the mix was silence"
     );
 }
 

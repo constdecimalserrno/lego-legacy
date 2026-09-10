@@ -539,27 +539,9 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn end_scene(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // The device's surface holds a finished frame.
-    if let Some(ComState::Device3D { surface }) = ctx.state.com(this).map(|o| o.state.clone()) {
-        if let Some(ComState::Surface {
-            pixels,
-            width,
-            height,
-            pitch,
-            depth,
-            ..
-        }) = ctx.state.com(surface).map(|o| o.state.clone())
-        {
-            ctx.state.present = Some(super::Present {
-                pixels,
-                width,
-                height,
-                pitch,
-                depth,
-            });
-        }
-    }
+fn end_scene(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // The scene is finished on the device's surface; the title presents it by
+    // flipping, which is where the machine counts a frame.
     Ok(S_OK)
 }
 

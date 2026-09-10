@@ -7,6 +7,7 @@
 use super::{Convention, Ctx, Object, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use std::collections::BTreeMap;
 
 pub const SHIMS: &[Shim] = &[
     Shim {
@@ -266,28 +267,28 @@ pub const SHIMS: &[Shim] = &[
         name: "EndDialog",
         args: 2,
         convention: Convention::Stdcall,
-        run: succeed,
+        run: end_dialog,
     },
     Shim {
         dll: "USER32",
         name: "GetDlgItem",
         args: 2,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: dialog_item,
     },
     Shim {
         dll: "USER32",
         name: "SendDlgItemMessageA",
         args: 5,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: send_dialog_item_message,
     },
     Shim {
         dll: "USER32",
         name: "SendMessageA",
         args: 4,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: send_message,
     },
     Shim {
         dll: "USER32",
@@ -340,10 +341,26 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "ClientToScreen",
+        args: 2,
+        convention: Convention::Stdcall,
+        // The title's window covers the declared screen from its corner, so
+        // a point in it is the same point on the screen.
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
+        name: "MoveWindow",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
         name: "EnableWindow",
         args: 2,
         convention: Convention::Stdcall,
-        run: succeed,
+        run: enable_window,
     },
     Shim {
         dll: "USER32",
@@ -617,13 +634,191 @@ fn message_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// machine hands out rather than an object it keeps.
 const _: Option<Object> = None;
 
-fn dialog_box(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // A modal dialog: the title is asking a person something. On this machine
-    // nobody is there to answer, so it is told the person accepted whatever it
-    // proposed, which is what a player pressing the default button would do.
-    ctx.log.line("dialog accepted without being shown");
-    // IDOK.
-    Ok(1)
+/// A modal dialog a title has up: its procedure, and what its controls hold.
+///
+/// Nothing is drawn. The title's own procedure is run, so it fills its
+/// controls and makes its own default choices, and then the default button is
+/// pressed, which is what a person pressing Enter does (#9).
+pub struct Dialog {
+    pub window: u32,
+    pub procedure: u32,
+    /// How many of the procedure's messages have come back.
+    pub turns: u32,
+    /// What the procedure ended the dialog with, once it has.
+    pub ended: Option<u32>,
+    lists: BTreeMap<u32, List>,
+    checks: BTreeMap<u32, u32>,
+    texts: BTreeMap<u32, String>,
+    /// Controls the procedure has disabled, which nobody can press.
+    pub disabled: std::collections::BTreeSet<u32>,
+}
+
+/// A list box's strings and which one is selected.
+#[derive(Default)]
+struct List {
+    items: Vec<String>,
+    selected: Option<usize>,
+}
+
+/// The dialog's own window handle.
+pub const DIALOG: u32 = 0x0001_0020;
+
+/// The handle a dialog's control with this identifier has.
+#[must_use]
+pub const fn control(id: u32) -> u32 {
+    0x0002_0000 | (id & 0xffff)
+}
+
+fn dialog_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // DialogBoxParamA(instance, template, parent, procedure, parameter).
+    if ctx.state.dialog.is_some() {
+        return Err(Stop::NotWritten {
+            what: "USER32.dll!DialogBoxParamA: a dialog on top of a dialog".to_owned(),
+            caller: 0,
+        });
+    }
+    ctx.log.line(&format!(
+        "dialog {:#x} up, procedure {:#010x}",
+        args[1], args[3]
+    ));
+    ctx.state.dialog = Some(Dialog {
+        window: DIALOG,
+        procedure: args[3],
+        turns: 0,
+        ended: None,
+        lists: BTreeMap::new(),
+        checks: BTreeMap::new(),
+        texts: BTreeMap::new(),
+        disabled: std::collections::BTreeSet::new(),
+    });
+    // WM_INITDIALOG, with the parameter the title passed.
+    ctx.call_guest = Some((args[3], vec![DIALOG, 0x0110, 0, args[4]]));
+    Ok(0)
+}
+
+fn enable_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Answers whether the window was disabled before.
+    let Some(dialog) = ctx.state.dialog.as_mut().filter(|_| args[0] >> 16 == 2) else {
+        return Ok(0);
+    };
+    let id = args[0] & 0xffff;
+    let was = if args[1] == 0 {
+        !dialog.disabled.insert(id)
+    } else {
+        dialog.disabled.remove(&id)
+    };
+    Ok(u32::from(was))
+}
+
+fn end_dialog(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    match ctx.state.dialog.as_mut() {
+        Some(dialog) if args[0] == dialog.window => {
+            dialog.ended = Some(args[1]);
+            Ok(1)
+        }
+        _ => Ok(0),
+    }
+}
+
+fn dialog_item(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(match &ctx.state.dialog {
+        Some(dialog) if args[0] == dialog.window => control(args[1]),
+        _ => 0,
+    })
+}
+
+fn send_dialog_item_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let window = dialog_item(ctx, &args[..2])?;
+    send_message(ctx, &[window, args[2], args[3], args[4]])
+}
+
+/// A message sent to a window and answered before the call returns.
+///
+/// A dialog's controls are answered here, as the control classes would: list
+/// boxes keep their strings and selection, buttons their check. The title's
+/// own window is not sent messages this way on the boot path; asking is a wall
+/// rather than a zero it would believe.
+fn send_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
+    let text = if matches!(message, 0x000c | 0x0180 | 0x018c) && lparam != 0 {
+        ctx.string(lparam).map_err(Stop::Fault)?
+    } else {
+        String::new()
+    };
+    let Some(dialog) = ctx.state.dialog.as_mut().filter(|_| window >> 16 == 2) else {
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!SendMessageA: message {message:#06x} to window {window:#x}"),
+            caller: 0,
+        });
+    };
+    let id = window & 0xffff;
+    const LB_ERR: u32 = 0xffff_ffff;
+    let list = dialog.lists.entry(id).or_default();
+    let answer = match message {
+        // WM_SETTEXT.
+        0x000c => {
+            dialog.texts.insert(id, text);
+            1
+        }
+        // BM_SETCHECK, BM_GETCHECK.
+        0x00f1 => {
+            dialog.checks.insert(id, wparam);
+            0
+        }
+        0x00f0 => dialog.checks.get(&id).copied().unwrap_or(0),
+        // LB_ADDSTRING: appended, because no list on the boot path is sorted.
+        0x0180 => {
+            list.items.push(text);
+            u32::try_from(list.items.len() - 1).unwrap_or(LB_ERR)
+        }
+        // LB_DELETESTRING: what is left, or an error when there was nothing.
+        0x0182 => {
+            let index = wparam as usize;
+            if index < list.items.len() {
+                list.items.remove(index);
+                list.selected = list.selected.filter(|s| *s < list.items.len());
+                u32::try_from(list.items.len()).unwrap_or(LB_ERR)
+            } else {
+                LB_ERR
+            }
+        }
+        // LB_SETCURSEL.
+        0x0186 => {
+            if (wparam as usize) < list.items.len() {
+                list.selected = Some(wparam as usize);
+                wparam
+            } else {
+                list.selected = None;
+                LB_ERR
+            }
+        }
+        // LB_GETCURSEL.
+        0x0188 => list
+            .selected
+            .and_then(|s| u32::try_from(s).ok())
+            .unwrap_or(LB_ERR),
+        // LB_GETTEXT.
+        0x0189 => match list.items.get(wparam as usize).cloned() {
+            Some(item) => {
+                let len = u32::try_from(item.len()).unwrap_or(0);
+                ctx.write_string(lparam, len + 1, &item)
+                    .map_err(Stop::Fault)?;
+                len
+            }
+            None => LB_ERR,
+        },
+        // LB_GETCOUNT.
+        0x018b => u32::try_from(list.items.len()).unwrap_or(LB_ERR),
+        _ => {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "USER32.dll!SendMessageA: message {message:#06x} to dialog control {id}"
+                ),
+                caller: 0,
+            })
+        }
+    };
+    Ok(answer)
 }
 
 fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

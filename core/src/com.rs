@@ -33,6 +33,36 @@ impl Interface {
     }
 }
 
+/// A slot the interface's own header declares and nothing here has needed.
+///
+/// Its name and argument count are taken from the header, so the table is the
+/// interface's real width and every slot sits where the guest expects it. What
+/// it does is not written: a guest that calls it stops the run, and the wall
+/// names the method rather than a slot number (#12).
+#[must_use]
+pub const fn wall(name: &'static str, args: u32) -> Method {
+    Method {
+        name,
+        args,
+        run: unwritten,
+    }
+}
+
+/// A written method, spelled on one line.
+#[must_use]
+pub const fn method(name: &'static str, args: u32, run: ComFn) -> Method {
+    Method { name, args, run }
+}
+
+/// What a declared but unwritten slot does. The machine fills in which
+/// interface and method it was, because only it knows which slot was called.
+fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Err(Stop::NotWritten {
+        what: String::new(),
+        caller: 0,
+    })
+}
+
 /// What every COM object answers in its first three slots.
 ///
 /// Reference counting is real but nothing is ever freed by it: the machine
@@ -98,6 +128,18 @@ const FACES: &[(&str, &str, &str)] = &[
         "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
         "IDirectDraw4",
     ),
+    // DirectX 3's DirectDraw, which a title's movie player asks for: the same
+    // slots as the newer one as far as it goes (#9).
+    (
+        "IDirectDraw4",
+        "b3a6f3e0-2b43-11cf-a2de-00aa00b93356",
+        "IDirectDraw4",
+    ),
+    (
+        "IDirectDraw",
+        "b3a6f3e0-2b43-11cf-a2de-00aa00b93356",
+        "IDirectDraw4",
+    ),
     // DirectX 6's retained mode, which the roster's titles ask for by name.
     (
         "IDirect3DRM",
@@ -130,6 +172,23 @@ const FACES: &[(&str, &str, &str)] = &[
     (
         "IDirectDrawSurface4",
         "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
+        "IDirectDrawSurface4",
+    ),
+    // A movie's video stream, asked for as the DirectDraw stream it is (#9).
+    (
+        "IDirectDrawMediaStream",
+        "f4104fce-9a70-11d0-8fde-00c04fd9189d",
+        "IDirectDrawMediaStream",
+    ),
+    // DirectX 5's surface, which is DirectX 6's without its last nine slots.
+    (
+        "IDirectDrawSurface",
+        "da044e00-69b2-11d0-a1d5-00aa00b8dfbb",
+        "IDirectDrawSurface4",
+    ),
+    (
+        "IDirectDrawSurface4",
+        "da044e00-69b2-11d0-a1d5-00aa00b8dfbb",
         "IDirectDrawSurface4",
     ),
 ];

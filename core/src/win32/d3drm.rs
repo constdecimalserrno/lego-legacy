@@ -5,7 +5,7 @@
 //! emulator's own rasteriser, into the guest's own surface.
 
 use super::{ComState, Convention, Ctx, Shim, State};
-use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, wall, Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -1222,56 +1222,100 @@ pub static VIEWPORT2: Interface = Interface {
 
 /// `IDirect3DRMFrame3`: a node in the scene a title builds.
 ///
-/// The eight methods every retained-mode object has are written; the rest of
-/// its table is bound to the boundary, so a call into one stops the run and
-/// names the slot rather than reading the heap and jumping into it. Filling
-/// them in is the next thing this title needs.
+/// All 89 slots, named and sized from the interface's own header. What is
+/// written is what this title has called; the rest stop the run by name.
 pub static FRAME3: Interface = Interface {
     name: "IDirect3DRMFrame3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: set_app_data,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: get_app_data,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
+        method("Clone", 3, unsupported),
+        method("AddDestroyCallback", 2, ok),
+        method("DeleteDestroyCallback", 2, ok),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, ok),
+        method("GetName", 2, ok),
+        method("GetClassName", 2, ok),
+        wall("AddChild", 1),
+        wall("AddLight", 1),
+        wall("AddMoveCallback", 3),
+        wall("AddTransform", 2),
+        wall("AddTranslation", 4),
+        wall("AddScale", 4),
+        wall("AddRotation", 5),
+        wall("AddVisual", 1),
+        wall("GetChildren", 1),
+        wall("GetColor", 0),
+        wall("GetLights", 1),
+        wall("GetMaterialMode", 0),
+        wall("GetParent", 1),
+        wall("GetPosition", 2),
+        wall("GetRotation", 3),
+        wall("GetScene", 1),
+        wall("GetSortMode", 0),
+        wall("GetTexture", 1),
+        wall("GetTransform", 2),
+        wall("GetVelocity", 3),
+        wall("GetOrientation", 3),
+        wall("GetVisuals", 2),
+        wall("InverseTransform", 2),
+        wall("Load", 5),
+        wall("LookAt", 3),
+        wall("Move", 1),
+        wall("DeleteChild", 1),
+        wall("DeleteLight", 1),
+        wall("DeleteMoveCallback", 2),
+        wall("DeleteVisual", 1),
+        wall("GetSceneBackground", 0),
+        wall("GetSceneBackgroundDepth", 1),
+        wall("GetSceneFogColor", 0),
+        wall("GetSceneFogEnable", 0),
+        wall("GetSceneFogMode", 0),
+        wall("GetSceneFogParams", 3),
+        wall("SetSceneBackground", 1),
+        wall("SetSceneBackgroundRGB", 3),
+        wall("SetSceneBackgroundDepth", 1),
+        wall("SetSceneBackgroundImage", 1),
+        wall("SetSceneFogEnable", 1),
+        wall("SetSceneFogColor", 1),
+        wall("SetSceneFogMode", 1),
+        wall("SetSceneFogParams", 3),
+        wall("SetColor", 1),
+        wall("SetColorRGB", 3),
+        wall("GetZbufferMode", 0),
+        wall("SetMaterialMode", 1),
+        wall("SetOrientation", 7),
+        wall("SetPosition", 4),
+        wall("SetRotation", 5),
+        method("SetSortMode", 1, set_sort_mode),
+        wall("SetTexture", 1),
+        wall("SetVelocity", 5),
+        wall("SetZbufferMode", 1),
+        wall("Transform", 2),
+        wall("GetBox", 1),
+        wall("GetBoxEnable", 0),
+        wall("GetAxes", 2),
+        wall("GetMaterial", 1),
+        wall("GetInheritAxes", 0),
+        wall("GetHierarchyBox", 1),
+        wall("SetBox", 1),
+        wall("SetBoxEnable", 1),
+        wall("SetAxes", 6),
+        wall("SetInheritAxes", 1),
+        wall("SetMaterial", 1),
+        wall("SetQuaternion", 2),
+        wall("RayPick", 4),
+        wall("Save", 3),
+        wall("TransformVectors", 4),
+        wall("InverseTransformVectors", 4),
+        wall("SetTraversalOptions", 1),
+        wall("GetTraversalOptions", 1),
+        wall("SetSceneFogMethod", 1),
+        wall("GetSceneFogMethod", 1),
+        wall("SetMaterialOverride", 1),
+        wall("GetMaterialOverride", 1),
     ],
 };
 
@@ -1361,7 +1405,9 @@ fn make_object(ctx: &mut Ctx<'_>, out: u32) -> Result<u32, Stop> {
 }
 
 fn create_frame(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateFrame(parent, out).
     let object = State::make_com(ctx, &FRAME3, ComState::None).map_err(Stop::Fault)?;
+    ctx.state.scene.add(object, args[0]);
     if args[1] != 0 {
         ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     }
@@ -1508,27 +1554,34 @@ fn render(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn update(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // The device's surface is finished with: what is on it is a frame.
-    let Some(ComState::Device3D { surface }) = ctx.state.com(this).map(|o| o.state.clone()) else {
-        return Ok(S_OK);
-    };
-    if let Some(ComState::Surface {
-        pixels,
-        width,
-        height,
-        pitch,
-        depth,
-        ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
-    {
-        ctx.state.present = Some(super::Present {
-            pixels,
-            width,
-            height,
-            pitch,
-            depth,
-        });
-    }
+fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // Retained mode brings the device's surface up to date with its
+    // viewports. That is drawing, not presenting: the frame reaches the screen
+    // when the title flips, and counting this as well had every frame
+    // presented twice.
     Ok(S_OK)
+}
+
+/// A frame the guest holds, to be changed.
+///
+/// A pointer this machine never made a frame for is a guest bug or a face
+/// nobody wrote; either way the answer is the interface's own refusal rather
+/// than a frame invented on the spot.
+fn with_frame(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    change: impl FnOnce(&mut super::scene::Frame),
+) -> Result<u32, Stop> {
+    match ctx.state.scene.frame_mut(this) {
+        Some(frame) => {
+            change(frame);
+            Ok(S_OK)
+        }
+        // D3DRMERR_BADOBJECT.
+        None => Ok(0x8876_030d),
+    }
+}
+
+fn set_sort_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.sort_mode = args[0])
 }

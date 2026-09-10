@@ -3,6 +3,7 @@
 //! Nothing here is keyed to a title. A title crate supplies a [`Title`] and
 //! calls [`run::main`]; everything else in a run happens through this crate.
 
+pub mod avi;
 pub mod cabinet;
 pub mod cli;
 pub mod clock;
@@ -14,6 +15,7 @@ pub mod hash;
 pub mod host;
 pub mod inflate;
 pub mod install;
+pub mod iv50;
 pub mod machine;
 pub mod pe;
 pub mod repl;
@@ -23,6 +25,7 @@ pub mod run;
 pub mod runlog;
 pub mod shim;
 pub mod snap;
+pub mod sound;
 pub mod stub;
 pub mod testkit;
 pub mod title;

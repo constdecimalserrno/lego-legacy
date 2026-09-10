@@ -12,10 +12,12 @@ use std::process::ExitCode;
 /// its reason, never measured from the host.
 pub const ROCK_RAIDERS: Title = Title {
     key: ENTRY.key,
-    // UNMEASURED. This title's drawing has not been priced yet, and a made-up
-    // price would be a fact the clock spends. #9 measures it, against the first
-    // movie frame this title presents.
-    flip_cost: FlipCost::Free,
+    // A flip waits for the declared display's next refresh, which is what
+    // DirectDraw's Flip does unless a title asks otherwise, and this one does
+    // not (#9). Sixty a second is what GetMonitorFrequency declares. Its movies
+    // pace themselves by waiting for each frame, and every frame they ask for
+    // lands on a refresh.
+    flip_cost: FlipCost::Refresh(60),
     // What this title is, rather than what machine it runs on: the launcher
     // needs the same facts, so they live in the roster and are read from here.
     image: ENTRY.image,

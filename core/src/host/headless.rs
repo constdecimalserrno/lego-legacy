@@ -7,13 +7,24 @@
 use super::{sys, Frame, Host, HostError, Input, Mapping};
 use std::time::Instant;
 
-/// One frame this host was asked to present, kept as its own bytes.
+/// One frame this host was asked to present.
 pub struct Presented {
     pub flip: u64,
     pub width: u32,
     pub height: u32,
+    /// The frame's own bytes, for the first [`KEPT`] frames and the latest
+    /// one; empty for the rest.
     pub pixels: Vec<u8>,
+    uniform: bool,
 }
+
+/// How many frames from the start of a run keep their pixels.
+///
+/// A run that plays its movies presents thousands of 640x480 frames, and
+/// keeping every one would hold gigabytes for tests that look at a handful.
+// ponytail: the first frames and the latest. A test that needs a frame from
+// the middle of a long run would need a way to say which.
+pub const KEPT: usize = 16;
 
 impl Presented {
     /// Whether every pixel in the frame is the same. A uniform frame is what a
@@ -21,11 +32,7 @@ impl Presented {
     /// not one.
     #[must_use]
     pub fn is_uniform(&self) -> bool {
-        self.pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| p == &self.pixels[..4])
+        self.uniform
     }
 }
 
@@ -89,11 +96,23 @@ impl Host for Headless {
             let end = start + (frame.width * 4) as usize;
             pixels.extend_from_slice(&frame.pixels[start..end]);
         }
+        let uniform = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[..] == pixels[..4]);
+        // The latest frame keeps its pixels until another replaces it.
+        if self.frames.len() > KEPT {
+            if let Some(previous) = self.frames.last_mut() {
+                previous.pixels = Vec::new();
+            }
+        }
         self.frames.push(Presented {
             flip: self.flips,
             width: frame.width,
             height: frame.height,
             pixels,
+            uniform,
         });
         self.flips += 1;
     }

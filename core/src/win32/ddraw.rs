@@ -85,7 +85,7 @@ pub static DIRECT_DRAW: Interface = Interface {
         Method {
             name: "EnumDisplayModes",
             args: 4,
-            run: ok,
+            run: enum_display_modes,
         },
         Method {
             name: "EnumSurfaces",
@@ -300,7 +300,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         Method {
             name: "SetColorKey",
             args: 2,
-            run: ok,
+            run: set_color_key,
         },
         Method {
             name: "SetOverlayPosition",
@@ -442,7 +442,7 @@ pub static DIRECT_DRAW4: Interface = Interface {
         Method {
             name: "EnumDisplayModes",
             args: 4,
-            run: ok,
+            run: enum_display_modes2,
         },
         Method {
             name: "EnumSurfaces",
@@ -682,7 +682,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         Method {
             name: "SetColorKey",
             args: 2,
-            run: ok,
+            run: set_color_key,
         },
         Method {
             name: "SetOverlayPosition",
@@ -843,7 +843,7 @@ fn vertical_blank(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
 }
 
 /// Write a DDSURFACEDESC the way a guest reads one back.
-fn write_surface_desc(
+pub(crate) fn write_surface_desc(
     ctx: &mut Ctx<'_>,
     at: u32,
     width: u32,
@@ -909,22 +909,12 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     };
     let depth = screen_depth;
 
+    let object = make_surface(ctx, width, height, depth, primary)?;
     let pitch = width * depth.div_ceil(8);
-    let pixels = ctx.state.heap.alloc(pitch * height.max(1));
-    let object = State::make_com(
-        ctx,
-        &DIRECT_DRAW_SURFACE,
-        ComState::Surface {
-            pixels,
-            width,
-            height,
-            pitch,
-            depth,
-            primary,
-            back: 0,
-        },
-    )
-    .map_err(Stop::Fault)?;
+    let pixels = match ctx.state.com(object).map(|o| &o.state) {
+        Some(ComState::Surface { pixels, .. }) => *pixels,
+        _ => 0,
+    };
 
     // A surface asked for with a back buffer gets one, attached to it.
     let back_count = if flags & 0x20 != 0 {
@@ -961,6 +951,36 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
         if primary { " primary" } else { "" }
     ));
     Ok(S_OK)
+}
+
+/// A surface of guest memory, as `CreateSurface` makes one and anything
+/// else that hands a guest a surface of its own.
+///
+/// # Errors
+/// When the heap is exhausted or the write faults.
+pub(crate) fn make_surface(
+    ctx: &mut Ctx<'_>,
+    width: u32,
+    height: u32,
+    depth: u32,
+    primary: bool,
+) -> Result<u32, Stop> {
+    let pitch = width * depth.div_ceil(8);
+    let pixels = ctx.state.heap.alloc(pitch * height.max(1));
+    State::make_com(
+        ctx,
+        &DIRECT_DRAW_SURFACE,
+        ComState::Surface {
+            pixels,
+            width,
+            height,
+            pitch,
+            depth,
+            primary,
+            back: 0,
+        },
+    )
+    .map_err(Stop::Fault)
 }
 
 fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool, u32)> {
@@ -1067,58 +1087,132 @@ fn flip(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Blt(destination rect, source, source rect, flags, effects). Only the
-    // colour fill and the whole-surface copy a title's front end uses.
+    // Blt(destination rect, source, source rect, flags, effects).
+    const DDBLT_ASYNC: u32 = 0x0000_0200;
+    const DDBLT_COLORFILL: u32 = 0x0000_0400;
+    const DDBLT_KEYSRC: u32 = 0x0000_8000;
+    const DDBLT_WAIT: u32 = 0x0100_0000;
     let flags = args[3];
+    if flags & !(DDBLT_ASYNC | DDBLT_COLORFILL | DDBLT_KEYSRC | DDBLT_WAIT) != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface::Blt: flags {flags:#x}"),
+            caller: 0,
+        });
+    }
     let Some((pixels, width, height, pitch, depth, _, _)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
+    let to = rect(ctx, args[0], width, height)?;
     // DDBLT_COLORFILL: the fill value is the effects block's own first word.
-    if flags & 0x0400 != 0 {
+    if flags & DDBLT_COLORFILL != 0 {
         let colour = if args[4] == 0 {
             0
         } else {
             ctx.mem.read_u32(args[4] + 0x14).map_err(Stop::Fault)?
         };
-        let (x0, y0, x1, y1) = rect(ctx, args[0], width, height)?;
-        fill(ctx, pixels, pitch, depth, (x0, y0, x1, y1), colour)?;
+        fill(ctx, pixels, pitch, depth, to, colour)?;
         return Ok(S_OK);
     }
-    if let Some((source, _, _, source_pitch, _, _, _)) = surface_of(ctx, args[1]) {
-        let (x0, y0, x1, y1) = rect(ctx, args[0], width, height)?;
-        copy(
-            ctx,
-            source,
-            source_pitch,
-            pixels,
-            pitch,
-            depth,
-            (x0, y0, x1, y1),
-        )?;
+    let Some((source, source_w, source_h, source_pitch, source_depth, _, _)) =
+        surface_of(ctx, args[1])
+    else {
+        return Ok(S_OK);
+    };
+    if source_depth != depth {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface::Blt: from {source_depth} bits to {depth}"),
+            caller: 0,
+        });
     }
+    let from = rect(ctx, args[2], source_w, source_h)?;
+    let key = if flags & DDBLT_KEYSRC != 0 {
+        ctx.state.color_keys.get(&source).copied()
+    } else {
+        None
+    };
+    transfer(
+        ctx,
+        Pixels {
+            at: source,
+            pitch: source_pitch,
+        },
+        from,
+        Pixels { at: pixels, pitch },
+        to,
+        depth,
+        key,
+    )?;
     Ok(S_OK)
 }
 
 fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // BltFast(x, y, source, source rect, flags).
+    const DDBLTFAST_SRCCOLORKEY: u32 = 0x1;
+    const DDBLTFAST_WAIT: u32 = 0x10;
+    let flags = args[4];
+    if flags & !(DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT) != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface::BltFast: flags {flags:#x}"),
+            caller: 0,
+        });
+    }
     let Some((pixels, width, height, pitch, depth, _, _)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     let Some((source, source_w, source_h, source_pitch, _, _, _)) = surface_of(ctx, args[2]) else {
         return Ok(S_OK);
     };
+    let from = rect(ctx, args[3], source_w, source_h)?;
     let (x, y) = (args[0].min(width), args[1].min(height));
-    let w = source_w.min(width - x);
-    let h = source_h.min(height - y);
-    copy(
+    // What lands off the destination's edge is clipped away.
+    let w = (from.2 - from.0).min(width - x);
+    let h = (from.3 - from.1).min(height - y);
+    let key = if flags & DDBLTFAST_SRCCOLORKEY != 0 {
+        ctx.state.color_keys.get(&source).copied()
+    } else {
+        None
+    };
+    transfer(
         ctx,
-        source,
-        source_pitch,
-        pixels,
-        pitch,
-        depth,
+        Pixels {
+            at: source,
+            pitch: source_pitch,
+        },
+        (from.0, from.1, from.0 + w, from.1 + h),
+        Pixels { at: pixels, pitch },
         (x, y, x + w, y + h),
+        depth,
+        key,
     )?;
+    Ok(S_OK)
+}
+
+fn set_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetColorKey(flags, key). The source key is what a keyed blit leaves
+    // out; it belongs to the pixels, which every face of a surface shares.
+    const DDCKEY_SRCBLT: u32 = 0x8;
+    let Some((pixels, ..)) = surface_of(ctx, this) else {
+        return Ok(S_OK);
+    };
+    if args[0] & !DDCKEY_SRCBLT != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface::SetColorKey: flags {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    if args[1] == 0 {
+        ctx.state.color_keys.remove(&pixels);
+    } else {
+        let low = ctx.mem.read_u32(args[1]).map_err(Stop::Fault)?;
+        let high = ctx.mem.read_u32(args[1] + 4).map_err(Stop::Fault)?;
+        if low != high {
+            return Err(Stop::NotWritten {
+                what: format!("IDirectDrawSurface::SetColorKey: a range {low:#x}..{high:#x}"),
+                caller: 0,
+            });
+        }
+        ctx.state.color_keys.insert(pixels, low);
+    }
     Ok(S_OK)
 }
 
@@ -1131,12 +1225,9 @@ fn rect(ctx: &Ctx<'_>, at: u32, width: u32, height: u32) -> Result<(u32, u32, u3
     let top = ctx.mem.read_u32(at + 4).map_err(Stop::Fault)?;
     let right = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
     let bottom = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
-    Ok((
-        left.min(width),
-        top.min(height),
-        right.min(width),
-        bottom.min(height),
-    ))
+    let right = right.min(width);
+    let bottom = bottom.min(height);
+    Ok((left.min(right), top.min(bottom), right, bottom))
 }
 
 fn fill(
@@ -1159,28 +1250,100 @@ fn fill(
     Ok(())
 }
 
-fn copy(
-    ctx: &mut Ctx<'_>,
-    source: u32,
-    source_pitch: u32,
-    destination: u32,
+/// Where a surface's pixels are, and how long its rows are.
+#[derive(Clone, Copy)]
+struct Pixels {
+    at: u32,
     pitch: u32,
+}
+
+/// Copy one rectangle into another, stretching when their sizes differ.
+///
+/// A stretch takes the nearest source pixel, which is what DirectDraw's own
+/// software blitter does for a surface in system memory. A source colour key
+/// leaves the pixels that match it untouched.
+fn transfer(
+    ctx: &mut Ctx<'_>,
+    source: Pixels,
+    (sx0, sy0, sx1, sy1): (u32, u32, u32, u32),
+    destination: Pixels,
+    (dx0, dy0, dx1, dy1): (u32, u32, u32, u32),
     depth: u32,
-    (x0, y0, x1, y1): (u32, u32, u32, u32),
+    key: Option<u32>,
 ) -> Result<(), Stop> {
-    let bytes = depth.div_ceil(8);
-    let width = (x1.saturating_sub(x0)) * bytes;
-    for (n, y) in (y0..y1).enumerate() {
-        let row = ctx
+    let bytes = depth.div_ceil(8) as usize;
+    let (sw, sh) = (sx1 - sx0, sy1 - sy0);
+    let (dw, dh) = (dx1 - dx0, dy1 - dy0);
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return Ok(());
+    }
+    let key = key.map(|k| k.to_le_bytes());
+    let mut row = vec![0u8; dw as usize * bytes];
+    for y in 0..dh {
+        let sy = sy0 + y * sh / dh;
+        let line = ctx
             .mem
-            .slice(source + (n as u32) * source_pitch, width as usize)
+            .slice(source.at + sy * source.pitch, (sx1 as usize) * bytes)
             .map_err(Stop::Fault)?
             .to_vec();
-        ctx.mem
-            .write(destination + y * pitch + x0 * bytes, &row)
-            .map_err(Stop::Fault)?;
+        let at = destination.at + (dy0 + y) * destination.pitch + dx0 * bytes as u32;
+        if key.is_some() {
+            let len = row.len();
+            row.copy_from_slice(ctx.mem.slice(at, len).map_err(Stop::Fault)?);
+        }
+        for x in 0..dw as usize {
+            let sx = (sx0 as usize + x * sw as usize / dw as usize) * bytes;
+            let pixel = &line[sx..sx + bytes];
+            if key.is_some_and(|k| k[..bytes] == *pixel) {
+                continue;
+            }
+            row[x * bytes..(x + 1) * bytes].copy_from_slice(pixel);
+        }
+        ctx.mem.write(at, &row).map_err(Stop::Fault)?;
     }
     Ok(())
+}
+
+fn enum_display_modes(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    enumerate_modes(ctx, args, 108)
+}
+
+/// DirectX 6's spelling, whose callback is handed the larger descriptor.
+fn enum_display_modes2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    enumerate_modes(ctx, args, 124)
+}
+
+/// EnumDisplayModes(flags, filter, context, callback): the declared machine's
+/// screen modes, which are the title crate's own, handed to the guest's
+/// callback.
+fn enumerate_modes(ctx: &mut Ctx<'_>, args: &[u32], size: u32) -> Result<u32, Stop> {
+    let (context, callback) = (args[2], args[3]);
+    let modes = ctx.title.declared.modes;
+    // ponytail: one callback per enumeration, which is all a machine that
+    // declares one mode needs. A second declared mode needs the callback's
+    // answer read between calls, the way a dialog's turns are.
+    let [(width, height, depth)] = modes else {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirectDraw::EnumDisplayModes: {} declared modes, and only one is handed out",
+                modes.len()
+            ),
+            caller: 0,
+        });
+    };
+    let desc = ctx.state.heap.alloc(size);
+    ctx.mem
+        .write(desc, &vec![0; size as usize])
+        .map_err(Stop::Fault)?;
+    write_surface_desc(ctx, desc, *width, *height, *depth, 0)?;
+    ctx.mem.write_u32(desc, size).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "ddraw modes: {width}x{height}x{depth}, the only one declared"
+    ));
+    if callback != 0 {
+        ctx.call_guest = Some((callback, vec![desc, context]));
+    }
+    Ok(S_OK)
 }
 
 fn create_palette(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {

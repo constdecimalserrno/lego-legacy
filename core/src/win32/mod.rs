@@ -6,6 +6,7 @@
 //! the real library had been there.
 
 pub mod advapi32;
+pub mod amstream;
 pub mod avifile;
 pub mod d3d;
 pub mod d3drm;
@@ -15,7 +16,10 @@ pub mod dsound;
 pub mod gdi32;
 pub mod kernel32;
 pub mod msvcrt;
+pub mod ole32;
+pub mod scene;
 pub mod user32;
+pub mod winmm;
 
 use crate::cpu::{Cpu, Stop};
 use crate::guest::heap::Heap;
@@ -88,8 +92,10 @@ pub struct State {
     pub current_directory: String,
     /// The label on the disc in the declared machine's drive.
     pub volume_label: String,
-    /// How long the guest has asked to wait for, in declared milliseconds.
-    pub slept_millis: u64,
+    /// Declared time the guest spent waiting inside the last call: a sleep,
+    /// or a blocking wait for a movie frame. The machine charges it to the
+    /// declared clock when the call returns (ADR-0003).
+    pub waited_millis: u64,
     /// How many files the declared install tree holds.
     pub installed_files: usize,
     /// The window procedure the guest registered, if it has.
@@ -102,6 +108,8 @@ pub struct State {
     pub pointer: (i32, i32),
     /// What the screen is, as the guest last set it.
     pub display_mode: (u32, u32, u32),
+    /// Each surface's source colour key, by where its pixels are.
+    pub color_keys: BTreeMap<u32, u32>,
     /// The palette the screen is showing through, if any.
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
@@ -110,14 +118,22 @@ pub struct State {
     pub current_viewport: u32,
     /// How many times a viewport has been cleared.
     pub cleared: u64,
-    /// How many movies the machine could not decode.
-    pub movies_refused: u64,
+    /// Every sound playing, mixed on the declared clock.
+    pub mixer: crate::sound::Mixer,
+    /// The multimedia streams a title has made, by the object it holds.
+    pub players: BTreeMap<u32, amstream::Player>,
+    /// How many movie frames have been put in a guest surface.
+    pub movie_frames: u64,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
     pub mouse_delta: (i32, i32),
     /// Whether the pointer's button is down.
     pub mouse_down: bool,
+    /// The modal dialog a title has up, while it has one.
+    pub dialog: Option<user32::Dialog>,
+    /// The scene retained mode is building.
+    pub scene: scene::Scene,
     /// COM objects, by the guest pointer that names them.
     com: BTreeMap<u32, ComObject>,
     /// Which vtable an interface's methods live behind, once one is made.
@@ -153,21 +169,26 @@ impl State {
             last_error: 0,
             current_directory: String::new(),
             volume_label: String::new(),
-            slept_millis: 0,
+            waited_millis: 0,
+            players: BTreeMap::new(),
+            mixer: crate::sound::Mixer::default(),
+            movie_frames: 0,
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
             quit_asked: false,
             pointer: (0, 0),
             display_mode: (640, 480, 16),
+            color_keys: BTreeMap::new(),
             palette: 0,
             present: None,
             current_viewport: 0,
             cleared: 0,
-            movies_refused: 0,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_down: false,
+            dialog: None,
+            scene: scene::Scene::default(),
             com: BTreeMap::new(),
             vtables: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -428,6 +449,12 @@ pub enum ComState {
     },
     /// A palette's own 256 entries, in guest memory.
     Palette { store: u32 },
+    /// A multimedia stream: a movie player, whose state is in the players.
+    MultiMediaStream,
+    /// One stream of a player's movie.
+    MediaStream { owner: u32, video: bool },
+    /// A sample that a player's video is updated into: the surface it wraps.
+    StreamSample { owner: u32, surface: u32 },
     /// A three-dimensional device, and the surface it draws into.
     Device3D { surface: u32 },
     /// A viewport: which device, where on it, and what it clears to.
@@ -461,6 +488,24 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Read a NUL-terminated UTF-16 string the guest passed.
+    ///
+    /// # Errors
+    /// When the address is outside the arena.
+    pub fn wide_string(&self, addr: u32) -> Result<String, Fault> {
+        let mut units = Vec::new();
+        let mut at = addr;
+        while addr != 0 && units.len() < 0x1_0000 {
+            let unit = u16::from_le_bytes(self.mem.slice(at, 2)?.try_into().unwrap_or([0, 0]));
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+            at += 2;
+        }
+        Ok(String::from_utf16_lossy(&units))
+    }
+
     /// Read a NUL-terminated string the guest passed.
     ///
     /// # Errors
@@ -566,6 +611,7 @@ pub fn interfaces() -> Vec<&'static crate::com::Interface> {
     all.extend_from_slice(ddraw::INTERFACES);
     all.extend_from_slice(d3drm::INTERFACES);
     all.extend_from_slice(d3d::INTERFACES);
+    all.extend_from_slice(amstream::INTERFACES);
     all
 }
 
@@ -602,6 +648,8 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         gdi32::SHIMS,
         d3drm::SHIMS,
         avifile::SHIMS,
+        ole32::SHIMS,
+        winmm::SHIMS,
     ] {
         if let Some(shim) = table
             .iter()
