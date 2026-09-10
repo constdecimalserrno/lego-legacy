@@ -1212,14 +1212,8 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let (_, _, width, height) = viewport_rect(ctx, this);
     super::d3d::set_device_transform(ctx.state, immediate, VIEW, &camera_world);
-    super::d3d::set_device_transform(
-        ctx.state,
-        immediate,
-        PROJECTION,
-        &view.perspective(width, height),
-    );
+    super::d3d::set_device_transform(ctx.state, immediate, PROJECTION, &view.perspective());
     super::d3d::set_device_viewport(ctx.state, immediate, under);
     let visuals = visits.len();
     ctx.log.at(crate::cli::Trace::Shims, || {
@@ -1283,7 +1277,10 @@ fn collect_lights(
             light.attenuation[1].unwrap_or(0.0),
             light.attenuation[2].unwrap_or(0.0),
         ];
-        let half_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle) / 2.0) as f32;
+        // An umbra and a penumbra are each the angle off the light's axis to
+        // the cone's edge: as half the cone's width, Rock Raiders' lamps
+        // light a narrow circle and leave its level's walls dark.
+        let cone_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle)) as f32;
         let converted = match light.kind {
             0 => Light::Ambient { colour },
             // ponytail: a parallel point light shines as a point light does,
@@ -1301,8 +1298,8 @@ fn collect_lights(
                 direction,
                 range,
                 attenuation,
-                inner: half_cos(light.umbra.unwrap_or(0.4)),
-                outer: half_cos(light.penumbra.unwrap_or(0.8)),
+                inner: cone_cos(light.umbra.unwrap_or(0.4)),
+                outer: cone_cos(light.penumbra.unwrap_or(0.8)),
             },
             3 => Light::Directional { colour, direction },
             other => {
@@ -2331,11 +2328,10 @@ fn viewport_set_projection(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result
     })
 }
 
-fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    with_view(ctx, this, |v| {
-        v.uniform_scaling = Some(args[0] != 0);
-        S_OK
-    })
+fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // SetUniformScaling(on): how the view is scaled when a viewport is
+    // resized, and a viewport here is never resized: nothing to keep.
+    with_view(ctx, this, |_| S_OK)
 }
 
 fn viewport_set_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {

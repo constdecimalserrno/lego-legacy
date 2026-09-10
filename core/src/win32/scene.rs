@@ -110,7 +110,6 @@ pub struct View {
     pub plane: [f32; 4],
     /// D3DRMPROJECT_PERSPECTIVE, or one of the others.
     pub projection: u32,
-    pub uniform_scaling: Option<bool>,
 }
 
 impl Default for View {
@@ -120,35 +119,24 @@ impl Default for View {
             back: 100.0,
             plane: [-0.5, 0.5, -0.5, 0.5],
             projection: 0,
-            uniform_scaling: None,
         }
     }
 }
 
 impl View {
-    /// The projection a perspective viewport of this size draws through, in
-    /// Direct3D's convention: the front plane's edges go to -1 and 1 across
-    /// and up, and depth from the front plane to the back one goes 0 to 1.
+    /// The projection a perspective viewport draws through, in Direct3D's
+    /// convention: the front plane's edges go to -1 and 1 across and up, and
+    /// depth from the front plane to the back one goes 0 to 1.
     ///
-    /// With uniform scaling, which retained mode starts with, the plane's
-    /// wider extent is the viewport's wider side and the other is cut to the
-    /// viewport's shape, so a square in the scene is square on the screen.
-    // ponytail: that the wider side keeps the plane is read from what
-    // retained mode's documentation says uniform scaling is for, not measured
-    // against native retained mode.
+    /// The plane goes to the viewport's own edges whatever its shape, so a
+    /// square field on a 640 by 480 viewport is wider than it is tall. That
+    /// is what Rock Raiders' levels are drawn for: cut to the viewport's
+    /// shape instead, as uniform scaling reads in retained mode's
+    /// documentation, a raider stands a third too tall and the level's edges
+    /// fall outside what the title works out it can see, and are left black.
     #[must_use]
-    pub fn perspective(&self, width: u32, height: u32) -> Matrix {
-        let [mut left, mut right, mut bottom, mut top] = self.plane;
-        if self.uniform_scaling != Some(false) && width > 0 && height > 0 {
-            let aspect = height as f32 / width as f32;
-            if aspect < 1.0 {
-                bottom *= aspect;
-                top *= aspect;
-            } else {
-                left /= aspect;
-                right /= aspect;
-            }
-        }
+    pub fn perspective(&self) -> Matrix {
+        let [left, right, bottom, top] = self.plane;
         let (n, f) = (self.front, self.back);
         let q = f / (f - n);
         [
@@ -171,7 +159,7 @@ impl View {
     #[must_use]
     pub fn to_screen(&self, rect: Rect, camera: &Matrix, point: [f32; 3]) -> Option<[f32; 4]> {
         let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
-        let clip_from_world = multiply(&invert(camera)?, &self.perspective(rect.2, rect.3));
+        let clip_from_world = multiply(&invert(camera)?, &self.perspective());
         let [cx, cy, cz, cw] =
             super::pipeline::project(&clip_from_world, [point[0], point[1], point[2], 1.0]);
         Some([
@@ -190,7 +178,7 @@ impl View {
         let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
         let w = screen[3];
         let [sx, sy, depth] = [screen[0] / w, screen[1] / w, screen[2] / w];
-        let p = self.perspective(rect.2, rect.3);
+        let p = self.perspective();
         // Depth goes q(z - front)/z, with q the back over the distance
         // between the planes.
         let (q, front) = (p[2][2], self.front);
@@ -411,7 +399,7 @@ mod tests {
     #[test]
     fn a_perspective_viewport_puts_its_front_plane_on_the_edges_of_the_screen() {
         let view = super::View::default();
-        let m = view.perspective(640, 480);
+        let m = view.perspective();
         let clip = |[x, y, z]: [f32; 3]| {
             let w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
             [
@@ -420,10 +408,9 @@ mod tests {
                 (x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2]) / w,
             ]
         };
-        // The front plane is half a unit either side across, and cut to the
-        // screen's shape up and down.
-        assert_eq!(clip([0.5, 0.375, 1.0]), [1.0, 1.0, 0.0]);
-        assert_eq!(clip([-1.0, -0.75, 2.0]), [-1.0, -1.0, 0.5050505]);
+        // The front plane is half a unit either side, across and up alike.
+        assert_eq!(clip([0.5, 0.5, 1.0]), [1.0, 1.0, 0.0]);
+        assert_eq!(clip([-1.0, -1.0, 2.0]), [-1.0, -1.0, 0.5050505]);
         let back = clip([0.0, 0.0, 100.0]);
         assert!(
             (back[2] - 1.0).abs() < 1e-6,
