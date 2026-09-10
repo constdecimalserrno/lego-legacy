@@ -136,11 +136,124 @@ pub enum Kind {
     },
     Jecxz,
     Nop,
+    /// A shift or rotate. The count is the source operand.
+    Shift(ShiftOp),
+    /// A double-precision shift: `shld` and `shrd`.
+    Dshift {
+        left: bool,
+    },
+    Mul,
+    Imul,
+    /// `imul` with an explicit destination, and optionally an immediate.
+    Imul2,
+    Div,
+    Idiv,
+    /// A string operation, one element at a time or repeated.
+    String(StringOp),
+    /// A bit test, and what it does to the bit it tested.
+    Bit(BitOp),
+    /// Scan for the first or last set bit.
+    BitScan {
+        forward: bool,
+    },
+    /// Widen a value, with or without its sign.
+    Extend {
+        signed: bool,
+        from: Width,
+    },
+    /// Widen the accumulator into itself: `cbw`, `cwde`.
+    Cbw,
+    /// Widen the accumulator into `dx` or `edx`: `cwd`, `cdq`.
+    Cwd,
+    Pushf,
+    Popf,
+    Sahf,
+    Lahf,
+    /// Set, clear or complement one flag.
+    SetFlag {
+        flag: FlagBit,
+        to: Option<bool>,
+    },
+    Enter,
+    Leave,
+    Xlat,
+    Pusha,
+    Popa,
+    /// Read a segment register into an operand, or write one from it.
+    MovSegTo,
+    MovSegFrom,
+    Push0f,
+    Pop0f,
+    /// A decimal adjustment: the four that exist, by name.
+    Bcd(BcdOp),
+    /// `wait`: nothing to wait for on a machine with no coprocessor pin.
+    Wait,
     /// `hlt`: the processor stops until something wakes it. On this machine
     /// nothing does, so it ends the run.
     Hlt,
     /// `int n`.
     Int(u8),
+}
+
+/// Which shift or rotate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftOp {
+    Rol,
+    Ror,
+    Rcl,
+    Rcr,
+    Shl,
+    Shr,
+    /// `sal` is `shl` under another name, and encodes as group 6.
+    Sal,
+    Sar,
+}
+
+/// Which string operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringOp {
+    Movs,
+    Cmps,
+    Scas,
+    Lods,
+    Stos,
+}
+
+/// What a bit test does to the bit it tested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOp {
+    Test,
+    Set,
+    Reset,
+    Complement,
+}
+
+/// Which decimal adjustment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BcdOp {
+    Daa,
+    Das,
+    Aaa,
+    Aas,
+    Aam,
+    Aad,
+}
+
+/// A flag an instruction sets, clears or complements by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagBit {
+    Carry,
+    Direction,
+    Interrupt,
+}
+
+/// How a string instruction repeats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rep {
+    /// `rep`, and `repe` on a comparing instruction.
+    WhileEqual,
+    /// `repne`.
+    WhileNotEqual,
 }
 
 /// One decoded instruction, and how many bytes it took.
@@ -154,5 +267,9 @@ pub struct Insn {
     pub addr32: bool,
     pub dst: Option<Op>,
     pub src: Option<Op>,
+    /// A third operand, which only `imul` and the double shifts have.
+    pub third: Option<Op>,
+    /// How a string instruction repeats, when it does.
+    pub rep: Option<Rep>,
     pub len: u8,
 }

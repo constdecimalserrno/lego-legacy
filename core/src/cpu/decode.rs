@@ -4,7 +4,9 @@
 //! follow, and refuses any byte it has not been taught. Refusing is the point:
 //! an opcode nobody measured is a wall the run stops at, never a guess.
 
-use super::insn::{Insn, Kind, MemRef, Op, Seg, Width};
+use super::insn::{
+    BcdOp, BitOp, FlagBit, Insn, Kind, MemRef, Op, Rep, Seg, ShiftOp, StringOp, Width,
+};
 use super::Mode;
 
 /// A byte sequence this decoder does not know.
@@ -188,6 +190,7 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
     let mut width = mode.default_width();
     let mut seg: Option<Seg> = None;
     let mut addr32 = mode.default_addr32();
+    let mut rep: Option<Rep> = None;
 
     let op = loop {
         let b = r.u8();
@@ -208,6 +211,8 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
             0x65 => seg = Some(Seg::Gs),
             // `lock` changes nothing on a machine with one flow of control.
             0xf0 => {}
+            0xf3 => rep = Some(Rep::WhileEqual),
+            0xf2 => rep = Some(Rep::WhileNotEqual),
             _ => break b,
         }
     };
@@ -215,6 +220,20 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
     // A macro rather than a closure: every arm needs the reader's position at
     // the moment it finishes, and a closure would borrow the reader for the
     // whole function.
+    macro_rules! done3 {
+        ($kind:expr, $w:expr, $dst:expr, $src:expr, $third:expr) => {
+            Ok(Insn {
+                kind: $kind,
+                width: $w,
+                addr32,
+                dst: $dst,
+                src: $src,
+                third: $third,
+                rep,
+                len: u8::try_from(r.at).unwrap_or(u8::MAX),
+            })
+        };
+    }
     macro_rules! done {
         ($kind:expr, $w:expr, $dst:expr, $src:expr) => {
             Ok(Insn {
@@ -223,6 +242,8 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
                 addr32,
                 dst: $dst,
                 src: $src,
+                third: None,
+                rep,
                 len: u8::try_from(r.at).unwrap_or(u8::MAX),
             })
         };
@@ -287,9 +308,14 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
             let rel = r.imm8_sx(Width::B32);
             done!(Kind::Jcc(op & 0xf), width, None, Some(Op::Imm(rel)))
         }
-        // group 1: arithmetic with an immediate
-        0x80 | 0x81 | 0x83 => {
-            let w = if op == 0x80 { Width::B8 } else { width };
+        // group 1: arithmetic with an immediate. 0x82 is 0x80 under another
+        // encoding, kept by every processor that ever decoded it.
+        0x80..=0x83 => {
+            let w = if op == 0x80 || op == 0x82 {
+                Width::B8
+            } else {
+                width
+            };
             let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
             let imm = if op == 0x83 { r.imm8_sx(w) } else { r.imm(w) };
             done!(ARITH[m.reg as usize], w, Some(m.rm), Some(Op::Imm(imm)))
@@ -431,11 +457,10 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
                 }
                 2 => done!(Kind::Not, w, Some(m.rm), None),
                 3 => done!(Kind::Neg, w, Some(m.rm), None),
-                g => Err(Undecoded {
-                    byte: op,
-                    group: Some(g),
-                    why: "not decoded yet",
-                }),
+                4 => done!(Kind::Mul, w, None, Some(m.rm)),
+                5 => done!(Kind::Imul, w, None, Some(m.rm)),
+                6 => done!(Kind::Div, w, None, Some(m.rm)),
+                _ => done!(Kind::Idiv, w, None, Some(m.rm)),
             }
         }
         // group 4 and 5: inc / dec / call / jmp / push through an r/m
@@ -455,10 +480,321 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
                 }),
             }
         }
+        // The eight shifts and rotates, by their group extension.
+        0xc0 | 0xc1 | 0xd0 | 0xd1 | 0xd2 | 0xd3 => {
+            const SHIFTS: [ShiftOp; 8] = [
+                ShiftOp::Rol,
+                ShiftOp::Ror,
+                ShiftOp::Rcl,
+                ShiftOp::Rcr,
+                ShiftOp::Shl,
+                ShiftOp::Shr,
+                ShiftOp::Sal,
+                ShiftOp::Sar,
+            ];
+            let w = if op & 1 == 0 { Width::B8 } else { width };
+            let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+            let count = match op {
+                0xc0 | 0xc1 => Op::Imm(u32::from(r.u8())),
+                0xd0 | 0xd1 => Op::Imm(1),
+                // by cl
+                _ => Op::Reg(super::ECX as u8),
+            };
+            let by_cl = matches!(op, 0xd2 | 0xd3);
+            let kind = Kind::Shift(SHIFTS[m.reg as usize]);
+            if by_cl {
+                // The count register is always cl, whatever the operand width.
+                done3!(kind, w, Some(m.rm), Some(count), Some(Op::Imm(1)))
+            } else {
+                done!(kind, w, Some(m.rm), Some(count))
+            }
+        }
+        // The string operations, one element or repeated. Their addressing
+        // is implicit, but a prefix can still move the segment the source is
+        // read through, so the source operand carries it.
+        0xa4 | 0xa5 | 0xa6 | 0xa7 | 0xac | 0xad => {
+            let w = if op & 1 == 0 { Width::B8 } else { width };
+            let which = match op {
+                0xa4 | 0xa5 => StringOp::Movs,
+                0xa6 | 0xa7 => StringOp::Cmps,
+                _ => StringOp::Lods,
+            };
+            let src = Op::Mem(MemRef {
+                seg: seg.unwrap_or(Seg::Ds),
+                base: Some(super::ESI as u8),
+                index: None,
+                disp: 0,
+                addr16: !addr32,
+                base_shift: 0,
+            });
+            done!(Kind::String(which), w, None, Some(src))
+        }
+        // The two that only touch the extra segment, which no prefix moves.
+        0xaa | 0xab => {
+            let w = if op == 0xaa { Width::B8 } else { width };
+            done!(Kind::String(StringOp::Stos), w, None, None)
+        }
+        0xae | 0xaf => {
+            let w = if op == 0xae { Width::B8 } else { width };
+            done!(Kind::String(StringOp::Scas), w, None, None)
+        }
+        // imul with an explicit destination and an immediate
+        0x69 | 0x6b => {
+            let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+            let imm = if op == 0x6b {
+                r.imm8_sx(width)
+            } else {
+                r.imm(width)
+            };
+            done3!(
+                Kind::Imul2,
+                width,
+                Some(Op::Reg(m.reg)),
+                Some(m.rm),
+                Some(Op::Imm(imm))
+            )
+        }
+        // The accumulator widening pair
+        0x98 => done!(Kind::Cbw, width, None, None),
+        0x99 => done!(Kind::Cwd, width, None, None),
+        // wait: this machine has no coprocessor pin to wait on
+        0x9b => done!(Kind::Wait, width, None, None),
+        0x9c => done!(Kind::Pushf, width, None, None),
+        0x9d => done!(Kind::Popf, width, None, None),
+        0x9e => done!(Kind::Sahf, width, None, None),
+        0x9f => done!(Kind::Lahf, width, None, None),
+        // The flag instructions, by the flag they name
+        0xf5 => done!(
+            Kind::SetFlag {
+                flag: FlagBit::Carry,
+                to: None
+            },
+            width,
+            None,
+            None
+        ),
+        0xf8 => done!(
+            Kind::SetFlag {
+                flag: FlagBit::Carry,
+                to: Some(false)
+            },
+            width,
+            None,
+            None
+        ),
+        0xf9 => done!(
+            Kind::SetFlag {
+                flag: FlagBit::Carry,
+                to: Some(true)
+            },
+            width,
+            None,
+            None
+        ),
+        0xfa => {
+            done!(
+                Kind::SetFlag {
+                    flag: FlagBit::Interrupt,
+                    to: Some(false)
+                },
+                width,
+                None,
+                None
+            )
+        }
+        0xfb => {
+            done!(
+                Kind::SetFlag {
+                    flag: FlagBit::Interrupt,
+                    to: Some(true)
+                },
+                width,
+                None,
+                None
+            )
+        }
+        0xfc => {
+            done!(
+                Kind::SetFlag {
+                    flag: FlagBit::Direction,
+                    to: Some(false)
+                },
+                width,
+                None,
+                None
+            )
+        }
+        0xfd => {
+            done!(
+                Kind::SetFlag {
+                    flag: FlagBit::Direction,
+                    to: Some(true)
+                },
+                width,
+                None,
+                None
+            )
+        }
+        // enter and leave
+        0xc8 => {
+            let size = r.imm(Width::B16);
+            let nesting = u32::from(r.u8());
+            done3!(
+                Kind::Enter,
+                width,
+                None,
+                Some(Op::Imm(size)),
+                Some(Op::Imm(nesting))
+            )
+        }
+        0xc9 => done!(Kind::Leave, width, None, None),
+        0xd7 => {
+            // The table is read through whatever segment the prefix named.
+            let table = Op::Mem(MemRef {
+                seg: seg.unwrap_or(Seg::Ds),
+                base: Some(super::EBX as u8),
+                index: None,
+                disp: 0,
+                addr16: !addr32,
+                base_shift: 0,
+            });
+            done!(Kind::Xlat, Width::B8, None, Some(table))
+        }
+        0x60 => done!(Kind::Pusha, width, None, None),
+        0x61 => done!(Kind::Popa, width, None, None),
+        // The decimal adjustments
+        0x27 => done!(Kind::Bcd(BcdOp::Daa), Width::B8, None, None),
+        0x2f => done!(Kind::Bcd(BcdOp::Das), Width::B8, None, None),
+        0x37 => done!(Kind::Bcd(BcdOp::Aaa), Width::B8, None, None),
+        0x3f => done!(Kind::Bcd(BcdOp::Aas), Width::B8, None, None),
+        0xd4 => {
+            let base = u32::from(r.u8());
+            done!(Kind::Bcd(BcdOp::Aam), Width::B8, None, Some(Op::Imm(base)))
+        }
+        0xd5 => {
+            let base = u32::from(r.u8());
+            done!(Kind::Bcd(BcdOp::Aad), Width::B8, None, Some(Op::Imm(base)))
+        }
+        // Segment registers, in and out
+        0x8c => {
+            let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+            // Into a register the segment is widened to the operand size; into
+            // memory only its own sixteen bits are written, whatever the size
+            // prefix said.
+            let w = if matches!(m.rm, Op::Reg(_)) {
+                width
+            } else {
+                Width::B16
+            };
+            done!(Kind::MovSegFrom, w, Some(m.rm), Some(Op::Reg(m.reg)))
+        }
+        0x8e => {
+            let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+            done!(Kind::MovSegTo, Width::B16, Some(Op::Reg(m.reg)), Some(m.rm))
+        }
+        0x06 | 0x0e | 0x16 | 0x1e => {
+            let sreg = (op >> 3) & 3;
+            done!(Kind::Push0f, width, None, Some(Op::Reg(sreg)))
+        }
+        0x07 | 0x17 | 0x1f => {
+            let sreg = (op >> 3) & 3;
+            done!(Kind::Pop0f, width, Some(Op::Reg(sreg)), None)
+        }
         // The two-byte opcodes
         0x0f => {
             let op2 = r.u8();
             match op2 {
+                // push fs / push gs, pop fs / pop gs
+                0xa0 | 0xa8 => {
+                    let sreg = if op2 == 0xa0 { super::FS } else { super::GS };
+                    done!(Kind::Push0f, width, None, Some(Op::Reg(sreg as u8)))
+                }
+                0xa1 | 0xa9 => {
+                    let sreg = if op2 == 0xa1 { super::FS } else { super::GS };
+                    done!(Kind::Pop0f, width, Some(Op::Reg(sreg as u8)), None)
+                }
+                // The bit tests
+                0xa3 | 0xab | 0xb3 | 0xbb => {
+                    const BITS: [BitOp; 4] =
+                        [BitOp::Test, BitOp::Set, BitOp::Reset, BitOp::Complement];
+                    let which = match op2 {
+                        0xa3 => 0,
+                        0xab => 1,
+                        0xb3 => 2,
+                        _ => 3,
+                    };
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    done!(
+                        Kind::Bit(BITS[which]),
+                        width,
+                        Some(m.rm),
+                        Some(Op::Reg(m.reg))
+                    )
+                }
+                // The bit tests with an immediate bit number
+                0xba => {
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    let bit = u32::from(r.u8());
+                    let which = match m.reg {
+                        4 => BitOp::Test,
+                        5 => BitOp::Set,
+                        6 => BitOp::Reset,
+                        7 => BitOp::Complement,
+                        g => {
+                            return Err(Undecoded {
+                                byte: op2,
+                                group: Some(g),
+                                why: "bit test group extension below four",
+                            })
+                        }
+                    };
+                    done!(Kind::Bit(which), width, Some(m.rm), Some(Op::Imm(bit)))
+                }
+                0xbc | 0xbd => {
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    done!(
+                        Kind::BitScan {
+                            forward: op2 == 0xbc
+                        },
+                        width,
+                        Some(Op::Reg(m.reg)),
+                        Some(m.rm)
+                    )
+                }
+                // movzx and movsx
+                0xb6 | 0xb7 | 0xbe | 0xbf => {
+                    let from = if op2 & 1 == 0 { Width::B8 } else { Width::B16 };
+                    let signed = op2 >= 0xbe;
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    done!(
+                        Kind::Extend { signed, from },
+                        width,
+                        Some(Op::Reg(m.reg)),
+                        Some(m.rm)
+                    )
+                }
+                // imul r, r/m
+                0xaf => {
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    done!(Kind::Imul2, width, Some(Op::Reg(m.reg)), Some(m.rm))
+                }
+                // The double-precision shifts
+                0xa4 | 0xa5 | 0xac | 0xad => {
+                    let left = op2 < 0xac;
+                    let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                    let count = if op2 & 1 == 0 {
+                        Op::Imm(u32::from(r.u8()))
+                    } else {
+                        Op::Reg(super::ECX as u8)
+                    };
+                    done3!(
+                        Kind::Dshift { left },
+                        width,
+                        Some(m.rm),
+                        Some(Op::Reg(m.reg)),
+                        Some(count)
+                    )
+                }
                 // jcc rel32
                 0x80..=0x8f => {
                     let rel = r.imm(width);

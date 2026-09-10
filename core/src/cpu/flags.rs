@@ -121,6 +121,14 @@ impl Flags {
         result
     }
 
+    /// Set parity, zero and sign from a result, leaving carry and overflow to
+    /// the caller. What a shift needs: it has already worked out its own
+    /// carry from the bit that left the value.
+    pub fn logic_keep_carry(&mut self, result: u32, w: Width) {
+        self.set_pzs(result, w);
+        self.af = false;
+    }
+
     /// Flags after an increment or a decrement, which leave carry alone.
     pub fn inc_dec(&mut self, before: u32, up: bool, w: Width) -> u32 {
         let carry = self.cf;
