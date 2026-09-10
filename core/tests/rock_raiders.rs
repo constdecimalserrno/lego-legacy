@@ -355,6 +355,52 @@ fn the_first_movie_frame_is_presented_at_the_same_flip_on_every_run() {
 }
 
 #[test]
+fn a_movie_skipped_stops_being_heard() {
+    if !scratch() {
+        return;
+    }
+    // Escape during the intro: the title lets go of the movie there, without
+    // stopping it first, and goes on to load.
+    const SKIPPED_AT: u64 = 1000;
+    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("skip-the-intro.route");
+    std::fs::write(
+        &route,
+        format!(
+            "#lego-legacy-route 1\nflip {SKIPPED_AT} key Escape down\nflip {} key Escape up\n",
+            SKIPPED_AT + 2
+        ),
+    )
+    .expect("the route writes");
+    let cli = Cli {
+        route: Some(route),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(Headless::new(), &ROCK_RAIDERS, &cli, 150_000_000);
+
+    ran.assert_logged("movie C:\\LEGORR\\Data\\avi\\intro.avi let go of");
+    let heard = |from: u64, to: u64| {
+        ran.host
+            .audio_blocks
+            .iter()
+            .zip(&ran.host.audio_flips)
+            .filter(|(_, flip)| (from..to).contains(*flip))
+            .any(|(block, _)| block.iter().any(|s| *s != 0))
+    };
+    assert!(
+        heard(SKIPPED_AT - 10, SKIPPED_AT),
+        "the intro is heard until it is skipped"
+    );
+    // What was mixed before the skip reaches the host a few flips on; after
+    // that, the loading that follows is silent.
+    let after = SKIPPED_AT + 4;
+    assert!(ran.finish.flips > after, "the run goes on past the skip");
+    assert!(
+        !heard(after, u64::MAX),
+        "a skipped movie's sound stops with it"
+    );
+}
+
+#[test]
 fn a_movies_sound_is_mixed_whether_or_not_anyone_is_listening() {
     let Some((_, ran)) = first_movie_picture(61_000_000) else {
         return;

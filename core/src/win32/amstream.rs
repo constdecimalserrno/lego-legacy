@@ -93,7 +93,7 @@ pub static MULTI_MEDIA_STREAM: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE,
+        method("Release", 0, release_stream),
         wall("GetInformation", 2),
         method("GetMediaStream", 2, get_media_stream),
         wall("EnumMediaStreams", 2),
@@ -324,6 +324,21 @@ fn get_media_stream(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     }
     ctx.state.com_ref(object, 1);
     Ok(S_OK)
+}
+
+fn release_stream(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // The last reference let go of ends the movie, played out or not: a title
+    // that skips a movie lets go of it without stopping it first, and what is
+    // left of its sound stops there.
+    let left = ctx.state.com_ref(this, -1);
+    if left == 0 {
+        let now = ctx.declared_millis();
+        ctx.state.mixer.stop(this, now * 1_000_000);
+        if let Some(movie) = ctx.state.players.remove(&this).and_then(|p| p.movie) {
+            ctx.log.line(&format!("movie {} let go of", movie.name));
+        }
+    }
+    Ok(left)
 }
 
 fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
