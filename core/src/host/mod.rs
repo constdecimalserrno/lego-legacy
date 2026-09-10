@@ -8,6 +8,8 @@
 pub mod headless;
 #[cfg(target_os = "macos")]
 pub mod mac;
+#[cfg(target_os = "macos")]
+pub mod mac_audio;
 pub mod sys;
 
 use std::fmt;
@@ -92,6 +94,8 @@ pub enum HostError {
     Unsupported(&'static str),
     /// The operating system refused, with its own errno.
     Os { what: &'static str, errno: i32 },
+    /// A system framework refused, with the status it returned.
+    Status { what: &'static str, status: i32 },
 }
 
 impl fmt::Display for HostError {
@@ -99,6 +103,7 @@ impl fmt::Display for HostError {
         match self {
             Self::Unsupported(why) => write!(f, "unsupported: {why}"),
             Self::Os { what, errno } => write!(f, "{what} failed: errno {errno}"),
+            Self::Status { what, status } => write!(f, "{what} failed: status {status}"),
         }
     }
 }

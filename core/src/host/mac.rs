@@ -319,6 +319,8 @@ pub struct MacWindow {
     pending: Vec<Input>,
     /// The keys the guest has been told are down.
     held: Vec<u32>,
+    /// Where the mix is heard, when `--audio` asked for it.
+    audio: Option<super::mac_audio::MacAudio>,
     /// Whether the person closed the window.
     closed: bool,
     /// How far behind the declared clock the host has fallen and will not
@@ -434,6 +436,7 @@ impl MacWindow {
                 started: Instant::now(),
                 pending: Vec::new(),
                 held: Vec::new(),
+                audio: None,
                 closed: false,
                 lag_nanos: 0,
                 frame_size: (width, height),
@@ -445,6 +448,11 @@ impl MacWindow {
     #[must_use]
     pub fn closed(&self) -> bool {
         self.closed
+    }
+
+    /// Let the mix be heard through this device from now on.
+    pub fn play_through(&mut self, device: super::mac_audio::MacAudio) {
+        self.audio = Some(device);
     }
 
     /// Take everything the window system has for us, turning what a person did
@@ -602,8 +610,10 @@ impl Host for MacWindow {
         std::mem::take(&mut self.pending)
     }
 
-    fn audio(&mut self, _samples: &[i16]) {
-        // No host audio device yet; the machine mixes either way.
+    fn audio(&mut self, samples: &[i16]) {
+        if let Some(device) = &self.audio {
+            device.play(samples);
+        }
     }
 
     fn closed(&self) -> bool {
