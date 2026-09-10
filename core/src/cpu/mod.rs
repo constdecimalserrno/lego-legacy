@@ -9,6 +9,7 @@ pub mod exec;
 pub mod flags;
 pub mod insn;
 pub mod interp;
+pub mod x87;
 
 use crate::guest::{Arena, Fault};
 use flags::Flags;
@@ -74,7 +75,10 @@ impl Mode {
 }
 
 /// Everything the processor is, at one cursor.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Compared by value rather than by identity, which is what a determinism gate
+/// needs. It is not `Eq`, because the floating-point registers are not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cpu {
     pub r: [u32; 8],
     pub eip: u32,
@@ -85,6 +89,8 @@ pub struct Cpu {
     /// thread information block gives `fs` a base of its own.
     pub seg_base: [u32; 6],
     pub flags: Flags,
+    /// The floating-point unit.
+    pub fpu: x87::X87,
 }
 
 impl Cpu {
@@ -98,7 +104,7 @@ impl Cpu {
 }
 
 /// Why the engine stopped between instructions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stop {
     /// The guest executed `int n`.
     Interrupt(u8),
@@ -117,6 +123,11 @@ pub enum Stop {
     /// The guest executed `hlt`. Nothing on this machine wakes a halted
     /// processor, so the run is over.
     Halted,
+    /// The guest ended the run itself, through the boundary.
+    Exited { code: u32 },
+    /// The guest called something across the boundary that nothing stands
+    /// behind yet.
+    NotWritten { what: String, caller: u32 },
 }
 
 impl fmt::Display for Stop {
@@ -138,6 +149,11 @@ impl fmt::Display for Stop {
             Self::Fault(fault) => write!(f, "{fault}"),
             Self::DivideError => write!(f, "divide error"),
             Self::Halted => write!(f, "halted"),
+            Self::Exited { code } => write!(f, "exited {code}"),
+            Self::NotWritten { what, caller } => write!(
+                f,
+                "{what} is imported and not written yet, called from {caller:#010x}"
+            ),
         }
     }
 }

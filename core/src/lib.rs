@@ -18,5 +18,6 @@ pub mod shim;
 pub mod stub;
 pub mod testkit;
 pub mod title;
+pub mod win32;
 
 pub use title::Title;

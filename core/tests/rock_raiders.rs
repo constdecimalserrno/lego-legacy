@@ -69,14 +69,15 @@ fn the_entry_image_loads_from_the_disc_and_stops_at_its_first_import() {
     };
     let ran = testkit::try_run_headless(&ROCK_RAIDERS, &cli, 100_000).expect("the rip loads");
 
-    // The first thing this title's C runtime asks the machine for.
-    ran.assert_wall("KERNEL32.dll!GetVersion")
-        .assert_logged("imports 145")
-        .assert_logged("shim KERNEL32.dll!GetVersion");
+    // The image loads and the guest starts asking the machine for things.
+    // What it asks for last moves as the boundary grows, so what is held here
+    // is that it got in and started calling, not where it stopped.
+    ran.assert_logged("imports 145")
+        .assert_logged("call KERNEL32.dll!GetVersion");
 
     assert!(
-        ran.finish.cursor > 0 && ran.finish.cursor < 100,
-        "the run should reach its first import within a few dozen instructions, not {}",
+        ran.finish.cursor > 100,
+        "the run should get past its own entry code, not stop at {}",
         ran.finish.cursor
     );
     assert!(

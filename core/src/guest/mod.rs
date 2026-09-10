@@ -5,6 +5,8 @@
 //! not own, and an unchecked one for the engine, which has already bounded the
 //! address by decoding the instruction that produced it (ADR-0004).
 
+pub mod heap;
+
 use crate::host::{Host, HostError, Mapping};
 use std::fmt;
 

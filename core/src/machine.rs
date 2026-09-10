@@ -9,6 +9,7 @@ use crate::host::{Frame, Host};
 use crate::runlog::RunLog;
 use crate::shim::Boundary;
 use crate::stub;
+use crate::win32::{self, Convention, Ctx, State};
 use crate::Title;
 use std::fmt;
 
@@ -74,6 +75,10 @@ pub struct Machine {
     pub boundary: Boundary,
     /// The image this machine is running, once one is loaded.
     pub image: Option<crate::pe::Image>,
+    /// Everything the guest holds that is not memory.
+    pub state: State,
+    /// The title this machine was built for.
+    title: &'static Title,
 }
 
 impl Machine {
@@ -81,7 +86,7 @@ impl Machine {
     ///
     /// # Errors
     /// When the host cannot map the arena.
-    pub fn new(title: &Title, host: &mut dyn Host) -> Result<Self, crate::host::HostError> {
+    pub fn new(title: &'static Title, host: &mut dyn Host) -> Result<Self, crate::host::HostError> {
         Ok(Self {
             arena: Arena::new(host, ARENA_BYTES)?,
             cpu: Cpu::default(),
@@ -93,6 +98,8 @@ impl Machine {
             flips: 0,
             boundary: Boundary::new(),
             image: None,
+            state: State::new(),
+            title,
         })
     }
 
@@ -172,19 +179,16 @@ impl Machine {
             // A call that lands on the boundary is a call into something
             // Microsoft wrote. Either it is implemented here, or the run stops
             // and names what was asked for, who asked, and where.
-            if let Some(import) = self.boundary.at(self.cpu.eip) {
-                let caller = self
-                    .arena
-                    .read_u32(self.cpu.r[crate::cpu::ESP])
-                    .map_or_else(|_| "unknown".to_owned(), |a| format!("{a:#010x}"));
-                let what = format!("{}!{}", import.dll, import.name);
-                log.at(
-                    Trace::Shims,
-                    &format!("shim {what} from {caller} cursor {}", self.clock.cursor()),
-                );
-                break Outcome::Wall {
-                    what: format!("{what} is imported and not written yet, called from {caller}"),
-                };
+            if self.boundary.holds(self.cpu.eip) {
+                match self.cross(log) {
+                    Ok(()) => continue,
+                    Err(Stop::Exited { code }) => break Outcome::Exited { code },
+                    Err(stop) => {
+                        break Outcome::Wall {
+                            what: stop.to_string(),
+                        }
+                    }
+                }
             }
             if log.trace() >= Trace::Insns {
                 log.line(&format!(
@@ -286,6 +290,80 @@ impl Machine {
             ..Cpu::default()
         };
         self.image = Some(image);
+        Ok(())
+    }
+}
+
+impl Machine {
+    /// Answer a call the guest made across the boundary.
+    ///
+    /// The arguments are where the calling convention says they are, the
+    /// answer goes back in `eax`, and the stack is left as the real library
+    /// would have left it.
+    fn cross(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let addr = self.cpu.eip;
+        let Some(import) = self.boundary.at(addr).cloned() else {
+            return Err(Stop::Undecoded {
+                eip: addr,
+                byte: 0,
+                group: None,
+                why: "an address inside the boundary that no import was bound to",
+            });
+        };
+        let what = format!("{}!{}", import.dll, import.name);
+        let esp = self.cpu.r[crate::cpu::ESP];
+        let caller = self.arena.read_u32(esp).map_err(Stop::Fault)?;
+
+        let Some(shim) = win32::find(&import.dll, &import.name) else {
+            log.at(
+                Trace::Shims,
+                &format!(
+                    "wall {what} from {caller:#010x} cursor {}",
+                    self.clock.cursor()
+                ),
+            );
+            return Err(Stop::NotWritten { what, caller });
+        };
+
+        let mut args = Vec::with_capacity(shim.args as usize);
+        for i in 0..shim.args {
+            args.push(self.arena.read_u32(esp + 4 + i * 4).map_err(Stop::Fault)?);
+        }
+        log.at(
+            Trace::Shims,
+            &format!(
+                "call {what}({}) from {caller:#010x} cursor {}",
+                args.iter()
+                    .map(|a| format!("{a:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.clock.cursor()
+            ),
+        );
+
+        let mut ctx = Ctx {
+            cpu: &mut self.cpu,
+            mem: &mut self.arena,
+            state: &mut self.state,
+            title: self.title,
+            log,
+        };
+        let answer = (shim.run)(&mut ctx, &args)?;
+
+        // The call returns: the return address comes off the stack, the
+        // arguments come off with it when the callee owns them, and the answer
+        // is in eax.
+        let popped = match shim.convention {
+            Convention::Stdcall => 4 + shim.args * 4,
+            Convention::Cdecl => 4,
+        };
+        self.cpu.r[crate::cpu::ESP] = esp.wrapping_add(popped);
+        self.cpu.r[crate::cpu::EAX] = answer;
+        self.cpu.eip = caller;
+        // A call across the boundary costs the declared clock what an
+        // instruction costs, so a title that spends its time in shims still
+        // advances its own clock.
+        self.clock.retire();
         Ok(())
     }
 }

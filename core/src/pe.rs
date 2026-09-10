@@ -41,6 +41,10 @@ impl fmt::Display for PeError {
 
 impl std::error::Error for PeError {}
 
+/// Where a Win32 executable asks to be loaded, and where every title on the
+/// roster is in fact loaded.
+pub const IMAGE_BASE_DEFAULT: u32 = 0x0040_0000;
+
 /// One name a loaded image imports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import {

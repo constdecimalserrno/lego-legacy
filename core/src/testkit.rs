@@ -97,7 +97,7 @@ impl Ran {
 /// When the run could not be set up at all, which is a broken test rather than
 /// a guest outcome.
 #[must_use]
-pub fn run_headless(title: &Title, cli: &Cli, budget: u64) -> Ran {
+pub fn run_headless(title: &'static Title, cli: &Cli, budget: u64) -> Ran {
     run_on(Headless::new(), title, cli, budget)
 }
 
@@ -108,7 +108,7 @@ pub fn run_headless(title: &Title, cli: &Cli, budget: u64) -> Ran {
 /// When the run could not be set up at all, which is a broken test rather than
 /// a guest outcome.
 #[must_use]
-pub fn run_on(host: Headless, title: &Title, cli: &Cli, budget: u64) -> Ran {
+pub fn run_on(host: Headless, title: &'static Title, cli: &Cli, budget: u64) -> Ran {
     try_run_on(host, title, cli, budget)
         .unwrap_or_else(|e| panic!("could not run {}: {e}", title.key))
 }
@@ -121,11 +121,16 @@ pub fn run_on(host: Headless, title: &Title, cli: &Cli, budget: u64) -> Ran {
 /// # Errors
 /// When the run could not be set up: no rip, the wrong pressing, or an image
 /// this emulator refuses.
-pub fn try_run_headless(title: &Title, cli: &Cli, budget: u64) -> Result<Ran, String> {
+pub fn try_run_headless(title: &'static Title, cli: &Cli, budget: u64) -> Result<Ran, String> {
     try_run_on(Headless::new(), title, cli, budget)
 }
 
-fn try_run_on(mut host: Headless, title: &Title, cli: &Cli, budget: u64) -> Result<Ran, String> {
+fn try_run_on(
+    mut host: Headless,
+    title: &'static Title,
+    cli: &Cli,
+    budget: u64,
+) -> Result<Ran, String> {
     let headless = Cli {
         headless: true,
         ..cli.clone()

@@ -17,7 +17,7 @@ use std::process::ExitCode;
 /// When the machine cannot be built, or the run cannot be set up. A guest that
 /// stops at a wall is not an error here: it is an [`Outcome`].
 pub fn run(
-    title: &Title,
+    title: &'static Title,
     cli: &Cli,
     host: &mut dyn Host,
     budget: u64,
@@ -48,7 +48,7 @@ pub fn run(
 /// Reads the process arguments, chooses a host, runs, and reports. The exit
 /// status is the guest's own when it ended the run itself.
 #[must_use]
-pub fn main(title: &Title) -> ExitCode {
+pub fn main(title: &'static Title) -> ExitCode {
     let cli = match Cli::parse(std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(CliError::Help) => {
@@ -98,7 +98,7 @@ pub fn main(title: &Title) -> ExitCode {
 /// The window stays open after the guest has finished, because a frame that
 /// flashes past is not something a person can look at.
 #[cfg(target_os = "macos")]
-fn windowed(title: &Title, cli: &Cli) -> ExitCode {
+fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     use crate::host::mac::MacWindow;
 
     // The window opens at the declared machine's own screen size; the guest's
@@ -142,7 +142,7 @@ fn windowed(title: &Title, cli: &Cli) -> ExitCode {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn windowed(_title: &Title, _cli: &Cli) -> ExitCode {
+fn windowed(_title: &'static Title, _cli: &Cli) -> ExitCode {
     eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
     ExitCode::FAILURE
 }

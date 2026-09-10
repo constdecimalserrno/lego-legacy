@@ -369,6 +369,15 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
             }
         }
         Kind::Wait => {}
+        Kind::X87 { escape, modrm } => {
+            // The unit reads its own operand: what the address means depends
+            // on the escape, and only the unit knows which format that is.
+            let address = match insn.dst {
+                Some(Op::Mem(m)) => Some(effective(cpu, &m)),
+                _ => None,
+            };
+            return super::x87::execute(cpu, mem, escape, modrm, address);
+        }
         Kind::Shift(which) => {
             let dst = insn.dst.expect("a shift has a destination");
             let count = read_op(cpu, mem, &insn.src.expect("a shift has a count"), Width::B8)?;

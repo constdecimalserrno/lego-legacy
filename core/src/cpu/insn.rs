@@ -188,6 +188,13 @@ pub enum Kind {
     Bcd(BcdOp),
     /// `wait`: nothing to wait for on a machine with no coprocessor pin.
     Wait,
+    /// One of the eight floating-point escapes, kept whole: the unit decides
+    /// what its own opcode means, and a decoder that spelled out every form
+    /// would say it twice.
+    X87 {
+        escape: u8,
+        modrm: u8,
+    },
     /// `hlt`: the processor stops until something wakes it. On this machine
     /// nothing does, so it ends the run.
     Hlt,

@@ -700,6 +700,18 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
             let sreg = (op >> 3) & 3;
             done!(Kind::Pop0f, width, Some(Op::Reg(sreg)), None)
         }
+        // The floating-point escapes. The unit's own opcode is the ModRM
+        // byte, which is passed through whole rather than spelled out here.
+        0xd8..=0xdf => {
+            let modrm = r.bytes.get(r.at).copied().unwrap_or(0);
+            if modrm >> 6 == 3 {
+                r.u8();
+                done!(Kind::X87 { escape: op, modrm }, width, None, None)
+            } else {
+                let m = decode_modrm(&mut r, seg, addr32, mode.real)?;
+                done!(Kind::X87 { escape: op, modrm }, width, Some(m.rm), None)
+            }
+        }
         // The two-byte opcodes
         0x0f => {
             let op2 = r.u8();
