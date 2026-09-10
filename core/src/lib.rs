@@ -6,11 +6,15 @@
 pub mod cli;
 pub mod clock;
 pub mod cpu;
+pub mod disc;
 pub mod guest;
+pub mod hash;
 pub mod host;
 pub mod machine;
+pub mod pe;
 pub mod run;
 pub mod runlog;
+pub mod shim;
 pub mod stub;
 pub mod testkit;
 pub mod title;

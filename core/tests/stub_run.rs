@@ -5,14 +5,10 @@
 //! it logged, and how it ended.
 
 use lego_legacy_core::cli::{Cli, Trace};
-use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::host::Input;
 use lego_legacy_core::{stub, testkit, Title};
 
-const TEST_TITLE: Title = Title {
-    key: "test-stub",
-    flip_cost: FlipCost::Free,
-};
+const TEST_TITLE: Title = Title::STUB;
 
 /// Keep run directories in the target scratch root, never in the working tree.
 fn scratch() {
@@ -66,10 +62,14 @@ fn a_budget_smaller_than_the_guest_stops_the_run_without_a_frame() {
 }
 
 #[test]
-fn a_run_with_no_guest_loaded_stops_at_a_wall_that_names_the_ticket() {
+fn a_title_with_no_disc_behind_it_refuses_and_names_what_it_looked_for() {
     scratch();
-    let ran = testkit::run_headless(&TEST_TITLE, &Cli::default(), 1_000);
-    ran.assert_wall("#5").assert_flips(0);
+    let err = testkit::try_run_headless(&TEST_TITLE, &Cli::default(), 1_000)
+        .expect_err("the stub guest comes off no disc, so asking for its disc must refuse");
+    assert!(
+        err.contains("no rip at"),
+        "the refusal names the path: {err}"
+    );
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn the_run_directory_holds_an_append_only_log_that_names_its_format() {
     assert!(ran.dir.join("log").is_file());
     let mut lines = ran.log.lines();
     assert_eq!(lines.next(), Some(lego_legacy_core::runlog::MAGIC));
-    assert_eq!(lines.next(), Some("title test-stub"));
+    assert_eq!(lines.next(), Some("title stub"));
     assert_eq!(
         ran.log
             .lines()

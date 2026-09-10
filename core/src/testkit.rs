@@ -12,12 +12,25 @@ use crate::Title;
 use std::path::PathBuf;
 
 /// A finished headless run, with everything it produced.
+///
+/// Printed as its outcome and its log, so a test that expected a refusal and
+/// got a run says which run it got.
 pub struct Ran {
     pub finish: Finish,
     pub host: Headless,
     /// The run log, as text.
     pub log: String,
     pub dir: PathBuf,
+}
+
+impl std::fmt::Debug for Ran {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "run ended {} after {} instructions",
+            self.finish.outcome, self.finish.cursor
+        )
+    }
 }
 
 impl Ran {
@@ -95,20 +108,37 @@ pub fn run_headless(title: &Title, cli: &Cli, budget: u64) -> Ran {
 /// When the run could not be set up at all, which is a broken test rather than
 /// a guest outcome.
 #[must_use]
-pub fn run_on(mut host: Headless, title: &Title, cli: &Cli, budget: u64) -> Ran {
+pub fn run_on(host: Headless, title: &Title, cli: &Cli, budget: u64) -> Ran {
+    try_run_on(host, title, cli, budget)
+        .unwrap_or_else(|e| panic!("could not run {}: {e}", title.key))
+}
+
+/// Run a title headless and hand back the refusal if it would not start.
+///
+/// A guest that stops at a wall is a [`Ran`]; an image the emulator will not
+/// run at all, or a rip that is not there, is the error.
+///
+/// # Errors
+/// When the run could not be set up: no rip, the wrong pressing, or an image
+/// this emulator refuses.
+pub fn try_run_headless(title: &Title, cli: &Cli, budget: u64) -> Result<Ran, String> {
+    try_run_on(Headless::new(), title, cli, budget)
+}
+
+fn try_run_on(mut host: Headless, title: &Title, cli: &Cli, budget: u64) -> Result<Ran, String> {
     let headless = Cli {
         headless: true,
         ..cli.clone()
     };
-    let (finish, log) = crate::run::run(title, &headless, &mut host, budget)
-        .unwrap_or_else(|e| panic!("could not run {}: {e}", title.key));
+    let (finish, log) =
+        crate::run::run(title, &headless, &mut host, budget).map_err(|e| e.to_string())?;
     let dir = log.dir().to_path_buf();
     drop(log);
     let text = std::fs::read_to_string(dir.join("log")).unwrap_or_default();
-    Ran {
+    Ok(Ran {
         finish,
         host,
         log: text,
         dir,
-    }
+    })
 }

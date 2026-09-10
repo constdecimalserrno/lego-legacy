@@ -28,20 +28,16 @@ pub fn run(
     if cli.stub {
         machine.load_stub()?;
     } else {
-        let what = "no guest to run: this title's entry image is not loaded yet (#5). \
-                    Use --stub to run the machine's own guest";
-        log.line(&format!("wall: {what}"));
-        return Ok((
-            Finish {
-                outcome: Outcome::Wall {
-                    what: what.to_owned(),
-                },
-                cursor: 0,
-                flips: 0,
-                declared_millis: 0,
-            },
-            log,
-        ));
+        machine.load_title(title)?;
+        if let Some(image) = &machine.image {
+            log.line(&format!(
+                "image {} base {:#010x} entry {:#010x} imports {}",
+                title.image.path,
+                image.base,
+                image.base.wrapping_add(image.entry),
+                image.imports.len()
+            ));
+        }
     }
     let finish = machine.run(host, &mut log, budget);
     Ok((finish, log))

@@ -7,6 +7,7 @@ use crate::cpu::{interp::Interp, Cpu, CpuEngine, Mode, Stop, EAX, REG_NAMES};
 use crate::guest::{Arena, GuestMem};
 use crate::host::{Frame, Host};
 use crate::runlog::RunLog;
+use crate::shim::Boundary;
 use crate::stub;
 use crate::Title;
 use std::fmt;
@@ -66,6 +67,10 @@ pub struct Machine {
     surface: Option<Surface>,
     stub: bool,
     flips: u64,
+    /// What the title's imports were bound to.
+    pub boundary: Boundary,
+    /// The image this machine is running, once one is loaded.
+    pub image: Option<crate::pe::Image>,
 }
 
 impl Machine {
@@ -83,6 +88,8 @@ impl Machine {
             surface: None,
             stub: false,
             flips: 0,
+            boundary: Boundary::new(),
+            image: None,
         })
     }
 
@@ -154,6 +161,23 @@ impl Machine {
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
             }
+            // A call that lands on the boundary is a call into something
+            // Microsoft wrote. Either it is implemented here, or the run stops
+            // and names what was asked for, who asked, and where.
+            if let Some(import) = self.boundary.at(self.cpu.eip) {
+                let caller = self
+                    .arena
+                    .read_u32(self.cpu.r[crate::cpu::ESP])
+                    .map_or_else(|_| "unknown".to_owned(), |a| format!("{a:#010x}"));
+                let what = format!("{}!{}", import.dll, import.name);
+                log.at(
+                    Trace::Shims,
+                    &format!("shim {what} from {caller} cursor {}", self.clock.cursor()),
+                );
+                break Outcome::Wall {
+                    what: format!("{what} is imported and not written yet, called from {caller}"),
+                };
+            }
             if log.trace() >= Trace::Insns {
                 log.line(&format!(
                     "insn cursor {} eip {:#010x} eax {:#010x}",
@@ -207,5 +231,53 @@ impl Machine {
             finish.outcome, finish.cursor, finish.flips, finish.declared_millis
         ));
         finish
+    }
+}
+
+/// Where the guest's stack lives, and how much of it there is.
+///
+/// A declared value: the address is chosen, not measured, and it sits below
+/// every image the roster's titles ask to be loaded at.
+pub const STACK_TOP: u32 = 0x0020_0000;
+pub const STACK_BYTES: u32 = 0x0010_0000;
+
+impl Machine {
+    /// Load a title's entry image out of its pressing and point the processor
+    /// at it.
+    ///
+    /// # Errors
+    /// When the rip is absent, the image is not the one the title declares,
+    /// the image is a copy-protection wrapper, or it will not fit.
+    pub fn load_title(&mut self, title: &Title) -> Result<(), Box<dyn std::error::Error>> {
+        let mut iso = crate::disc::open_pressing(title.image.disc_dir, title.image.pressing)?;
+        let bytes = iso.read(title.image.path)?;
+
+        // A title is the bytes it is made of. A pressing that has been patched
+        // or is simply the other one is refused by name rather than run.
+        let digest = crate::hash::sha256_hex(&bytes);
+        if digest != title.image.sha256 {
+            return Err(format!(
+                "{} in {} hashes {digest}, and this title is declared as {}. \
+                 A different pressing, a patched executable, or a bad rip",
+                title.image.path,
+                iso.path().display(),
+                title.image.sha256
+            )
+            .into());
+        }
+
+        let image = crate::pe::load(&bytes, &mut self.arena)?;
+        self.boundary.bind(&image.imports, &mut self.arena)?;
+        self.cpu = Cpu {
+            eip: image.base.wrapping_add(image.entry),
+            r: {
+                let mut r = [0u32; 8];
+                r[crate::cpu::ESP] = STACK_TOP - 16;
+                r
+            },
+            ..Cpu::default()
+        };
+        self.image = Some(image);
+        Ok(())
     }
 }

@@ -23,6 +23,18 @@ One physical release of a title, original retail or Masterpiece re-release, with
 executable. A title has one or two, and they are not interchangeable.
 _Avoid_: disc, rip, edition, version, release as a synonym for title
 
+**Wrapped image**:
+An entry image whose real code is encrypted behind copy protection, shipped
+beside the encrypted remainder. Recognised and named, never run, decrypted or
+bypassed.
+_Avoid_: SafeDisc as a verb, protected, packed
+
+**Red Book audio**:
+A pressing's soundtrack, recorded as audio tracks on the disc itself rather
+than as files. A title declares which pressing its tracks come from, which
+need not be the pressing its entry image comes from.
+_Avoid_: CD audio, soundtrack, music as a synonym
+
 **Game data**:
 A pressing's own bytes, ripped from the player's disc into `game-data/<title>/<pressing>/`. Never
 committed; its absence is a refusal, not a fallback.
