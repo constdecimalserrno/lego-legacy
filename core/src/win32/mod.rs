@@ -6,6 +6,7 @@
 //! the real library had been there.
 
 pub mod advapi32;
+pub mod d3drm;
 pub mod ddraw;
 pub mod dinput;
 pub mod dsound;
@@ -401,6 +402,17 @@ pub enum ComState {
     },
     /// A palette's own 256 entries, in guest memory.
     Palette { store: u32 },
+    /// A three-dimensional device, and the surface it draws into.
+    Device3D { surface: u32 },
+    /// A viewport: which device, where on it, and what it clears to.
+    Viewport {
+        device: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        background: u32,
+    },
 }
 
 /// What a shim is given.
@@ -526,6 +538,7 @@ pub fn interfaces() -> Vec<&'static crate::com::Interface> {
     all.extend_from_slice(dinput::INTERFACES);
     all.extend_from_slice(dsound::INTERFACES);
     all.extend_from_slice(ddraw::INTERFACES);
+    all.extend_from_slice(d3drm::INTERFACES);
     all
 }
 
@@ -560,6 +573,7 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         dsound::SHIMS,
         ddraw::SHIMS,
         gdi32::SHIMS,
+        d3drm::SHIMS,
     ] {
         if let Some(shim) = table
             .iter()

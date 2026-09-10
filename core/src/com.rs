@@ -98,10 +98,33 @@ const FACES: &[(&str, &str, &str)] = &[
         "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
         "IDirectDraw4",
     ),
-    // Its surfaces.
+    // DirectX 6's retained mode, which the roster's titles ask for by name.
+    (
+        "IDirect3DRM",
+        "4516ec83-8f20-11d0-9b6d-0000c0781bc3",
+        "IDirect3DRM3",
+    ),
+    (
+        "IDirect3DRM3",
+        "4516ec83-8f20-11d0-9b6d-0000c0781bc3",
+        "IDirect3DRM3",
+    ),
+    // Its surfaces. DirectX 2's surface and DirectX 6's agree slot for slot as
+    // far as the older one goes, so one table answers both: everything through
+    // PageUnlock is in the same place, and the newer one only adds after it.
     (
         "IDirectDrawSurface",
         "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
+        "IDirectDrawSurface4",
+    ),
+    (
+        "IDirectDrawSurface",
+        "6c14db81-a733-11ce-a521-0020af0be560",
+        "IDirectDrawSurface4",
+    ),
+    (
+        "IDirectDrawSurface4",
+        "6c14db81-a733-11ce-a521-0020af0be560",
         "IDirectDrawSurface4",
     ),
     (

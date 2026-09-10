@@ -218,7 +218,7 @@ fn the_disc_reads_in_the_order_the_image_records() {
 }
 
 #[test]
-fn the_boot_path_reaches_the_three_dimensional_device() {
+fn the_boot_path_builds_a_three_dimensional_device_on_a_real_surface() {
     let Some(ran) = boot() else { return };
 
     // Where this title stops today: its own C runtime is done, it has checked
@@ -226,7 +226,7 @@ fn the_boot_path_reaches_the_three_dimensional_device() {
     // Where this title stops today. It moves as the boundary grows, and what
     // is held here is that it got past its own C runtime, its disc check, its
     // data, and DirectX's input.
-    ran.assert_wall("d3drm.dll!Direct3DRMCreate")
+    ran.assert_wall("immediate mode, which is not written yet")
         .assert_logged("dinput created")
         // It opens its keyboard before it makes its window; the pointer comes
         // later, through the window itself.
@@ -235,7 +235,16 @@ fn the_boot_path_reaches_the_three_dimensional_device() {
         .assert_logged("window class LegoRR")
         .assert_logged("dsound created")
         .assert_logged("display mode 320x200x16")
-        .assert_logged("primary");
+        .assert_logged("primary")
+        // The retained-mode device, drawing into a surface that is guest
+        // memory rather than a null pointer.
+        .assert_logged("d3drm created")
+        .assert_logged("d3drm device");
+    assert!(
+        !ran.log.contains("drawing into surface 0x00000000"),
+        "the device draws into real guest memory\nlog:\n{}",
+        ran.log
+    );
     assert!(
         ran.finish.cursor > 10_000_000,
         "the boot path loads this title's own data, which is tens of millions of \

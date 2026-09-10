@@ -150,10 +150,18 @@ impl fmt::Display for Stop {
             Self::DivideError => write!(f, "divide error"),
             Self::Halted => write!(f, "halted"),
             Self::Exited { code } => write!(f, "exited {code}"),
-            Self::NotWritten { what, caller } => write!(
-                f,
-                "{what} is imported and not written yet, called from {caller:#010x}"
-            ),
+            Self::NotWritten { what, caller } => {
+                // A name with a colon in it is already a sentence about
+                // itself; a bare one needs saying what happened to it.
+                if what.contains(':') {
+                    write!(f, "{what} (called from {caller:#010x})")
+                } else {
+                    write!(
+                        f,
+                        "{what} is imported and not written yet, called from {caller:#010x}"
+                    )
+                }
+            }
         }
     }
 }
