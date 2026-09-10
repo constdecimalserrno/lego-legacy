@@ -57,8 +57,9 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
 
 /// The boot path, run once and looked at by several tests.
 ///
-/// It retires ninety-six million instructions and unpacks a 79 MB archive on
-/// the way, which is worth doing once rather than once per assertion.
+/// It plays four and a half minutes of movie, retires two hundred million
+/// instructions and unpacks a 79 MB archive on the way, which is worth doing
+/// once rather than once per assertion.
 fn boot() -> Option<&'static testkit::Ran> {
     use std::sync::OnceLock;
     static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
@@ -221,11 +222,14 @@ fn the_disc_reads_in_the_order_the_image_records() {
 fn the_boot_path_plays_its_movies_and_goes_on_to_build_its_scene() {
     let Some(ran) = boot() else { return };
 
-    // Where this title stops today: past both its movies, building its scene
-    // on a retained-mode frame method nobody has written yet. It moves as the
-    // boundary grows; what is held is everything on the way.
-    ran.assert_wall("IDirect3DRMFrame3::")
-        .assert_logged("dinput created")
+    // Past both movies and the scene, loading its levels' objects with the
+    // loading screen up, and nothing on the way it asked for that is not here.
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "the boot path should run to its budget without a wall"
+    );
+    ran.assert_logged("dinput created")
         // It opens its keyboard before it makes its window; the pointer comes
         // later, through the window itself.
         .assert_logged("dinput keyboard")
@@ -257,6 +261,32 @@ fn the_boot_path_plays_its_movies_and_goes_on_to_build_its_scene() {
         ran.finish.declared_millis > (279 * 1000 / 15) + (3821 * 1000 / 15),
         "the movies take their own time on the declared clock, not {} ms",
         ran.finish.declared_millis
+    );
+}
+
+#[test]
+fn the_scene_is_built_through_retained_mode_and_drawn_through_the_device_under_it() {
+    let Some(ran) = boot() else { return };
+
+    // Its camera's view of the level, full screen, and the radar's, in the
+    // corner of the panel: the viewports a player sees, made on the device.
+    ran.assert_logged("d3drm viewport 640x480 at 0,0")
+        .assert_logged("d3drm viewport 151x151 at 16,13")
+        // The frames it builds its scene from are placed and turned.
+        .assert_logged("IDirect3DRMFrame3::SetPosition")
+        .assert_logged("IDirect3DRMFrame3::SetOrientation")
+        .assert_logged("IDirect3DRMFrame3::AddChild")
+        // Its lights, and the objects it draws itself when the scene renders.
+        .assert_logged("IDirect3DRM3::CreateLightRGB")
+        .assert_logged("IDirect3DRM3::CreateUserVisual")
+        // The device underneath retained mode, asked for as DirectX 6's,
+        // which is how it makes the material it draws with.
+        .assert_logged("com IDirect3DDevice2 handed back IDirect3DDevice3")
+        .assert_logged("IDirect3D3::CreateMaterial")
+        .assert_logged("IDirect3DMaterial3::GetHandle");
+    assert!(
+        !ran.log.contains("IDirect3DDevice2 was asked for b0ab3b60"),
+        "the DirectX 6 device is never refused"
     );
 }
 
@@ -408,21 +438,57 @@ fn the_titles_own_archives_are_on_the_declared_machines_disc() {
             "{shipped} is in the pressing's cabinet and should have been found"
         );
     }
-    // The eight it probes for and this pressing does not ship are the only
-    // things it does not find. Anything else missing is a gap in the tree.
-    let unexpected: Vec<&str> = ran
+    // It also looks for files the pressing does not ship: eight more archives,
+    // and, while it loads its objects, textures in an object's own folder
+    // before it falls back to the shared ones. A miss is only a gap in the
+    // tree when the file is in the pressing after all.
+    let shipped = wad_names();
+    let gaps: Vec<&str> = ran
         .log
         .lines()
-        .filter(|l| l.starts_with("file missing"))
-        .filter(|l| !(2..10).any(|n| l.contains(&format!("LegoRR{n}.wad"))))
+        .filter_map(|l| l.strip_prefix("file missing "))
+        .filter(|path| !(2..10).any(|n| path.ends_with(&format!("LegoRR{n}.wad"))))
+        .filter(|path| {
+            let inside = path
+                .strip_prefix("C:\\LEGORR\\Data\\")
+                .or_else(|| path.strip_prefix("D:\\Data\\"))
+                .unwrap_or(path);
+            shipped.contains(&inside.to_ascii_lowercase())
+        })
         .collect();
-    assert!(
-        unexpected.is_empty(),
-        "the tree does not hold: {unexpected:?}"
-    );
+    assert!(gaps.is_empty(), "the tree does not hold: {gaps:?}");
     assert!(
         ran.finish.cursor > 10_000_000,
         "loading its data takes tens of millions of instructions, not {}",
         ran.finish.cursor
     );
+}
+
+/// Every file name in the pressing's archives, in lower case.
+fn wad_names() -> std::collections::BTreeSet<String> {
+    let mut iso = disc::open_pressing("rock-raiders", "masterpiece-rock-raiders")
+        .expect("the pressing opens");
+    let header = iso.read("DATA1.HDR").expect("the cabinet's header");
+    let mut tree = lego_legacy_core::install::Tree::new();
+    tree.set_cabinet(&header, "DATA1.CAB", ROCK_RAIDERS.install_dir)
+        .expect("the cabinet reads");
+    tree.set_disc(iso);
+    let mut names = std::collections::BTreeSet::new();
+    for wad in ["LegoRR0.wad", "LegoRR1.wad"] {
+        let bytes = tree
+            .read(&format!("{}\\{wad}", ROCK_RAIDERS.install_dir))
+            .expect("the archive is installed");
+        // "WWAD", a count, then that many NUL-terminated names.
+        let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let mut rest = &bytes[8..];
+        for _ in 0..count {
+            let end = rest
+                .iter()
+                .position(|b| *b == 0)
+                .expect("a terminated name");
+            names.insert(String::from_utf8_lossy(&rest[..end]).to_ascii_lowercase());
+            rest = &rest[end + 1..];
+        }
+    }
+    names
 }

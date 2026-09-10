@@ -114,8 +114,6 @@ pub struct State {
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
     pub present: Option<Present>,
-    /// Which viewport the three-dimensional device is drawing through.
-    pub current_viewport: u32,
     /// How many times a viewport has been cleared.
     pub cleared: u64,
     /// Every sound playing, mixed on the declared clock.
@@ -130,10 +128,19 @@ pub struct State {
     pub mouse_down: bool,
     /// The modal dialog a title has up, while it has one.
     pub dialog: Option<user32::Dialog>,
+    /// What a title named its objects, by the object.
+    pub names: BTreeMap<u32, String>,
+    /// Settings a title set on an object and may read back, by the object and
+    /// the setting's name.
+    pub settings: BTreeMap<(u32, &'static str), u32>,
+    /// What immediate mode keeps about its devices and materials.
+    pub immediate: d3d::Immediate,
     /// The scene retained mode is building.
     pub scene: scene::Scene,
     /// COM objects, by the guest pointer that names them.
     com: BTreeMap<u32, ComObject>,
+    /// Every face of every object, by the object and the interface.
+    faces: BTreeMap<(u32, &'static str), u32>,
     /// Which vtable an interface's methods live behind, once one is made.
     vtables: BTreeMap<&'static str, u32>,
     /// Settings files, by path, section and key.
@@ -179,14 +186,17 @@ impl State {
             color_keys: BTreeMap::new(),
             palette: 0,
             present: None,
-            current_viewport: 0,
             cleared: 0,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_down: false,
             dialog: None,
+            names: BTreeMap::new(),
+            settings: BTreeMap::new(),
+            immediate: d3d::Immediate::default(),
             scene: scene::Scene::default(),
             com: BTreeMap::new(),
+            faces: BTreeMap::new(),
             vtables: BTreeMap::new(),
             profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
@@ -281,15 +291,54 @@ impl State {
 
     /// Remember a COM object the machine handed out.
     pub fn add_com(&mut self, at: u32, interface: &'static str, state: ComState) {
+        self.faces.insert((at, interface), at);
         self.com.insert(
             at,
             ComObject {
                 interface,
                 refs: 1,
+                identity: at,
                 app_data: 0,
                 state,
             },
         );
+    }
+
+    /// Hand back an object's face as another interface: the same face again
+    /// if the guest has had it before, as COM promises, and a new one sharing
+    /// the object's state if not.
+    ///
+    /// # Errors
+    /// When the heap is exhausted or the write faults.
+    pub fn face(
+        ctx: &mut Ctx<'_>,
+        of: u32,
+        interface: &'static crate::com::Interface,
+    ) -> Result<u32, Fault> {
+        let identity = ctx.state.identity(of);
+        let existing = ctx.state.faces.get(&(identity, interface.name)).copied();
+        if let Some(at) = existing {
+            ctx.state.com_ref(at, 1);
+            return Ok(at);
+        }
+        let state = ctx
+            .state
+            .com(of)
+            .map(|o| o.state.clone())
+            .unwrap_or_default();
+        let at = Self::make_com(ctx, interface, state)?;
+        if let Some(object) = ctx.state.com_mut(at) {
+            object.identity = identity;
+        }
+        ctx.state.faces.remove(&(at, interface.name));
+        ctx.state.faces.insert((identity, interface.name), at);
+        Ok(at)
+    }
+
+    /// The object a face belongs to.
+    #[must_use]
+    pub fn identity(&self, at: u32) -> u32 {
+        self.com.get(&at).map_or(at, |o| o.identity)
     }
 
     /// What interface a guest pointer is, if the machine made it.
@@ -412,6 +461,10 @@ pub const SLOTS_PER_INTERFACE: usize = 128;
 pub struct ComObject {
     pub interface: &'static str,
     pub refs: i32,
+    /// The object this is a face of: its own address for the object a call
+    /// made, and that object's for every face the guest asked it for. What an
+    /// object keeps on the side is kept under this, so every face sees it.
+    pub identity: u32,
     /// What the guest hung on this object with `SetAppData`. Its own pointer,
     /// which it expects to read back unchanged.
     pub app_data: u32,
@@ -454,9 +507,18 @@ pub enum ComState {
     StreamSample { owner: u32, surface: u32 },
     /// A three-dimensional device, and the surface it draws into.
     Device3D { surface: u32 },
+    /// A frame's children, as they were when a title asked for them.
+    FrameArray { frames: Vec<u32> },
+    /// Something a title draws itself: its callback, and what to pass it.
+    UserVisual { callback: u32, argument: u32 },
+    /// Retained mode's device: its surface, and how many buffers the title
+    /// said it flips between.
+    RetainedDevice { surface: u32, buffers: u32 },
     /// A viewport: which device, where on it, and what it clears to.
     Viewport {
         device: u32,
+        /// The frame it looks from, for a retained-mode viewport.
+        camera: u32,
         x: u32,
         y: u32,
         width: u32,
@@ -482,6 +544,9 @@ pub struct Ctx<'a> {
     /// finish: the function to call and what to pass it. The answer the shim
     /// returned is given to the guest once that call comes back.
     pub call_guest: Option<(u32, Vec<u32>)>,
+    /// Set by a method whose answer is a floating-point value, which the
+    /// caller reads from the top of the floating-point stack, not `eax`.
+    pub float_answer: Option<f32>,
 }
 
 impl Ctx<'_> {

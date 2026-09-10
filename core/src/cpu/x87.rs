@@ -188,6 +188,38 @@ impl X87 {
         }
     }
 
+    /// Classify `st(0)`, as `fxam` does: C1 is its sign, and C3, C2 and C0
+    /// say what kind of value it is.
+    ///
+    /// The registers hold doubles, and every double that is not zero, infinite
+    /// or a NaN is a normal number in the unit's extended format, so a
+    /// denormal is never reported.
+    pub fn examine(&mut self) {
+        let value = self.st(0);
+        let (c3, c2, c0) = if !self.occupied(0) {
+            (true, false, true)
+        } else if value.is_nan() {
+            (false, false, true)
+        } else if value.is_infinite() {
+            (false, true, true)
+        } else if value == 0.0 {
+            (true, false, false)
+        } else {
+            (false, true, false)
+        };
+        self.status &= !0x4700;
+        for (set, bit) in [
+            (c0, 0x0100),
+            (value.is_sign_negative(), 0x0200),
+            (c2, 0x0400),
+            (c3, 0x4000),
+        ] {
+            if set {
+                self.status |= bit;
+            }
+        }
+    }
+
     /// Set the flags a comparison against the integer unit writes.
     ///
     /// `fcomi` puts the answer in the processor's own flags instead of the
@@ -574,6 +606,7 @@ pub fn execute(
             let value = cpu.fpu.st(0);
             cpu.fpu.compare(value, 0.0);
         }
+        (0xd9, 0xe5) => cpu.fpu.examine(),
         (0xd9, 0xe8) => cpu.fpu.push(1.0),
         (0xd9, 0xe9) => cpu.fpu.push(std::f64::consts::LOG2_10),
         (0xd9, 0xea) => cpu.fpu.push(std::f64::consts::LOG2_E),
@@ -992,6 +1025,25 @@ mod tests {
         assert_eq!(fpu.status() & 0x4500, 0x4000, "equal sets C3");
         fpu.compare(f64::NAN, 1.0);
         assert_eq!(fpu.status() & 0x4500, 0x4500, "unordered sets all three");
+    }
+    #[test]
+    fn examining_the_top_names_its_kind_and_sign() {
+        let mut fpu = X87::new();
+        let kind = |fpu: &X87| fpu.status() & 0x4700;
+        fpu.examine();
+        assert_eq!(kind(&fpu), 0x4100, "an empty register is C3 and C0");
+        fpu.push(-2.5);
+        fpu.examine();
+        assert_eq!(kind(&fpu), 0x0600, "a negative normal number is C2 and C1");
+        fpu.push(0.0);
+        fpu.examine();
+        assert_eq!(kind(&fpu), 0x4000, "zero is C3");
+        fpu.push(f64::INFINITY);
+        fpu.examine();
+        assert_eq!(kind(&fpu), 0x0500, "infinity is C2 and C0");
+        fpu.push(f64::NAN);
+        fpu.examine();
+        assert_eq!(kind(&fpu) & 0x4500, 0x0100, "a NaN is C0");
     }
 
     #[test]

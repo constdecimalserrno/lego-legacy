@@ -174,11 +174,46 @@ const FACES: &[(&str, &str, &str)] = &[
         "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
         "IDirectDrawSurface4",
     ),
+    // The device underneath retained mode, asked for as DirectX 6's device,
+    // which is what it is (#11).
+    (
+        "IDirect3DDevice2",
+        "b0ab3b60-33d7-11d1-a981-00c04fd7b174",
+        "IDirect3DDevice3",
+    ),
+    (
+        "IDirect3DDevice3",
+        "b0ab3b60-33d7-11d1-a981-00c04fd7b174",
+        "IDirect3DDevice3",
+    ),
     // A movie's video stream, asked for as the DirectDraw stream it is (#9).
     (
         "IDirectDrawMediaStream",
         "f4104fce-9a70-11d0-8fde-00c04fd9189d",
         "IDirectDrawMediaStream",
+    ),
+    // A frame's older face, which a frame array holds, asked for as the frame
+    // it is, and the other way (#11).
+    (
+        "IDirect3DRMFrame",
+        "ff6b7f70-a40e-11d1-91f9-0000f8758e66",
+        "IDirect3DRMFrame3",
+    ),
+    (
+        "IDirect3DRMFrame3",
+        "eb16cb03-d271-11ce-ac48-0000c03825a1",
+        "IDirect3DRMFrame",
+    ),
+    // A surface asked for as the texture Direct3D draws it as (#11).
+    (
+        "IDirectDrawSurface",
+        "93281502-8cf8-11d0-89ab-00a0c9054129",
+        "IDirect3DTexture2",
+    ),
+    (
+        "IDirectDrawSurface4",
+        "93281502-8cf8-11d0-89ab-00a0c9054129",
+        "IDirect3DTexture2",
     ),
     // DirectX 5's surface, which is DirectX 6's without its last nine slots.
     (
@@ -193,6 +228,107 @@ const FACES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Every interface this machine hands out, and the identifier it is asked for
+/// by, from each interface's own header.
+const OWN: &[(&str, &str)] = &[
+    (
+        "IAMMultiMediaStream",
+        "bebe595c-9a6f-11d0-8fde-00c04fd9189d",
+    ),
+    ("IDirect3D2", "6aae1ec1-662a-11d0-889d-00aa00bbb76a"),
+    ("IDirect3D3", "bb223240-e72b-11d0-a9b4-00aa00c0993e"),
+    ("IDirect3DDevice2", "93281501-8cf8-11d0-89ab-00a0c9054129"),
+    ("IDirect3DDevice3", "b0ab3b60-33d7-11d1-a981-00c04fd7b174"),
+    ("IDirect3DLight", "4417c142-33ad-11cf-816f-0000c020156e"),
+    ("IDirect3DMaterial3", "ca9c46f4-d3c5-11d1-b75a-00600852b312"),
+    ("IDirect3DRM", "2bc49361-8327-11cf-ac4a-0000c03825a1"),
+    ("IDirect3DRM3", "4516ec83-8f20-11d0-9b6d-0000c0781bc3"),
+    ("IDirect3DRMDevice3", "549f498b-bfeb-11d1-8ed8-00a0c967a482"),
+    ("IDirect3DRMFrame", "eb16cb03-d271-11ce-ac48-0000c03825a1"),
+    ("IDirect3DRMFrame3", "ff6b7f70-a40e-11d1-91f9-0000f8758e66"),
+    (
+        "IDirect3DRMFrameArray",
+        "eb16cb12-d271-11ce-ac48-0000c03825a1",
+    ),
+    ("IDirect3DRMLight", "eb16cb08-d271-11ce-ac48-0000c03825a1"),
+    (
+        "IDirect3DRMMaterial2",
+        "ff6b7f75-a40e-11d1-91f9-0000f8758e66",
+    ),
+    ("IDirect3DRMMesh", "a3a80d01-6e12-11cf-ac4a-0000c03825a1"),
+    (
+        "IDirect3DRMMeshBuilder3",
+        "4516ec82-8f20-11d0-9b6d-0000c0781bc3",
+    ),
+    (
+        "IDirect3DRMTexture3",
+        "ff6b7f73-a40e-11d1-91f9-0000f8758e66",
+    ),
+    (
+        "IDirect3DRMUserVisual",
+        "59163de0-6d43-11cf-ac4a-0000c03825a1",
+    ),
+    (
+        "IDirect3DRMViewport2",
+        "4a1b1be6-bfed-11d1-8ed8-00a0c967a482",
+    ),
+    ("IDirect3DTexture2", "93281502-8cf8-11d0-89ab-00a0c9054129"),
+    ("IDirect3DViewport3", "b0ab3b61-33d7-11d1-a981-00c04fd7b174"),
+    ("IDirectDraw", "6c14db80-a733-11ce-a521-0020af0be560"),
+    ("IDirectDraw4", "9c59509a-39bd-11d1-8c4a-00c04fd930c5"),
+    ("IDirectDrawClipper", "6c14db85-a733-11ce-a521-0020af0be560"),
+    (
+        "IDirectDrawMediaStream",
+        "f4104fce-9a70-11d0-8fde-00c04fd9189d",
+    ),
+    ("IDirectDrawPalette", "6c14db84-a733-11ce-a521-0020af0be560"),
+    (
+        "IDirectDrawStreamSample",
+        "f4104fcf-9a70-11d0-8fde-00c04fd9189d",
+    ),
+    ("IDirectDrawSurface", "6c14db81-a733-11ce-a521-0020af0be560"),
+    (
+        "IDirectDrawSurface4",
+        "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
+    ),
+    ("IDirectInputA", "89521360-aa8a-11cf-bfc7-444553540000"),
+    (
+        "IDirectInputDeviceA",
+        "5944e680-c92e-11cf-bfc7-444553540000",
+    ),
+    ("IDirectSound", "279afa83-4981-11ce-a521-0020af0be560"),
+    ("IDirectSoundBuffer", "279afa85-4981-11ce-a521-0020af0be560"),
+    ("IMediaStream", "b502d1bd-9a57-11d0-8fde-00c04fd9189d"),
+];
+
+/// What every object is: `IUnknown`.
+const IUNKNOWN: &str = "00000000-0000-0000-c000-000000000046";
+
+/// What every retained-mode object is too: `IDirect3DRMObject`, and for the
+/// kinds that hang on a frame, `IDirect3DRMVisual`.
+const RM_OBJECT: &str = "eb16cb00-d271-11ce-ac48-0000c03825a1";
+const RM_VISUAL: &str = "eb16cb04-d271-11ce-ac48-0000c03825a1";
+
+/// Whether an object answers to an identifier as itself.
+fn is_itself(interface: &str, asked: &str) -> bool {
+    let retained = interface.starts_with("IDirect3DRM") && interface != "IDirect3DRM3";
+    let visual = matches!(
+        interface,
+        "IDirect3DRMFrame"
+            | "IDirect3DRMFrame3"
+            | "IDirect3DRMMesh"
+            | "IDirect3DRMMeshBuilder3"
+            | "IDirect3DRMTexture3"
+            | "IDirect3DRMUserVisual"
+    );
+    asked == IUNKNOWN
+        || OWN
+            .iter()
+            .any(|(name, iid)| *name == interface && *iid == asked)
+        || (retained && asked == RM_OBJECT)
+        || (visual && asked == RM_VISUAL)
+}
+
 fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let out = args[1];
     if out != 0 {
@@ -205,15 +341,22 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         return Ok(E_NOINTERFACE);
     };
     let have = object.interface;
-    let state = object.state.clone();
+
+    // Asked for what it already is: the same object, one more reference.
+    if is_itself(have, &asked) {
+        ctx.state.com_ref(this, 1);
+        if out != 0 {
+            ctx.mem.write_u32(out, this).map_err(Stop::Fault)?;
+        }
+        return Ok(S_OK);
+    }
 
     if let Some((_, _, give)) = FACES
         .iter()
         .find(|(from, iid, _)| *from == have && *iid == asked)
     {
         if let Some(interface) = crate::win32::interface_named(give) {
-            let object =
-                crate::win32::State::make_com(ctx, interface, state).map_err(Stop::Fault)?;
+            let object = crate::win32::State::face(ctx, this, interface).map_err(Stop::Fault)?;
             if out != 0 {
                 ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
             }

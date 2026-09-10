@@ -3,9 +3,14 @@
 //! The boundary sits above it (ADR-0002): a title hands D3DRM a scene made of
 //! frames, meshes and lights, and asks it to draw. What draws is this
 //! emulator's own rasteriser, into the guest's own surface.
+//!
+//! Every table is the interface's full width, named and sized from its own
+//! header. A slot is written when this title has called it; the rest stop the
+//! run and name the method (#11).
 
+use super::scene::Matrix;
 use super::{ComState, Convention, Ctx, Shim, State};
-use crate::com::{method, wall, Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -17,6 +22,13 @@ pub const SHIMS: &[Shim] = &[Shim {
     run: create,
 }];
 
+/// An object this machine never made, or made as something else.
+const D3DRMERR_BADOBJECT: u32 = 0x8876_030d;
+/// A value that makes no sense for the call.
+const D3DRMERR_BADVALUE: u32 = 0x8876_0316;
+/// No texture format the device has matches what was asked for.
+const D3DRMERR_TEXTUREFORMATNOTFOUND: u32 = 0x8876_032b;
+
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let object = State::make_com(ctx, &D3DRM, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
@@ -24,1223 +36,550 @@ fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// `IDirect3DRM`, in slot order.
+/// `IDirect3DRM`: what `Direct3DRMCreate` hands out. This title asks it for its DirectX 6 face straight away, and nothing else of it is written.
 pub static D3DRM: Interface = Interface {
     name: "IDirect3DRM",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "CreateObject",
-            args: 4,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateFrame",
-            args: 2,
-            run: create_frame,
-        },
-        Method {
-            name: "CreateMesh",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateMeshBuilder",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateFace",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateAnimation",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateAnimationSet",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateTexture",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "CreateLight",
-            args: 3,
-            run: create_light,
-        },
-        Method {
-            name: "CreateLightRGB",
-            args: 5,
-            run: create_light_rgb,
-        },
-        Method {
-            name: "CreateMaterial",
-            args: 2,
-            run: create_material,
-        },
-        Method {
-            name: "CreateDevice",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateDeviceFromSurface",
-            args: 4,
-            run: device_from_surface,
-        },
-        Method {
-            name: "CreateDeviceFromD3D",
-            args: 4,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateDeviceFromClipper",
-            args: 5,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateTextureFromSurface",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "CreateShadow",
-            args: 6,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateViewport",
-            args: 7,
-            run: create_viewport,
-        },
-        Method {
-            name: "CreateWrap",
-            args: 12,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateUserVisual",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "LoadTexture",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "LoadTextureFromResource",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "SetSearchPath",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "AddSearchPath",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetSearchPath",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetDefaultTextureColors",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetDefaultTextureShades",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetDevices",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetNamedObject",
-            args: 2,
-            run: unsupported,
-        },
-        Method {
-            name: "EnumerateObjects",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Load",
-            args: 10,
-            run: unsupported,
-        },
-        Method {
-            name: "Tick",
-            args: 1,
-            run: ok,
-        },
+        wall("CreateObject", 4),
+        wall("CreateFrame", 2),
+        wall("CreateMesh", 1),
+        wall("CreateMeshBuilder", 1),
+        wall("CreateFace", 1),
+        wall("CreateAnimation", 1),
+        wall("CreateAnimationSet", 1),
+        wall("CreateTexture", 2),
+        wall("CreateLight", 3),
+        wall("CreateLightRGB", 5),
+        wall("CreateMaterial", 2),
+        wall("CreateDevice", 3),
+        wall("CreateDeviceFromSurface", 4),
+        wall("CreateDeviceFromD3D", 3),
+        wall("CreateDeviceFromClipper", 5),
+        wall("CreateTextureFromSurface", 2),
+        wall("CreateShadow", 9),
+        wall("CreateViewport", 7),
+        wall("CreateWrap", 16),
+        wall("CreateUserVisual", 3),
+        wall("LoadTexture", 2),
+        wall("LoadTextureFromResource", 2),
+        wall("SetSearchPath", 1),
+        wall("AddSearchPath", 1),
+        wall("GetSearchPath", 2),
+        wall("SetDefaultTextureColors", 1),
+        wall("SetDefaultTextureShades", 1),
+        wall("GetDevices", 1),
+        wall("GetNamedObject", 2),
+        wall("EnumerateObjects", 2),
+        wall("Load", 10),
+        wall("Tick", 1),
     ],
 };
 
-/// `IDirect3DRMDevice`, in slot order after the object's own methods.
-pub static DEVICE: Interface = Interface {
-    name: "IDirect3DRMDevice",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Init",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InitFromD3D",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InitFromClipper",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "Update",
-            args: 0,
-            run: update,
-        },
-        Method {
-            name: "AddUpdateCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteUpdateCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetBufferCount",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetBufferCount",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "SetDither",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetShades",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetQuality",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetTextureQuality",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetViewports",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetDither",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetShades",
-            args: 0,
-            run: shades,
-        },
-        Method {
-            name: "GetHeight",
-            args: 0,
-            run: height,
-        },
-        Method {
-            name: "GetWidth",
-            args: 0,
-            run: width,
-        },
-        Method {
-            name: "GetTrianglesDrawn",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetWireframeOptions",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetQuality",
-            args: 0,
-            run: quality,
-        },
-        Method {
-            name: "GetColorModel",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "GetTextureQuality",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetDirect3DDevice",
-            args: 1,
-            run: unsupported,
-        },
-    ],
-};
-
-/// `IDirect3DRMViewport`, in slot order.
-pub static VIEWPORT: Interface = Interface {
-    name: "IDirect3DRMViewport",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Init",
-            args: 6,
-            run: ok,
-        },
-        Method {
-            name: "Clear",
-            args: 0,
-            run: clear,
-        },
-        Method {
-            name: "Render",
-            args: 1,
-            run: render,
-        },
-        Method {
-            name: "SetFront",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetBack",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetField",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetUniformScaling",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetCamera",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetProjection",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "Transform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InverseTransform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Configure",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "ForceUpdate",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "SetPlane",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "GetCamera",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetDevice",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetPlane",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "Pick",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "GetUniformScaling",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "GetX",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetY",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetWidth",
-            args: 0,
-            run: width,
-        },
-        Method {
-            name: "GetHeight",
-            args: 0,
-            run: height,
-        },
-        Method {
-            name: "GetField",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetBack",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetFront",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetProjection",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetDirect3DViewport",
-            args: 1,
-            run: unsupported,
-        },
-    ],
-};
-
-/// Everything else a scene is made of. These keep no state yet: what a title
-/// builds is remembered by the title, and what this machine has to know to
-/// draw arrives when the rasteriser does (#12).
-pub static OBJECT: Interface = Interface {
-    name: "IDirect3DRMObject",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
-    ],
-};
-
-/// `IDirect3DRM3`: DirectX 6's own retained mode, and what this title asks for
-/// by name. The same machine underneath, with six slots added at the end and a
-/// device creator that takes a flags word.
+/// `IDirect3DRM3`: DirectX 6's retained mode, which this title drives.
 pub static D3DRM3: Interface = Interface {
     name: "IDirect3DRM3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "CreateObject",
-            args: 4,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateFrame",
-            args: 2,
-            run: create_frame,
-        },
-        Method {
-            name: "CreateMesh",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateMeshBuilder",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateFace",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "CreateAnimation",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateAnimationSet",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateTexture",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "CreateLight",
-            args: 3,
-            run: create_light,
-        },
-        Method {
-            name: "CreateLightRGB",
-            args: 5,
-            run: create_light_rgb,
-        },
-        Method {
-            name: "CreateMaterial",
-            args: 2,
-            run: create_material,
-        },
-        Method {
-            name: "CreateDevice",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateDeviceFromSurface",
-            args: 5,
-            run: device_from_surface3,
-        },
-        Method {
-            name: "CreateDeviceFromD3D",
-            args: 4,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateDeviceFromClipper",
-            args: 5,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateTextureFromSurface",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "CreateShadow",
-            args: 8,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateViewport",
-            args: 7,
-            run: create_viewport,
-        },
-        Method {
-            name: "CreateWrap",
-            args: 12,
-            run: unsupported,
-        },
-        Method {
-            name: "CreateUserVisual",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "LoadTexture",
-            args: 2,
-            run: create_texture,
-        },
-        Method {
-            name: "LoadTextureFromResource",
-            args: 3,
-            run: create_texture,
-        },
-        Method {
-            name: "SetSearchPath",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "AddSearchPath",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetSearchPath",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetDefaultTextureColors",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetDefaultTextureShades",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetDevices",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetNamedObject",
-            args: 2,
-            run: unsupported,
-        },
-        Method {
-            name: "EnumerateObjects",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Load",
-            args: 10,
-            run: unsupported,
-        },
-        Method {
-            name: "Tick",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "CreateProgressiveMesh",
-            args: 1,
-            run: create_mesh,
-        },
-        Method {
-            name: "RegisterClient",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "UnregisterClient",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "CreateClippedVisual",
-            args: 2,
-            run: unsupported,
-        },
-        Method {
-            name: "SetOptions",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetOptions",
-            args: 1,
-            run: options,
-        },
+        wall("CreateObject", 4),
+        method("CreateFrame", 2, create_frame),
+        method("CreateMesh", 1, create_mesh),
+        method("CreateMeshBuilder", 1, create_mesh_builder),
+        wall("CreateFace", 1),
+        wall("CreateAnimation", 1),
+        wall("CreateAnimationSet", 1),
+        method("CreateTexture", 2, create_texture),
+        method("CreateLight", 3, create_light),
+        method("CreateLightRGB", 5, create_light_rgb),
+        method("CreateMaterial", 2, create_material),
+        wall("CreateDevice", 3),
+        method("CreateDeviceFromSurface", 5, device_from_surface),
+        wall("CreateDeviceFromD3D", 3),
+        wall("CreateDeviceFromClipper", 5),
+        method("CreateTextureFromSurface", 2, create_texture_from_surface),
+        wall("CreateShadow", 9),
+        method("CreateViewport", 7, create_viewport),
+        wall("CreateWrap", 16),
+        method("CreateUserVisual", 3, create_user_visual),
+        wall("LoadTexture", 2),
+        wall("LoadTextureFromResource", 4),
+        wall("SetSearchPath", 1),
+        wall("AddSearchPath", 1),
+        wall("GetSearchPath", 2),
+        wall("SetDefaultTextureColors", 1),
+        wall("SetDefaultTextureShades", 1),
+        wall("GetDevices", 1),
+        wall("GetNamedObject", 2),
+        wall("EnumerateObjects", 2),
+        wall("Load", 10),
+        wall("Tick", 1),
+        wall("CreateProgressiveMesh", 1),
+        wall("RegisterClient", 2),
+        wall("UnregisterClient", 1),
+        wall("CreateClippedVisual", 2),
+        wall("SetOptions", 1),
+        wall("GetOptions", 1),
     ],
 };
 
-/// `IDirect3DRMDevice3`: the device DirectX 6's retained mode hands out. Ten
-/// slots more than the first one, and a title that has the newer interface
-/// calls through them.
+/// `IDirect3DRMDevice3`: the device retained mode draws with, on a DirectDraw surface.
 pub static DEVICE3: Interface = Interface {
     name: "IDirect3DRMDevice3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Init",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InitFromD3D",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InitFromClipper",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "Update",
-            args: 0,
-            run: update,
-        },
-        Method {
-            name: "AddUpdateCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteUpdateCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetBufferCount",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetBufferCount",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "SetDither",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetShades",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetQuality",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetTextureQuality",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetViewports",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetDither",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetShades",
-            args: 0,
-            run: shades,
-        },
-        Method {
-            name: "GetHeight",
-            args: 0,
-            run: height,
-        },
-        Method {
-            name: "GetWidth",
-            args: 0,
-            run: width,
-        },
-        Method {
-            name: "GetTrianglesDrawn",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetWireframeOptions",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetQuality",
-            args: 0,
-            run: quality,
-        },
-        Method {
-            name: "GetColorModel",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "GetTextureQuality",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetDirect3DDevice",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "InitFromD3D2",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InitFromSurface",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "SetRenderMode",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetRenderMode",
-            args: 0,
-            run: render_mode,
-        },
-        Method {
-            name: "GetDirect3DDevice2",
-            args: 1,
-            run: missing,
-        },
-        Method {
-            name: "FindPreferredTextureFormat",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "RenderStateChange",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "LightStateChange",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "GetStateChangeOptions",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "SetStateChangeOptions",
-            args: 3,
-            run: ok,
-        },
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("Init", 2),
+        wall("InitFromD3D", 2),
+        wall("InitFromClipper", 4),
+        method("Update", 0, update),
+        wall("AddUpdateCallback", 2),
+        wall("DeleteUpdateCallback", 2),
+        method("SetBufferCount", 1, set_buffer_count),
+        method("GetBufferCount", 0, get_buffer_count),
+        method("SetDither", 1, device_set_dither),
+        method("SetShades", 1, device_set_shades),
+        method("SetQuality", 1, device_set_quality),
+        method("SetTextureQuality", 1, device_set_texture_quality),
+        wall("GetViewports", 1),
+        method("GetDither", 0, device_get_dither),
+        method("GetShades", 0, device_get_shades),
+        method("GetHeight", 0, device_height),
+        method("GetWidth", 0, device_width),
+        wall("GetTrianglesDrawn", 0),
+        wall("GetWireframeOptions", 0),
+        method("GetQuality", 0, device_get_quality),
+        wall("GetColorModel", 0),
+        method("GetTextureQuality", 0, device_get_texture_quality),
+        wall("GetDirect3DDevice", 1),
+        wall("InitFromD3D2", 2),
+        wall("InitFromSurface", 3),
+        method("SetRenderMode", 1, device_set_render_mode),
+        method("GetRenderMode", 0, device_get_render_mode),
+        method("GetDirect3DDevice2", 1, direct3d_device2),
+        method("FindPreferredTextureFormat", 3, preferred_texture_format),
+        wall("RenderStateChange", 3),
+        wall("LightStateChange", 3),
+        wall("GetStateChangeOptions", 3),
+        wall("SetStateChangeOptions", 3),
     ],
 };
 
-/// `IDirect3DRMViewport2`: two slots more than the first viewport.
+/// `IDirect3DRMViewport2`: a camera's view onto part of a device.
 pub static VIEWPORT2: Interface = Interface {
     name: "IDirect3DRMViewport2",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "Clone",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "AddDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DeleteDestroyCallback",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetAppData",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetAppData",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "SetName",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetClassName",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Init",
-            args: 6,
-            run: ok,
-        },
-        Method {
-            name: "Clear",
-            args: 1,
-            run: clear,
-        },
-        Method {
-            name: "Render",
-            args: 1,
-            run: render,
-        },
-        Method {
-            name: "SetFront",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetBack",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetField",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetUniformScaling",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetCamera",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetProjection",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "Transform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "InverseTransform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Configure",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "ForceUpdate",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "SetPlane",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "GetCamera",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetDevice",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "GetPlane",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "Pick",
-            args: 3,
-            run: unsupported,
-        },
-        Method {
-            name: "GetUniformScaling",
-            args: 0,
-            run: one,
-        },
-        Method {
-            name: "GetX",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetY",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetWidth",
-            args: 0,
-            run: width,
-        },
-        Method {
-            name: "GetHeight",
-            args: 0,
-            run: height,
-        },
-        Method {
-            name: "GetField",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetBack",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetFront",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetProjection",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetDirect3DViewport",
-            args: 1,
-            run: unsupported,
-        },
-        Method {
-            name: "TransformVectors",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "InverseTransformVectors",
-            args: 4,
-            run: ok,
-        },
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("Init", 6),
+        method("Clear", 1, clear),
+        method("Render", 1, render),
+        method("SetFront", 1, viewport_set_front),
+        method("SetBack", 1, viewport_set_back),
+        method("SetField", 1, viewport_set_field),
+        method("SetUniformScaling", 1, viewport_set_uniform_scaling),
+        method("SetCamera", 1, viewport_set_camera),
+        method("SetProjection", 1, viewport_set_projection),
+        wall("Transform", 2),
+        wall("InverseTransform", 2),
+        wall("Configure", 4),
+        wall("ForceUpdate", 4),
+        method("SetPlane", 4, viewport_set_plane),
+        method("GetCamera", 1, viewport_get_camera),
+        method("GetDevice", 1, viewport_get_device),
+        method("GetPlane", 4, viewport_get_plane),
+        wall("Pick", 3),
+        wall("GetUniformScaling", 0),
+        method("GetX", 0, viewport_get_x),
+        method("GetY", 0, viewport_get_y),
+        method("GetWidth", 0, viewport_get_width),
+        method("GetHeight", 0, viewport_get_height),
+        method("GetField", 0, viewport_get_field),
+        method("GetBack", 0, viewport_get_back),
+        method("GetFront", 0, viewport_get_front),
+        method("GetProjection", 0, viewport_get_projection),
+        wall("GetDirect3DViewport", 1),
+        wall("TransformVectors", 3),
+        wall("InverseTransformVectors", 3),
     ],
 };
 
 /// `IDirect3DRMFrame3`: a node in the scene a title builds.
-///
-/// All 89 slots, named and sized from the interface's own header. What is
-/// written is what this title has called; the rest stop the run by name.
 pub static FRAME3: Interface = Interface {
     name: "IDirect3DRMFrame3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        method("Clone", 3, unsupported),
-        method("AddDestroyCallback", 2, ok),
-        method("DeleteDestroyCallback", 2, ok),
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
         method("SetAppData", 1, set_app_data),
         method("GetAppData", 0, get_app_data),
-        method("SetName", 1, ok),
-        method("GetName", 2, ok),
-        method("GetClassName", 2, ok),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        method("AddChild", 1, add_child),
+        method("AddLight", 1, add_light),
+        wall("AddMoveCallback", 3),
+        method("AddTransform", 2, add_transform),
+        method("AddTranslation", 4, add_translation),
+        method("AddScale", 4, add_scale),
+        method("AddRotation", 5, add_rotation),
+        method("AddVisual", 1, add_visual),
+        method("GetChildren", 1, get_children),
+        method("GetColor", 0, get_color),
+        wall("GetLights", 1),
+        wall("GetMaterialMode", 0),
+        method("GetParent", 1, get_parent),
+        method("GetPosition", 2, get_position),
+        wall("GetRotation", 3),
+        method("GetScene", 1, get_scene),
+        wall("GetSortMode", 0),
+        wall("GetTexture", 1),
+        method("GetTransform", 2, get_transform),
+        wall("GetVelocity", 3),
+        method("GetOrientation", 3, get_orientation),
+        method("GetVisuals", 2, get_visuals),
+        method("InverseTransform", 2, inverse_transform_vector),
+        wall("Load", 5),
+        wall("LookAt", 3),
+        wall("Move", 1),
+        method("DeleteChild", 1, delete_child),
+        method("DeleteLight", 1, delete_light),
+        wall("DeleteMoveCallback", 2),
+        method("DeleteVisual", 1, delete_visual),
+        method("GetSceneBackground", 0, get_scene_background),
+        wall("GetSceneBackgroundDepth", 1),
+        wall("GetSceneFogColor", 0),
+        wall("GetSceneFogEnable", 0),
+        wall("GetSceneFogMode", 0),
+        wall("GetSceneFogParams", 3),
+        method("SetSceneBackground", 1, set_scene_background),
+        method("SetSceneBackgroundRGB", 3, set_scene_background_rgb),
+        wall("SetSceneBackgroundDepth", 1),
+        wall("SetSceneBackgroundImage", 1),
+        wall("SetSceneFogEnable", 1),
+        wall("SetSceneFogColor", 1),
+        wall("SetSceneFogMode", 1),
+        wall("SetSceneFogParams", 3),
+        method("SetColor", 1, set_color),
+        method("SetColorRGB", 3, set_color_rgb),
+        method("GetZbufferMode", 0, get_zbuffer_mode),
+        method("SetMaterialMode", 1, set_material_mode),
+        method("SetOrientation", 7, set_orientation),
+        method("SetPosition", 4, set_position),
+        wall("SetRotation", 5),
+        method("SetSortMode", 1, set_sort_mode),
+        wall("SetTexture", 1),
+        wall("SetVelocity", 5),
+        method("SetZbufferMode", 1, set_zbuffer_mode),
+        method("Transform", 2, transform_vector),
+        wall("GetBox", 1),
+        wall("GetBoxEnable", 0),
+        wall("GetAxes", 2),
+        wall("GetMaterial", 1),
+        wall("GetInheritAxes", 0),
+        wall("GetHierarchyBox", 1),
+        wall("SetBox", 1),
+        wall("SetBoxEnable", 1),
+        wall("SetAxes", 6),
+        wall("SetInheritAxes", 1),
+        wall("SetMaterial", 1),
+        wall("SetQuaternion", 2),
+        wall("RayPick", 4),
+        wall("Save", 3),
+        wall("TransformVectors", 4),
+        wall("InverseTransformVectors", 4),
+        wall("SetTraversalOptions", 1),
+        wall("GetTraversalOptions", 1),
+        wall("SetSceneFogMethod", 1),
+        wall("GetSceneFogMethod", 1),
+        wall("SetMaterialOverride", 1),
+        wall("GetMaterialOverride", 1),
+    ],
+};
+
+/// `IDirect3DRMMeshBuilder3`: geometry a title builds up or loads.
+pub static MESH_BUILDER3: Interface = Interface {
+    name: "IDirect3DRMMeshBuilder3",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("Load", 5),
+        wall("Save", 3),
+        wall("Scale", 3),
+        wall("Translate", 3),
+        wall("SetColorSource", 1),
+        wall("GetBox", 1),
+        wall("GenerateNormals", 2),
+        wall("GetColorSource", 0),
+        wall("AddMesh", 1),
+        wall("AddMeshBuilder", 2),
+        wall("AddFrame", 1),
+        wall("AddFace", 1),
+        wall("AddFaces", 6),
+        wall("ReserveSpace", 3),
+        wall("SetColorRGB", 3),
+        wall("SetColor", 1),
+        wall("SetTexture", 1),
+        wall("SetMaterial", 1),
+        wall("SetTextureTopology", 2),
+        wall("SetQuality", 1),
+        wall("SetPerspective", 1),
+        wall("SetVertex", 4),
+        wall("SetNormal", 4),
+        wall("SetTextureCoordinates", 3),
+        wall("SetVertexColor", 2),
+        wall("SetVertexColorRGB", 4),
+        wall("GetFaces", 1),
+        wall("GetGeometry", 6),
+        wall("GetTextureCoordinates", 3),
+        wall("AddVertex", 3),
+        wall("AddNormal", 3),
+        wall("CreateFace", 1),
+        wall("GetQuality", 0),
+        wall("GetPerspective", 0),
+        wall("GetFaceCount", 0),
+        wall("GetVertexCount", 0),
+        wall("GetVertexColor", 1),
+        wall("CreateMesh", 1),
+        wall("GetFace", 2),
+        wall("GetVertex", 2),
+        wall("GetNormal", 2),
+        wall("DeleteVertices", 2),
+        wall("DeleteNormals", 2),
+        wall("DeleteFace", 1),
+        wall("Empty", 1),
+        wall("Optimize", 1),
+        wall("AddFacesIndexed", 4),
+        wall("CreateSubMesh", 1),
+        wall("GetParentMesh", 2),
+        wall("GetSubMeshes", 2),
+        wall("DeleteSubMesh", 1),
+        wall("Enable", 1),
+        wall("GetEnable", 1),
+        wall("AddTriangles", 4),
+        wall("SetVertices", 3),
+        wall("GetVertices", 3),
+        wall("SetNormals", 3),
+        wall("GetNormals", 3),
+        wall("GetNormalCount", 0),
+    ],
+};
+
+/// `IDirect3DRMMesh`: geometry in groups, ready to draw.
+pub static MESH: Interface = Interface {
+    name: "IDirect3DRMMesh",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("Scale", 3),
+        wall("Translate", 3),
+        wall("GetBox", 1),
+        wall("AddGroup", 5),
+        wall("SetVertices", 4),
+        wall("SetGroupColor", 2),
+        wall("SetGroupColorRGB", 4),
+        wall("SetGroupMapping", 2),
+        wall("SetGroupQuality", 2),
+        wall("SetGroupMaterial", 2),
+        wall("SetGroupTexture", 2),
+        wall("GetGroupCount", 0),
+        wall("GetGroup", 6),
+        wall("GetVertices", 4),
+        wall("GetGroupColor", 1),
+        wall("GetGroupMapping", 1),
+        wall("GetGroupQuality", 1),
+        wall("GetGroupMaterial", 2),
+        wall("GetGroupTexture", 2),
+    ],
+};
+
+/// `IDirect3DRMTexture3`: an image a mesh is drawn with.
+pub static TEXTURE3: Interface = Interface {
+    name: "IDirect3DRMTexture3",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("InitFromFile", 1),
+        wall("InitFromSurface", 1),
+        wall("InitFromResource", 1),
+        wall("Changed", 3),
+        wall("SetColors", 1),
+        wall("SetShades", 1),
+        wall("SetDecalSize", 2),
+        wall("SetDecalOrigin", 2),
+        wall("SetDecalScale", 1),
+        wall("SetDecalTransparency", 1),
+        wall("SetDecalTransparentColor", 1),
+        wall("GetDecalSize", 2),
+        wall("GetDecalOrigin", 2),
+        wall("GetImage", 0),
+        wall("GetShades", 0),
+        wall("GetColors", 0),
+        wall("GetDecalScale", 0),
+        wall("GetDecalTransparency", 0),
+        wall("GetDecalTransparentColor", 0),
+        wall("InitFromImage", 1),
+        wall("InitFromResource2", 3),
+        wall("GenerateMIPMap", 1),
+        wall("GetSurface", 2),
+        wall("SetCacheOptions", 2),
+        wall("GetCacheOptions", 2),
+        wall("SetDownsampleCallback", 2),
+        wall("SetValidationCallback", 2),
+    ],
+};
+
+/// `IDirect3DRMLight`: a light hung on a frame.
+pub static LIGHT: Interface = Interface {
+    name: "IDirect3DRMLight",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        method("SetType", 1, light_set_type),
+        method("SetColor", 1, light_set_color),
+        method("SetColorRGB", 3, light_set_color_rgb),
+        method("SetRange", 1, light_set_range),
+        method("SetUmbra", 1, light_set_umbra),
+        method("SetPenumbra", 1, light_set_penumbra),
+        method("SetConstantAttenuation", 1, light_set_constant),
+        method("SetLinearAttenuation", 1, light_set_linear),
+        method("SetQuadraticAttenuation", 1, light_set_quadratic),
+        wall("GetRange", 0),
+        wall("GetUmbra", 0),
+        wall("GetPenumbra", 0),
+        wall("GetConstantAttenuation", 0),
+        wall("GetLinearAttenuation", 0),
+        wall("GetQuadraticAttenuation", 0),
+        method("GetColor", 0, light_get_color),
+        method("GetType", 0, light_get_type),
+        method("SetEnableFrame", 1, light_set_enable_frame),
+        wall("GetEnableFrame", 1),
+    ],
+};
+
+/// `IDirect3DRMMaterial2`: how a surface reflects light.
+pub static MATERIAL2: Interface = Interface {
+    name: "IDirect3DRMMaterial2",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        method("GetClassName", 2, get_class_name),
+        wall("SetPower", 1),
+        wall("SetSpecular", 3),
+        wall("SetEmissive", 3),
+        wall("GetPower", 0),
+        wall("GetSpecular", 3),
+        wall("GetEmissive", 3),
+        wall("GetAmbient", 3),
+        wall("SetAmbient", 3),
+    ],
+};
+
+/// `IDirect3DRMUserVisual`: something a title draws itself when retained mode renders the frame it hangs on.
+pub static USER_VISUAL: Interface = Interface {
+    name: "IDirect3DRMUserVisual",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        method("SetAppData", 1, set_app_data),
+        method("GetAppData", 0, get_app_data),
+        method("SetName", 1, set_name),
+        method("GetName", 2, get_name),
+        wall("GetClassName", 2),
+        wall("Init", 2),
+    ],
+};
+
+/// `IDirect3DRMFrame`: DirectX 3's face of a frame, which is what a frame array hands out; this title only asks it for the newer face.
+pub static FRAME: Interface = Interface {
+    name: "IDirect3DRMFrame",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Clone", 3),
+        wall("AddDestroyCallback", 2),
+        wall("DeleteDestroyCallback", 2),
+        wall("SetAppData", 1),
+        wall("GetAppData", 0),
+        wall("SetName", 1),
+        wall("GetName", 2),
+        wall("GetClassName", 2),
         wall("AddChild", 1),
         wall("AddLight", 1),
-        wall("AddMoveCallback", 3),
+        wall("AddMoveCallback", 2),
         wall("AddTransform", 2),
         wall("AddTranslation", 4),
         wall("AddScale", 4),
@@ -1256,10 +595,11 @@ pub static FRAME3: Interface = Interface {
         wall("GetScene", 1),
         wall("GetSortMode", 0),
         wall("GetTexture", 1),
-        wall("GetTransform", 2),
+        wall("GetTransform", 1),
         wall("GetVelocity", 3),
         wall("GetOrientation", 3),
-        wall("GetVisuals", 2),
+        wall("GetVisuals", 1),
+        wall("GetTextureTopology", 2),
         wall("InverseTransform", 2),
         wall("Load", 5),
         wall("LookAt", 3),
@@ -1289,118 +629,69 @@ pub static FRAME3: Interface = Interface {
         wall("SetOrientation", 7),
         wall("SetPosition", 4),
         wall("SetRotation", 5),
-        method("SetSortMode", 1, set_sort_mode),
+        wall("SetSortMode", 1),
         wall("SetTexture", 1),
+        wall("SetTextureTopology", 2),
         wall("SetVelocity", 5),
         wall("SetZbufferMode", 1),
         wall("Transform", 2),
-        wall("GetBox", 1),
-        wall("GetBoxEnable", 0),
-        wall("GetAxes", 2),
-        wall("GetMaterial", 1),
-        wall("GetInheritAxes", 0),
-        wall("GetHierarchyBox", 1),
-        wall("SetBox", 1),
-        wall("SetBoxEnable", 1),
-        wall("SetAxes", 6),
-        wall("SetInheritAxes", 1),
-        wall("SetMaterial", 1),
-        wall("SetQuaternion", 2),
-        wall("RayPick", 4),
-        wall("Save", 3),
-        wall("TransformVectors", 4),
-        wall("InverseTransformVectors", 4),
-        wall("SetTraversalOptions", 1),
-        wall("GetTraversalOptions", 1),
-        wall("SetSceneFogMethod", 1),
-        wall("GetSceneFogMethod", 1),
-        wall("SetMaterialOverride", 1),
-        wall("GetMaterialOverride", 1),
+    ],
+};
+
+/// `IDirect3DRMFrameArray`: a frame's children, as they were when it was asked.
+pub static FRAME_ARRAY: Interface = Interface {
+    name: "IDirect3DRMFrameArray",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("GetSize", 0, array_size),
+        method("GetElement", 2, array_element),
     ],
 };
 
 pub static INTERFACES: &[&Interface] = &[
-    &D3DRM, &FRAME3, &D3DRM3, &DEVICE, &DEVICE3, &VIEWPORT, &VIEWPORT2, &OBJECT,
+    &D3DRM,
+    &D3DRM3,
+    &DEVICE3,
+    &VIEWPORT2,
+    &FRAME3,
+    &MESH_BUILDER3,
+    &MESH,
+    &TEXTURE3,
+    &LIGHT,
+    &MATERIAL2,
+    &USER_VISUAL,
+    &FRAME,
+    &FRAME_ARRAY,
 ];
-
-fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
-}
-
-fn one(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(1)
-}
 
 /// What a title hangs on one of these objects, and reads back later.
 ///
 /// It is the title's own pointer: giving it back a zero is how a guest ends up
 /// dereferencing one.
 fn set_app_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let previous = ctx.state.com(this).map_or(0, |o| o.app_data);
-    if let Some(object) = ctx.state.com_mut(this) {
-        object.app_data = args[0];
+    match ctx.state.com_mut(this) {
+        Some(object) => {
+            object.app_data = args[0];
+            Ok(S_OK)
+        }
+        None => Ok(D3DRMERR_BADOBJECT),
     }
-    Ok(previous)
 }
 
 fn get_app_data(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(ctx.state.com(this).map_or(0, |o| o.app_data))
 }
 
-fn shades(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // How many shades a ramp has on the declared machine.
-    Ok(32)
-}
-
-fn quality(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // D3DRMRENDER_GOURAUD.
-    Ok(0x0000_0004)
-}
-
-fn width(ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.display_mode.0)
-}
-
-fn height(ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.display_mode.1)
-}
-
-/// Something this machine has not been taught, which the title can do without.
-/// It is told so in the way the interface's own errors are spelled.
-fn unsupported(ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    ctx.log
-        .line("d3drm was asked for something it has not been taught");
-    // D3DRMERR_NOTFOUND.
-    Ok(0x8876_0244)
-}
-
-/// Something the title cannot do without.
-///
-/// A refusal here is worse than a wall: this title does not check the answer,
-/// so it would call through the pointer it did not get and end up executing
-/// its own stack. Stopping names what is missing instead (ADR-0003's stub
-/// policy).
-fn missing(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // The device underneath retained mode: what this title actually draws
-    // through. It shares the surface, because there is only one.
-    let surface = match ctx.state.com(this).map(|o| o.state.clone()) {
-        Some(ComState::Device3D { surface }) => surface,
-        _ => 0,
-    };
-    let object = State::make_com(ctx, &super::d3d::DEVICE2, ComState::Device3D { surface })
-        .map_err(Stop::Fault)?;
-    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
-    ctx.log.line(&format!(
-        "d3d immediate device at {object:#010x} on surface {surface:#010x}"
-    ));
-    Ok(S_OK)
-}
-
-fn make_object(ctx: &mut Ctx<'_>, out: u32) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &OBJECT, ComState::None).map_err(Stop::Fault)?;
-    if out != 0 {
-        ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
+/// Make an object of one of retained mode's own kinds and hand it to the
+/// guest through `out`.
+fn make(ctx: &mut Ctx<'_>, interface: &'static Interface, out: u32) -> Result<u32, Stop> {
+    if out == 0 {
+        return Ok(D3DRMERR_BADVALUE);
     }
+    let object = State::make_com(ctx, interface, ComState::None).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
@@ -1415,44 +706,68 @@ fn create_frame(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop
 }
 
 fn create_mesh(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[0])
+    make(ctx, &MESH, args[0])
+}
+
+fn create_mesh_builder(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    make(ctx, &MESH_BUILDER3, args[0])
 }
 
 fn create_texture(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[1])
+    // CreateTexture(image, out).
+    make(ctx, &TEXTURE3, args[1])
 }
 
-fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[1])
+fn create_texture_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateTextureFromSurface(surface, out).
+    make(ctx, &TEXTURE3, args[1])
 }
 
 fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[2])
+    // CreateLight(type, colour, out): a light of that type and colour, opaque.
+    light(ctx, args[0], 0xff00_0000 | args[1], args[2])
 }
 
 fn create_light_rgb(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make_object(ctx, args[4])
+    // CreateLightRGB(type, red, green, blue, out).
+    light(ctx, args[0], rgb(args[1], args[2], args[3]), args[4])
 }
 
-fn render_mode(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // D3DRMRENDERMODE_BLENDEDTRANSPARENCY | D3DRMRENDERMODE_SORTEDTRANSPARENCY.
-    Ok(0x0000_0003)
-}
-
-fn options(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if args[0] != 0 {
-        // D3DRMOPTIONS_ROTATIONS.
-        ctx.mem.write_u32(args[0], 1).map_err(Stop::Fault)?;
+fn light(ctx: &mut Ctx<'_>, kind: u32, colour: u32, out: u32) -> Result<u32, Stop> {
+    let answer = make(ctx, &LIGHT, out)?;
+    if answer == S_OK {
+        let object = ctx.mem.read_u32(out).map_err(Stop::Fault)?;
+        ctx.state.scene.lights.insert(
+            object,
+            super::scene::Light {
+                kind,
+                colour,
+                ..super::scene::Light::default()
+            },
+        );
     }
-    Ok(S_OK)
+    Ok(answer)
 }
 
-/// The DirectX 6 spelling: a flags word before its answer, and the device it
-/// hands back is the one that interface's own tables describe.
-fn device_from_surface3(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateMaterial(power, out).
+    make(ctx, &MATERIAL2, args[1])
+}
+
+fn device_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateDeviceFromSurface(guid, ddraw, back buffer, flags, out). The
+    // surface the device draws into is the guest's own, which is what makes
+    // what it draws guest-visible.
     let surface = args[2];
-    let object =
-        State::make_com(ctx, &DEVICE3, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    let object = State::make_com(
+        ctx,
+        &DEVICE3,
+        ComState::RetainedDevice {
+            surface,
+            buffers: 1,
+        },
+    )
+    .map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3drm device at {object:#010x} drawing into surface {surface:#010x}"
@@ -1460,33 +775,14 @@ fn device_from_surface3(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u
     Ok(S_OK)
 }
 
-fn device_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateDeviceFromSurface(guid, ddraw, surface, out). The surface the
-    // device draws into is the guest's own, which is what makes what it draws
-    // guest-visible.
-    let surface = args[2];
-    let object =
-        State::make_com(ctx, &DEVICE, ComState::Device3D { surface }).map_err(Stop::Fault)?;
-    ctx.mem.write_u32(args[3], object).map_err(Stop::Fault)?;
-    ctx.log.line(&format!(
-        "d3drm device at {object:#010x} drawing into surface {surface:#010x}"
-    ));
-    Ok(S_OK)
-}
-
-fn create_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateViewport(device, camera, x, y, width, height, out). A viewport
-    // made by DirectX 6's interface is one of its own.
-    let newer = ctx
-        .state
-        .com(this)
-        .is_some_and(|o| o.interface == "IDirect3DRM3");
-    let interface = if newer { &VIEWPORT2 } else { &VIEWPORT };
+fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateViewport(device, camera, x, y, width, height, out).
     let object = State::make_com(
         ctx,
-        interface,
+        &VIEWPORT2,
         ComState::Viewport {
             device: args[0],
+            camera: args[1],
             x: args[2],
             y: args[3],
             width: args[4],
@@ -1495,6 +791,10 @@ fn create_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         },
     )
     .map_err(Stop::Fault)?;
+    ctx.state
+        .scene
+        .viewports
+        .insert(object, super::scene::View::default());
     ctx.mem.write_u32(args[6], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3drm viewport {}x{} at {},{}",
@@ -1503,25 +803,141 @@ fn create_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
     Ok(S_OK)
 }
 
-fn clear(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // The viewport's own part of the device's surface goes to its background
-    // colour. This is the first thing a title draws, and the first thing this
-    // machine can show.
+/// The surface a retained-mode device draws into.
+fn device_surface(ctx: &Ctx<'_>, device: u32) -> Option<u32> {
+    match ctx.state.com(device).map(|o| &o.state) {
+        Some(ComState::RetainedDevice { surface, .. }) => Some(*surface),
+        _ => None,
+    }
+}
+
+/// A device's size is its surface's.
+fn device_size(ctx: &Ctx<'_>, device: u32) -> (u32, u32) {
+    let surface = device_surface(ctx, device).unwrap_or(0);
+    match ctx.state.com(surface).map(|o| &o.state) {
+        Some(ComState::Surface { width, height, .. }) => (*width, *height),
+        _ => (0, 0),
+    }
+}
+
+fn device_width(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(device_size(ctx, this).0)
+}
+
+fn device_height(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(device_size(ctx, this).1)
+}
+
+fn set_buffer_count(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // How many buffers the title flips between, which retained mode uses to
+    // know how much of the screen to redraw. Kept, and read back.
+    match ctx.state.com_mut(this).map(|o| &mut o.state) {
+        Some(ComState::RetainedDevice { buffers, .. }) => {
+            *buffers = args[0];
+            Ok(S_OK)
+        }
+        _ => Ok(D3DRMERR_BADOBJECT),
+    }
+}
+
+fn get_buffer_count(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::RetainedDevice { buffers, .. }) => *buffers,
+        _ => 0,
+    })
+}
+
+fn direct3d_device2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // The immediate-mode device underneath: what this title actually draws
+    // through. It shares the surface, because there is only one.
+    let Some(surface) = device_surface(ctx, this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let object = State::make_com(ctx, &super::d3d::DEVICE2, ComState::Device3D { surface })
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3d immediate device at {object:#010x} on surface {surface:#010x}"
+    ));
+    Ok(S_OK)
+}
+
+fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // FindPreferredTextureFormat(bit depths, flags, format). The declared card
+    // is TNT2-class, and a TNT2 has no palettized textures: what it offers is
+    // sixteen-bit 5-6-5, the screen's own format.
+    const DDBD_16: u32 = 0x0400;
+    const D3DRMFPTF_ALPHA: u32 = 0x1;
+    const D3DRMFPTF_PALETTIZED: u32 = 0x4;
+    let (depths, flags, out) = (args[0], args[1], args[2]);
+    if depths & DDBD_16 == 0 || flags & (D3DRMFPTF_ALPHA | D3DRMFPTF_PALETTIZED) != 0 {
+        return Ok(D3DRMERR_TEXTUREFORMATNOTFOUND);
+    }
+    // DDPIXELFORMAT: size, DDPF_RGB, no FourCC, sixteen bits, and the masks.
+    for (offset, value) in [
+        (0, 32),
+        (4, 0x40),
+        (8, 0),
+        (12, 16),
+        (16, 0xf800),
+        (20, 0x07e0),
+        (24, 0x001f),
+        (28, 0),
+    ] {
+        ctx.mem
+            .write_u32(out + offset, value)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // Retained mode brings the device's surface up to date with its
+    // viewports. That is drawing, not presenting: the frame reaches the screen
+    // when the title flips.
+    Ok(S_OK)
+}
+
+/// A colour as the screen stores it.
+pub(crate) fn pixel(colour: u32, depth: u32) -> Vec<u8> {
+    let [b, g, r, _] = colour.to_le_bytes();
+    match depth {
+        16 => {
+            let packed = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
+            packed.to_le_bytes().to_vec()
+        }
+        _ => colour.to_le_bytes()[..depth.div_ceil(8) as usize].to_vec(),
+    }
+}
+
+fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Clear(flags). The viewport's own part of the device's surface goes to
+    // the background colour of the scene its camera is in.
+    const D3DRMCLEAR_TARGET: u32 = 0x1;
     let Some(ComState::Viewport {
         device,
+        camera,
         x,
         y,
         width,
         height,
-        background,
+        ..
     }) = ctx.state.com(this).map(|o| o.state.clone())
     else {
-        return Ok(S_OK);
+        return Ok(D3DRMERR_BADOBJECT);
     };
-    let Some(ComState::Device3D { surface }) = ctx.state.com(device).map(|o| o.state.clone())
-    else {
-        return Ok(S_OK);
-    };
+    if args[0] & D3DRMCLEAR_TARGET == 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DRMViewport2::Clear: flags {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    let background = ctx
+        .state
+        .scene
+        .root(camera)
+        .and_then(|root| ctx.state.scene.frame(root))
+        .map_or(0, |f| f.background);
     let Some(ComState::Surface {
         pixels,
         pitch,
@@ -1529,36 +945,26 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
         width: sw,
         height: sh,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = device_surface(ctx, device).and_then(|s| ctx.state.com(s).map(|o| o.state.clone()))
     else {
-        return Ok(S_OK);
+        return Ok(D3DRMERR_BADOBJECT);
     };
-
     let bytes = depth.div_ceil(8);
-    let x1 = (x + width).min(sw);
-    let y1 = (y + height).min(sh);
-    let row: Vec<u8> = (x..x1)
-        .flat_map(|_| background.to_le_bytes().into_iter().take(bytes as usize))
-        .collect();
+    let colour = pixel(background, depth);
+    let (x1, y1) = ((x + width).min(sw), (y + height).min(sh));
+    let row: Vec<u8> = (x..x1).flat_map(|_| colour.iter().copied()).collect();
     for row_y in y..y1 {
         ctx.mem
             .write(pixels + row_y * pitch + x * bytes, &row)
             .map_err(Stop::Fault)?;
     }
+    ctx.state.cleared += 1;
     Ok(S_OK)
 }
 
 fn render(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
     // Drawing the scene is the rasteriser's, and it arrives with #12. What is
     // on the surface until then is what Clear left there.
-    Ok(S_OK)
-}
-
-fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // Retained mode brings the device's surface up to date with its
-    // viewports. That is drawing, not presenting: the frame reaches the screen
-    // when the title flips, and counting this as well had every frame
-    // presented twice.
     Ok(S_OK)
 }
 
@@ -1577,11 +983,916 @@ fn with_frame(
             change(frame);
             Ok(S_OK)
         }
-        // D3DRMERR_BADOBJECT.
-        None => Ok(0x8876_030d),
+        None => Ok(D3DRMERR_BADOBJECT),
     }
 }
 
 fn set_sort_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     with_frame(ctx, this, |f| f.sort_mode = args[0])
+}
+
+/// Where a reference frame the guest passed puts things in the scene.
+///
+/// A null reference is what this title passes for a frame with no parent,
+/// having asked the frame for its parent first; for a frame at the top of its
+/// scene, relative to nothing and relative to the scene are the same thing.
+/// What a null means for a frame that has a parent has not been measured.
+fn reference(ctx: &Ctx<'_>, method: &str, frame: u32, at: u32) -> Result<Matrix, Stop> {
+    if at == 0 {
+        if ctx.state.scene.frame(frame).is_some_and(|f| f.parent == 0) {
+            return Ok(super::scene::IDENTITY);
+        }
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMFrame3::{method}: a null reference for a frame with a parent"
+            ),
+            caller: 0,
+        });
+    }
+    ctx.state.scene.world(at).ok_or_else(|| Stop::NotWritten {
+        what: format!("IDirect3DRMFrame3::{method}: {at:#x} is not a frame"),
+        caller: 0,
+    })
+}
+
+/// A float the guest passed in a four-byte argument.
+fn value(arg: u32) -> f32 {
+    f32::from_bits(arg)
+}
+
+/// Where a frame's parent puts things: the transform from the scene into the
+/// parent's own space.
+fn into_parent(ctx: &Ctx<'_>, method: &str, frame: u32) -> Result<Matrix, Stop> {
+    let parent = ctx.state.scene.frame(frame).map_or(0, |f| f.parent);
+    if parent == 0 {
+        return Ok(super::scene::IDENTITY);
+    }
+    let world = ctx
+        .state
+        .scene
+        .world(parent)
+        .unwrap_or(super::scene::IDENTITY);
+    super::scene::invert(&world).ok_or_else(|| Stop::NotWritten {
+        what: format!("IDirect3DRMFrame3::{method}: a parent whose transform flattens space"),
+        caller: 0,
+    })
+}
+
+fn set_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetPosition(reference, x, y, z): the frame's origin lands at this point
+    // in the reference frame's space, and its orientation is left alone.
+    if ctx.state.scene.frame(this).is_none() {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    let from = reference(ctx, "SetPosition", this, args[0])?;
+    let point = super::scene::transform(&from, [value(args[1]), value(args[2]), value(args[3])]);
+    let [x, y, z] = super::scene::transform(&into_parent(ctx, "SetPosition", this)?, point);
+    with_frame(ctx, this, |f| f.local[3] = [x, y, z, 1.0])
+}
+
+fn frame_or_bad(ctx: &Ctx<'_>, at: u32) -> bool {
+    ctx.state.scene.frame(at).is_some()
+}
+
+fn add_child(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // A frame hangs from one parent at a time: adding it here takes it off
+    // wherever it was.
+    if !frame_or_bad(ctx, this) || !frame_or_bad(ctx, args[0]) {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    ctx.state.scene.attach(this, args[0]);
+    Ok(S_OK)
+}
+
+fn delete_child(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    if !frame_or_bad(ctx, args[0]) {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    if ctx.state.scene.frame(args[0]).map(|f| f.parent) != Some(this) {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    ctx.state.scene.attach(0, args[0]);
+    Ok(S_OK)
+}
+
+/// Hand the guest a frame through `out`, counting the reference it now holds.
+fn give_frame(ctx: &mut Ctx<'_>, out: u32, frame: u32) -> Result<u32, Stop> {
+    if out == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    if frame != 0 {
+        ctx.state.com_ref(frame, 1);
+    }
+    ctx.mem.write_u32(out, frame).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn get_parent(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some(parent) = ctx.state.scene.frame(this).map(|f| f.parent) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    give_frame(ctx, args[0], parent)
+}
+
+fn get_scene(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some(root) = ctx.state.scene.root(this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    give_frame(ctx, args[0], root)
+}
+
+/// How a new transform is put together with the frame's own.
+fn combine(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    how: u32,
+    with: Matrix,
+    replace: Matrix,
+) -> Result<u32, Stop> {
+    use super::scene::multiply;
+    // D3DRMCOMBINE_REPLACE, _BEFORE and _AFTER: before means the new transform
+    // is applied to a point first, in the frame's own space.
+    if how > 2 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    with_frame(ctx, this, |f| {
+        f.local = match how {
+            0 => replace,
+            1 => multiply(&with, &f.local),
+            _ => multiply(&f.local, &with),
+        };
+    })
+}
+
+fn read_matrix(ctx: &Ctx<'_>, at: u32) -> Result<Matrix, Stop> {
+    let mut m = [[0.0; 4]; 4];
+    for (i, cell) in m.iter_mut().flatten().enumerate() {
+        *cell = value(ctx.mem.read_u32(at + 4 * i as u32).map_err(Stop::Fault)?);
+    }
+    Ok(m)
+}
+
+fn write_matrix(ctx: &mut Ctx<'_>, at: u32, m: &Matrix) -> Result<(), Stop> {
+    for (i, cell) in m.iter().flatten().enumerate() {
+        ctx.mem
+            .write_u32(at + 4 * i as u32, cell.to_bits())
+            .map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
+fn add_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let m = read_matrix(ctx, args[1])?;
+    // Only an affine transform is a place a frame can be.
+    if m[0][3] != 0.0 || m[1][3] != 0.0 || m[2][3] != 0.0 || m[3][3] != 1.0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    combine(ctx, this, args[0], m, m)
+}
+
+fn add_translation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let mut m = super::scene::IDENTITY;
+    m[3] = [value(args[1]), value(args[2]), value(args[3]), 1.0];
+    combine(ctx, this, args[0], m, m)
+}
+
+fn add_scale(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let mut m = super::scene::IDENTITY;
+    m[0][0] = value(args[1]);
+    m[1][1] = value(args[2]);
+    m[2][2] = value(args[3]);
+    combine(ctx, this, args[0], m, m)
+}
+
+fn add_rotation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let m = super::scene::rotation(
+        [value(args[1]), value(args[2]), value(args[3])],
+        value(args[4]),
+    );
+    combine(ctx, this, args[0], m, m)
+}
+
+/// A frame's transform into a reference frame's space, or into the scene's
+/// when the reference is null.
+fn relative(ctx: &Ctx<'_>, method: &str, this: u32, reference: u32) -> Result<Matrix, Stop> {
+    let world = ctx
+        .state
+        .scene
+        .world(this)
+        .ok_or_else(|| Stop::NotWritten {
+            what: format!("IDirect3DRMFrame3::{method}: {this:#x} is not a frame"),
+            caller: 0,
+        })?;
+    let into =
+        super::scene::invert(&self::reference(ctx, method, this, reference)?).ok_or_else(|| {
+            Stop::NotWritten {
+                what: format!("IDirect3DRMFrame3::{method}: a reference that flattens space"),
+                caller: 0,
+            }
+        })?;
+    Ok(super::scene::multiply(&world, &into))
+}
+
+fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let m = relative(ctx, "GetTransform", this, args[0])?;
+    write_matrix(ctx, args[1], &m)?;
+    Ok(S_OK)
+}
+
+fn read_vector(ctx: &Ctx<'_>, at: u32) -> Result<[f32; 3], Stop> {
+    let mut v = [0.0; 3];
+    for (i, c) in v.iter_mut().enumerate() {
+        *c = value(ctx.mem.read_u32(at + 4 * i as u32).map_err(Stop::Fault)?);
+    }
+    Ok(v)
+}
+
+fn write_vector(ctx: &mut Ctx<'_>, at: u32, v: [f32; 3]) -> Result<(), Stop> {
+    for (i, c) in v.iter().enumerate() {
+        ctx.mem
+            .write_u32(at + 4 * i as u32, c.to_bits())
+            .map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
+fn transform_vector(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Transform(destination, source): a point in the frame's space, in the
+    // scene's.
+    let Some(world) = ctx.state.scene.world(this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let v = read_vector(ctx, args[1])?;
+    write_vector(ctx, args[0], super::scene::transform(&world, v))?;
+    Ok(S_OK)
+}
+
+fn inverse_transform_vector(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // InverseTransform(destination, source): a point in the scene's space, in
+    // the frame's.
+    let Some(world) = ctx.state.scene.world(this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let Some(into) = super::scene::invert(&world) else {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMFrame3::InverseTransform: a frame that flattens space".to_owned(),
+            caller: 0,
+        });
+    };
+    let v = read_vector(ctx, args[1])?;
+    write_vector(ctx, args[0], super::scene::transform(&into, v))?;
+    Ok(S_OK)
+}
+
+fn add_visual(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    let visual = args[0];
+    let added = ctx.state.scene.frame_mut(this).map(|f| {
+        let new = !f.visuals.contains(&visual);
+        if new {
+            f.visuals.push(visual);
+        }
+        new
+    });
+    match added {
+        None => Ok(D3DRMERR_BADOBJECT),
+        Some(new) => {
+            if new {
+                ctx.state.com_ref(visual, 1);
+            }
+            Ok(S_OK)
+        }
+    }
+}
+
+fn delete_visual(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let visual = args[0];
+    let removed = ctx.state.scene.frame_mut(this).map(|f| {
+        let before = f.visuals.len();
+        f.visuals.retain(|v| *v != visual);
+        f.visuals.len() != before
+    });
+    match removed {
+        None => Ok(D3DRMERR_BADOBJECT),
+        Some(false) => Ok(D3DRMERR_BADVALUE),
+        Some(true) => {
+            ctx.state.com_ref(visual, -1);
+            Ok(S_OK)
+        }
+    }
+}
+
+fn add_light(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let light = args[0];
+    if light == 0 {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    with_frame(ctx, this, |f| {
+        if !f.lights.contains(&light) {
+            f.lights.push(light);
+        }
+    })
+}
+
+fn delete_light(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let light = args[0];
+    with_frame(ctx, this, |f| f.lights.retain(|l| *l != light))
+}
+
+fn set_scene_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.background = args[0])
+}
+
+/// A colour component a title gives as a fraction, as a byte.
+fn component(c: f32) -> u32 {
+    if c <= 0.0 {
+        0
+    } else if c >= 1.0 {
+        255
+    } else {
+        (c * 255.0).floor() as u32
+    }
+}
+
+/// An opaque colour from three fractions.
+fn rgb(red: u32, green: u32, blue: u32) -> u32 {
+    0xff00_0000
+        | (component(value(red)) << 16)
+        | (component(value(green)) << 8)
+        | component(value(blue))
+}
+
+fn set_scene_background_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let colour = rgb(args[0], args[1], args[2]);
+    with_frame(ctx, this, |f| f.background = colour)
+}
+
+fn get_scene_background(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.background))
+}
+
+fn get_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetPosition(reference, out): the frame's origin in the reference's
+    // space.
+    let m = relative(ctx, "GetPosition", this, args[0])?;
+    write_vector(ctx, args[1], [m[3][0], m[3][1], m[3][2]])?;
+    Ok(S_OK)
+}
+
+fn set_orientation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetOrientation(reference, direction, up): the frame's z axis points
+    // along the direction and its y axis as near the up vector as a right
+    // angle allows, both in the reference frame's space. Where the frame is
+    // does not move.
+    use super::scene::{cross, direct, invert, normalise};
+    if !frame_or_bad(ctx, this) {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    let from = reference(ctx, "SetOrientation", this, args[0])?;
+    let dir = [value(args[1]), value(args[2]), value(args[3])];
+    let up = [value(args[4]), value(args[5]), value(args[6])];
+    let (Some(dir), Some(right)) = (normalise(dir), normalise(cross(up, dir))) else {
+        // No direction, or an up vector along it: there is no orientation.
+        return Ok(D3DRMERR_BADVALUE);
+    };
+    let up = cross(dir, right);
+    let parent = ctx.state.scene.frame(this).map_or(0, |f| f.parent);
+    let into = if parent == 0 {
+        super::scene::IDENTITY
+    } else {
+        let world = ctx
+            .state
+            .scene
+            .world(parent)
+            .unwrap_or(super::scene::IDENTITY);
+        invert(&world).ok_or_else(|| Stop::NotWritten {
+            what: "IDirect3DRMFrame3::SetOrientation: a parent that flattens space".to_owned(),
+            caller: 0,
+        })?
+    };
+    let axes = [right, up, dir].map(|axis| direct(&into, direct(&from, axis)));
+    with_frame(ctx, this, |f| {
+        for (row, axis) in f.local.iter_mut().zip(axes) {
+            *row = [axis[0], axis[1], axis[2], 0.0];
+        }
+    })
+}
+
+fn get_orientation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetOrientation(reference, direction, up): the frame's z and y axes in the
+    // reference's space.
+    let m = relative(ctx, "GetOrientation", this, args[0])?;
+    let normal =
+        |row: [f32; 4]| super::scene::normalise([row[0], row[1], row[2]]).unwrap_or([0.0; 3]);
+    write_vector(ctx, args[1], normal(m[2]))?;
+    write_vector(ctx, args[2], normal(m[1]))?;
+    Ok(S_OK)
+}
+
+fn set_zbuffer_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.zbuffer_mode = args[0])
+}
+
+fn get_zbuffer_mode(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.zbuffer_mode))
+}
+
+fn set_material_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.material_mode = args[0])
+}
+
+fn set_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.color = args[0])
+}
+
+fn set_color_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let colour = rgb(args[0], args[1], args[2]);
+    with_frame(ctx, this, |f| f.color = colour)
+}
+
+fn get_color(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.color))
+}
+
+/// A light the guest holds, to be changed.
+fn with_light(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    change: impl FnOnce(&mut super::scene::Light),
+) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    match ctx.state.scene.lights.get_mut(&identity) {
+        Some(light) => {
+            change(light);
+            Ok(S_OK)
+        }
+        None => Ok(D3DRMERR_BADOBJECT),
+    }
+}
+
+fn light_set_type(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.kind = args[0])
+}
+
+fn light_set_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.colour = 0xff00_0000 | args[0])
+}
+
+fn light_set_color_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let colour = rgb(args[0], args[1], args[2]);
+    with_light(ctx, this, |l| l.colour = colour)
+}
+
+fn light_set_range(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.range = Some(value(args[0])))
+}
+
+fn light_set_umbra(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.umbra = Some(value(args[0])))
+}
+
+fn light_set_penumbra(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.penumbra = Some(value(args[0])))
+}
+
+fn light_set_constant(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.attenuation[0] = Some(value(args[0])))
+}
+
+fn light_set_linear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.attenuation[1] = Some(value(args[0])))
+}
+
+fn light_set_quadratic(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.attenuation[2] = Some(value(args[0])))
+}
+
+fn light_set_enable_frame(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_light(ctx, this, |l| l.enable_frame = args[0])
+}
+
+fn light_get_color(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    Ok(ctx
+        .state
+        .scene
+        .lights
+        .get(&identity)
+        .map_or(0, |l| l.colour))
+}
+
+fn light_get_type(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    Ok(ctx.state.scene.lights.get(&identity).map_or(0, |l| l.kind))
+}
+
+/// A device setting a title sets and may read back: dither, shades, quality,
+/// texture quality, render mode.
+///
+/// What each does to drawing is the rasteriser's to honour. Retained mode's
+/// own defaults have not been measured, so reading one that was never set is
+/// a wall rather than a number made up.
+fn keep(ctx: &mut Ctx<'_>, this: u32, setting: &'static str, value: u32) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    ctx.state.settings.insert((identity, setting), value);
+    Ok(S_OK)
+}
+
+fn kept(ctx: &mut Ctx<'_>, this: u32, method: &str, setting: &'static str) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    ctx.state
+        .settings
+        .get(&(identity, setting))
+        .copied()
+        .ok_or_else(|| Stop::NotWritten {
+            what: format!("IDirect3DRMDevice3::{method}: read before it was set"),
+            caller: 0,
+        })
+}
+
+fn device_set_dither(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "dither", args[0])
+}
+
+fn device_get_dither(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    kept(ctx, this, "GetDither", "dither")
+}
+
+fn device_set_shades(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "shades", args[0])
+}
+
+fn device_get_shades(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    kept(ctx, this, "GetShades", "shades")
+}
+
+fn device_set_quality(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "quality", args[0])
+}
+
+fn device_get_quality(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    kept(ctx, this, "GetQuality", "quality")
+}
+
+fn device_set_texture_quality(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "texture quality", args[0])
+}
+
+fn device_get_texture_quality(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    kept(ctx, this, "GetTextureQuality", "texture quality")
+}
+
+fn device_set_render_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "render mode", args[0])
+}
+
+fn device_get_render_mode(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    kept(ctx, this, "GetRenderMode", "render mode")
+}
+
+fn create_user_visual(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateUserVisual(callback, argument, out): the title's own function,
+    // which retained mode calls when it renders a frame this hangs on.
+    if args[0] == 0 || args[2] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let object = State::make_com(
+        ctx,
+        &USER_VISUAL,
+        ComState::UserVisual {
+            callback: args[0],
+            argument: args[1],
+        },
+    )
+    .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// E_INVALIDARG: a buffer too small, or no size to say how big.
+const E_INVALIDARG: u32 = 0x8007_0057;
+
+fn set_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    if args[0] == 0 {
+        ctx.state.names.remove(&identity);
+    } else {
+        let name = ctx.string(args[0]).map_err(Stop::Fault)?;
+        ctx.state.names.insert(identity, name);
+    }
+    Ok(S_OK)
+}
+
+/// GetName and GetClassName: `size` in is how big the buffer is, and out is
+/// how big the answer is with its terminator. No buffer asks only the size.
+fn write_name(
+    ctx: &mut Ctx<'_>,
+    size_at: u32,
+    buffer: u32,
+    name: Option<&str>,
+) -> Result<u32, Stop> {
+    if size_at == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let size = ctx.mem.read_u32(size_at).map_err(Stop::Fault)?;
+    let needed = name.map_or(0, |n| u32::try_from(n.len() + 1).unwrap_or(u32::MAX));
+    if buffer != 0 {
+        if size < needed {
+            return Ok(E_INVALIDARG);
+        }
+        match name {
+            Some(name) => {
+                ctx.write_string(buffer, needed, name)
+                    .map_err(Stop::Fault)?;
+            }
+            None if size > 0 => ctx.mem.write(buffer, &[0]).map_err(Stop::Fault)?,
+            None => {}
+        }
+    }
+    ctx.mem.write_u32(size_at, needed).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn get_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    let name = ctx.state.names.get(&identity).cloned();
+    write_name(ctx, args[0], args[1], name.as_deref())
+}
+
+fn get_class_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // What retained mode calls each of its kinds of object.
+    let class = match ctx.state.com(this).map_or("", |o| o.interface) {
+        "IDirect3DRMFrame3" => "Frame",
+        "IDirect3DRMDevice3" => "Device",
+        "IDirect3DRMViewport2" => "Viewport",
+        "IDirect3DRMMeshBuilder3" => "Builder",
+        "IDirect3DRMMesh" => "Mesh",
+        "IDirect3DRMTexture3" => "Texture",
+        "IDirect3DRMLight" => "Light",
+        "IDirect3DRMMaterial2" => "Material",
+        _ => return Ok(D3DRMERR_BADOBJECT),
+    };
+    write_name(ctx, args[0], args[1], Some(class))
+}
+
+fn get_visuals(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetVisuals(count, visuals): how many visuals hang on the frame, and,
+    // given room for them all, the visuals themselves, each with a reference.
+    let (count_at, out) = (args[0], args[1]);
+    let Some(visuals) = ctx.state.scene.frame(this).map(|f| f.visuals.clone()) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if count_at == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let room = ctx.mem.read_u32(count_at).map_err(Stop::Fault)?;
+    let have = u32::try_from(visuals.len()).unwrap_or(u32::MAX);
+    ctx.mem.write_u32(count_at, have).map_err(Stop::Fault)?;
+    if out == 0 {
+        return Ok(S_OK);
+    }
+    if room < have {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    for (i, visual) in visuals.iter().enumerate() {
+        ctx.state.com_ref(*visual, 1);
+        ctx.mem
+            .write_u32(out + 4 * i as u32, *visual)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn get_children(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetChildren(out): an array of the frame's children as they are now,
+    // each as the older face of a frame, which is what the array holds.
+    if args[0] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let Some(children) = ctx.state.scene.frame(this).map(|f| f.children.clone()) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let mut faces = Vec::with_capacity(children.len());
+    for child in children {
+        faces.push(State::face(ctx, child, &FRAME).map_err(Stop::Fault)?);
+    }
+    let array = State::make_com(ctx, &FRAME_ARRAY, ComState::FrameArray { frames: faces })
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], array).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn array_frames(ctx: &Ctx<'_>, this: u32) -> Vec<u32> {
+    match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::FrameArray { frames }) => frames.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn array_size(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(u32::try_from(array_frames(ctx, this).len()).unwrap_or(0))
+}
+
+fn array_element(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetElement(index, out).
+    if args[1] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let frames = array_frames(ctx, this);
+    let Some(frame) = frames.get(args[0] as usize).copied() else {
+        ctx.mem.write_u32(args[1], 0).map_err(Stop::Fault)?;
+        return Ok(D3DRMERR_BADVALUE);
+    };
+    ctx.state.com_ref(frame, 1);
+    ctx.mem.write_u32(args[1], frame).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// A viewport's view of its scene, to be changed.
+fn with_view(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    change: impl FnOnce(&mut super::scene::View) -> u32,
+) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    match ctx.state.scene.viewports.get_mut(&identity) {
+        Some(view) => Ok(change(view)),
+        None => Ok(D3DRMERR_BADOBJECT),
+    }
+}
+
+fn view(ctx: &Ctx<'_>, this: u32) -> Option<super::scene::View> {
+    ctx.state
+        .scene
+        .viewports
+        .get(&ctx.state.identity(this))
+        .cloned()
+}
+
+fn viewport_set_front(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let front = value(args[0]);
+    with_view(ctx, this, |v| {
+        if front <= 0.0 {
+            return D3DRMERR_BADVALUE;
+        }
+        v.front = front;
+        S_OK
+    })
+}
+
+fn viewport_set_back(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let back = value(args[0]);
+    with_view(ctx, this, |v| {
+        if back <= v.front {
+            return D3DRMERR_BADVALUE;
+        }
+        v.back = back;
+        S_OK
+    })
+}
+
+fn viewport_set_field(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let field = value(args[0]);
+    with_view(ctx, this, |v| {
+        if field <= 0.0 {
+            return D3DRMERR_BADVALUE;
+        }
+        v.plane = [-field, field, -field, field];
+        S_OK
+    })
+}
+
+fn viewport_set_plane(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetPlane(left, right, bottom, top).
+    let plane = [
+        value(args[0]),
+        value(args[1]),
+        value(args[2]),
+        value(args[3]),
+    ];
+    with_view(ctx, this, |v| {
+        v.plane = plane;
+        S_OK
+    })
+}
+
+fn viewport_set_projection(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_view(ctx, this, |v| {
+        v.projection = args[0];
+        S_OK
+    })
+}
+
+fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_view(ctx, this, |v| {
+        v.uniform_scaling = Some(args[0] != 0);
+        S_OK
+    })
+}
+
+fn viewport_set_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 || ctx.state.scene.frame(args[0]).is_none() {
+        return Ok(D3DRMERR_BADOBJECT);
+    }
+    match ctx.state.com_mut(this).map(|o| &mut o.state) {
+        Some(ComState::Viewport { camera, .. }) => {
+            *camera = args[0];
+            Ok(S_OK)
+        }
+        _ => Ok(D3DRMERR_BADOBJECT),
+    }
+}
+
+/// A viewport's answer that is a float, handed back on the floating-point
+/// stack where the caller reads it.
+fn float_answer(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    pick: fn(&super::scene::View) -> f32,
+) -> Result<u32, Stop> {
+    let Some(view) = view(ctx, this) else {
+        return Ok(0);
+    };
+    ctx.float_answer = Some(pick(&view));
+    Ok(0)
+}
+
+fn viewport_get_front(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    float_answer(ctx, this, |v| v.front)
+}
+
+fn viewport_get_back(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    float_answer(ctx, this, |v| v.back)
+}
+
+fn viewport_get_field(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    float_answer(ctx, this, |v| (v.plane[1] - v.plane[0]) / 2.0)
+}
+
+fn viewport_get_plane(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some(view) = view(ctx, this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    for (at, v) in args.iter().zip(view.plane) {
+        ctx.mem.write_u32(*at, v.to_bits()).map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn viewport_get_projection(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(view(ctx, this).map_or(0, |v| v.projection))
+}
+
+fn viewport_field(ctx: &Ctx<'_>, this: u32) -> Option<ComState> {
+    ctx.state.com(this).map(|o| o.state.clone())
+}
+
+fn viewport_get_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some(ComState::Viewport { camera, .. }) = viewport_field(ctx, this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    give_frame(ctx, args[0], camera)
+}
+
+fn viewport_get_device(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some(ComState::Viewport { device, .. }) = viewport_field(ctx, this) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if args[0] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    ctx.state.com_ref(device, 1);
+    ctx.mem.write_u32(args[0], device).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn viewport_rect(ctx: &Ctx<'_>, this: u32) -> (u32, u32, u32, u32) {
+    match viewport_field(ctx, this) {
+        Some(ComState::Viewport {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }) => (x, y, width, height),
+        _ => (0, 0, 0, 0),
+    }
+}
+
+fn viewport_get_x(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(viewport_rect(ctx, this).0)
+}
+
+fn viewport_get_y(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(viewport_rect(ctx, this).1)
+}
+
+fn viewport_get_width(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(viewport_rect(ctx, this).2)
+}
+
+fn viewport_get_height(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(viewport_rect(ctx, this).3)
 }

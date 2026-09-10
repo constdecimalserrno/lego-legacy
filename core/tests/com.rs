@@ -28,11 +28,13 @@ fn a_slot_nobody_declared_is_not_answered() {
 #[test]
 fn every_method_says_how_many_arguments_it_takes() {
     // The count is what cleans the stack when the call returns, so a wrong one
-    // is a guest that carries on with a stack pointer nobody can explain.
+    // is a guest that carries on with a stack pointer nobody can explain. The
+    // longest method in the interfaces' own headers is retained mode's
+    // CreateWrap, at sixteen.
     for interface in win32::interfaces() {
         for (slot, method) in interface.methods.iter().enumerate() {
             assert!(
-                method.args < 16,
+                method.args <= 16,
                 "{}::{} at slot {slot} claims {} arguments",
                 interface.name,
                 method.name,

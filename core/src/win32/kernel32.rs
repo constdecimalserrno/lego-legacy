@@ -744,7 +744,13 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if address != 0 {
         return Ok(address);
     }
-    let at = ctx.state.heap.alloc(size.next_multiple_of(0x1000));
+    // A new region starts on Windows' allocation granularity, sixty-four
+    // kilobytes, and is a whole number of pages: the C runtime's own heap
+    // works out where its pages are from exactly that.
+    let at = ctx
+        .state
+        .heap
+        .alloc_aligned(size.next_multiple_of(0x1000), 0x1_0000);
     if at == 0 {
         ctx.log.line(&format!("no room to reserve {size} bytes"));
     }
@@ -752,11 +758,24 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Only a release gives the memory back; decommitting leaves the region
-    // reserved, and the declared machine has nothing to take away.
+    // VirtualFree(address, size, type). Memory given back reads as zero when
+    // it is next committed, as Windows' does; the declared machine's pages are
+    // always mapped, so that is done now rather than then.
+    const MEM_DECOMMIT: u32 = 0x4000;
     const MEM_RELEASE: u32 = 0x8000;
-    if args[2] & MEM_RELEASE != 0 {
-        ctx.state.heap.free(args[0]);
+    let (address, size, kind) = (args[0], args[1], args[2]);
+    if kind & MEM_RELEASE != 0 {
+        let whole = ctx.state.heap.size_of(address).unwrap_or(0);
+        ctx.mem
+            .write(address, &vec![0; whole as usize])
+            .map_err(Stop::Fault)?;
+        ctx.state.heap.free(address);
+    } else if kind & MEM_DECOMMIT != 0 {
+        let start = address & !0xfff;
+        let end = (address.wrapping_add(size)).next_multiple_of(0x1000);
+        ctx.mem
+            .write(start, &vec![0; end.saturating_sub(start) as usize])
+            .map_err(Stop::Fault)?;
     }
     Ok(1)
 }

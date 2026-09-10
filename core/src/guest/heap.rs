@@ -54,21 +54,36 @@ impl Heap {
     /// Returns zero when the heap is exhausted, which is what the guest reads
     /// as a failed allocation.
     pub fn alloc(&mut self, size: u32) -> u32 {
+        self.alloc_aligned(size, 8)
+    }
+
+    /// Hand out `size` bytes starting on a multiple of `align`, which must be
+    /// a power of two.
+    ///
+    /// Returns zero when the heap is exhausted.
+    pub fn alloc_aligned(&mut self, size: u32, align: u32) -> u32 {
         // A guest asking for more than the address space holds gets a refusal,
         // not a panic: rounding it up must not be the thing that overflows.
-        let Some(size) = size.max(1).checked_next_multiple_of(8) else {
+        let Some(size) = size.max(1).checked_next_multiple_of(align) else {
             return 0;
         };
-        if let Some(i) = self.free.iter().position(|(_, s)| *s >= size) {
+        if let Some(i) = self
+            .free
+            .iter()
+            .position(|(addr, s)| *s >= size && addr % align == 0)
+        {
             let (addr, whole) = self.free.remove(i);
             self.live.insert(addr, whole);
             return addr;
         }
-        if self.next.saturating_add(size) > self.end {
+        // Whatever lies between here and the next boundary is never handed out.
+        let Some(addr) = self.next.checked_next_multiple_of(align) else {
+            return 0;
+        };
+        if addr.saturating_add(size) > self.end {
             return 0;
         }
-        let addr = self.next;
-        self.next += size;
+        self.next = addr + size;
         self.live.insert(addr, size);
         addr
     }
@@ -128,6 +143,17 @@ mod tests {
             "freeing twice is refused rather than silently accepted"
         );
         assert_eq!(h.alloc(100), a, "a freed block is handed out again");
+    }
+
+    #[test]
+    fn an_aligned_allocation_starts_on_its_boundary_however_the_heap_stands() {
+        let mut h = Heap::new();
+        h.alloc(12);
+        let region = h.alloc_aligned(0x40_0000, 0x1_0000);
+        assert_eq!(region % 0x1_0000, 0, "{region:#x} is not on a boundary");
+        assert!(region > HEAP_BASE, "it does not overlap what came before");
+        let next = h.alloc(8);
+        assert!(next >= region + 0x40_0000, "nor what comes after");
     }
 
     #[test]

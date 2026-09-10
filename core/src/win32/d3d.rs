@@ -4,365 +4,525 @@
 //! underneath retained mode and hand it primitives themselves. Everything it
 //! draws lands in the guest's own surface (ADR-0002), so what the guest reads
 //! back is what was drawn.
+//!
+//! Every table is the interface's full width from its header; a slot nobody has
+//! called stops the run by name (#11).
 
+use super::scene::IDENTITY;
 use super::{ComState, Ctx, State};
-use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use std::collections::BTreeMap;
 
-/// `IDirect3DDevice2`, in slot order.
+/// A handle or state this device was never given.
+const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+/// BeginScene inside a scene, or EndScene outside one.
+const D3DERR_SCENE_IN_SCENE: u32 = 0x8876_02f8;
+const D3DERR_SCENE_NOT_IN_SCENE: u32 = 0x8876_02f9;
+
+/// What immediate mode keeps about its objects, by the object each face
+/// belongs to.
+#[derive(Default)]
+pub struct Immediate {
+    devices: BTreeMap<u32, Device>,
+    /// Materials' own bytes, a `D3DMATERIAL` each.
+    materials: BTreeMap<u32, Vec<u8>>,
+    /// Which material a handle names.
+    handles: BTreeMap<u32, u32>,
+    next_handle: u32,
+    /// Viewports' own descriptions, as the guest last set them.
+    viewports: BTreeMap<u32, Vec<u8>>,
+}
+
+/// One device's state: everything a title sets and may read back.
+#[derive(Default)]
+struct Device {
+    render: BTreeMap<u32, u32>,
+    light: BTreeMap<u32, u32>,
+    transforms: BTreeMap<u32, [u32; 16]>,
+    textures: BTreeMap<u32, u32>,
+    stages: BTreeMap<(u32, u32), u32>,
+    current_viewport: u32,
+    in_scene: bool,
+    direct3d: u32,
+}
+
+/// `IDirect3DDevice2`: DirectX 5's face of the device underneath retained mode, which is what retained mode hands a title.
 pub static DEVICE2: Interface = Interface {
     name: "IDirect3DDevice2",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "GetCaps",
-            args: 2,
-            run: caps,
-        },
-        Method {
-            name: "SwapTextureHandles",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetStats",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "AddViewport",
-            args: 1,
-            run: add_viewport,
-        },
-        Method {
-            name: "DeleteViewport",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "NextViewport",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "EnumTextureFormats",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "BeginScene",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "EndScene",
-            args: 0,
-            run: end_scene,
-        },
-        Method {
-            name: "GetDirect3D",
-            args: 1,
-            run: get_direct3d,
-        },
-        Method {
-            name: "SetCurrentViewport",
-            args: 1,
-            run: set_viewport,
-        },
-        Method {
-            name: "GetCurrentViewport",
-            args: 1,
-            run: get_viewport,
-        },
-        Method {
-            name: "SetRenderTarget",
-            args: 2,
-            run: set_render_target,
-        },
-        Method {
-            name: "GetRenderTarget",
-            args: 1,
-            run: get_render_target,
-        },
-        Method {
-            name: "Begin",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "BeginIndexed",
-            args: 5,
-            run: ok,
-        },
-        Method {
-            name: "Vertex",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "Index",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "End",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetRenderState",
-            args: 2,
-            run: get_state,
-        },
-        Method {
-            name: "SetRenderState",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetLightState",
-            args: 2,
-            run: get_state,
-        },
-        Method {
-            name: "SetLightState",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetTransform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetTransform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "MultiplyTransform",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "DrawPrimitive",
-            args: 5,
-            run: draw,
-        },
-        Method {
-            name: "DrawIndexedPrimitive",
-            args: 7,
-            run: draw_indexed,
-        },
-        Method {
-            name: "SetClipStatus",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetClipStatus",
-            args: 1,
-            run: ok,
-        },
+        wall("GetCaps", 2),
+        wall("SwapTextureHandles", 2),
+        wall("GetStats", 1),
+        method("AddViewport", 1, add_viewport),
+        wall("DeleteViewport", 1),
+        wall("NextViewport", 3),
+        wall("EnumTextureFormats", 2),
+        method("BeginScene", 0, begin_scene),
+        method("EndScene", 0, end_scene),
+        wall("GetDirect3D", 1),
+        method("SetCurrentViewport", 1, set_current_viewport),
+        method("GetCurrentViewport", 1, get_current_viewport),
+        method("SetRenderTarget", 2, set_render_target),
+        method("GetRenderTarget", 1, get_render_target),
+        wall("Begin", 3),
+        wall("BeginIndexed", 5),
+        wall("Vertex", 1),
+        wall("Index", 1),
+        wall("End", 1),
+        method("GetRenderState", 2, get_render_state),
+        method("SetRenderState", 2, set_render_state),
+        method("GetLightState", 2, get_light_state),
+        method("SetLightState", 2, set_light_state),
+        method("SetTransform", 2, set_transform),
+        method("GetTransform", 2, get_transform),
+        wall("MultiplyTransform", 2),
+        wall("DrawPrimitive", 5),
+        wall("DrawIndexedPrimitive", 7),
+        wall("SetClipStatus", 1),
+        wall("GetClipStatus", 1),
     ],
 };
 
-/// `IDirect3D2`, in slot order.
+/// `IDirect3DDevice3`: DirectX 6's face of the same device, which this title draws through.
+pub static DEVICE3: Interface = Interface {
+    name: "IDirect3DDevice3",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("GetCaps", 2),
+        wall("GetStats", 1),
+        method("AddViewport", 1, add_viewport),
+        wall("DeleteViewport", 1),
+        wall("NextViewport", 3),
+        wall("EnumTextureFormats", 2),
+        method("BeginScene", 0, begin_scene),
+        method("EndScene", 0, end_scene),
+        method("GetDirect3D", 1, get_direct3d3),
+        method("SetCurrentViewport", 1, set_current_viewport),
+        method("GetCurrentViewport", 1, get_current_viewport),
+        method("SetRenderTarget", 2, set_render_target),
+        method("GetRenderTarget", 1, get_render_target),
+        wall("Begin", 3),
+        wall("BeginIndexed", 5),
+        wall("Vertex", 1),
+        wall("Index", 1),
+        wall("End", 1),
+        method("GetRenderState", 2, get_render_state),
+        method("SetRenderState", 2, set_render_state),
+        method("GetLightState", 2, get_light_state),
+        method("SetLightState", 2, set_light_state),
+        method("SetTransform", 2, set_transform),
+        method("GetTransform", 2, get_transform),
+        wall("MultiplyTransform", 2),
+        wall("DrawPrimitive", 5),
+        wall("DrawIndexedPrimitive", 7),
+        wall("SetClipStatus", 1),
+        wall("GetClipStatus", 1),
+        wall("DrawPrimitiveStrided", 5),
+        wall("DrawIndexedPrimitiveStrided", 7),
+        wall("DrawPrimitiveVB", 5),
+        wall("DrawIndexedPrimitiveVB", 5),
+        wall("ComputeSphereVisibility", 5),
+        method("GetTexture", 2, get_texture),
+        method("SetTexture", 2, set_texture),
+        method("GetTextureStageState", 3, get_texture_stage_state),
+        method("SetTextureStageState", 3, set_texture_stage_state),
+        wall("ValidateDevice", 1),
+    ],
+};
+
+/// `IDirect3D2`: DirectX 5's Direct3D object.
 pub static D3D2: Interface = Interface {
     name: "IDirect3D2",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "EnumDevices",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "CreateLight",
-            args: 2,
-            run: make_object,
-        },
-        Method {
-            name: "CreateMaterial",
-            args: 2,
-            run: make_object,
-        },
-        Method {
-            name: "CreateViewport",
-            args: 2,
-            run: make_viewport,
-        },
-        Method {
-            name: "FindDevice",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "CreateDevice",
-            args: 3,
-            run: ok,
-        },
+        wall("EnumDevices", 2),
+        wall("CreateLight", 2),
+        wall("CreateMaterial", 2),
+        wall("CreateViewport", 2),
+        wall("FindDevice", 2),
+        wall("CreateDevice", 3),
     ],
 };
 
-/// `IDirect3DViewport2`, in slot order.
-pub static VIEWPORT2: Interface = Interface {
-    name: "IDirect3DViewport2",
+/// `IDirect3D3`: DirectX 6's Direct3D object: what makes materials, lights and viewports for a device.
+pub static D3D3: Interface = Interface {
+    name: "IDirect3D3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "Initialize",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetViewport",
-            args: 1,
-            run: get_viewport_data,
-        },
-        Method {
-            name: "SetViewport",
-            args: 1,
-            run: set_viewport_data,
-        },
-        Method {
-            name: "TransformVertices",
-            args: 5,
-            run: ok,
-        },
-        Method {
-            name: "LightElements",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetBackground",
-            args: 1,
-            run: set_background,
-        },
-        Method {
-            name: "GetBackground",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetBackgroundDepth",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetBackgroundDepth",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Clear",
-            args: 3,
-            run: clear,
-        },
-        Method {
-            name: "AddLight",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "DeleteLight",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "NextLight",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "GetViewport2",
-            args: 1,
-            run: get_viewport_data,
-        },
-        Method {
-            name: "SetViewport2",
-            args: 1,
-            run: set_viewport_data,
-        },
+        wall("EnumDevices", 2),
+        method("CreateLight", 2, create_light),
+        method("CreateMaterial", 2, create_material),
+        method("CreateViewport", 2, create_viewport),
+        wall("FindDevice", 2),
+        wall("CreateDevice", 4),
+        wall("CreateVertexBuffer", 4),
+        wall("EnumZBufferFormats", 3),
+        wall("EvictManagedTextures", 0),
     ],
 };
 
-/// Everything else immediate mode hands out and this machine only has to keep
-/// distinct: lights, materials and textures.
-pub static THING: Interface = Interface {
-    name: "IDirect3DThing",
+/// `IDirect3DViewport3`: the part of a device a title clears and draws into.
+pub static VIEWPORT3: Interface = Interface {
+    name: "IDirect3DViewport3",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "Initialize",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetLight",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "GetLight",
-            args: 1,
-            run: ok,
-        },
+        wall("Initialize", 1),
+        method("GetViewport", 1, get_viewport),
+        method("SetViewport", 1, set_viewport),
+        wall("TransformVertices", 4),
+        wall("LightElements", 2),
+        method("SetBackground", 1, set_background),
+        method("GetBackground", 2, get_background),
+        wall("SetBackgroundDepth", 1),
+        wall("GetBackgroundDepth", 2),
+        method("Clear", 3, clear),
+        wall("AddLight", 1),
+        wall("DeleteLight", 1),
+        wall("NextLight", 3),
+        method("GetViewport2", 1, get_viewport2),
+        method("SetViewport2", 1, set_viewport2),
+        wall("SetBackgroundDepth2", 1),
+        wall("GetBackgroundDepth2", 2),
+        method("Clear2", 6, clear2),
     ],
 };
 
-pub static INTERFACES: &[&Interface] = &[&DEVICE2, &D3D2, &VIEWPORT2, &THING];
+/// `IDirect3DMaterial3`: a surface's colours, known to a device by its handle.
+pub static MATERIAL3: Interface = Interface {
+    name: "IDirect3DMaterial3",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("SetMaterial", 1, set_material),
+        method("GetMaterial", 1, get_material),
+        method("GetHandle", 2, material_handle),
+    ],
+};
 
-fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
+/// `IDirect3DLight`: a light a viewport lights its primitives with.
+pub static LIGHT: Interface = Interface {
+    name: "IDirect3DLight",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("Initialize", 1),
+        wall("SetLight", 1),
+        wall("GetLight", 1),
+    ],
+};
+
+/// `IDirect3DTexture2`: a surface a device draws with.
+pub static TEXTURE2: Interface = Interface {
+    name: "IDirect3DTexture2",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("GetHandle", 2),
+        wall("PaletteChanged", 2),
+        wall("Load", 1),
+    ],
+};
+
+pub static INTERFACES: &[&Interface] = &[
+    &DEVICE2, &DEVICE3, &D3D2, &D3D3, &VIEWPORT3, &MATERIAL3, &LIGHT, &TEXTURE2,
+];
+
+fn device<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> &'a mut Device {
+    let identity = ctx.state.identity(this);
+    ctx.state.immediate.devices.entry(identity).or_default()
 }
 
-fn get_state(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if args[1] != 0 {
-        ctx.mem.write_u32(args[1], 0).map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
-}
-
-fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // What the declared machine's 3D hardware can do. Everything this
-    // rasteriser does is written here, so what is claimed is what is true.
-    for at in [args[0], args[1]] {
-        if at == 0 {
-            continue;
+fn add_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // A viewport belongs to the device that took it, and draws into that
+    // device's surface.
+    match ctx.state.com_mut(args[0]).map(|o| &mut o.state) {
+        Some(ComState::Viewport { device, .. }) => {
+            *device = this;
+            Ok(S_OK)
         }
-        let size = ctx.mem.read_u32(at).map_err(Stop::Fault)?.clamp(4, 0x200);
-        for offset in (4..size).step_by(4) {
-            ctx.mem.write_u32(at + offset, 0).map_err(Stop::Fault)?;
-        }
+        _ => Ok(DDERR_INVALIDPARAMS),
+    }
+}
+
+fn set_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    device(ctx, this).current_viewport = args[0];
+    Ok(S_OK)
+}
+
+fn get_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let current = device(ctx, this).current_viewport;
+    if current != 0 {
+        ctx.state.com_ref(current, 1);
+    }
+    ctx.mem.write_u32(args[0], current).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn set_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // The surface the device draws into, changed after it was made.
+    if let Some(ComState::Device3D { surface }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+        *surface = args[0];
+    }
+    ctx.log
+        .line(&format!("d3d render target {:#010x}", args[0]));
+    Ok(S_OK)
+}
+
+fn get_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let surface = match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::Device3D { surface }) => *surface,
+        _ => 0,
+    };
+    ctx.mem.write_u32(args[0], surface).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn begin_scene(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    let device = device(ctx, this);
+    if device.in_scene {
+        return Ok(D3DERR_SCENE_IN_SCENE);
+    }
+    device.in_scene = true;
+    Ok(S_OK)
+}
+
+fn end_scene(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // The scene is finished on the device's surface; the title presents it by
+    // flipping, which is where the machine counts a frame.
+    let device = device(ctx, this);
+    if !device.in_scene {
+        return Ok(D3DERR_SCENE_NOT_IN_SCENE);
+    }
+    device.in_scene = false;
+    Ok(S_OK)
+}
+
+/// What a render state is before a title sets it, from DirectX 6's own
+/// documentation of each state's default.
+fn render_default(state: u32) -> Option<u32> {
+    Some(match state {
+        // D3DRENDERSTATE_TEXTUREPERSPECTIVE: on, in DirectX 6.
+        4 => 1,
+        // D3DRENDERSTATE_ZENABLE: off, with no depth buffer attached.
+        7 => 0,
+        // D3DRENDERSTATE_FILLMODE: solid.
+        8 => 3,
+        // D3DRENDERSTATE_SHADEMODE: Gouraud.
+        9 => 2,
+        // D3DRENDERSTATE_ZWRITEENABLE: on.
+        14 => 1,
+        // D3DRENDERSTATE_ALPHATESTENABLE: off.
+        15 => 0,
+        // D3DRENDERSTATE_SRCBLEND and DESTBLEND: one and zero.
+        19 => 2,
+        20 => 1,
+        // D3DRENDERSTATE_TEXTUREMAPBLEND: modulate.
+        21 => 4,
+        // D3DRENDERSTATE_CULLMODE: counter-clockwise.
+        22 => 3,
+        // D3DRENDERSTATE_ZFUNC: less or equal.
+        23 => 4,
+        // D3DRENDERSTATE_ALPHAREF and ALPHAFUNC: zero, always.
+        24 => 0,
+        25 => 8,
+        // D3DRENDERSTATE_DITHERENABLE, ALPHABLENDENABLE, FOGENABLE,
+        // SPECULARENABLE: all off.
+        26..=29 => 0,
+        // D3DRENDERSTATE_COLORKEYENABLE: off.
+        41 => 0,
+        _ => return None,
+    })
+}
+
+fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let state = args[0];
+    let value = device(ctx, this)
+        .render
+        .get(&state)
+        .copied()
+        .or_else(|| render_default(state));
+    let Some(value) = value else {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DDevice3::GetRenderState: state {state} read before it was set, \
+                 and its default is not declared"
+            ),
+            caller: 0,
+        });
+    };
+    ctx.mem.write_u32(args[1], value).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn set_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Kept, and read back. What each state does to a primitive is the
+    // rasteriser's to honour when it draws one.
+    device(ctx, this).render.insert(args[0], args[1]);
+    Ok(S_OK)
+}
+
+fn get_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let state = args[0];
+    // D3DLIGHTSTATE_MATERIAL, AMBIENT and the fog states start at zero;
+    // D3DLIGHTSTATE_COLORMODEL starts at RGB.
+    let default = match state {
+        3 => Some(2),
+        1 | 2 | 4..=7 => Some(0),
+        _ => None,
+    };
+    let Some(value) = device(ctx, this).light.get(&state).copied().or(default) else {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DDevice3::GetLightState: state {state}"),
+            caller: 0,
+        });
+    };
+    ctx.mem.write_u32(args[1], value).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn set_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    device(ctx, this).light.insert(args[0], args[1]);
+    Ok(S_OK)
+}
+
+fn set_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetTransform(which, matrix): world, view or projection.
+    let mut m = [0u32; 16];
+    for (i, cell) in m.iter_mut().enumerate() {
+        *cell = ctx
+            .mem
+            .read_u32(args[1] + 4 * i as u32)
+            .map_err(Stop::Fault)?;
+    }
+    device(ctx, this).transforms.insert(args[0], m);
+    Ok(S_OK)
+}
+
+fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Every transform starts as the identity.
+    let identity: Vec<u32> = IDENTITY.iter().flatten().map(|c| c.to_bits()).collect();
+    let m = device(ctx, this)
+        .transforms
+        .get(&args[0])
+        .map_or(identity, |m| m.to_vec());
+    for (i, cell) in m.iter().enumerate() {
+        ctx.mem
+            .write_u32(args[1] + 4 * i as u32, *cell)
+            .map_err(Stop::Fault)?;
     }
     Ok(S_OK)
 }
 
-fn make_object(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &THING, ComState::None).map_err(Stop::Fault)?;
-    if args[0] != 0 {
-        ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+fn get_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let texture = device(ctx, this)
+        .textures
+        .get(&args[0])
+        .copied()
+        .unwrap_or(0);
+    if texture != 0 {
+        ctx.state.com_ref(texture, 1);
     }
+    ctx.mem.write_u32(args[1], texture).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
-fn make_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+fn set_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    device(ctx, this).textures.insert(args[0], args[1]);
+    Ok(S_OK)
+}
+
+fn stage_default(state: u32, stage: u32) -> Option<u32> {
+    Some(match (state, stage) {
+        // D3DTSS_COLOROP: modulate on the first stage, off after it.
+        (1, 0) => 4,
+        (1, _) => 1,
+        // D3DTSS_COLORARG1 and ARG2: the texture, and the current colour.
+        (2, _) => 2,
+        (3, _) => 1,
+        // D3DTSS_ALPHAOP: the first argument on the first stage, off after.
+        (4, 0) => 2,
+        (4, _) => 1,
+        (5, _) => 2,
+        (6, _) => 1,
+        _ => return None,
+    })
+}
+
+fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let (stage, state) = (args[0], args[1]);
+    let value = device(ctx, this)
+        .stages
+        .get(&(stage, state))
+        .copied()
+        .or_else(|| stage_default(state, stage));
+    let Some(value) = value else {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DDevice3::GetTextureStageState: stage {stage} state {state}"),
+            caller: 0,
+        });
+    };
+    ctx.mem.write_u32(args[2], value).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn set_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    device(ctx, this).stages.insert((args[0], args[1]), args[2]);
+    Ok(S_OK)
+}
+
+fn get_direct3d3(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // The Direct3D object the device came from: one per device, the same
+    // every time it is asked for.
+    let existing = device(ctx, this).direct3d;
+    let object = if existing == 0 {
+        let made = State::make_com(ctx, &D3D3, ComState::None).map_err(Stop::Fault)?;
+        device(ctx, this).direct3d = made;
+        made
+    } else {
+        ctx.state.com_ref(existing, 1);
+        existing
+    };
+    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateMaterial(out, outer).
+    let object = State::make_com(ctx, &MATERIAL3, ComState::None).map_err(Stop::Fault)?;
+    ctx.state.immediate.materials.insert(object, Vec::new());
+    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let object = State::make_com(ctx, &LIGHT, ComState::None).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     let object = State::make_com(
         ctx,
-        &VIEWPORT2,
+        &VIEWPORT3,
         ComState::Viewport {
             device: 0,
+            camera: 0,
             x: 0,
             y: 0,
             width: 0,
@@ -371,186 +531,235 @@ fn make_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
         },
     )
     .map_err(Stop::Fault)?;
-    if args[0] != 0 {
-        ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
-}
-
-fn get_direct3d(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &D3D2, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
-fn add_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // A viewport belongs to the device that took it, and draws into that
-    // device's surface.
-    if let Some(object) = ctx.state.com_mut(args[0]) {
-        if let ComState::Viewport { device, .. } = &mut object.state {
-            *device = this;
+fn set_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetMaterial(D3DMATERIAL): kept whole, as long as it says it is.
+    let size = ctx
+        .mem
+        .read_u32(args[0])
+        .map_err(Stop::Fault)?
+        .clamp(4, 0x100);
+    let bytes = ctx
+        .mem
+        .slice(args[0], size as usize)
+        .map_err(Stop::Fault)?
+        .to_vec();
+    let identity = ctx.state.identity(this);
+    ctx.state.immediate.materials.insert(identity, bytes);
+    Ok(S_OK)
+}
+
+fn get_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    let bytes = ctx
+        .state
+        .immediate
+        .materials
+        .get(&identity)
+        .cloned()
+        .unwrap_or_default();
+    ctx.mem.write(args[0], &bytes).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn material_handle(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetHandle(device, out): the name a device's states use for a material.
+    // One per material, from one, in the order they are asked for.
+    let identity = ctx.state.identity(this);
+    let immediate = &mut ctx.state.immediate;
+    let handle = match immediate.handles.iter().find(|(_, m)| **m == identity) {
+        Some((handle, _)) => *handle,
+        None => {
+            immediate.next_handle += 1;
+            immediate.handles.insert(immediate.next_handle, identity);
+            immediate.next_handle
         }
+    };
+    ctx.mem.write_u32(args[1], handle).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// A viewport description, `D3DVIEWPORT` or `D3DVIEWPORT2`: size, then x, y,
+/// width and height in the same place in both.
+fn store_viewport(ctx: &mut Ctx<'_>, this: u32, at: u32) -> Result<u32, Stop> {
+    let size = ctx.mem.read_u32(at).map_err(Stop::Fault)?.clamp(20, 0x40);
+    let bytes = ctx
+        .mem
+        .slice(at, size as usize)
+        .map_err(Stop::Fault)?
+        .to_vec();
+    let field = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let (x, y, w, h) = (field(4), field(8), field(12), field(16));
+    if let Some(ComState::Viewport {
+        x: vx,
+        y: vy,
+        width: vw,
+        height: vh,
+        ..
+    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    {
+        (*vx, *vy, *vw, *vh) = (x, y, w, h);
     }
+    let identity = ctx.state.identity(this);
+    ctx.state.immediate.viewports.insert(identity, bytes);
+    ctx.log.line(&format!("d3d viewport {w}x{h} at {x},{y}"));
+    Ok(S_OK)
+}
+
+fn fetch_viewport(ctx: &mut Ctx<'_>, this: u32, at: u32) -> Result<u32, Stop> {
+    let identity = ctx.state.identity(this);
+    let Some(bytes) = ctx.state.immediate.viewports.get(&identity).cloned() else {
+        // D3DERR_VIEWPORTDATANOTSET.
+        return Ok(0x8876_0305);
+    };
+    ctx.mem.write(at, &bytes).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn set_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Device3D { .. } = &object.state {
-            // The device remembers which viewport is current by handle.
-            ctx.state.current_viewport = args[0];
-        }
-    }
-    Ok(S_OK)
+    store_viewport(ctx, this, args[0])
 }
 
-fn get_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let current = ctx.state.current_viewport;
-    ctx.mem.write_u32(args[0], current).map_err(Stop::Fault)?;
-    Ok(S_OK)
+fn get_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    fetch_viewport(ctx, this, args[0])
 }
 
-fn set_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // The surface the device draws into, changed after it was made.
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Device3D { surface } = &mut object.state {
-            *surface = args[0];
-        }
-    }
-    ctx.log
-        .line(&format!("d3d render target {:#010x}", args[0]));
-    Ok(S_OK)
+fn set_viewport2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    store_viewport(ctx, this, args[0])
 }
 
-fn get_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let surface = match ctx.state.com(this).map(|o| o.state.clone()) {
-        Some(ComState::Device3D { surface }) => surface,
-        _ => 0,
-    };
-    ctx.mem.write_u32(args[0], surface).map_err(Stop::Fault)?;
-    Ok(S_OK)
-}
-
-fn get_viewport_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(ComState::Viewport {
-        x,
-        y,
-        width,
-        height,
-        ..
-    }) = ctx.state.com(this).map(|o| o.state.clone())
-    else {
-        return Ok(S_OK);
-    };
-    let at = args[0];
-    for (offset, value) in [(4, x), (8, y), (12, width), (16, height)] {
-        ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
-}
-
-fn set_viewport_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // D3DVIEWPORT: size, then x, y, width and height.
-    let at = args[0];
-    let x = ctx.mem.read_u32(at + 4).map_err(Stop::Fault)?;
-    let y = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
-    let width = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
-    let height = ctx.mem.read_u32(at + 16).map_err(Stop::Fault)?;
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Viewport {
-            x: vx,
-            y: vy,
-            width: vw,
-            height: vh,
-            ..
-        } = &mut object.state
-        {
-            *vx = x;
-            *vy = y;
-            *vw = width;
-            *vh = height;
-        }
-    }
-    ctx.log
-        .line(&format!("d3d viewport {width}x{height} at {x},{y}"));
-    Ok(S_OK)
+fn get_viewport2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    fetch_viewport(ctx, this, args[0])
 }
 
 fn set_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Viewport { background, .. } = &mut object.state {
+    // SetBackground(material handle): the viewport clears to that material's
+    // colour.
+    match ctx.state.com_mut(this).map(|o| &mut o.state) {
+        Some(ComState::Viewport { background, .. }) => {
             *background = args[0];
+            Ok(S_OK)
         }
+        _ => Ok(DDERR_INVALIDPARAMS),
     }
+}
+
+fn get_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetBackground(handle, valid).
+    let handle = match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::Viewport { background, .. }) => *background,
+        _ => 0,
+    };
+    ctx.mem.write_u32(args[0], handle).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(args[1], u32::from(handle != 0))
+        .map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
-fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Clear(count, rects, flags). This is the first thing a frame is made of,
-    // and the first thing this machine can put on a screen.
-    let Some(ComState::Viewport {
-        device,
-        x,
-        y,
-        width,
-        height,
-        background,
-    }) = ctx.state.com(this).map(|o| o.state.clone())
+/// A material's diffuse colour as an opaque `D3DCOLOR`.
+fn material_colour(ctx: &Ctx<'_>, handle: u32) -> u32 {
+    let Some(bytes) = ctx
+        .state
+        .immediate
+        .handles
+        .get(&handle)
+        .and_then(|m| ctx.state.immediate.materials.get(m))
     else {
-        return Ok(S_OK);
+        return 0;
     };
-    let Some(ComState::Device3D { surface }) = ctx.state.com(device).map(|o| o.state.clone())
+    let channel = |o: usize| {
+        bytes
+            .get(o..o + 4)
+            .map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let byte = |c: f32| {
+        if c <= 0.0 {
+            0
+        } else if c >= 1.0 {
+            255
+        } else {
+            (c * 255.0).floor() as u32
+        }
+    };
+    0xff00_0000 | (byte(channel(4)) << 16) | (byte(channel(8)) << 8) | byte(channel(12))
+}
+
+/// Fill rectangles of a viewport's device surface with a colour.
+fn fill_rects(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    count: u32,
+    rects: u32,
+    colour: u32,
+) -> Result<u32, Stop> {
+    let Some(ComState::Viewport { device, .. }) = ctx.state.com(this).map(|o| o.state.clone())
     else {
-        return Ok(S_OK);
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let surface = match ctx.state.com(device).map(|o| &o.state) {
+        Some(ComState::Device3D { surface }) => *surface,
+        _ => return Ok(DDERR_INVALIDPARAMS),
     };
     let Some(ComState::Surface {
         pixels,
+        width,
+        height,
         pitch,
         depth,
-        width: sw,
-        height: sh,
         ..
     }) = ctx.state.com(surface).map(|o| o.state.clone())
     else {
-        return Ok(S_OK);
-    };
-
-    // The background is an ARGB colour; the surface may be narrower than that.
-    let colour = match depth {
-        16 => {
-            let [b, g, r, _] = background.to_le_bytes();
-            u32::from((u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3))
-        }
-        _ => background,
+        return Ok(DDERR_INVALIDPARAMS);
     };
     let bytes = depth.div_ceil(8);
-    let x1 = (x + width).min(sw).max(x);
-    let y1 = (y + height).min(sh).max(y);
-    let row: Vec<u8> = (x..x1)
-        .flat_map(|_| colour.to_le_bytes().into_iter().take(bytes as usize))
-        .collect();
-    for row_y in y..y1 {
-        ctx.mem
-            .write(pixels + row_y * pitch + x * bytes, &row)
-            .map_err(Stop::Fault)?;
+    let colour = super::d3drm::pixel(colour, depth);
+    for i in 0..count {
+        // D3DRECT: x1, y1, x2, y2.
+        let at = rects + i * 16;
+        let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
+        let (x1, y1) = (read(0)?.min(width), read(4)?.min(height));
+        let (x2, y2) = (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1));
+        let row: Vec<u8> = (x1..x2).flat_map(|_| colour.iter().copied()).collect();
+        for y in y1..y2 {
+            ctx.mem
+                .write(pixels + y * pitch + x1 * bytes, &row)
+                .map_err(Stop::Fault)?;
+        }
     }
-    let _ = args;
     ctx.state.cleared += 1;
     Ok(S_OK)
 }
 
-fn end_scene(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // The scene is finished on the device's surface; the title presents it by
-    // flipping, which is where the machine counts a frame.
-    Ok(S_OK)
+/// What a clear may ask for that is written: the target.
+const D3DCLEAR_TARGET: u32 = 0x1;
+
+fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Clear(count, rects, flags): to the background material's colour.
+    if args[2] & !D3DCLEAR_TARGET != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DViewport3::Clear: flags {:#x}", args[2]),
+            caller: 0,
+        });
+    }
+    let handle = match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::Viewport { background, .. }) => *background,
+        _ => 0,
+    };
+    let colour = material_colour(ctx, handle);
+    fill_rects(ctx, this, args[0], args[1], colour)
 }
 
-fn draw(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // Triangles are the rasteriser's, and it arrives with #12. What is on the
-    // surface until then is what Clear left there.
-    Ok(S_OK)
-}
-
-fn draw_indexed(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
+fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Clear2(count, rects, flags, colour, z, stencil).
+    if args[2] & !D3DCLEAR_TARGET != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DViewport3::Clear2: flags {:#x}", args[2]),
+            caller: 0,
+        });
+    }
+    fill_rects(ctx, this, args[0], args[1], args[3])
 }

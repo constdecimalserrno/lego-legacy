@@ -376,7 +376,25 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 Some(Op::Mem(m)) => Some(effective(cpu, &m)),
                 _ => None,
             };
-            return super::x87::execute(cpu, mem, escape, modrm, address);
+            // The unit does not know where the instruction was; a form it
+            // refuses is named at the address the escape was decoded from.
+            let at = cpu.eip.wrapping_sub(u32::from(insn.len));
+            return super::x87::execute(cpu, mem, escape, modrm, address).map_err(
+                |stop| match stop {
+                    Stop::Undecoded {
+                        eip: 0,
+                        byte,
+                        group,
+                        why,
+                    } => Stop::Undecoded {
+                        eip: at,
+                        byte,
+                        group,
+                        why,
+                    },
+                    other => other,
+                },
+            );
         }
         Kind::Shift(which) => {
             let dst = insn.dst.expect("a shift has a destination");

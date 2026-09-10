@@ -9,6 +9,31 @@ use super::insn::{Insn, Width};
 use super::{exec, Cpu, CpuEngine, Mode, Stop, CS};
 use crate::guest::{Arena, GuestMem};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A hasher for instruction addresses.
+///
+/// The cache is consulted for every instruction the guest retires, and the
+/// standard hasher is built to resist keys chosen by an attacker, which an
+/// address in a title's own code is not. One multiply spreads them well enough.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 << 8 | u64::from(*byte)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.0 = u64::from(value).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
 
 /// A decode-cached interpreter.
 pub struct Interp {
@@ -18,7 +43,7 @@ pub struct Interp {
     // ponytail: no invalidation. Guest code that rewrites itself would run its
     // old form. Nothing on the roster has been measured doing so; the first
     // title that does gets a write watch over cached ranges.
-    cache: HashMap<u32, Insn>,
+    cache: HashMap<u32, Insn, BuildHasherDefault<AddressHasher>>,
 }
 
 impl Interp {
@@ -26,7 +51,7 @@ impl Interp {
     pub fn new(mode: Mode) -> Self {
         Self {
             mode,
-            cache: HashMap::new(),
+            cache: HashMap::default(),
         }
     }
 
@@ -49,9 +74,9 @@ impl Interp {
 
     /// The instruction at a linear address, decoding it if this is the first
     /// time the engine has stood there.
-    fn at(&mut self, lin: u32, mem: &Arena) -> Result<Insn, Stop> {
-        if let Some(insn) = self.cache.get(&lin) {
-            return Ok(*insn);
+    fn at(&mut self, lin: u32, mem: &Arena) -> Result<&Insn, Stop> {
+        if self.cache.contains_key(&lin) {
+            return Ok(&self.cache[&lin]);
         }
         // The window is as much as an instruction can be, or as much as is
         // left before the end of the arena.
@@ -69,14 +94,14 @@ impl Interp {
                 len: usize::from(insn.len),
             }));
         }
-        self.cache.insert(lin, insn);
-        Ok(insn)
+        Ok(self.cache.entry(lin).or_insert(insn))
     }
 }
 
 impl CpuEngine for Interp {
     fn step(&mut self, cpu: &mut Cpu, mem: &mut Arena) -> Result<(), Stop> {
         let lin = cpu.seg_base[CS].wrapping_add(cpu.eip);
+        let mode = self.mode;
         let insn = self.at(lin, mem)?;
         // The instruction pointer moves before the instruction runs, so that a
         // relative branch is relative to what comes after it.
@@ -84,7 +109,7 @@ impl CpuEngine for Interp {
         // instruction, even in real mode: a 386 lets eip run past 64K and only
         // a branch with a sixteen-bit operand size brings it back.
         cpu.eip = cpu.eip.wrapping_add(u32::from(insn.len));
-        match exec::execute(cpu, mem, &insn, self.mode) {
+        match exec::execute(cpu, mem, insn, mode) {
             Ok(()) => Ok(()),
             // A halt or an interrupt retires and then stops the run: the
             // instruction pointer belongs after it, which is where a return

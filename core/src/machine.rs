@@ -280,6 +280,9 @@ impl Machine {
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
             }
+            if let Some(outcome) = self.run_guest(host, log, budget) {
+                break outcome;
+            }
             if let Some(outcome) = self.tick(host, log) {
                 break outcome;
             }
@@ -434,6 +437,7 @@ impl Machine {
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
             call_guest: None,
+            float_answer: None,
         };
         let answer = match (shim.run)(&mut ctx, &args) {
             // A shim that stops the run cannot see who called it.
@@ -701,6 +705,7 @@ impl Machine {
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
             call_guest: None,
+            float_answer: None,
         };
         let answer = match (method.run)(&mut ctx, this, &args) {
             // A slot the header declares and nothing has written: the wall
@@ -717,6 +722,9 @@ impl Machine {
             other => other?,
         };
         let call_guest = ctx.call_guest.take();
+        if let Some(value) = ctx.float_answer.take() {
+            self.cpu.fpu.push(f64::from(value));
+        }
 
         // Every COM method is stdcall, and the object counts as an argument.
         self.cpu.r[crate::cpu::ESP] = esp.wrapping_add(4 + (method.args + 1) * 4);
@@ -783,6 +791,39 @@ impl Machine {
         )?;
         self.clock.retire();
         Ok(())
+    }
+
+    /// Run the guest's own code until it calls across the boundary, the budget
+    /// is spent, or a burst ends, without the checks `tick` makes before each
+    /// instruction.
+    ///
+    /// Nothing but the engine has anything to do between calls out: a frame to
+    /// present only appears when a shim runs, and a window closed mid-burst is
+    /// noticed at its end. What the guest does is the same either way; only
+    /// the host's time is saved.
+    fn run_guest(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Option<Outcome> {
+        const BURST: u64 = 1 << 16;
+        if self.stub || log.trace() >= Trace::Insns || self.state.present.is_some() {
+            return None;
+        }
+        let end = budget.min(self.clock.cursor() + BURST);
+        while self.clock.cursor() < end && !Boundary::in_range(self.cpu.eip) {
+            match self.engine.step(&mut self.cpu, &mut self.arena) {
+                Ok(()) => self.clock.retire(),
+                Err(Stop::Interrupt(n)) => {
+                    self.clock.retire();
+                    return Some(Outcome::Wall {
+                        what: format!("int {n:#04x}"),
+                    });
+                }
+                Err(stop) => {
+                    return Some(Outcome::Wall {
+                        what: stop.to_string(),
+                    })
+                }
+            }
+        }
+        host.closed().then_some(Outcome::Closed)
     }
 
     /// Hand the host every block of the mix the declared clock has passed.
