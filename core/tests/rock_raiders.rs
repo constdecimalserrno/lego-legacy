@@ -55,6 +55,26 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
     install_dir: "C:\\LEGORR",
 };
 
+/// The boot path, run once and looked at by several tests.
+///
+/// It retires ninety-six million instructions and unpacks a 79 MB archive on
+/// the way, which is worth doing once rather than once per assertion.
+fn boot() -> Option<&'static testkit::Ran> {
+    use std::sync::OnceLock;
+    static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+    RAN.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let cli = Cli {
+            trace: Trace::Shims,
+            ..Cli::default()
+        };
+        Some(testkit::try_run_headless(&ROCK_RAIDERS, &cli, 200_000_000).expect("the rip loads"))
+    })
+    .as_ref()
+}
+
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
     std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
@@ -199,14 +219,7 @@ fn the_disc_reads_in_the_order_the_image_records() {
 
 #[test]
 fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
-    if !scratch() {
-        return;
-    }
-    let cli = Cli {
-        trace: Trace::Shims,
-        ..Cli::default()
-    };
-    let ran = testkit::try_run_headless(&ROCK_RAIDERS, &cli, 10_000_000).expect("the rip loads");
+    let Some(ran) = boot() else { return };
 
     // Where this title stops today: its own C runtime is done, it has checked
     // the disc, and it is asking DirectX for an input device.
@@ -220,14 +233,7 @@ fn the_boot_path_gets_through_the_c_runtime_and_reaches_directx() {
 
 #[test]
 fn the_disc_in_the_declared_drive_is_the_pressing_itself() {
-    if !scratch() {
-        return;
-    }
-    let cli = Cli {
-        trace: Trace::Shims,
-        ..Cli::default()
-    };
-    let ran = testkit::try_run_headless(&ROCK_RAIDERS, &cli, 10_000_000).expect("the rip loads");
+    let Some(ran) = boot() else { return };
 
     // The title checks its own disc by opening a file on D:, which the
     // declared machine answers out of the pressing in its drive.
@@ -278,5 +284,37 @@ fn what_the_machine_declares_is_what_the_guest_reads_back() {
     assert!(
         !ROCK_RAIDERS.declared.why.is_empty(),
         "a declared value carries its reason"
+    );
+}
+
+#[test]
+fn the_titles_own_archives_are_on_the_declared_machines_disc() {
+    let Some(ran) = boot() else { return };
+
+    // Before the cabinet was read, this title opened its ten archives, found
+    // none, and gave up. Now it finds the two the pressing ships and goes on
+    // to load its own art out of them.
+    for shipped in ["LegoRR0.wad", "LegoRR1.wad"] {
+        assert!(
+            !ran.log.contains(&format!("file missing {shipped}")),
+            "{shipped} is in the pressing's cabinet and should have been found"
+        );
+    }
+    // The eight it probes for and this pressing does not ship are the only
+    // things it does not find. Anything else missing is a gap in the tree.
+    let unexpected: Vec<&str> = ran
+        .log
+        .lines()
+        .filter(|l| l.starts_with("file missing"))
+        .filter(|l| !(2..10).any(|n| l.contains(&format!("LegoRR{n}.wad"))))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the tree does not hold: {unexpected:?}"
+    );
+    assert!(
+        ran.finish.cursor > 10_000_000,
+        "loading its data takes tens of millions of instructions, not {}",
+        ran.finish.cursor
     );
 }

@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 pub enum Source {
     /// A file inside the pressing's own image.
     Disc(String),
+    /// A file packed into the pressing's cabinet, by its index there.
+    Packed(usize),
     /// Bytes the machine makes up, because the installer would have written
     /// them rather than copied them.
     Declared(Vec<u8>),
@@ -20,6 +22,8 @@ pub enum Source {
 
 /// The declared machine's disc.
 pub struct Tree {
+    /// The pressing's own archive, and where its data lives on the disc.
+    cabinet: Option<(crate::cabinet::Cabinet, String)>,
     /// Guest paths, upper-cased and with their separators normalised, to what
     /// stands behind them.
     files: BTreeMap<String, Source>,
@@ -38,6 +42,7 @@ impl Tree {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            cabinet: None,
             files: BTreeMap::new(),
             iso: None,
             missing: Vec::new(),
@@ -53,6 +58,39 @@ impl Tree {
     /// declared machine, and neither does which way the separators lean.
     fn key(path: &str) -> String {
         path.trim().replace('/', "\\").to_uppercase()
+    }
+
+    /// Declare everything the pressing's cabinet holds, under a root.
+    ///
+    /// A packed entry becomes a file the guest can open; one the header names
+    /// but does not pack sits loose on the disc, and is mapped there instead.
+    ///
+    /// # Errors
+    /// When the header is not a cabinet.
+    pub fn set_cabinet(
+        &mut self,
+        header: &[u8],
+        data_path: &str,
+        root: &str,
+    ) -> Result<usize, crate::cabinet::CabinetError> {
+        let cabinet = crate::cabinet::Cabinet::open(header)?;
+        let mut declared = 0;
+        for (index, entry) in cabinet.entries().iter().enumerate() {
+            let guest = entry.guest_path(root);
+            if entry.in_cabinet() {
+                self.files.insert(Self::key(&guest), Source::Packed(index));
+            } else {
+                let on_disc = if entry.directory.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", entry.directory.replace('\\', "/"), entry.name)
+                };
+                self.files.insert(Self::key(&guest), Source::Disc(on_disc));
+            }
+            declared += 1;
+        }
+        self.cabinet = Some((cabinet, data_path.to_owned()));
+        Ok(declared)
     }
 
     /// Declare that a guest path holds one of the pressing's files.
@@ -79,6 +117,22 @@ impl Tree {
         let key = Self::key(guest_path);
         match self.files.get(&key).cloned() {
             Some(Source::Declared(bytes)) => Some(bytes),
+            Some(Source::Packed(index)) => {
+                let (cabinet, data_path) = self.cabinet.as_ref()?;
+                let entry = cabinet.entries().get(index)?.clone();
+                let iso = self.iso.as_mut()?;
+                let span = iso
+                    .read_range(data_path, entry.offset, entry.compressed as usize)
+                    .ok()?;
+                let (cabinet, _) = self.cabinet.as_ref()?;
+                match cabinet.unpack(&entry, &span) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => {
+                        self.missing.push(guest_path.to_owned());
+                        None
+                    }
+                }
+            }
             Some(Source::Disc(path)) => {
                 let iso = self.iso.as_mut()?;
                 match iso.read(&path) {

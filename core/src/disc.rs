@@ -140,6 +140,28 @@ impl Iso {
         Ok(bytes)
     }
 
+    /// Read part of a file out of the image.
+    ///
+    /// What a large archive is read through: the whole of it need not be in
+    /// memory to unpack one entry.
+    ///
+    /// # Errors
+    /// When the image holds no such file.
+    pub fn read_range(
+        &mut self,
+        path: &str,
+        offset: u32,
+        len: usize,
+    ) -> Result<Vec<u8>, DiscError> {
+        let entry = self.entry(path)?;
+        let start = u64::from(entry.sector) * SECTOR + u64::from(offset);
+        let room = (entry.len as usize).saturating_sub(offset as usize);
+        let mut bytes = vec![0u8; len.min(room)];
+        self.file.seek(SeekFrom::Start(start))?;
+        self.file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
     /// Whether the image holds this path.
     ///
     /// # Errors

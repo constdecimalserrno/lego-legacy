@@ -603,6 +603,13 @@ pub const SHIMS: &[Shim] = &[
         convention: Convention::Stdcall,
         run: create_thread,
     },
+    Shim {
+        dll: "KERNEL32",
+        name: "OutputDebugStringA",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: output_debug_string,
+    },
 ];
 
 fn get_version(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -1447,4 +1454,12 @@ fn create_thread(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
         what: "KERNEL32.dll!CreateThread".to_owned(),
         caller: ctx.cpu.r[crate::cpu::ESP],
     })
+}
+
+fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // What the title's own developers watched. It goes in the run log, where
+    // it is the guest's own account of what it is doing.
+    let text = ctx.string(args[0]).map_err(Stop::Fault)?;
+    ctx.log.line(&format!("guest says {}", text.trim_end()));
+    Ok(0)
 }

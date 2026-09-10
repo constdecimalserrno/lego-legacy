@@ -81,6 +81,8 @@ pub struct State {
     pub volume_label: String,
     /// How long the guest has asked to wait for, in declared milliseconds.
     pub slept_millis: u64,
+    /// How many files the declared install tree holds.
+    pub installed_files: usize,
     /// Settings files, by path, section and key.
     profiles: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
     /// The registry, as a flat map from a key's whole path to its values.
@@ -113,6 +115,7 @@ impl State {
             current_directory: String::new(),
             volume_label: String::new(),
             slept_millis: 0,
+            installed_files: 0,
             profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
@@ -271,7 +274,20 @@ impl Ctx<'_> {
     /// declared machine's disc. Nothing outside it is reachable: the guest
     /// cannot open the host's files, because it is not on the host.
     pub fn open_guest_file(&mut self, path: &str) -> Option<Vec<u8>> {
-        self.tree.read(path)
+        self.tree.read(&self.absolute(path))
+    }
+
+    /// A path the guest gave us, resolved the way the guest means it: a
+    /// relative one is against wherever the guest believes it is.
+    #[must_use]
+    pub fn absolute(&self, path: &str) -> String {
+        let path = path.trim();
+        let rooted = path.len() > 1 && path.as_bytes().get(1) == Some(&b':');
+        if rooted || path.starts_with('\\') {
+            path.to_owned()
+        } else {
+            format!("{}\\{}", self.state.current_directory, path)
+        }
     }
 
     /// The declared clock, in milliseconds, as the guest reads it.

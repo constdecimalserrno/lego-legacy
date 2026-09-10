@@ -304,7 +304,6 @@ impl Machine {
     pub fn load_title(&mut self, title: &Title) -> Result<(), Box<dyn std::error::Error>> {
         let mut iso = crate::disc::open_pressing(title.image.disc_dir, title.image.pressing)?;
         let bytes = iso.read(title.image.path)?;
-        let iso = iso;
 
         // A title is the bytes it is made of. A pressing that has been patched
         // or is simply the other one is refused by name rather than run.
@@ -324,6 +323,16 @@ impl Machine {
         // run: a title reads its own disc, and the label it checks is the
         // label the image carries.
         self.state.volume_label = iso.label.clone();
+
+        // What this title's installer would have put on the machine's disc,
+        // declared from the pressing's own cabinet rather than by running the
+        // installer (#16).
+        let mut iso = iso;
+        if let Ok(header) = iso.read("DATA1.HDR") {
+            self.state.installed_files =
+                self.tree
+                    .set_cabinet(&header, "DATA1.CAB", title.install_dir)?;
+        }
         self.tree.set_disc(iso);
 
         let image = crate::pe::load(&bytes, &mut self.arena)?;
