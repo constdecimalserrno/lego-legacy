@@ -80,6 +80,20 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "GlobalAlloc",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: global_alloc,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GlobalFree",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: global_free,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "HeapFree",
         args: 3,
         convention: Convention::Stdcall,
@@ -706,6 +720,33 @@ fn heap_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem.write(addr, &zeros).map_err(Stop::Fault)?;
     }
     Ok(addr)
+}
+
+fn global_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GlobalAlloc(flags, bytes). Fixed memory is an address, which is what a
+    // title that never imports GlobalLock asks for; GMEM_ZEROINIT zeroes it.
+    const GMEM_MOVEABLE: u32 = 0x2;
+    const GMEM_ZEROINIT: u32 = 0x40;
+    let (flags, size) = (args[0], args[1]);
+    if flags & GMEM_MOVEABLE != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("KERNEL32.dll!GlobalAlloc: moveable memory, flags {flags:#x}"),
+            caller: 0,
+        });
+    }
+    heap_alloc(
+        ctx,
+        &[0, if flags & GMEM_ZEROINIT != 0 { 0x8 } else { 0 }, size],
+    )
+}
+
+fn global_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GlobalFree(memory): null when it is freed, the memory back when not.
+    Ok(if ctx.state.heap.free(args[0]) {
+        0
+    } else {
+        args[0]
+    })
 }
 
 fn heap_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

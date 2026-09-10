@@ -215,6 +215,18 @@ const FACES: &[(&str, &str, &str)] = &[
         "93281502-8cf8-11d0-89ab-00a0c9054129",
         "IDirect3DTexture2",
     ),
+    // A sound buffer's 3D faces: the primary buffer's listener, and a
+    // secondary buffer's own position (#19).
+    (
+        "IDirectSoundBuffer",
+        "279afa84-4981-11ce-a521-0020af0be560",
+        "IDirectSound3DListener",
+    ),
+    (
+        "IDirectSoundBuffer",
+        "279afa86-4981-11ce-a521-0020af0be560",
+        "IDirectSound3DBuffer",
+    ),
     // DirectX 5's surface, which is DirectX 6's without its last nine slots.
     (
         "IDirectDrawSurface",
@@ -298,6 +310,14 @@ const OWN: &[(&str, &str)] = &[
     ),
     ("IDirectSound", "279afa83-4981-11ce-a521-0020af0be560"),
     ("IDirectSoundBuffer", "279afa85-4981-11ce-a521-0020af0be560"),
+    (
+        "IDirectSound3DBuffer",
+        "279afa86-4981-11ce-a521-0020af0be560",
+    ),
+    (
+        "IDirectSound3DListener",
+        "279afa84-4981-11ce-a521-0020af0be560",
+    ),
     ("IMediaStream", "b502d1bd-9a57-11d0-8fde-00c04fd9189d"),
 ];
 

@@ -58,9 +58,10 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
 
 /// The boot path, run once and looked at by several tests.
 ///
-/// It plays four and a half minutes of movie, retires two hundred million
+/// It plays four and a half minutes of movie, retires four hundred million
 /// instructions and unpacks a 79 MB archive on the way, which is worth doing
-/// once rather than once per assertion.
+/// once rather than once per assertion. Its sounds load before its scene is
+/// built, and the scene's lights come at about 352 million.
 fn boot() -> Option<&'static testkit::Ran> {
     use std::sync::OnceLock;
     static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
@@ -72,7 +73,7 @@ fn boot() -> Option<&'static testkit::Ran> {
             trace: Trace::Shims,
             ..Cli::default()
         };
-        Some(testkit::try_run_headless(&ROCK_RAIDERS, &cli, 200_000_000).expect("the rip loads"))
+        Some(testkit::try_run_headless(&ROCK_RAIDERS, &cli, 400_000_000).expect("the rip loads"))
     })
     .as_ref()
 }
@@ -505,9 +506,10 @@ const MENU: u64 = 4603;
 /// Enough instructions to reach the menu and a couple of hundred flips of it:
 /// the movies, the loading, and the menu waiting for a person. The loading
 /// takes the title's own texture conversion, which runs now that its 8-bit
-/// images are the 8-bit surfaces it asked for (#18): about 115 million
-/// instructions more than when every surface was the screen's.
-const FIRST_LIGHT_BUDGET: u64 = 7_770_000_000;
+/// images are the 8-bit surfaces it asked for (#18), about 115 million
+/// instructions, and its sounds, which it loads now that DirectSound keeps a
+/// listener (#19), about 230 million more.
+const FIRST_LIGHT_BUDGET: u64 = 8_010_000_000;
 
 /// The flip the pointer has been on Start Game long enough to be drawn.
 const HOVERED: u64 = 4615;
@@ -609,7 +611,9 @@ fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
             let cursor = w.nth(1)?.parse().ok()?;
             Some((flip, cursor))
         })
-        .filter(|(flip, _)| (MENU..=HOVERED).contains(flip))
+        // The flip after the menu comes up loads its ambience from disc, and
+        // is not the menu waiting yet.
+        .filter(|(flip, _)| (MENU + 1..=HOVERED).contains(flip))
         .collect();
     assert!(cursors.len() > 10, "the menu is presented flip after flip");
     for pair in cursors.windows(2) {
@@ -766,6 +770,45 @@ fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
     assert!(
         busy(rockfall, big_rock) > 0.3,
         "a rock is textured, and a flat colour is not"
+    );
+}
+
+#[test]
+fn the_sounds_the_title_plays_are_mixed_on_the_declared_clock() {
+    let Some(ran) = to_the_level_select(&LEVEL_SELECT_FIRST) else {
+        return;
+    };
+    // How loud each mixed block is, for the blocks mixed between two flips.
+    let loudness = |from: u64, to: u64| -> Vec<f64> {
+        ran.host
+            .audio_blocks
+            .iter()
+            .zip(&ran.host.audio_flips)
+            .filter(|(_, flip)| (from..to).contains(*flip))
+            .map(|(block, _)| {
+                let power: f64 = block.iter().map(|s| f64::from(*s).powi(2)).sum();
+                (power / block.len().max(1) as f64).sqrt()
+            })
+            .collect()
+    };
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+
+    // The movies are long over by the end of the loading, and nothing plays.
+    let loading = loudness(4590, MENU);
+    assert!(!loading.is_empty() && loading.iter().all(|r| *r == 0.0));
+    // The menu loops its own ambience, from a DirectSound buffer.
+    let menu = loudness(MENU + 10, 4620);
+    assert!(
+        !menu.is_empty() && menu.iter().all(|r| *r > 500.0),
+        "the menu's ambience is heard: {menu:?}"
+    );
+    // And the rocks coming down are louder than it.
+    let rockfall = loudness(4630, LEVEL_SELECT);
+    assert!(
+        mean(&rockfall) > 2.0 * mean(&menu),
+        "the rockfall is heard over the menu: {} against {}",
+        mean(&rockfall),
+        mean(&menu)
     );
 }
 

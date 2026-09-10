@@ -72,10 +72,21 @@ impl Format {
     /// # Errors
     /// When the format is one nothing here decodes, or the data is corrupt.
     pub fn decode(&self, data: &[u8]) -> Result<Vec<i16>, Error> {
-        if self.rate != RATE || !(1..=2).contains(&self.channels) {
+        if self.rate != RATE {
+            return Err(Error(format!("{} Hz, and the mix is at {RATE}", self.rate)));
+        }
+        self.stereo(data)
+    }
+
+    /// Decode samples in this format into stereo at the format's own rate.
+    ///
+    /// # Errors
+    /// When the format is one nothing here decodes, or the data is corrupt.
+    pub fn stereo(&self, data: &[u8]) -> Result<Vec<i16>, Error> {
+        if !(1..=2).contains(&self.channels) {
             return Err(Error(format!(
-                "{} channels at {} Hz, and the mix is stereo at {RATE}",
-                self.channels, self.rate
+                "{} channels, and the mix is stereo",
+                self.channels
             )));
         }
         let samples = match (self.tag, self.bits) {
@@ -165,6 +176,8 @@ impl Format {
 /// One sound playing.
 struct Voice {
     id: u32,
+    /// Whether it goes round again at its end, until it is stopped.
+    looping: bool,
     /// Stereo samples at the mix's rate.
     samples: Vec<i16>,
     /// The frame of the mix its first sample lands on.
@@ -187,9 +200,18 @@ pub fn frame_at(nanos: u64) -> u64 {
 impl Mixer {
     /// Start a sound at a declared time, replacing one with the same id.
     pub fn play(&mut self, id: u32, samples: Vec<i16>, nanos: u64) {
+        self.play_from(id, samples, nanos, false);
+    }
+
+    /// Start a sound at a declared time, once or round and round.
+    pub fn play_from(&mut self, id: u32, samples: Vec<i16>, nanos: u64, looping: bool) {
         self.stop(id);
+        if samples.len() < 2 {
+            return;
+        }
         self.voices.push(Voice {
             id,
+            looping,
             samples,
             start: frame_at(nanos),
         });
@@ -211,6 +233,12 @@ impl Mixer {
                     let Some(offset) = (first + frame as u64).checked_sub(voice.start) else {
                         continue;
                     };
+                    let frames = (voice.samples.len() / 2) as u64;
+                    let offset = if voice.looping {
+                        offset % frames
+                    } else {
+                        offset
+                    };
                     let at = offset as usize * 2;
                     if let Some(s) = voice.samples.get(at..at + 2) {
                         pair[0] += i32::from(s[0]);
@@ -227,7 +255,7 @@ impl Mixer {
             self.blocks += 1;
             let end = self.blocks * BLOCK_FRAMES as u64;
             self.voices
-                .retain(|v| v.start + (v.samples.len() / 2) as u64 > end);
+                .retain(|v| v.looping || v.start + (v.samples.len() / 2) as u64 > end);
         }
         out
     }

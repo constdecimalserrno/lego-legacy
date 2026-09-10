@@ -73,6 +73,14 @@ pub enum Object {
     Key { path: String },
     /// A COM object the guest holds a pointer to.
     Com { interface: &'static str, refs: i32 },
+    /// A multimedia file over guest memory, and where it is reading; `owned`
+    /// when the machine put the file there and frees it on close.
+    Mmio {
+        base: u32,
+        len: u32,
+        at: u32,
+        owned: bool,
+    },
 }
 
 /// Everything the guest holds that is not memory.
@@ -123,6 +131,8 @@ pub struct State {
     pub cleared: u64,
     /// Every sound playing, mixed on the declared clock.
     pub mixer: crate::sound::Mixer,
+    /// DirectSound's buffers and listener.
+    pub sound: dsound::Sounds,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
     /// Which keys are down, as the guest's own device numbers them.
@@ -186,6 +196,7 @@ impl State {
             waited_millis: 0,
             players: BTreeMap::new(),
             mixer: crate::sound::Mixer::default(),
+            sound: dsound::Sounds::default(),
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
@@ -513,11 +524,7 @@ pub enum ComState {
     Device { keyboard: bool, acquired: bool },
     /// A sound buffer: where its samples are, how many it holds, and whether
     /// the guest has started it.
-    Sound {
-        store: u32,
-        bytes: u32,
-        playing: bool,
-    },
+    Sound { store: u32, bytes: u32 },
     /// A drawing surface: guest memory, and how to read it.
     Surface {
         pixels: u32,

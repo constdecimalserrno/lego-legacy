@@ -45,6 +45,8 @@ pub struct Headless {
     /// Every audio block mixed, in order. Mixing runs whether or not a device
     /// would have taken the samples.
     pub audio_blocks: Vec<Vec<i16>>,
+    /// How many flips had been presented when each block was mixed.
+    pub audio_flips: Vec<u64>,
     /// Input still to deliver, newest last, each keyed to the flip it belongs
     /// to.
     pending: Vec<(u64, Input)>,
@@ -60,6 +62,7 @@ impl Headless {
             flips: 0,
             frames: Vec::new(),
             audio_blocks: Vec::new(),
+            audio_flips: Vec::new(),
             pending: Vec::new(),
             keep: Vec::new(),
         }
@@ -142,6 +145,7 @@ impl Host for Headless {
 
     fn audio(&mut self, samples: &[i16]) {
         self.audio_blocks.push(samples.to_vec());
+        self.audio_flips.push(self.flips);
     }
 
     fn wall_nanos(&self) -> u64 {
