@@ -12,8 +12,8 @@ pub struct Presented {
     pub flip: u64,
     pub width: u32,
     pub height: u32,
-    /// The frame's own bytes, for the first [`KEPT`] flips and the latest
-    /// one; empty for the rest.
+    /// The frame's own bytes, for the first [`KEPT`] flips, any flip the
+    /// host was asked to keep, and the latest one; empty for the rest.
     pub pixels: Vec<u8>,
     uniform: bool,
 }
@@ -22,8 +22,8 @@ pub struct Presented {
 ///
 /// A run that plays its movies presents thousands of 640x480 frames, and
 /// keeping every one would hold gigabytes for tests that look at a handful.
-// ponytail: the first frames and the latest. A test that needs a frame from
-// the middle of a long run would need a way to say which.
+// ponytail: the first frames, the latest, and the flips a test names with
+// `keep`. A test that wants every frame of a long run wants a digest instead.
 pub const KEPT: usize = 16;
 
 impl Presented {
@@ -48,6 +48,8 @@ pub struct Headless {
     /// Input still to deliver, newest last, each keyed to the flip it belongs
     /// to.
     pending: Vec<(u64, Input)>,
+    /// Flips whose pixels are kept however long the run goes on.
+    keep: Vec<u64>,
 }
 
 impl Headless {
@@ -59,7 +61,21 @@ impl Headless {
             frames: Vec::new(),
             audio_blocks: Vec::new(),
             pending: Vec::new(),
+            keep: Vec::new(),
         }
+    }
+
+    /// Keep these flips' pixels, wherever in the run they fall.
+    #[must_use]
+    pub fn keeping(mut self, flips: &[u64]) -> Self {
+        self.keep.extend_from_slice(flips);
+        self
+    }
+
+    /// A presented frame, by the flip it was presented at.
+    #[must_use]
+    pub fn frame(&self, flip: u64) -> Option<&Presented> {
+        self.frames.iter().find(|f| f.flip == flip)
     }
 
     /// Queue the input a route asks for. Events are delivered at the flip they
@@ -104,7 +120,9 @@ impl Host for Headless {
         // The latest frame keeps its pixels until another replaces it.
         if self.frames.len() > KEPT {
             if let Some(previous) = self.frames.last_mut() {
-                previous.pixels = Vec::new();
+                if !self.keep.contains(&previous.flip) {
+                    previous.pixels = Vec::new();
+                }
             }
         }
         self.frames.push(Presented {

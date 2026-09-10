@@ -99,14 +99,14 @@ pub const SHIMS: &[Shim] = &[
         name: "TranslateMessage",
         args: 1,
         convention: Convention::Stdcall,
-        run: succeed,
+        run: translate_message,
     },
     Shim {
         dll: "USER32",
         name: "DispatchMessageA",
         args: 1,
         convention: Convention::Stdcall,
-        run: succeed,
+        run: dispatch_message,
     },
     Shim {
         dll: "USER32",
@@ -232,7 +232,7 @@ pub const SHIMS: &[Shim] = &[
         name: "SetCursorPos",
         args: 2,
         convention: Convention::Stdcall,
-        run: succeed,
+        run: set_cursor_pos,
     },
     Shim {
         dll: "USER32",
@@ -535,23 +535,99 @@ fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(if ctx.state.window_made { WINDOW } else { 0 })
 }
 
-fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The declared machine's queue is empty. What a person did reaches the
-    // guest through its own devices at the flip boundary, not through
-    // messages, and a title that finds nothing here gets on with drawing.
-    let msg = args[0];
-    if msg != 0 {
-        for offset in (0..28).step_by(4) {
-            ctx.mem.write_u32(msg + offset, 0).map_err(Stop::Fault)?;
-        }
+/// The first waiting message a filter takes: a window, and a range of
+/// messages where zero to zero is all of them.
+fn waiting(ctx: &Ctx<'_>, window: u32, first: u32, last: u32) -> Option<usize> {
+    ctx.state.messages.iter().position(|m| {
+        (window == 0 || m.window == window)
+            && ((first == 0 && last == 0) || (first..=last).contains(&m.message))
+    })
+}
+
+/// Write a `MSG`: window, message, the two parameters, the time, the point.
+fn write_message(ctx: &mut Ctx<'_>, at: u32, m: &super::Message) -> Result<(), Stop> {
+    for (offset, value) in [
+        (0, m.window),
+        (4, m.message),
+        (8, m.wparam),
+        (12, m.lparam),
+        (16, m.time),
+        (20, m.point.0 as u32),
+        (24, m.point.1 as u32),
+    ] {
+        ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
     }
+    Ok(())
+}
+
+fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // PeekMessageA(msg, window, first, last, remove). What a person did is
+    // posted at the flip boundary; a title that finds nothing here gets on
+    // with drawing.
+    const PM_REMOVE: u32 = 0x0001;
+    let (msg, window, first, last, remove) = (args[0], args[1], args[2], args[3], args[4]);
+    let Some(index) = waiting(ctx, window, first, last) else {
+        return Ok(0);
+    };
+    let message = if remove & PM_REMOVE != 0 {
+        ctx.state.messages.remove(index)
+    } else {
+        ctx.state.messages.get(index).copied()
+    };
+    if let (Some(message), true) = (message, msg != 0) {
+        write_message(ctx, msg, &message)?;
+    }
+    Ok(1)
+}
+
+fn translate_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // Only a key message has a character to make, and this machine posts
+    // none: a title's keys arrive through DirectInput.
     Ok(0)
 }
 
+fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // DispatchMessageA(msg): the title's own window procedure is called with
+    // it. What the procedure answers is not handed back; no title on the
+    // roster has been measured reading it.
+    let at = args[0];
+    let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
+    let (window, message, wparam, lparam) = (read(0)?, read(4)?, read(8)?, read(12)?);
+    let procedure = ctx.state.window_procedure;
+    if window != WINDOW || procedure == 0 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "USER32.dll!DispatchMessageA: message {message:#06x} to window {window:#x}, \
+                 which has no procedure here"
+            ),
+            caller: 0,
+        });
+    }
+    ctx.call_guest = Some((procedure, vec![window, message, wparam, lparam]));
+    Ok(0)
+}
+
+fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The title puts the pointer somewhere, and that is where it is until a
+    // person moves it.
+    ctx.state.pointer = (args[0] as i32, args[1] as i32);
+    Ok(1)
+}
+
 fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // A title that waits for a message would wait forever on a machine whose
-    // queue is empty, so it is given the one message that ends a loop: quit.
+    // GetMessageA(msg, window, first, last). A message waiting is taken. A
+    // title that waits for one on an empty queue would wait forever on a
+    // machine that only takes input at a flip, so it is given the one message
+    // that ends a loop: quit.
     let msg = args[0];
+    if let Some(index) = waiting(ctx, args[1], args[2], args[3]) {
+        if let Some(message) = ctx.state.messages.remove(index) {
+            if msg != 0 {
+                write_message(ctx, msg, &message)?;
+            }
+            return Ok(1);
+        }
+    }
     if msg != 0 {
         ctx.mem.write_u32(msg, 0).map_err(Stop::Fault)?;
         // WM_QUIT.

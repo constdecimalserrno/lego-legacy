@@ -131,16 +131,23 @@ impl Runtime {
     }
 }
 
-/// Where a window point is, as the guest counts.
+/// Where a point in the window's content is on the guest's screen.
 ///
-/// AppKit measures from the bottom left of the window and the guest from the
-/// top left, so the vertical axis is turned over on the way in. A point above
-/// the window's top or below its bottom is clamped rather than handed to the
-/// guest as a negative coordinate it would never see on real hardware.
+/// The window shows the guest's frame scaled to fit and centred, its aspect
+/// kept, so a point is taken back through that: out of the bars either side,
+/// down to the frame's own size, and turned over, because the window's origin
+/// is its bottom left corner and the guest's is its top left. A point outside
+/// the picture is clamped to its edge rather than handed to the guest as a
+/// coordinate it would never see on real hardware.
 #[must_use]
-pub fn guest_point(window_height: f64, x: f64, y: f64) -> (i32, i32) {
-    let flipped = (window_height - y).max(0.0);
-    (x.max(0.0) as i32, flipped as i32)
+pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i32, i32) {
+    let (cw, ch) = content;
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let scale = (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE);
+    let (left, bottom) = ((cw - fw * scale) / 2.0, (ch - fh * scale) / 2.0);
+    let gx = ((x - left) / scale).clamp(0.0, fw - 1.0);
+    let gy = ((ch - y - bottom) / scale).clamp(0.0, fh - 1.0);
+    (gx as i32, gy as i32)
 }
 
 /// Hand a presented frame's copy back once Core Graphics is done with it.
@@ -171,6 +178,12 @@ pub struct MacWindow {
     closed: bool,
     /// The wall time presentation is being held back to.
     next_flip_nanos: u64,
+    /// How far behind the declared clock the host has fallen and will not
+    /// make up: a run the host could not keep pace with carries on in real
+    /// time from where it got to, rather than racing to catch up.
+    lag_nanos: u64,
+    /// The size of the last frame presented, which the window scales.
+    frame_size: (u32, u32),
     colour_space: *mut c_void,
     cg_image_create: unsafe extern "C" fn(
         usize,
@@ -279,6 +292,8 @@ impl MacWindow {
                 pending: Vec::new(),
                 closed: false,
                 next_flip_nanos: 0,
+                lag_nanos: 0,
+                frame_size: (width, height),
             })
         }
     }
@@ -322,9 +337,11 @@ impl MacWindow {
                     5 | 6 => {
                         let p: Point =
                             self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
-                        let bounds: Rect =
-                            self.rt.send::<MsgRect>()(self.window, self.rt.sel("frame"));
-                        let (x, y) = guest_point(bounds.height, p.x, p.y);
+                        let view: Id =
+                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+                        let bounds: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
+                        let (x, y) =
+                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y);
                         self.pending.push(Input::Move { x, y });
                     }
                     // Key down and key up.
@@ -371,6 +388,7 @@ impl Host for MacWindow {
         //
         // ponytail: one copy per presented frame. Measure before replacing it
         // with a pool of surfaces the layer can cycle through.
+        self.frame_size = (frame.width, frame.height);
         let len = (frame.pitch * frame.height) as usize;
         let copy: Box<Vec<u8>> = Box::new(frame.pixels[..len.min(frame.pixels.len())].to_vec());
         let pixels = copy.as_ptr();
@@ -435,11 +453,12 @@ impl Host for MacWindow {
     fn pace(&mut self, declared_nanos: u64) {
         // A game-second takes a wall-second (ADR-0003): if the machine is
         // ahead of its own clock, it waits.
-        self.next_flip_nanos = declared_nanos;
         let wall = self.wall_nanos();
-        if declared_nanos > wall {
-            let ahead = declared_nanos - wall;
-            std::thread::sleep(std::time::Duration::from_nanos(ahead));
+        self.lag_nanos = self.lag_nanos.max(wall.saturating_sub(declared_nanos));
+        let due = declared_nanos + self.lag_nanos;
+        self.next_flip_nanos = due;
+        if due > wall {
+            std::thread::sleep(std::time::Duration::from_nanos(due - wall));
         }
     }
 }
@@ -451,11 +470,22 @@ mod tests {
     #[test]
     fn the_vertical_axis_turns_over_between_the_window_and_the_guest() {
         // The window's own origin is its bottom left corner.
-        assert_eq!(guest_point(480.0, 0.0, 480.0), (0, 0));
-        assert_eq!(guest_point(480.0, 320.0, 0.0), (320, 480));
-        assert_eq!(guest_point(480.0, 100.0, 180.0), (100, 300));
+        let same = (640.0, 480.0);
+        assert_eq!(guest_point(same, (640, 480), 0.0, 480.0), (0, 0));
+        assert_eq!(guest_point(same, (640, 480), 320.0, 1.0), (320, 479));
+        assert_eq!(guest_point(same, (640, 480), 100.0, 180.0), (100, 300));
         // A point outside the window is clamped rather than passed through
         // negative.
-        assert_eq!(guest_point(480.0, -5.0, 600.0), (0, 0));
+        assert_eq!(guest_point(same, (640, 480), -5.0, 600.0), (0, 0));
+    }
+
+    #[test]
+    fn a_point_comes_back_through_the_scale_and_the_bars() {
+        // Twice the size, with a hundred and sixty points of bar each side.
+        let wide = (1600.0, 960.0);
+        assert_eq!(guest_point(wide, (640, 480), 160.0, 960.0), (0, 0));
+        assert_eq!(guest_point(wide, (640, 480), 800.0, 480.0), (320, 240));
+        // In the bar is at the picture's edge.
+        assert_eq!(guest_point(wide, (640, 480), 10.0, 480.0), (0, 240));
     }
 }

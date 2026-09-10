@@ -1,0 +1,11 @@
+#lego-legacy-route 1
+# LEGO Rock Raiders, from its boot to its main menu: first light.
+#
+# Nothing on the way is pressed. The setup dialog's default button is pressed
+# by the machine, as a person pressing Enter would; both movies play to their
+# end; the title loads its objects with the loading screen up; and at flip 4603
+# it presents its main menu, which it then draws every flip while it waits.
+#
+# The pointer then moves onto Start Game, which the title lights up: a person's
+# input reaches the title through its own window procedure.
+flip 4610 move 320 222

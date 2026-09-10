@@ -26,7 +26,7 @@ use crate::guest::heap::Heap;
 use crate::guest::{Arena, Fault, GuestMem};
 use crate::runlog::RunLog;
 use crate::Title;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Who takes the arguments off the stack when a call returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +126,8 @@ pub struct State {
     pub mouse_delta: (i32, i32),
     /// Whether the pointer's button is down.
     pub mouse_down: bool,
+    /// Window messages waiting for the title to take them, oldest first.
+    pub messages: VecDeque<Message>,
     /// The modal dialog a title has up, while it has one.
     pub dialog: Option<user32::Dialog>,
     /// What a title named its objects, by the object.
@@ -190,6 +192,7 @@ impl State {
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_down: false,
+            messages: VecDeque::new(),
             dialog: None,
             names: BTreeMap::new(),
             set_values: BTreeMap::new(),
@@ -201,6 +204,59 @@ impl State {
             profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
+    }
+
+    /// What a person did, as the declared machine's devices and its message
+    /// queue see it: the pointer, the button and the keys change, and the
+    /// title's window is sent what Windows would send it.
+    pub fn deliver(&mut self, event: crate::host::Input, millis: u32) {
+        use crate::host::Input;
+        const WM_MOUSEMOVE: u32 = 0x0200;
+        const WM_LBUTTONDOWN: u32 = 0x0201;
+        const WM_LBUTTONUP: u32 = 0x0202;
+        const MK_LBUTTON: u32 = 0x0001;
+        match event {
+            Input::Move { x, y } => {
+                self.mouse_delta.0 += x - self.pointer.0;
+                self.mouse_delta.1 += y - self.pointer.1;
+                self.pointer = (x, y);
+                let buttons = if self.mouse_down { MK_LBUTTON } else { 0 };
+                self.post(WM_MOUSEMOVE, buttons, millis);
+            }
+            Input::Down => {
+                self.mouse_down = true;
+                self.post(WM_LBUTTONDOWN, MK_LBUTTON, millis);
+            }
+            Input::Up => {
+                self.mouse_down = false;
+                self.post(WM_LBUTTONUP, 0, millis);
+            }
+            Input::Key { code, down } => {
+                // Keys reach a title through DirectInput's keyboard, by the
+                // device's own numbering.
+                self.keys_down.retain(|k| *k != code);
+                if down {
+                    self.keys_down.push(code);
+                }
+            }
+        }
+    }
+
+    /// Queue a mouse message for the title's window, where the pointer is.
+    fn post(&mut self, message: u32, wparam: u32, time: u32) {
+        if !self.window_made {
+            return;
+        }
+        let (x, y) = self.pointer;
+        let lparam = (u32::from(y as u16) << 16) | u32::from(x as u16);
+        self.messages.push_back(Message {
+            window: user32::WINDOW,
+            message,
+            wparam,
+            lparam,
+            time,
+            point: self.pointer,
+        });
     }
 
     /// Give the guest a handle to something.
@@ -446,6 +502,18 @@ impl State {
             _ => None,
         })
     }
+}
+
+/// One window message, as a `MSG` holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub window: u32,
+    pub message: u32,
+    pub wparam: u32,
+    pub lparam: u32,
+    /// The declared clock when it was posted, in milliseconds.
+    pub time: u32,
+    pub point: (i32, i32),
 }
 
 /// A frame the guest finished, and where to read it.

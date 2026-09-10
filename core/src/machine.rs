@@ -180,9 +180,17 @@ impl Machine {
         ));
         host.pace(self.clock.nanos());
 
-        // A replaying run takes its input from the route rather than from the
-        // person, and the person's own input is not mixed in: a route replays
-        // what it says and nothing else.
+        self.deliver_input(host, log);
+        self.flips += 1;
+    }
+
+    /// Hand the guest what a person did while the frame was on screen, at the
+    /// flip boundary (#10).
+    ///
+    /// A replaying run takes its input from the route rather than from the
+    /// person, and the person's own input is not mixed in: a route replays
+    /// what it says and nothing else.
+    fn deliver_input(&mut self, host: &mut dyn Host, log: &mut RunLog) {
         let events = match &self.route {
             Some(route) => {
                 let _ = host.poll_input(self.flips);
@@ -190,14 +198,15 @@ impl Machine {
             }
             None => host.poll_input(self.flips),
         };
+        let millis = u32::try_from(self.clock.millis() & 0xffff_ffff).unwrap_or(0);
         for event in events {
             log.line(&format!("input flip {} {event:?}", self.flips));
             if let Some(recording) = &mut self.recording {
                 recording.push(self.flips, event);
             }
             self.input.push((self.flips, event));
+            self.state.deliver(event, millis);
         }
-        self.flips += 1;
     }
 
     /// Take the machine one instruction further, or say why it stopped.
@@ -1011,10 +1020,7 @@ impl Machine {
         ));
         host.pace(self.clock.nanos());
         self.mix(host);
-        for event in host.poll_input(self.flips) {
-            log.line(&format!("input flip {} {event:?}", self.flips));
-            self.input.push((self.flips, event));
-        }
+        self.deliver_input(host, log);
         self.flips += 1;
     }
 }

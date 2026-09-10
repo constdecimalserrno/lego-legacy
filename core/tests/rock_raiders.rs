@@ -6,6 +6,7 @@
 
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::clock::FlipCost;
+use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::title::{Declared, EntryImage, WINDOWS_98_SE};
 use lego_legacy_core::{disc, testkit, Title};
 
@@ -494,4 +495,163 @@ fn wad_names() -> std::collections::BTreeSet<String> {
         }
     }
     names
+}
+
+/// Where the committed route says first light is: the flip the title first
+/// presents its main menu at.
+const FIRST_LIGHT: u64 = 4603;
+
+/// Enough instructions to reach first light and a hundred flips of menu past
+/// it: the movies, the loading, and the menu waiting for a person.
+const FIRST_LIGHT_BUDGET: u64 = 7_650_000_000;
+
+/// The flip the pointer has been on Start Game long enough to be drawn.
+const HOVERED: u64 = 4615;
+
+fn first_light_route() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../titles/lego-rock-raiders/routes/first-light.route")
+}
+
+/// The committed route, replayed, keeping the frames the tests look at.
+///
+/// Two slots, so the determinism gate's two runs can go side by side with
+/// the tests that look at one of them.
+fn replay(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let host = Headless::new().keeping(&[FIRST_LIGHT - 1, FIRST_LIGHT, HOVERED]);
+        let cli = Cli {
+            route: Some(first_light_route()),
+            ..Cli::default()
+        };
+        Some(testkit::run_on(
+            host,
+            &ROCK_RAIDERS,
+            &cli,
+            FIRST_LIGHT_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+static FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// How many pixels two frames disagree on, within a rectangle.
+fn differing(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> usize {
+    (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (y * 640 + x) * 4))
+        .filter(|at| a[*at..at + 3] != b[*at..at + 3])
+        .count()
+}
+
+#[test]
+fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
+    let Some(ran) = replay(&FIRST) else { return };
+
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way to the menu stops the run"
+    );
+    let menu = ran
+        .host
+        .frame(FIRST_LIGHT)
+        .expect("first light is presented");
+    let loading = ran
+        .host
+        .frame(FIRST_LIGHT - 1)
+        .expect("the frame before it");
+    assert_eq!((menu.width, menu.height), (640, 480));
+    assert!(
+        !menu.is_uniform(),
+        "the menu is a picture, not a cleared screen"
+    );
+    // A different screen, not the loading screen drawn again: most of the
+    // picture changes between them.
+    assert!(
+        differing(&loading.pixels, &menu.pixels, (0, 0, 640, 480)) > 640 * 480 / 2,
+        "flip {FIRST_LIGHT} should be a new screen, not the loading screen"
+    );
+    // And from first light on, the title is waiting in its menu: a frame
+    // every few tens of thousands of instructions, where loading took
+    // millions between frames.
+    let cursors: Vec<(u64, u64)> = ran
+        .log
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.strip_prefix("flip ")?.split_whitespace();
+            let flip = w.next()?.parse().ok()?;
+            let cursor = w.nth(1)?.parse().ok()?;
+            Some((flip, cursor))
+        })
+        .filter(|(flip, _)| (FIRST_LIGHT..=HOVERED).contains(flip))
+        .collect();
+    assert!(cursors.len() > 10, "the menu is presented flip after flip");
+    for pair in cursors.windows(2) {
+        assert!(
+            pair[1].1 - pair[0].1 < 200_000,
+            "flip {} took {} instructions, which is not a menu waiting",
+            pair[1].0,
+            pair[1].1 - pair[0].1
+        );
+    }
+}
+
+#[test]
+fn a_persons_pointer_reaches_the_menu_and_lights_up_what_it_is_over() {
+    let Some(ran) = replay(&FIRST) else { return };
+
+    ran.assert_logged("input flip 4610 Move { x: 320, y: 222 }");
+    let before = ran.host.frame(FIRST_LIGHT).expect("first light is kept");
+    let after = ran.host.frame(HOVERED).expect("the hovered frame is kept");
+    // Start Game is drawn in another colour with the pointer on it, and the
+    // pointer itself has moved there from the corner.
+    let start_game = (200, 200, 440, 240);
+    assert!(
+        differing(&before.pixels, &after.pixels, start_game) > 500,
+        "Start Game should light up under the pointer"
+    );
+    // The rest of the menu is left as it was.
+    let quit_game = (200, 360, 440, 400);
+    assert_eq!(
+        differing(&before.pixels, &after.pixels, quit_game),
+        0,
+        "only what the pointer is over changes"
+    );
+}
+
+#[test]
+fn the_first_light_route_replays_to_the_same_machine_every_time() {
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| replay(&SECOND));
+        (
+            replay(&FIRST),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    assert_eq!(first.finish.cursor, second.finish.cursor);
+    assert_eq!(first.finish.flips, second.finish.flips);
+    assert_eq!(
+        first.finish.declared_millis, second.finish.declared_millis,
+        "the same declared time"
+    );
+    assert_eq!(
+        first.digest, second.digest,
+        "and the machine ends the same way"
+    );
+    assert_eq!(
+        first.host.frame(HOVERED).map(|f| &f.pixels),
+        second.host.frame(HOVERED).map(|f| &f.pixels),
+        "including what it presented"
+    );
 }
