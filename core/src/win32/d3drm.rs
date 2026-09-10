@@ -698,7 +698,12 @@ fn make(ctx: &mut Ctx<'_>, interface: &'static Interface, out: u32) -> Result<u3
 fn create_frame(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreateFrame(parent, out).
     let object = State::make_com(ctx, &FRAME3, ComState::None).map_err(Stop::Fault)?;
-    ctx.state.scene.add(object, args[0]);
+    let parent = ctx.state.identity(args[0]);
+    ctx.state.scene.add(object, parent);
+    if parent != 0 {
+        // Its parent holds a reference, as AddChild's does.
+        ctx.state.com_ref(object, 1);
+    }
     if args[1] != 0 {
         ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     }
@@ -765,6 +770,7 @@ fn device_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u3
         ComState::RetainedDevice {
             surface,
             buffers: 1,
+            immediate: 0,
         },
     )
     .map_err(Stop::Fault)?;
@@ -849,12 +855,26 @@ fn get_buffer_count(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, 
 
 fn direct3d_device2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The immediate-mode device underneath: what this title actually draws
-    // through. It shares the surface, because there is only one.
-    let Some(surface) = device_surface(ctx, this) else {
+    // through. It shares the surface, because there is only one, and it is
+    // the same device every time it is asked for.
+    let Some(ComState::RetainedDevice {
+        surface, immediate, ..
+    }) = ctx.state.com(this).map(|o| o.state.clone())
+    else {
         return Ok(D3DRMERR_BADOBJECT);
     };
+    if immediate != 0 {
+        let face = State::face(ctx, immediate, &super::d3d::DEVICE2).map_err(Stop::Fault)?;
+        ctx.mem.write_u32(args[0], face).map_err(Stop::Fault)?;
+        return Ok(S_OK);
+    }
     let object = State::make_com(ctx, &super::d3d::DEVICE2, ComState::Device3D { surface })
         .map_err(Stop::Fault)?;
+    if let Some(ComState::RetainedDevice { immediate, .. }) =
+        ctx.state.com_mut(this).map(|o| &mut o.state)
+    {
+        *immediate = object;
+    }
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3d immediate device at {object:#010x} on surface {surface:#010x}"
@@ -864,31 +884,38 @@ fn direct3d_device2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 
 fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // FindPreferredTextureFormat(bit depths, flags, format). The declared card
-    // is TNT2-class, and a TNT2 has no palettized textures: what it offers is
-    // sixteen-bit 5-6-5, the screen's own format.
+    // is TNT2-class. Rock Raiders asks two things: an eight-bit palettized
+    // format, which a TNT2 does not have, and then any sixteen-bit one, which
+    // is 5-6-5, the screen's own. What else a TNT2 offers has not been asked.
+    const DDBD_8: u32 = 0x0800;
     const DDBD_16: u32 = 0x0400;
-    const D3DRMFPTF_ALPHA: u32 = 0x1;
     const D3DRMFPTF_PALETTIZED: u32 = 0x4;
     let (depths, flags, out) = (args[0], args[1], args[2]);
-    if depths & DDBD_16 == 0 || flags & (D3DRMFPTF_ALPHA | D3DRMFPTF_PALETTIZED) != 0 {
-        return Ok(D3DRMERR_TEXTUREFORMATNOTFOUND);
+    match (depths, flags) {
+        (DDBD_8, D3DRMFPTF_PALETTIZED) => Ok(D3DRMERR_TEXTUREFORMATNOTFOUND),
+        (DDBD_16, 0) => {
+            // DDPIXELFORMAT: size, DDPF_RGB, no FourCC, sixteen bits, masks.
+            for (offset, value) in [
+                (0, 32),
+                (4, 0x40),
+                (8, 0),
+                (12, 16),
+                (16, 0xf800),
+                (20, 0x07e0),
+                (24, 0x001f),
+                (28, 0),
+            ] {
+                ctx.mem.write_u32(out + offset, value).map_err(Stop::Fault)?;
+            }
+            Ok(S_OK)
+        }
+        _ => Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMDevice3::FindPreferredTextureFormat: depths {depths:#x} flags {flags:#x}"
+            ),
+            caller: 0,
+        }),
     }
-    // DDPIXELFORMAT: size, DDPF_RGB, no FourCC, sixteen bits, and the masks.
-    for (offset, value) in [
-        (0, 32),
-        (4, 0x40),
-        (8, 0),
-        (12, 16),
-        (16, 0xf800),
-        (20, 0x07e0),
-        (24, 0x001f),
-        (28, 0),
-    ] {
-        ctx.mem
-            .write_u32(out + offset, value)
-            .map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
 }
 
 fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
@@ -898,21 +925,10 @@ fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// A colour as the screen stores it.
-pub(crate) fn pixel(colour: u32, depth: u32) -> Vec<u8> {
-    let [b, g, r, _] = colour.to_le_bytes();
-    match depth {
-        16 => {
-            let packed = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
-            packed.to_le_bytes().to_vec()
-        }
-        _ => colour.to_le_bytes()[..depth.div_ceil(8) as usize].to_vec(),
-    }
-}
-
 fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Clear(flags). The viewport's own part of the device's surface goes to
-    // the background colour of the scene its camera is in.
+    // the background colour of the scene its camera is in. A depth buffer or
+    // dirty rectangles are not here to clear.
     const D3DRMCLEAR_TARGET: u32 = 0x1;
     let Some(ComState::Viewport {
         device,
@@ -926,12 +942,13 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    if args[0] & D3DRMCLEAR_TARGET == 0 {
+    if args[0] != D3DRMCLEAR_TARGET {
         return Err(Stop::NotWritten {
             what: format!("IDirect3DRMViewport2::Clear: flags {:#x}", args[0]),
             caller: 0,
         });
     }
+    let camera = ctx.state.identity(camera);
     let background = ctx
         .state
         .scene
@@ -949,23 +966,26 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let bytes = depth.div_ceil(8);
-    let colour = pixel(background, depth);
-    let (x1, y1) = ((x + width).min(sw), (y + height).min(sh));
-    let row: Vec<u8> = (x..x1).flat_map(|_| colour.iter().copied()).collect();
-    for row_y in y..y1 {
-        ctx.mem
-            .write(pixels + row_y * pitch + x * bytes, &row)
-            .map_err(Stop::Fault)?;
-    }
-    ctx.state.cleared += 1;
+    super::fill(
+        ctx,
+        (pixels, pitch, depth),
+        (x, y, (x + width).min(sw), (y + height).min(sh)),
+        background,
+    )?;
     Ok(S_OK)
 }
 
-fn render(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // Drawing the scene is the rasteriser's, and it arrives with #12. What is
-    // on the surface until then is what Clear left there.
-    Ok(S_OK)
+fn render(_ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Rendering a scene walks its frames and calls each visual, which is the
+    // rasteriser's and nothing on the way to this title's menu asks for it.
+    // Answering that it rendered would be a frame nobody drew.
+    Err(Stop::NotWritten {
+        what: format!(
+            "IDirect3DRMViewport2::Render: the scene at {:#x}, which nothing here draws yet",
+            args[0]
+        ),
+        caller: 0,
+    })
 }
 
 /// A frame the guest holds, to be changed.
@@ -978,7 +998,7 @@ fn with_frame(
     this: u32,
     change: impl FnOnce(&mut super::scene::Frame),
 ) -> Result<u32, Stop> {
-    match ctx.state.scene.frame_mut(this) {
+    match ctx.state.scene.frame_mut(ctx.state.identity(this)) {
         Some(frame) => {
             change(frame);
             Ok(S_OK)
@@ -1009,6 +1029,7 @@ fn reference(ctx: &Ctx<'_>, method: &str, frame: u32, at: u32) -> Result<Matrix,
             caller: 0,
         });
     }
+    let at = ctx.state.identity(at);
     ctx.state.scene.world(at).ok_or_else(|| Stop::NotWritten {
         what: format!("IDirect3DRMFrame3::{method}: {at:#x} is not a frame"),
         caller: 0,
@@ -1041,7 +1062,7 @@ fn into_parent(ctx: &Ctx<'_>, method: &str, frame: u32) -> Result<Matrix, Stop> 
 fn set_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetPosition(reference, x, y, z): the frame's origin lands at this point
     // in the reference frame's space, and its orientation is left alone.
-    if ctx.state.scene.frame(this).is_none() {
+    if ctx.state.scene.frame(ctx.state.identity(this)).is_none() {
         return Ok(D3DRMERR_BADOBJECT);
     }
     let from = reference(ctx, "SetPosition", this, args[0])?;
@@ -1051,27 +1072,34 @@ fn set_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 }
 
 fn frame_or_bad(ctx: &Ctx<'_>, at: u32) -> bool {
-    ctx.state.scene.frame(at).is_some()
+    ctx.state.scene.frame(ctx.state.identity(at)).is_some()
 }
 
 fn add_child(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // A frame hangs from one parent at a time: adding it here takes it off
     // wherever it was.
-    if !frame_or_bad(ctx, this) || !frame_or_bad(ctx, args[0]) {
+    let (parent, child) = (ctx.state.identity(this), ctx.state.identity(args[0]));
+    if !frame_or_bad(ctx, parent) || !frame_or_bad(ctx, child) {
         return Ok(D3DRMERR_BADOBJECT);
     }
-    ctx.state.scene.attach(this, args[0]);
+    // The parent holds a reference to a child it did not already have.
+    if ctx.state.scene.frame(child).map(|f| f.parent) != Some(parent) {
+        ctx.state.com_ref(child, 1);
+    }
+    ctx.state.scene.attach(parent, child);
     Ok(S_OK)
 }
 
 fn delete_child(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if !frame_or_bad(ctx, args[0]) {
+    let (parent, child) = (ctx.state.identity(this), ctx.state.identity(args[0]));
+    if !frame_or_bad(ctx, child) {
         return Ok(D3DRMERR_BADOBJECT);
     }
-    if ctx.state.scene.frame(args[0]).map(|f| f.parent) != Some(this) {
+    if ctx.state.scene.frame(child).map(|f| f.parent) != Some(parent) {
         return Ok(D3DRMERR_BADVALUE);
     }
-    ctx.state.scene.attach(0, args[0]);
+    ctx.state.scene.attach(0, child);
+    ctx.state.com_ref(child, -1);
     Ok(S_OK)
 }
 
@@ -1088,7 +1116,12 @@ fn give_frame(ctx: &mut Ctx<'_>, out: u32, frame: u32) -> Result<u32, Stop> {
 }
 
 fn get_parent(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(parent) = ctx.state.scene.frame(this).map(|f| f.parent) else {
+    let Some(parent) = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map(|f| f.parent)
+    else {
         return Ok(D3DRMERR_BADOBJECT);
     };
     give_frame(ctx, args[0], parent)
@@ -1249,13 +1282,17 @@ fn add_visual(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(D3DRMERR_BADOBJECT);
     }
     let visual = args[0];
-    let added = ctx.state.scene.frame_mut(this).map(|f| {
-        let new = !f.visuals.contains(&visual);
-        if new {
-            f.visuals.push(visual);
-        }
-        new
-    });
+    let added = ctx
+        .state
+        .scene
+        .frame_mut(ctx.state.identity(this))
+        .map(|f| {
+            let new = !f.visuals.contains(&visual);
+            if new {
+                f.visuals.push(visual);
+            }
+            new
+        });
     match added {
         None => Ok(D3DRMERR_BADOBJECT),
         Some(new) => {
@@ -1269,11 +1306,15 @@ fn add_visual(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn delete_visual(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let visual = args[0];
-    let removed = ctx.state.scene.frame_mut(this).map(|f| {
-        let before = f.visuals.len();
-        f.visuals.retain(|v| *v != visual);
-        f.visuals.len() != before
-    });
+    let removed = ctx
+        .state
+        .scene
+        .frame_mut(ctx.state.identity(this))
+        .map(|f| {
+            let before = f.visuals.len();
+            f.visuals.retain(|v| *v != visual);
+            f.visuals.len() != before
+        });
     match removed {
         None => Ok(D3DRMERR_BADOBJECT),
         Some(false) => Ok(D3DRMERR_BADVALUE),
@@ -1289,11 +1330,17 @@ fn add_light(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     if light == 0 {
         return Ok(D3DRMERR_BADOBJECT);
     }
-    with_frame(ctx, this, |f| {
+    let mut added = false;
+    let answer = with_frame(ctx, this, |f| {
         if !f.lights.contains(&light) {
             f.lights.push(light);
+            added = true;
         }
-    })
+    })?;
+    if added {
+        ctx.state.com_ref(light, 1);
+    }
+    Ok(answer)
 }
 
 fn delete_light(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1305,23 +1352,12 @@ fn set_scene_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
     with_frame(ctx, this, |f| f.background = args[0])
 }
 
-/// A colour component a title gives as a fraction, as a byte.
-fn component(c: f32) -> u32 {
-    if c <= 0.0 {
-        0
-    } else if c >= 1.0 {
-        255
-    } else {
-        (c * 255.0).floor() as u32
-    }
-}
-
 /// An opaque colour from three fractions.
 fn rgb(red: u32, green: u32, blue: u32) -> u32 {
     0xff00_0000
-        | (component(value(red)) << 16)
-        | (component(value(green)) << 8)
-        | component(value(blue))
+        | (super::component(value(red)) << 16)
+        | (super::component(value(green)) << 8)
+        | super::component(value(blue))
 }
 
 fn set_scene_background_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1330,7 +1366,11 @@ fn set_scene_background_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Resul
 }
 
 fn get_scene_background(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.background))
+    Ok(ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map_or(0, |f| f.background))
 }
 
 fn get_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1358,7 +1398,11 @@ fn set_orientation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         return Ok(D3DRMERR_BADVALUE);
     };
     let up = cross(dir, right);
-    let parent = ctx.state.scene.frame(this).map_or(0, |f| f.parent);
+    let parent = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map_or(0, |f| f.parent);
     let into = if parent == 0 {
         super::scene::IDENTITY
     } else {
@@ -1396,7 +1440,11 @@ fn set_zbuffer_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 }
 
 fn get_zbuffer_mode(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.zbuffer_mode))
+    Ok(ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map_or(0, |f| f.zbuffer_mode))
 }
 
 fn set_material_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1413,7 +1461,11 @@ fn set_color_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
 }
 
 fn get_color(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.scene.frame(this).map_or(0, |f| f.color))
+    Ok(ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map_or(0, |f| f.color))
 }
 
 /// A light the guest holds, to be changed.
@@ -1488,7 +1540,7 @@ fn light_get_type(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, St
     Ok(ctx.state.scene.lights.get(&identity).map_or(0, |l| l.kind))
 }
 
-/// A device setting a title sets and may read back: dither, shades, quality,
+/// A device value a title sets and may read back: dither, shades, quality,
 /// texture quality, render mode.
 ///
 /// What each does to drawing is the rasteriser's to honour. Retained mode's
@@ -1496,14 +1548,14 @@ fn light_get_type(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, St
 /// a wall rather than a number made up.
 fn keep(ctx: &mut Ctx<'_>, this: u32, setting: &'static str, value: u32) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
-    ctx.state.settings.insert((identity, setting), value);
+    ctx.state.set_values.insert((identity, setting), value);
     Ok(S_OK)
 }
 
 fn kept(ctx: &mut Ctx<'_>, this: u32, method: &str, setting: &'static str) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     ctx.state
-        .settings
+        .set_values
         .get(&(identity, setting))
         .copied()
         .ok_or_else(|| Stop::NotWritten {
@@ -1623,7 +1675,7 @@ fn get_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn get_class_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // What retained mode calls each of its kinds of object.
-    let class = match ctx.state.com(this).map_or("", |o| o.interface) {
+    let class = match ctx.state.interface_of(this).unwrap_or("") {
         "IDirect3DRMFrame3" => "Frame",
         "IDirect3DRMDevice3" => "Device",
         "IDirect3DRMViewport2" => "Viewport",
@@ -1641,7 +1693,12 @@ fn get_visuals(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     // GetVisuals(count, visuals): how many visuals hang on the frame, and,
     // given room for them all, the visuals themselves, each with a reference.
     let (count_at, out) = (args[0], args[1]);
-    let Some(visuals) = ctx.state.scene.frame(this).map(|f| f.visuals.clone()) else {
+    let Some(visuals) = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map(|f| f.visuals.clone())
+    else {
         return Ok(D3DRMERR_BADOBJECT);
     };
     if count_at == 0 {
@@ -1671,7 +1728,12 @@ fn get_children(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     if args[0] == 0 {
         return Ok(D3DRMERR_BADVALUE);
     }
-    let Some(children) = ctx.state.scene.frame(this).map(|f| f.children.clone()) else {
+    let Some(children) = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map(|f| f.children.clone())
+    else {
         return Ok(D3DRMERR_BADOBJECT);
     };
     let mut faces = Vec::with_capacity(children.len());
@@ -1793,7 +1855,7 @@ fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> R
 }
 
 fn viewport_set_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if args[0] == 0 || ctx.state.scene.frame(args[0]).is_none() {
+    if args[0] == 0 || !frame_or_bad(ctx, args[0]) {
         return Ok(D3DRMERR_BADOBJECT);
     }
     match ctx.state.com_mut(this).map(|o| &mut o.state) {
@@ -1807,28 +1869,34 @@ fn viewport_set_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32
 
 /// A viewport's answer that is a float, handed back on the floating-point
 /// stack where the caller reads it.
-fn float_answer(
+fn answer_float(
     ctx: &mut Ctx<'_>,
     this: u32,
     pick: fn(&super::scene::View) -> f32,
 ) -> Result<u32, Stop> {
+    // A caller reading a float pops the floating-point stack whatever the
+    // call did, so there is no refusal to give: a viewport this machine did
+    // not make is a wall.
     let Some(view) = view(ctx, this) else {
-        return Ok(0);
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DRMViewport2: {this:#x} has no view to read a float from"),
+            caller: 0,
+        });
     };
     ctx.float_answer = Some(pick(&view));
     Ok(0)
 }
 
 fn viewport_get_front(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    float_answer(ctx, this, |v| v.front)
+    answer_float(ctx, this, |v| v.front)
 }
 
 fn viewport_get_back(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    float_answer(ctx, this, |v| v.back)
+    answer_float(ctx, this, |v| v.back)
 }
 
 fn viewport_get_field(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    float_answer(ctx, this, |v| (v.plane[1] - v.plane[0]) / 2.0)
+    answer_float(ctx, this, |v| (v.plane[1] - v.plane[0]) / 2.0)
 }
 
 fn viewport_get_plane(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1845,19 +1913,19 @@ fn viewport_get_projection(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Resul
     Ok(view(ctx, this).map_or(0, |v| v.projection))
 }
 
-fn viewport_field(ctx: &Ctx<'_>, this: u32) -> Option<ComState> {
+fn viewport_state(ctx: &Ctx<'_>, this: u32) -> Option<ComState> {
     ctx.state.com(this).map(|o| o.state.clone())
 }
 
 fn viewport_get_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(ComState::Viewport { camera, .. }) = viewport_field(ctx, this) else {
+    let Some(ComState::Viewport { camera, .. }) = viewport_state(ctx, this) else {
         return Ok(D3DRMERR_BADOBJECT);
     };
     give_frame(ctx, args[0], camera)
 }
 
 fn viewport_get_device(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(ComState::Viewport { device, .. }) = viewport_field(ctx, this) else {
+    let Some(ComState::Viewport { device, .. }) = viewport_state(ctx, this) else {
         return Ok(D3DRMERR_BADOBJECT);
     };
     if args[0] == 0 {
@@ -1869,7 +1937,7 @@ fn viewport_get_device(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32
 }
 
 fn viewport_rect(ctx: &Ctx<'_>, this: u32) -> (u32, u32, u32, u32) {
-    match viewport_field(ctx, this) {
+    match viewport_state(ctx, this) {
         Some(ComState::Viewport {
             x,
             y,

@@ -202,8 +202,9 @@ impl Machine {
 
     /// Take the machine one instruction further, or say why it stopped.
     ///
-    /// Returns `None` while there is more to do. The debugger and the run loop
-    /// share this, so what a person steps through is what a route replays.
+    /// Returns `None` while there is more to do. The debugger steps with this,
+    /// and the run loop comes back to it for every call across the boundary,
+    /// so what a person steps through is what a route replays.
     pub fn tick(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
         // A person closing the window ends the run there and then, with the
         // log written up to the instruction it stopped on.
@@ -282,6 +283,9 @@ impl Machine {
             }
             if let Some(outcome) = self.run_guest(host, log, budget) {
                 break outcome;
+            }
+            if self.clock.cursor() >= budget {
+                break Outcome::BudgetExhausted;
             }
             if let Some(outcome) = self.tick(host, log) {
                 break outcome;

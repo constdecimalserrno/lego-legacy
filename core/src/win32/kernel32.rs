@@ -771,6 +771,12 @@ fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .map_err(Stop::Fault)?;
         ctx.state.heap.free(address);
     } else if kind & MEM_DECOMMIT != 0 {
+        // A size of zero decommits the whole region the address starts.
+        let size = if size == 0 {
+            ctx.state.heap.size_of(address).unwrap_or(0)
+        } else {
+            size
+        };
         let start = address & !0xfff;
         let end = (address.wrapping_add(size)).next_multiple_of(0x1000);
         ctx.mem

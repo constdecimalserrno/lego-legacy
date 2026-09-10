@@ -441,7 +441,10 @@ fn the_titles_own_archives_are_on_the_declared_machines_disc() {
     // It also looks for files the pressing does not ship: eight more archives,
     // and, while it loads its objects, textures in an object's own folder
     // before it falls back to the shared ones. A miss is only a gap in the
-    // tree when the file is in the pressing after all.
+    // tree when the file is in the pressing after all. The tree already holds
+    // everything in the cabinet and on the disc, which is where a miss was
+    // looked for, so the one place a shipped file can still hide is inside
+    // the title's own archives.
     let shipped = wad_names();
     let gaps: Vec<&str> = ran
         .log

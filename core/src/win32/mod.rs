@@ -130,9 +130,9 @@ pub struct State {
     pub dialog: Option<user32::Dialog>,
     /// What a title named its objects, by the object.
     pub names: BTreeMap<u32, String>,
-    /// Settings a title set on an object and may read back, by the object and
-    /// the setting's name.
-    pub settings: BTreeMap<(u32, &'static str), u32>,
+    /// Values a title set on an object and may read back, by the object and
+    /// what the value is.
+    pub set_values: BTreeMap<(u32, &'static str), u32>,
     /// What immediate mode keeps about its devices and materials.
     pub immediate: d3d::Immediate,
     /// The scene retained mode is building.
@@ -192,7 +192,7 @@ impl State {
             mouse_down: false,
             dialog: None,
             names: BTreeMap::new(),
-            settings: BTreeMap::new(),
+            set_values: BTreeMap::new(),
             immediate: d3d::Immediate::default(),
             scene: scene::Scene::default(),
             com: BTreeMap::new(),
@@ -321,13 +321,11 @@ impl State {
             ctx.state.com_ref(at, 1);
             return Ok(at);
         }
-        let state = ctx
-            .state
-            .com(of)
-            .map(|o| o.state.clone())
-            .unwrap_or_default();
-        let at = Self::make_com(ctx, interface, state)?;
-        if let Some(object) = ctx.state.com_mut(at) {
+        // The face keeps nothing of its own: what the object keeps is found
+        // through its identity, so a change made through one face is seen
+        // through every other.
+        let at = Self::make_com(ctx, interface, ComState::None)?;
+        if let Some(object) = ctx.state.com.get_mut(&at) {
             object.identity = identity;
         }
         ctx.state.faces.remove(&(at, interface.name));
@@ -341,14 +339,23 @@ impl State {
         self.com.get(&at).map_or(at, |o| o.identity)
     }
 
-    /// What interface a guest pointer is, if the machine made it.
+    /// The object a guest pointer is a face of, if the machine made it: its
+    /// state, what the guest hung on it, and its references, whichever face
+    /// the pointer is.
     #[must_use]
     pub fn com(&self, at: u32) -> Option<&ComObject> {
-        self.com.get(&at)
+        self.com.get(&self.identity(at))
     }
 
     pub fn com_mut(&mut self, at: u32) -> Option<&mut ComObject> {
-        self.com.get_mut(&at)
+        let identity = self.identity(at);
+        self.com.get_mut(&identity)
+    }
+
+    /// Which interface a guest pointer is: the face itself, not the object.
+    #[must_use]
+    pub fn interface_of(&self, at: u32) -> Option<&'static str> {
+        self.com.get(&at).map(|o| o.interface)
     }
 
     /// Count a reference in or out, and answer with what is left.
@@ -513,7 +520,12 @@ pub enum ComState {
     UserVisual { callback: u32, argument: u32 },
     /// Retained mode's device: its surface, and how many buffers the title
     /// said it flips between.
-    RetainedDevice { surface: u32, buffers: u32 },
+    RetainedDevice {
+        surface: u32,
+        buffers: u32,
+        /// The immediate-mode device underneath, once one has been asked for.
+        immediate: u32,
+    },
     /// A viewport: which device, where on it, and what it clears to.
     Viewport {
         device: u32,
@@ -656,6 +668,54 @@ impl Ctx<'_> {
         self.mem.write(addr + bytes.len() as u32, &[0])?;
         Ok(addr)
     }
+}
+
+/// A colour component given as a fraction, as a byte: nothing below zero,
+/// everything from one up full, and truncated between, as Direct3D does.
+#[must_use]
+pub fn component(c: f32) -> u32 {
+    if c <= 0.0 {
+        0
+    } else if c >= 1.0 {
+        255
+    } else {
+        (c * 255.0).floor() as u32
+    }
+}
+
+/// A `D3DCOLOR` as a screen of this depth stores it.
+#[must_use]
+pub fn pixel(colour: u32, depth: u32) -> Vec<u8> {
+    let [b, g, r, _] = colour.to_le_bytes();
+    match depth {
+        16 => {
+            let packed = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
+            packed.to_le_bytes().to_vec()
+        }
+        _ => colour.to_le_bytes()[..depth.div_ceil(8) as usize].to_vec(),
+    }
+}
+
+/// Fill a rectangle of a surface, `(pixels, pitch, depth)`, with a colour.
+///
+/// # Errors
+/// When the rectangle reaches outside the arena.
+pub fn fill(
+    ctx: &mut Ctx<'_>,
+    (pixels, pitch, depth): (u32, u32, u32),
+    (x0, y0, x1, y1): (u32, u32, u32, u32),
+    colour: u32,
+) -> Result<(), Stop> {
+    let bytes = depth.div_ceil(8);
+    let one = pixel(colour, depth);
+    let row: Vec<u8> = (x0..x1.max(x0)).flat_map(|_| one.iter().copied()).collect();
+    for y in y0..y1 {
+        ctx.mem
+            .write(pixels + y * pitch + x0 * bytes, &row)
+            .map_err(Stop::Fault)?;
+    }
+    ctx.state.cleared += 1;
+    Ok(())
 }
 
 /// Every entry point that is written rather than only named.

@@ -314,13 +314,11 @@ fn end_scene(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// What a render state is before a title sets it, from DirectX 6's own
-/// documentation of each state's default.
-fn render_default(state: u32) -> Option<u32> {
+/// documentation of each state.
+fn render_state_at_start(state: u32) -> Option<u32> {
     Some(match state {
         // D3DRENDERSTATE_TEXTUREPERSPECTIVE: on, in DirectX 6.
         4 => 1,
-        // D3DRENDERSTATE_ZENABLE: off, with no depth buffer attached.
-        7 => 0,
         // D3DRENDERSTATE_FILLMODE: solid.
         8 => 3,
         // D3DRENDERSTATE_SHADEMODE: Gouraud.
@@ -356,13 +354,13 @@ fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         .render
         .get(&state)
         .copied()
-        .or_else(|| render_default(state));
+        .or_else(|| render_state_at_start(state));
     let Some(value) = value else {
+        ctx.log.line(&format!(
+            "d3d render state {state} read before it was set, and what it starts as is not declared"
+        ));
         return Err(Stop::NotWritten {
-            what: format!(
-                "IDirect3DDevice3::GetRenderState: state {state} read before it was set, \
-                 and its default is not declared"
-            ),
+            what: String::new(),
             caller: 0,
         });
     };
@@ -379,16 +377,20 @@ fn set_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 
 fn get_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let state = args[0];
-    // D3DLIGHTSTATE_MATERIAL, AMBIENT and the fog states start at zero;
-    // D3DLIGHTSTATE_COLORMODEL starts at RGB.
-    let default = match state {
+    // D3DLIGHTSTATE_MATERIAL, AMBIENT and FOGMODE start at nothing and
+    // COLORMODEL at RGB. What the fog's floating-point states start at has
+    // not been measured.
+    let at_start = match state {
         3 => Some(2),
-        1 | 2 | 4..=7 => Some(0),
+        1 | 2 | 4 => Some(0),
         _ => None,
     };
-    let Some(value) = device(ctx, this).light.get(&state).copied().or(default) else {
+    let Some(value) = device(ctx, this).light.get(&state).copied().or(at_start) else {
+        ctx.log.line(&format!(
+            "d3d light state {state} read before it was set, and what it starts as is not declared"
+        ));
         return Err(Stop::NotWritten {
-            what: format!("IDirect3DDevice3::GetLightState: state {state}"),
+            what: String::new(),
             caller: 0,
         });
     };
@@ -443,11 +445,21 @@ fn get_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 }
 
 fn set_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    device(ctx, this).textures.insert(args[0], args[1]);
+    // SetTexture(stage, texture): the device holds a reference to what it
+    // draws with, and lets go of what it drew with before.
+    let previous = device(ctx, this).textures.insert(args[0], args[1]);
+    if args[1] != 0 {
+        ctx.state.com_ref(args[1], 1);
+    }
+    if let Some(previous) = previous.filter(|p| *p != 0) {
+        ctx.state.com_ref(previous, -1);
+    }
     Ok(S_OK)
 }
 
-fn stage_default(state: u32, stage: u32) -> Option<u32> {
+/// What a texture stage's state is before a title sets it, from DirectX 6's
+/// documentation.
+fn stage_state_at_start(state: u32, stage: u32) -> Option<u32> {
     Some(match (state, stage) {
         // D3DTSS_COLOROP: modulate on the first stage, off after it.
         (1, 0) => 4,
@@ -470,10 +482,14 @@ fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result
         .stages
         .get(&(stage, state))
         .copied()
-        .or_else(|| stage_default(state, stage));
+        .or_else(|| stage_state_at_start(state, stage));
     let Some(value) = value else {
+        ctx.log.line(&format!(
+            "d3d texture stage {stage} state {state} read before it was set, \
+             and what it starts as is not declared"
+        ));
         return Err(Stop::NotWritten {
-            what: format!("IDirect3DDevice3::GetTextureStageState: stage {stage} state {state}"),
+            what: String::new(),
             caller: 0,
         });
     };
@@ -593,16 +609,6 @@ fn store_viewport(ctx: &mut Ctx<'_>, this: u32, at: u32) -> Result<u32, Stop> {
         .to_vec();
     let field = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     let (x, y, w, h) = (field(4), field(8), field(12), field(16));
-    if let Some(ComState::Viewport {
-        x: vx,
-        y: vy,
-        width: vw,
-        height: vh,
-        ..
-    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
-    {
-        (*vx, *vy, *vw, *vh) = (x, y, w, h);
-    }
     let identity = ctx.state.identity(this);
     ctx.state.immediate.viewports.insert(identity, bytes);
     ctx.log.line(&format!("d3d viewport {w}x{h} at {x},{y}"));
@@ -676,16 +682,10 @@ fn material_colour(ctx: &Ctx<'_>, handle: u32) -> u32 {
             .get(o..o + 4)
             .map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
-    let byte = |c: f32| {
-        if c <= 0.0 {
-            0
-        } else if c >= 1.0 {
-            255
-        } else {
-            (c * 255.0).floor() as u32
-        }
-    };
-    0xff00_0000 | (byte(channel(4)) << 16) | (byte(channel(8)) << 8) | byte(channel(12))
+    0xff00_0000
+        | (super::component(channel(4)) << 16)
+        | (super::component(channel(8)) << 8)
+        | super::component(channel(12))
 }
 
 /// Fill rectangles of a viewport's device surface with a colour.
@@ -702,7 +702,8 @@ fn fill_rects(
     };
     let surface = match ctx.state.com(device).map(|o| &o.state) {
         Some(ComState::Device3D { surface }) => *surface,
-        _ => return Ok(DDERR_INVALIDPARAMS),
+        // D3DERR_VIEWPORTHASNODEVICE: never added to a device.
+        _ => return Ok(0x8876_0306),
     };
     let Some(ComState::Surface {
         pixels,
@@ -716,14 +717,14 @@ fn fill_rects(
         return Ok(DDERR_INVALIDPARAMS);
     };
     let bytes = depth.div_ceil(8);
-    let colour = super::d3drm::pixel(colour, depth);
+    let one = super::pixel(colour, depth);
     for i in 0..count {
         // D3DRECT: x1, y1, x2, y2.
         let at = rects + i * 16;
         let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
         let (x1, y1) = (read(0)?.min(width), read(4)?.min(height));
         let (x2, y2) = (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1));
-        let row: Vec<u8> = (x1..x2).flat_map(|_| colour.iter().copied()).collect();
+        let row: Vec<u8> = (x1..x2).flat_map(|_| one.iter().copied()).collect();
         for y in y1..y2 {
             ctx.mem
                 .write(pixels + y * pitch + x1 * bytes, &row)

@@ -63,9 +63,11 @@ impl Default for Frame {
             sort_mode: 0,
             zbuffer_mode: 0,
             material_mode: 0,
-            // D3DRMFRAME's documented default colour: opaque white.
+            // A frame's own colour starts opaque white.
             color: 0xffff_ffff,
-            background: 0,
+            // A scene's background starts opaque black, as Wine's tests hold
+            // native retained mode to.
+            background: 0xff00_0000,
             fog: Fog::default(),
             texture: 0,
             material: 0,
@@ -205,7 +207,8 @@ pub fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
 /// A rotation by `theta` radians about an axis, as retained mode builds one.
 #[must_use]
 pub fn rotation(axis: [f32; 3], theta: f32) -> Matrix {
-    let [x, y, z] = normalise(axis).unwrap_or([0.0; 3]);
+    // An axis with no length is the x axis, as D3DRMVectorNormalize makes it.
+    let [x, y, z] = normalise(axis).unwrap_or([1.0, 0.0, 0.0]);
     // The engine's own trigonometry, never the host's: a run gives the same
     // answer on every machine.
     let (sin, cos) = (

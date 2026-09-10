@@ -309,9 +309,23 @@ const IUNKNOWN: &str = "00000000-0000-0000-c000-000000000046";
 const RM_OBJECT: &str = "eb16cb00-d271-11ce-ac48-0000c03825a1";
 const RM_VISUAL: &str = "eb16cb04-d271-11ce-ac48-0000c03825a1";
 
-/// Whether an object answers to an identifier as itself.
+/// Whether a face answers to an identifier as itself.
 fn is_itself(interface: &str, asked: &str) -> bool {
-    let retained = interface.starts_with("IDirect3DRM") && interface != "IDirect3DRM3";
+    // Retained mode's objects all derive from IDirect3DRMObject; the retained
+    // mode object itself and a frame array derive from IUnknown alone.
+    let retained = matches!(
+        interface,
+        "IDirect3DRMFrame"
+            | "IDirect3DRMFrame3"
+            | "IDirect3DRMDevice3"
+            | "IDirect3DRMViewport2"
+            | "IDirect3DRMMesh"
+            | "IDirect3DRMMeshBuilder3"
+            | "IDirect3DRMTexture3"
+            | "IDirect3DRMLight"
+            | "IDirect3DRMMaterial2"
+            | "IDirect3DRMUserVisual"
+    );
     let visual = matches!(
         interface,
         "IDirect3DRMFrame"
@@ -321,10 +335,8 @@ fn is_itself(interface: &str, asked: &str) -> bool {
             | "IDirect3DRMTexture3"
             | "IDirect3DRMUserVisual"
     );
-    asked == IUNKNOWN
-        || OWN
-            .iter()
-            .any(|(name, iid)| *name == interface && *iid == asked)
+    OWN.iter()
+        .any(|(name, iid)| *name == interface && *iid == asked)
         || (retained && asked == RM_OBJECT)
         || (visual && asked == RM_VISUAL)
 }
@@ -337,12 +349,22 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
     let asked = read_iid(ctx, args[0])
         .map(|iid| iid_text(&iid))
         .unwrap_or_default();
-    let Some(object) = ctx.state.com(this) else {
+    let Some(have) = ctx.state.interface_of(this) else {
         return Ok(E_NOINTERFACE);
     };
-    let have = object.interface;
 
-    // Asked for what it already is: the same object, one more reference.
+    // IUnknown is the object's identity, the same pointer whichever face is
+    // asked: how COM says two pointers are one object.
+    if asked == IUNKNOWN {
+        let identity = ctx.state.identity(this);
+        ctx.state.com_ref(identity, 1);
+        if out != 0 {
+            ctx.mem.write_u32(out, identity).map_err(Stop::Fault)?;
+        }
+        return Ok(S_OK);
+    }
+
+    // Asked for what it already is: the same face, one more reference.
     if is_itself(have, &asked) {
         ctx.state.com_ref(this, 1);
         if out != 0 {

@@ -76,7 +76,10 @@ impl Heap {
             self.live.insert(addr, whole);
             return addr;
         }
-        // Whatever lies between here and the next boundary is never handed out.
+        // ponytail: whatever lies between here and the next boundary is never
+        // handed out, a few kilobytes per region a title reserves. A title
+        // that reserves thousands of small regions would want the gap on the
+        // free list.
         let Some(addr) = self.next.checked_next_multiple_of(align) else {
             return 0;
         };
