@@ -396,7 +396,7 @@ pub static DIRECT_DRAW_CLIPPER: Interface = Interface {
         Method {
             name: "SetClipList",
             args: 2,
-            run: ok,
+            run: set_clip_list,
         },
         Method {
             name: "SetHWnd",
@@ -1229,8 +1229,10 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     };
     let to = rect(ctx, args[0], width, height)?;
     // A blit reaching past its destination's edge is clipped when a clipper
-    // is attached, and refused when none is, as DirectDraw does.
-    if !ctx.state.clipped.contains(&pixels) && !within(to, width, height) {
+    // is attached, and refused when none is, as DirectDraw does; one the
+    // wrong way round is refused either way.
+    let ordered = to.0 <= to.2 && to.1 <= to.3;
+    if !ordered || (!ctx.state.clipped.contains(&pixels) && !within(to, width, height)) {
         return Ok(DDERR_INVALIDRECT);
     }
     // DDBLT_COLORFILL: the fill value is the effects block's own first word.
@@ -1290,8 +1292,9 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// `DDERR_INVALIDRECT`.
+/// `DDERR_INVALIDRECT` and `DDERR_BLTFASTCANTCLIP`.
 const DDERR_INVALIDRECT: u32 = 0x8876_0096;
+const DDERR_BLTFASTCANTCLIP: u32 = 0x8876_023e;
 
 /// Whether a rectangle is the right way round and inside a surface.
 fn within((left, top, right, bottom): (i64, i64, i64, i64), width: u32, height: u32) -> bool {
@@ -1305,18 +1308,55 @@ fn within((left, top, right, bottom): (i64, i64, i64, i64), width: u32, height: 
 
 fn set_clipper(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetClipper(clipper): a clipper attached clips what is blitted to the
-    // surface; none, and a blit past its edge is refused.
-    // ponytail: a clipper clips to its surface, not to its clip list's own
-    // rectangles; a title that clips to less than the whole surface needs
-    // the list kept and read.
-    let Some((pixels, ..)) = surface_of(ctx, this) else {
+    // surface to its clip list; none, and a blit past its edge is refused.
+    // What is written is a clip list of the whole surface, which clips to the
+    // surface's own edges; anything less stops here.
+    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     if args[0] == 0 {
         ctx.state.clipped.remove(&pixels);
-    } else {
-        ctx.state.clipped.insert(pixels);
+        return Ok(S_OK);
     }
+    let whole = (0, 0, width as i32, height as i32);
+    match ctx.state.clip_lists.get(&ctx.state.identity(args[0])) {
+        Some(list) if *list == whole => {
+            ctx.state.clipped.insert(pixels);
+            Ok(S_OK)
+        }
+        list => Err(Stop::NotWritten {
+            what: format!(
+                "IDirectDrawSurface::SetClipper: a clipper clipping to {list:?} on a {width}x{height} surface"
+            ),
+            caller: 0,
+        }),
+    }
+}
+
+fn set_clip_list(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetClipList(region, flags): an RGNDATA, a header of four words and a
+    // bounding rectangle, then its rectangles. One rectangle is a clip list
+    // this machine keeps; more stop here.
+    let identity = ctx.state.identity(this);
+    if args[0] == 0 {
+        ctx.state.clip_lists.remove(&identity);
+        return Ok(S_OK);
+    }
+    let count = ctx.mem.read_u32(args[0] + 8).map_err(Stop::Fault)?;
+    if count != 1 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawClipper::SetClipList: {count} rectangles"),
+            caller: 0,
+        });
+    }
+    let edge = |offset: u32| -> Result<i32, Stop> {
+        Ok(ctx
+            .mem
+            .read_u32(args[0] + 32 + offset)
+            .map_err(Stop::Fault)? as i32)
+    };
+    let list = (edge(0)?, edge(4)?, edge(8)?, edge(12)?);
+    ctx.state.clip_lists.insert(identity, list);
     Ok(S_OK)
 }
 
@@ -1347,13 +1387,18 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
+    // BltFast neither clips nor lets a clipper clip for it: a destination
+    // with a clipper, or a blit that does not fit, is refused.
+    if ctx.state.clipped.contains(&pixels) {
+        return Ok(DDERR_BLTFASTCANTCLIP);
+    }
     let from = rect(ctx, args[3], source_w, source_h)?;
-    if !within(from, source_w, source_h) {
+    let (x, y) = (i64::from(args[0] as i32), i64::from(args[1] as i32));
+    let to = (x, y, x + from.2 - from.0, y + from.3 - from.1);
+    if !within(from, source_w, source_h) || !within(to, width, height) {
         return Ok(DDERR_INVALIDRECT);
     }
-    let (x, y) = (i64::from(args[0]), i64::from(args[1]));
     let key = source_key(ctx, source, flags & DDBLTFAST_SRCCOLORKEY != 0);
-    // What lands off the destination's edge is clipped away.
     transfer(
         ctx.mem,
         Pixels {
@@ -1362,7 +1407,7 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         },
         from,
         Pixels { at: pixels, pitch },
-        (x, y, x + from.2 - from.0, y + from.3 - from.1),
+        to,
         (width, height),
         depth,
         key,

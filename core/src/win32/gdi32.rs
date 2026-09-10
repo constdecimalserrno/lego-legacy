@@ -107,7 +107,8 @@ fn region_data(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // RGNDATA: a header saying how many rectangles follow, and then one. The
     // clipper this feeds covers the whole screen, because the declared machine
     // has one window and nothing overlaps it.
-    let (at, room) = (args[1], args[0]);
+    // GetRegionData(region, room, data).
+    let (room, at) = (args[1], args[2]);
     let (width, height, _) = ctx.state.display_mode;
     let needed = 32 + 16;
     if at == 0 || room < needed {

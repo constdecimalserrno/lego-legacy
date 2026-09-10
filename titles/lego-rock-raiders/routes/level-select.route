@@ -13,3 +13,8 @@
 flip 4610 move 320 222
 flip 4620 down
 flip 4622 up
+#
+# Then the pointer goes to the bottom edge and the level select scrolls down:
+# the crosses on the caverns passing its top edge are drawn as far as they are
+# still on the screen.
+flip 4760 move 320 478

@@ -722,6 +722,10 @@ const ROCKFALL: u64 = 4648;
 /// A flip well after the level select came in, with nothing clicked since.
 const WAITING_IN_THE_LEVEL_SELECT: u64 = 4750;
 
+/// A flip with the level select scrolled part of the way down, the crosses on
+/// two caverns passing its top edge.
+const SCROLLED_LEVEL_SELECT: u64 = 4785;
+
 /// Enough instructions for the level select and a couple of hundred flips of
 /// it: the rockfall is fifty flips after the menu, and the level select waits
 /// at about a quarter of a million instructions a flip, long enough for the
@@ -765,7 +769,13 @@ fn to_the_level_select(
     following(
         slot,
         "level-select.route",
-        &[MENU, ROCKFALL, LEVEL_SELECT, WAITING_IN_THE_LEVEL_SELECT],
+        &[
+            MENU,
+            ROCKFALL,
+            LEVEL_SELECT,
+            WAITING_IN_THE_LEVEL_SELECT,
+            SCROLLED_LEVEL_SELECT,
+        ],
         LEVEL_SELECT_BUDGET,
     )
 }
@@ -830,6 +840,30 @@ fn clicking_start_game_brings_rocks_down_in_3d_and_the_level_select_up() {
     assert!(
         busy(rockfall, big_rock) > 0.3,
         "a rock is textured, and a flat colour is not"
+    );
+}
+
+#[test]
+fn scrolling_the_level_select_draws_the_crosses_passing_its_top_edge() {
+    let Some(ran) = to_the_level_select(&LEVEL_SELECT_FIRST) else {
+        return;
+    };
+    // The crosses' yellow tape in the top forty rows: a blit reaching above
+    // the screen draws what of it is still on the screen (#27), where it once
+    // drew nothing at all.
+    let scrolled = ran
+        .host
+        .frame(SCROLLED_LEVEL_SELECT)
+        .expect("the scrolled level select is kept");
+    let tape = scrolled.pixels[..40 * scrolled.width as usize * 4]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|[b, g, r, _]| *r > 180 && *g > 150 && *b < 80)
+        .count();
+    assert!(
+        tape > 300,
+        "flip {SCROLLED_LEVEL_SELECT}: {tape} pixels of tape"
     );
 }
 
