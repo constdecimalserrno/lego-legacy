@@ -611,8 +611,8 @@ fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
             let cursor = w.nth(1)?.parse().ok()?;
             Some((flip, cursor))
         })
-        // The flip after the menu comes up loads its ambience from disc, and
-        // is not the menu waiting yet.
+        // The flip after the menu comes up loads its ambience from its file,
+        // and is not the menu waiting yet.
         .filter(|(flip, _)| (MENU + 1..=HOVERED).contains(flip))
         .collect();
     assert!(cursors.len() > 10, "the menu is presented flip after flip");
@@ -793,17 +793,26 @@ fn the_sounds_the_title_plays_are_mixed_on_the_declared_clock() {
     };
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
 
+    // Flips before and after the menu's ambience starts, and while the rocks
+    // come down.
+    const LOADING_ENDS: u64 = 4590;
+    const AMBIENCE_PLAYS: u64 = MENU + 10;
+    const CLICKED_AT: u64 = 4620;
+    const ROCKS_FALL: u64 = 4630;
+    // Silence is below this; the ambience measured about 1300.
+    const HEARD: f64 = 500.0;
+
     // The movies are long over by the end of the loading, and nothing plays.
-    let loading = loudness(4590, MENU);
+    let loading = loudness(LOADING_ENDS, MENU);
     assert!(!loading.is_empty() && loading.iter().all(|r| *r == 0.0));
     // The menu loops its own ambience, from a DirectSound buffer.
-    let menu = loudness(MENU + 10, 4620);
+    let menu = loudness(AMBIENCE_PLAYS, CLICKED_AT);
     assert!(
-        !menu.is_empty() && menu.iter().all(|r| *r > 500.0),
+        !menu.is_empty() && menu.iter().all(|r| *r > HEARD),
         "the menu's ambience is heard: {menu:?}"
     );
     // And the rocks coming down are louder than it.
-    let rockfall = loudness(4630, LEVEL_SELECT);
+    let rockfall = loudness(ROCKS_FALL, LEVEL_SELECT);
     assert!(
         mean(&rockfall) > 2.0 * mean(&menu),
         "the rockfall is heard over the menu: {} against {}",

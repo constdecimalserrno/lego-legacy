@@ -349,7 +349,7 @@ fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     if let Some(samples) = sound {
         ctx.state.mixer.play(this, samples, since * 1_000_000);
     } else if !running {
-        ctx.state.mixer.stop(this);
+        ctx.state.mixer.stop(this, now * 1_000_000);
     }
     Ok(S_OK)
 }

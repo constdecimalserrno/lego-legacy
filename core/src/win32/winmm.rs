@@ -112,13 +112,27 @@ fn mmio_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // MMIOINFO: its size at 20 and where it is at 24. A file opened by name
     // is read whole into guest memory and read from there, which is what
     // reading it through a buffer as large as the file would be.
-    const MMIO_READWRITE_MASK: u32 = 0x3;
+    // ponytail: a file opened by name is copied into the guest's heap whole,
+    // which moves where later allocations land; a title that streams files
+    // too large for its heap needs reads from the file as it goes.
+    const MMIO_ALLOCBUF: u32 = 0x0001_0000;
     let (name, info, flags) = (args[0], args[1], args[2]);
-    let procedure = if info == 0 {
-        0
+    let (procedure, custom) = if info == 0 {
+        (0, 0)
     } else {
-        ctx.mem.read_u32(info + 4).map_err(Stop::Fault)?
+        (
+            ctx.mem.read_u32(info + 4).map_err(Stop::Fault)?,
+            ctx.mem.read_u32(info + 8).map_err(Stop::Fault)?,
+        )
     };
+    // Reading is all this opens: creating, deleting, parsing a name, asking
+    // whether a file exists, or a title's own I/O procedure, is a wall.
+    if flags & !MMIO_ALLOCBUF != 0 || custom != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("WINMM.dll!mmioOpenA: flags {flags:#x}, I/O procedure {custom:#x}"),
+            caller: 0,
+        });
+    }
     if name == 0 && procedure == FOURCC_MEM {
         let len = ctx.mem.read_u32(info + 20).map_err(Stop::Fault)?;
         let base = ctx.mem.read_u32(info + 24).map_err(Stop::Fault)?;
@@ -129,9 +143,9 @@ fn mmio_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             owned: false,
         }));
     }
-    if name == 0 || procedure != 0 || flags & MMIO_READWRITE_MASK != 0 {
+    if name == 0 || procedure != 0 {
         return Err(Stop::NotWritten {
-            what: format!("WINMM.dll!mmioOpenA: flags {flags:#x}, procedure {procedure:#x}"),
+            what: format!("WINMM.dll!mmioOpenA: procedure {procedure:#x}"),
             caller: 0,
         });
     }
@@ -193,10 +207,14 @@ fn find_chunk(bytes: &[u8], mut at: u32, end: u32, find: Find) -> Option<Chunk> 
             .get(o as usize..o as usize + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
-    while at + 8 <= end {
+    while at.checked_add(8).is_some_and(|header| header <= end) {
         let (id, size) = (word(at)?, word(at + 4)?);
         let is_form = id == u32::from_le_bytes(*b"RIFF") || id == u32::from_le_bytes(*b"LIST");
-        let form = if is_form { word(at + 8)? } else { 0 };
+        let form = if is_form {
+            word(at.checked_add(8)?)?
+        } else {
+            0
+        };
         let found = match find {
             Find::Next => true,
             Find::Chunk(want) => id == want,
@@ -210,7 +228,10 @@ fn find_chunk(bytes: &[u8], mut at: u32, end: u32, find: Find) -> Option<Chunk> 
                 data: at + 8,
             });
         }
-        at = at.checked_add(8 + size + size % 2)?;
+        at = at
+            .checked_add(8)?
+            .checked_add(size)?
+            .checked_add(size % 2)?;
     }
     None
 }
@@ -243,7 +264,7 @@ fn mmio_descend(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     } else {
         let data = ctx.mem.read_u32(parent + 12).map_err(Stop::Fault)?;
         let size = ctx.mem.read_u32(parent + 4).map_err(Stop::Fault)?;
-        (data + size).min(len)
+        data.saturating_add(size).min(len)
     };
     let bytes = ctx.mem.slice(base, len as usize).map_err(Stop::Fault)?;
     let Some(found) = find_chunk(bytes, at, end, find) else {
@@ -261,7 +282,9 @@ fn mmio_descend(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .map_err(Stop::Fault)?;
     }
     // Into the chunk's data: past its form type, for a RIFF or LIST chunk.
-    let into = found.data + if found.form != 0 { 4 } else { 0 };
+    let into = found
+        .data
+        .saturating_add(if found.form != 0 { 4 } else { 0 });
     move_to(ctx, handle, into);
     Ok(0)
 }
@@ -274,7 +297,11 @@ fn mmio_ascend(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     let size = ctx.mem.read_u32(chunk_at + 4).map_err(Stop::Fault)?;
     let data = ctx.mem.read_u32(chunk_at + 12).map_err(Stop::Fault)?;
-    move_to(ctx, handle, data + size + size % 2);
+    move_to(
+        ctx,
+        handle,
+        data.saturating_add(size).saturating_add(size % 2),
+    );
     Ok(0)
 }
 

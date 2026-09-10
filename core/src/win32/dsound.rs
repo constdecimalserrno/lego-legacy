@@ -11,10 +11,11 @@
 //! playing, follow from the declared clock (ADR-0003).
 
 use super::{ComState, Convention, Ctx, Shim, State};
-use crate::com::{wall, Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{wall, Interface, Method, ADD_REF, QUERY_INTERFACE, S_OK};
+use crate::cpu::x87::maths;
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
-use crate::sound::{Format, RATE};
+use crate::sound::{frame_at, Format, RATE};
 use std::collections::BTreeMap;
 
 pub const SHIMS: &[Shim] = &[
@@ -36,17 +37,22 @@ pub const SHIMS: &[Shim] = &[
     },
 ];
 
-/// Every buffer's playing state, and the listener.
+/// Every buffer, by the object the guest holds, and the listener.
 #[derive(Default)]
 pub struct Sounds {
     buffers: BTreeMap<u32, Buffer>,
     listener: Listener,
 }
 
-/// What a buffer plays and how, beyond its bytes.
+/// A buffer: its bytes, and what it plays and how.
 #[derive(Clone, Debug)]
 struct Buffer {
-    /// The format its bytes are in; a primary buffer's is what the title set.
+    /// Where its bytes are in guest memory, and how many there are. The
+    /// primary buffer has none of its own.
+    store: u32,
+    bytes: u32,
+    /// The format its bytes are in; `None` for the primary buffer, which
+    /// plays the mix.
     format: Option<Format>,
     /// Hundredths of a decibel below full, from 0 to -10000.
     volume: i32,
@@ -59,21 +65,36 @@ struct Buffer {
     started: Option<u64>,
     /// Where in its bytes it starts, or stopped.
     offset: u32,
-    /// Where it is, when the title asked for it in 3D.
+    /// Where it is, when the title made it with 3D.
     place: Option<Place>,
 }
 
-impl Buffer {
-    fn new(format: Option<Format>, three_d: bool) -> Self {
-        Self {
-            format,
-            volume: 0,
-            pan: 0,
-            frequency: None,
-            looping: false,
-            started: None,
-            offset: 0,
-            place: three_d.then(Place::default),
+/// `DS3DMODE_*`: how a 3D buffer's position is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// In the world, and heard from where the listener is.
+    Normal,
+    /// Relative to the listener, wherever the listener is.
+    HeadRelative,
+    /// Not in 3D at all.
+    Disabled,
+}
+
+impl Mode {
+    fn from_ds(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Normal,
+            1 => Self::HeadRelative,
+            2 => Self::Disabled,
+            _ => return None,
+        })
+    }
+
+    fn to_ds(self) -> u32 {
+        match self {
+            Self::Normal => 0,
+            Self::HeadRelative => 1,
+            Self::Disabled => 2,
         }
     }
 }
@@ -84,8 +105,7 @@ struct Place {
     position: [f32; 3],
     min_distance: f32,
     max_distance: f32,
-    /// `DS3DMODE_NORMAL`, `_HEADRELATIVE` or `_DISABLE`.
-    mode: u32,
+    mode: Mode,
 }
 
 impl Default for Place {
@@ -96,7 +116,7 @@ impl Default for Place {
             position: [0.0; 3],
             min_distance: 1.0,
             max_distance: 1_000_000_000.0,
-            mode: 0,
+            mode: Mode::Normal,
         }
     }
 }
@@ -107,6 +127,7 @@ struct Listener {
     position: [f32; 3],
     front: [f32; 3],
     top: [f32; 3],
+    /// Metres to a unit, which only a Doppler shift would use.
     distance_factor: f32,
     rolloff_factor: f32,
     doppler_factor: f32,
@@ -127,6 +148,14 @@ impl Default for Listener {
     }
 }
 
+/// `DSBSTATUS_PLAYING` and `DSBSTATUS_LOOPING`.
+const DSBSTATUS_PLAYING: u32 = 0x1;
+const DSBSTATUS_LOOPING: u32 = 0x4;
+
+/// `DSERR_INVALIDPARAM` and `DSERR_INVALIDCALL`.
+const DSERR_INVALIDPARAM: u32 = 0x8007_0057;
+const DSERR_INVALIDCALL: u32 = 0x8878_0032;
+
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DirectSoundCreate(guid, out, outer).
     let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
@@ -141,7 +170,7 @@ pub static DIRECT_SOUND: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE,
+        crate::com::RELEASE,
         Method {
             name: "CreateSoundBuffer",
             args: 3,
@@ -191,7 +220,11 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE,
+        Method {
+            name: "Release",
+            args: 0,
+            run: release_buffer,
+        },
         Method {
             name: "GetCaps",
             args: 1,
@@ -206,17 +239,26 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         Method {
             name: "GetVolume",
             args: 1,
-            run: get_volume,
+            run: |ctx, this, args| {
+                let volume = buffer(ctx, this).map(|b| b.volume as u32);
+                write_word(ctx, args[0], volume)
+            },
         },
         Method {
             name: "GetPan",
             args: 1,
-            run: get_pan,
+            run: |ctx, this, args| {
+                let pan = buffer(ctx, this).map(|b| b.pan as u32);
+                write_word(ctx, args[0], pan)
+            },
         },
         Method {
             name: "GetFrequency",
             args: 1,
-            run: get_frequency,
+            run: |ctx, this, args| {
+                let rate = buffer(ctx, this).and_then(|b| b.rate());
+                write_word(ctx, args[0], rate)
+            },
         },
         Method {
             name: "GetStatus",
@@ -241,7 +283,7 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         Method {
             name: "SetCurrentPosition",
             args: 1,
-            run: set_position,
+            run: |ctx, this, args| change(ctx, this, |b| b.offset = args[0].min(b.bytes)),
         },
         Method {
             name: "SetFormat",
@@ -251,17 +293,28 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         Method {
             name: "SetVolume",
             args: 1,
-            run: set_volume,
+            run: |ctx, this, args| {
+                change(ctx, this, |b| b.volume = (args[0] as i32).clamp(-10_000, 0))
+            },
         },
         Method {
             name: "SetPan",
             args: 1,
-            run: set_pan,
+            run: |ctx, this, args| {
+                change(ctx, this, |b| {
+                    b.pan = (args[0] as i32).clamp(-10_000, 10_000)
+                })
+            },
         },
         Method {
             name: "SetFrequency",
             args: 1,
-            run: set_frequency,
+            // DSBFREQUENCY_ORIGINAL, zero, is the format's own rate.
+            run: |ctx, this, args| {
+                change(ctx, this, |b| {
+                    b.frequency = (args[0] != 0).then_some(args[0])
+                })
+            },
         },
         Method {
             name: "Stop",
@@ -287,7 +340,7 @@ pub static DIRECT_SOUND_3D_LISTENER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE,
+        crate::com::RELEASE,
         wall("GetAllParameters", 1),
         Method {
             name: "GetDistanceFactor",
@@ -382,7 +435,8 @@ pub static DIRECT_SOUND_3D_LISTENER: Interface = Interface {
             args: 4,
             run: ok,
         },
-        // Every setting here takes effect when it is made, deferred or not.
+        // Deferred or not, a listener's settings are kept when they are made;
+        // a sound takes them when it starts.
         Method {
             name: "CommitDeferredSettings",
             args: 0,
@@ -397,7 +451,7 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE,
+        crate::com::RELEASE,
         wall("GetAllParameters", 1),
         wall("GetConeAngles", 2),
         wall("GetConeOrientation", 1),
@@ -406,35 +460,32 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
             name: "GetMaxDistance",
             args: 1,
             run: |ctx, this, args| {
-                let place = place(ctx, this)?;
-                write_float(ctx, args[0], place.max_distance)
+                let value = place(ctx, this).map(|p| p.max_distance.to_bits());
+                write_word(ctx, args[0], value)
             },
         },
         Method {
             name: "GetMinDistance",
             args: 1,
             run: |ctx, this, args| {
-                let place = place(ctx, this)?;
-                write_float(ctx, args[0], place.min_distance)
+                let value = place(ctx, this).map(|p| p.min_distance.to_bits());
+                write_word(ctx, args[0], value)
             },
         },
         Method {
             name: "GetMode",
             args: 1,
             run: |ctx, this, args| {
-                let place = place(ctx, this)?;
-                ctx.mem
-                    .write_u32(args[0], place.mode)
-                    .map_err(Stop::Fault)?;
-                Ok(S_OK)
+                let value = place(ctx, this).map(|p| p.mode.to_ds());
+                write_word(ctx, args[0], value)
             },
         },
         Method {
             name: "GetPosition",
             args: 1,
-            run: |ctx, this, args| {
-                let place = place(ctx, this)?;
-                write_vector(ctx, args[0], place.position)
+            run: |ctx, this, args| match place(ctx, this) {
+                Some(p) => write_vector(ctx, args[0], p.position),
+                None => Ok(DSERR_INVALIDCALL),
             },
         },
         wall("GetVelocity", 1),
@@ -456,13 +507,10 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
             name: "SetMode",
             args: 2,
             run: |ctx, this, args| {
-                if args[0] > 2 {
-                    return Err(Stop::NotWritten {
-                        what: format!("IDirectSound3DBuffer::SetMode: mode {}", args[0]),
-                        caller: 0,
-                    });
-                }
-                with_place(ctx, this, |p| p.mode = args[0])
+                let Some(mode) = Mode::from_ds(args[0]) else {
+                    return Ok(DSERR_INVALIDPARAM);
+                };
+                with_place(ctx, this, |p| p.mode = mode)
             },
         },
         Method {
@@ -500,13 +548,26 @@ fn float(word: u32) -> f32 {
 }
 
 fn write_float(ctx: &mut Ctx<'_>, at: u32, value: f32) -> Result<u32, Stop> {
-    ctx.mem
-        .write_u32(at, value.to_bits())
-        .map_err(Stop::Fault)?;
+    write_word(ctx, at, Some(value.to_bits()))
+}
+
+/// Write an answer through a pointer the guest passed: a null pointer, or no
+/// buffer to answer about, is the call's own refusal.
+fn write_word(ctx: &mut Ctx<'_>, at: u32, value: Option<u32>) -> Result<u32, Stop> {
+    let Some(value) = value else {
+        return Ok(DSERR_INVALIDCALL);
+    };
+    if at == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    ctx.mem.write_u32(at, value).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn write_vector(ctx: &mut Ctx<'_>, at: u32, v: [f32; 3]) -> Result<u32, Stop> {
+    if at == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
     for (i, c) in v.iter().enumerate() {
         ctx.mem
             .write_u32(at + 4 * i as u32, c.to_bits())
@@ -515,21 +576,75 @@ fn write_vector(ctx: &mut Ctx<'_>, at: u32, v: [f32; 3]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// `DSERR_INVALIDCALL`: a 3D face on a buffer made without 3D.
-const DSERR_INVALIDCALL: u32 = 0x8878_0032;
+impl Buffer {
+    fn new(store: u32, bytes: u32, format: Option<Format>, three_d: bool) -> Self {
+        Self {
+            store,
+            bytes,
+            format,
+            volume: 0,
+            pan: 0,
+            frequency: None,
+            looping: false,
+            started: None,
+            offset: 0,
+            place: three_d.then(Place::default),
+        }
+    }
+
+    /// The rate it plays at.
+    fn rate(&self) -> Option<u32> {
+        let format = self.format.as_ref()?;
+        Some(self.frequency.unwrap_or(format.rate).max(1))
+    }
+
+    /// How many bytes one of its frames takes.
+    fn align(&self) -> u32 {
+        self.format
+            .as_ref()
+            .map_or(1, |f| u32::from(f.block_align.max(1)))
+    }
+
+    /// Where it is in its bytes at a declared millisecond, and whether it is
+    /// still playing. A sound that has played to its end is stopped, back at
+    /// its beginning, as DirectSound leaves it.
+    fn progress(&self, millis: u64) -> (u32, bool) {
+        let (Some(started), Some(rate)) = (self.started, self.rate()) else {
+            return (self.offset, self.started.is_some());
+        };
+        let frames = millis.saturating_sub(started) * u64::from(rate) / 1000;
+        let at = u64::from(self.offset) + frames * u64::from(self.align());
+        let len = u64::from(self.bytes.max(1));
+        if self.looping {
+            ((at % len) as u32, true)
+        } else if at >= len {
+            (0, false)
+        } else {
+            (at as u32, true)
+        }
+    }
+
+    /// Bring its state up to a declared millisecond: where it is, and whether
+    /// it has stopped by playing to its end.
+    fn settle(&mut self, millis: u64) {
+        if self.started.is_some() && self.format.is_some() {
+            let (at, playing) = self.progress(millis);
+            self.offset = at;
+            self.started = playing.then_some(millis);
+        }
+    }
+}
 
 fn buffer<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> Option<&'a mut Buffer> {
     let identity = ctx.state.identity(this);
-    ctx.state.sound.buffers.get_mut(&identity)
+    let millis = ctx.clock_millis;
+    let buffer = ctx.state.sound.buffers.get_mut(&identity)?;
+    buffer.settle(millis);
+    Some(buffer)
 }
 
-fn place(ctx: &mut Ctx<'_>, this: u32) -> Result<Place, Stop> {
-    buffer(ctx, this)
-        .and_then(|b| b.place)
-        .ok_or_else(|| Stop::NotWritten {
-            what: "IDirectSound3DBuffer: a buffer made without 3D".to_owned(),
-            caller: 0,
-        })
+fn place(ctx: &mut Ctx<'_>, this: u32) -> Option<Place> {
+    buffer(ctx, this).and_then(|b| b.place)
 }
 
 fn with_place(ctx: &mut Ctx<'_>, this: u32, change: impl FnOnce(&mut Place)) -> Result<u32, Stop> {
@@ -538,6 +653,7 @@ fn with_place(ctx: &mut Ctx<'_>, this: u32, change: impl FnOnce(&mut Place)) -> 
             change(place);
             Ok(S_OK)
         }
+        // A 3D face on a buffer made without 3D.
         None => Ok(DSERR_INVALIDCALL),
     }
 }
@@ -561,16 +677,19 @@ fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn speaker_config(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // DSSPEAKER_STEREO.
-    if args[0] != 0 {
-        ctx.mem.write_u32(args[0], 1).map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
+    write_word(ctx, args[0], Some(1))
 }
 
-/// A `WAVEFORMATEX` in guest memory: its eighteen bytes and what follows.
+/// A `WAVEFORMATEX` in guest memory. PCM's is sixteen bytes and says nothing
+/// of its extra bytes; another format's is eighteen and says how many follow.
 fn read_format(ctx: &Ctx<'_>, at: u32) -> Result<Format, Stop> {
-    let extra = ctx.mem.slice(at + 16, 2).map_err(Stop::Fault)?;
-    let len = 18 + usize::from(u16::from_le_bytes([extra[0], extra[1]]));
+    let tag = ctx.mem.slice(at, 2).map_err(Stop::Fault)?;
+    let len = if u16::from_le_bytes([tag[0], tag[1]]) == 1 {
+        16
+    } else {
+        let extra = ctx.mem.slice(at + 16, 2).map_err(Stop::Fault)?;
+        18 + usize::from(u16::from_le_bytes([extra[0], extra[1]]))
+    };
     let bytes = ctx.mem.slice(at, len).map_err(Stop::Fault)?;
     Format::parse(bytes).map_err(|e| Stop::NotWritten {
         what: format!("IDirectSound: {e}"),
@@ -587,34 +706,32 @@ fn create_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
     let flags = ctx.mem.read_u32(at + 4).map_err(Stop::Fault)?;
     let bytes = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
     let format_at = ctx.mem.read_u32(at + 16).map_err(Stop::Fault)?;
-    let format = if flags & DSBCAPS_PRIMARYBUFFER == 0 && format_at != 0 {
-        Some(read_format(ctx, format_at)?)
-    } else {
-        None
+    let primary = flags & DSBCAPS_PRIMARYBUFFER != 0;
+    let format = match (primary, format_at) {
+        (true, _) => None,
+        // A secondary buffer with no format is the call's own refusal.
+        (false, 0) => return Ok(DSERR_INVALIDPARAM),
+        (false, at) => Some(read_format(ctx, at)?),
     };
     let store = ctx.state.heap.alloc(bytes.max(4));
-    let object = State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound { store, bytes })
-        .map_err(Stop::Fault)?;
-    ctx.state
-        .sound
-        .buffers
-        .insert(object, Buffer::new(format, flags & DSBCAPS_CTRL3D != 0));
+    let object =
+        State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
+    ctx.state.sound.buffers.insert(
+        object,
+        Buffer::new(store, bytes, format, flags & DSBCAPS_CTRL3D != 0),
+    );
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // DuplicateSoundBuffer(original, out): the same bytes, played on their own.
-    let original = args[0];
-    let Some(ComState::Sound { store, bytes }) = ctx.state.com(original).map(|o| o.state.clone())
-    else {
+    // DuplicateSoundBuffer(original, out): the same bytes, played on their own
+    // from the beginning.
+    let Some(template) = buffer(ctx, args[0]).cloned() else {
         return Ok(DSERR_INVALIDCALL);
     };
-    let Some(template) = buffer(ctx, original).cloned() else {
-        return Ok(DSERR_INVALIDCALL);
-    };
-    let object = State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound { store, bytes })
-        .map_err(Stop::Fault)?;
+    let object =
+        State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
     let copy = Buffer {
         started: None,
         offset: 0,
@@ -626,29 +743,16 @@ fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// The rate a buffer plays at, and how many bytes one of its frames takes.
-fn pace(buffer: &Buffer) -> Option<(u32, u32)> {
-    let format = buffer.format.as_ref()?;
-    let rate = buffer.frequency.unwrap_or(format.rate).max(1);
-    Some((rate, u32::from(format.block_align.max(1))))
-}
-
-/// Where a buffer is in its bytes at a declared millisecond, and whether it
-/// has played to its end.
-fn progress(buffer: &Buffer, bytes: u32, millis: u64) -> (u32, bool) {
-    let (Some(started), Some((rate, align))) = (buffer.started, pace(buffer)) else {
-        return (buffer.offset, buffer.started.is_none());
-    };
-    let played = millis.saturating_sub(started) * u64::from(rate) / 1000 * u64::from(align);
-    let at = u64::from(buffer.offset) + played;
-    let len = u64::from(bytes.max(1));
-    if buffer.looping {
-        ((at % len) as u32, false)
-    } else if at >= len {
-        (bytes, true)
-    } else {
-        (at as u32, false)
+fn release_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // The last reference let go stops the sound and forgets the buffer.
+    let left = ctx.state.com_ref(this, -1);
+    if left == 0 {
+        let identity = ctx.state.identity(this);
+        let nanos = ctx.clock_millis * 1_000_000;
+        ctx.state.mixer.stop(identity, nanos);
+        ctx.state.sound.buffers.remove(&identity);
     }
+    Ok(left)
 }
 
 fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -657,13 +761,13 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // must see it move by the same amount on every run (ADR-0003). The
     // primary buffer, which has no bytes of its own, runs at the mix's rate.
     let millis = ctx.clock_millis;
-    let bytes = match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::Sound { bytes, .. }) => *bytes,
-        _ => 0,
+    let Some(b) = buffer(ctx, this) else {
+        return Ok(DSERR_INVALIDCALL);
     };
-    let at = match buffer(ctx, this) {
-        Some(b) if b.format.is_some() => progress(b, bytes, millis).0,
-        _ => (millis * u64::from(RATE) * 4 / 1000) as u32,
+    let at = if b.format.is_some() {
+        b.offset
+    } else {
+        (frame_at(millis * 1_000_000) * 4) as u32
     };
     for out in [args[0], args[1]] {
         if out != 0 {
@@ -674,22 +778,13 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn status(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // GetStatus(out): DSBSTATUS_PLAYING, and DSBSTATUS_LOOPING with it.
-    let millis = ctx.clock_millis;
-    let bytes = match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::Sound { bytes, .. }) => *bytes,
-        _ => 0,
-    };
-    let word = match buffer(ctx, this) {
-        Some(b) if b.started.is_some() && !progress(b, bytes, millis).1 => {
-            1 | if b.looping { 4 } else { 0 }
-        }
-        _ => 0,
-    };
-    if args[0] != 0 {
-        ctx.mem.write_u32(args[0], word).map_err(Stop::Fault)?;
-    }
-    Ok(S_OK)
+    // GetStatus(out): whether it plays, and whether round and round.
+    let word = buffer(ctx, this).map(|b| match (b.started, b.looping) {
+        (None, _) => 0,
+        (Some(_), false) => DSBSTATUS_PLAYING,
+        (Some(_), true) => DSBSTATUS_PLAYING | DSBSTATUS_LOOPING,
+    });
+    write_word(ctx, args[0], word)
 }
 
 fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -701,9 +796,8 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // needs the mixer to read the buffer as it goes.
     const DSBLOCK_FROMWRITECURSOR: u32 = 0x1;
     const DSBLOCK_ENTIREBUFFER: u32 = 0x2;
-    let Some(ComState::Sound { store, bytes }) = ctx.state.com(this).map(|o| o.state.clone())
-    else {
-        return Ok(S_OK);
+    let Some((store, bytes)) = buffer(ctx, this).map(|b| (b.store, b.bytes)) else {
+        return Ok(DSERR_INVALIDCALL);
     };
     if args[6] & DSBLOCK_FROMWRITECURSOR != 0 {
         return Err(Stop::NotWritten {
@@ -716,18 +810,16 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     } else {
         (args[0], args[1])
     };
-    let room = bytes.saturating_sub(offset);
-    let give = wanted.min(room);
+    let give = wanted.min(bytes.saturating_sub(offset));
     ctx.mem
-        .write_u32(args[2], store + offset)
+        .write_u32(args[2], store + offset.min(bytes))
         .map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[3], give).map_err(Stop::Fault)?;
     // The wrap-around half is empty: this machine hands out one run.
-    if args[4] != 0 {
-        ctx.mem.write_u32(args[4], 0).map_err(Stop::Fault)?;
-    }
-    if args[5] != 0 {
-        ctx.mem.write_u32(args[5], 0).map_err(Stop::Fault)?;
+    for out in [args[4], args[5]] {
+        if out != 0 {
+            ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
+        }
     }
     Ok(S_OK)
 }
@@ -737,7 +829,7 @@ fn gain(hundredths: i32) -> f64 {
     if hundredths <= -10_000 {
         return 0.0;
     }
-    crate::cpu::x87::maths::pow2(f64::from(hundredths) / 2000.0 * std::f64::consts::LOG2_10)
+    maths::pow2(f64::from(hundredths) / 2000.0 * std::f64::consts::LOG2_10)
 }
 
 /// How loud a buffer is on each side: its volume and pan, and for a 3D
@@ -748,31 +840,28 @@ fn weights(buffer: &Buffer, listener: &Listener) -> (f64, f64) {
         volume * gain(-buffer.pan.max(0)),
         volume * gain(buffer.pan.min(0)),
     );
-    let Some(place) = buffer.place.filter(|p| p.mode != 2) else {
+    let Some(place) = buffer.place.filter(|p| p.mode != Mode::Disabled) else {
         return (left, right);
     };
     // Where the sound is from the listener, in the listener's own axes.
-    let relative = if place.mode == 1 {
-        place.position
-    } else {
-        std::array::from_fn(|i| place.position[i] - listener.position[i])
+    let (relative, across) = match place.mode {
+        Mode::HeadRelative => (place.position, [1.0, 0.0, 0.0]),
+        _ => (
+            std::array::from_fn(|i| place.position[i] - listener.position[i]),
+            super::scene::cross(listener.top, listener.front),
+        ),
     };
     let dot = |a: [f32; 3], b: [f32; 3]| f64::from(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
-    let distance = dot(relative, relative).sqrt() * f64::from(listener.distance_factor);
+    let distance = dot(relative, relative).sqrt();
+    // Past the minimum distance a sound falls off as the minimum over the
+    // distance, to the power of the rolloff: twice the rolloff, twice as
+    // fast; and past the maximum distance it falls off no further.
     let min = f64::from(place.min_distance.max(f32::MIN_POSITIVE));
     let far = distance.clamp(min, f64::from(place.max_distance).max(min));
-    let falloff = 1.0 / (1.0 + f64::from(listener.rolloff_factor) * (far / min - 1.0));
-    let across = if place.mode == 1 {
-        [1.0, 0.0, 0.0]
-    } else {
-        super::scene::cross(listener.top, listener.front)
-    };
+    let falloff = maths::pow2(f64::from(listener.rolloff_factor) * maths::log2(min / far));
     let side = if distance > 0.0 {
-        (dot(
-            relative,
-            super::scene::normalise(across).unwrap_or([1.0, 0.0, 0.0]),
-        ) / dot(relative, relative).sqrt())
-        .clamp(-1.0, 1.0)
+        let across = super::scene::normalise(across).unwrap_or([1.0, 0.0, 0.0]);
+        (dot(relative, across) / distance).clamp(-1.0, 1.0)
     } else {
         0.0
     };
@@ -782,52 +871,51 @@ fn weights(buffer: &Buffer, listener: &Listener) -> (f64, f64) {
 }
 
 fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Play(reserved, priority, flags): from where the buffer is, looping when
-    // DSBPLAY_LOOPING asks.
-    // ponytail: volume, pan and position are taken when a buffer starts; a
-    // title that moves a sound while it plays is heard where it started.
+    // Play(reserved, priority, flags): from where the buffer is, round and
+    // round when DSBPLAY_LOOPING asks.
     const DSBPLAY_LOOPING: u32 = 0x1;
+    let looping = args[2] & DSBPLAY_LOOPING != 0;
+    let millis = ctx.clock_millis;
+    let Some(b) = buffer(ctx, this) else {
+        return Ok(DSERR_INVALIDCALL);
+    };
+    b.looping = looping;
+    b.started = Some(millis);
+    start_voice(ctx, this)
+}
+
+/// Put a playing buffer's sound in the mixer, from where it is now.
+///
+/// ponytail: the whole buffer is decoded and taken to the mix's rate, nearest
+/// sample by nearest sample, each time it starts; and its volume, pan and
+/// position are taken then, so a title moving a sound while it plays is heard
+/// where it last started. A buffer changed often while it plays wants the
+/// mixer to read it and weigh it as it goes.
+fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let millis = ctx.clock_millis;
-    let Some(ComState::Sound { store, bytes }) = ctx.state.com(this).map(|o| o.state.clone())
-    else {
-        return Ok(DSERR_INVALIDCALL);
-    };
     let listener = ctx.state.sound.listener;
-    let Some(sound) = ctx.state.sound.buffers.get_mut(&identity) else {
+    let Some(b) = ctx.state.sound.buffers.get(&identity).cloned() else {
         return Ok(DSERR_INVALIDCALL);
     };
-    // The primary buffer plays whatever is mixed; it has nothing of its own.
-    let Some(format) = sound.format.clone() else {
+    // The primary buffer plays the mix; it has nothing of its own.
+    let (Some(format), Some(rate), Some(_)) = (b.format.as_ref(), b.rate(), b.started) else {
         return Ok(S_OK);
     };
-    if sound.started.is_some() {
-        let (at, _) = progress(sound, bytes, millis);
-        sound.offset = at;
-    }
-    sound.looping = args[2] & DSBPLAY_LOOPING != 0;
-    sound.started = Some(millis);
-    let (rate, align) = pace(sound).unwrap_or((format.rate, 1));
-    let (left, right) = weights(sound, &listener);
-    let offset = sound.offset.min(bytes) / align * align;
-    let looping = sound.looping;
     let data = ctx
         .mem
-        .slice(store + offset, (bytes - offset) as usize)
+        .slice(b.store, b.bytes as usize)
         .map_err(Stop::Fault)?;
-    let decoded = Format {
-        rate: RATE,
-        ..format
-    }
-    .decode(data)
-    .map_err(|e| Stop::NotWritten {
+    let decoded = format.stereo(data).map_err(|e| Stop::NotWritten {
         what: format!("IDirectSoundBuffer::Play: {e}"),
         caller: 0,
     })?;
+    let (left, right) = weights(&b, &listener);
     let samples = resample(&decoded, rate, left, right);
+    let first = u64::from(b.offset / b.align()) * u64::from(RATE) / u64::from(rate);
     ctx.state
         .mixer
-        .play_from(identity, samples, millis * 1_000_000, looping);
+        .start(identity, samples, first, millis * 1_000_000, b.looping);
     Ok(S_OK)
 }
 
@@ -835,6 +923,9 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 /// sample, and weighed on each side.
 fn resample(stereo: &[i16], rate: u32, left: f64, right: f64) -> Vec<i16> {
     let frames = stereo.len() / 2;
+    if frames == 0 {
+        return Vec::new();
+    }
     let out_frames = (frames as u64 * u64::from(RATE) / u64::from(rate.max(1))) as usize;
     let weigh = |s: i16, w: f64| (f64::from(s) * w).round().clamp(-32768.0, 32767.0) as i16;
     (0..out_frames)
@@ -848,38 +939,33 @@ fn resample(stereo: &[i16], rate: u32, left: f64, right: f64) -> Vec<i16> {
 
 fn stop_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
-    let millis = ctx.clock_millis;
-    let bytes = match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::Sound { bytes, .. }) => *bytes,
-        _ => 0,
-    };
-    if let Some(sound) = ctx.state.sound.buffers.get_mut(&identity) {
-        if sound.started.is_some() {
-            sound.offset = progress(sound, bytes, millis).0 % bytes.max(1);
-            sound.started = None;
-        }
+    let nanos = ctx.clock_millis * 1_000_000;
+    if let Some(b) = buffer(ctx, this) {
+        b.started = None;
     }
-    ctx.state.mixer.stop(identity);
+    ctx.state.mixer.stop(identity, nanos);
     Ok(S_OK)
 }
 
-fn set_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // SetCurrentPosition(offset). A buffer that is playing goes on from there.
-    let Some(sound) = buffer(ctx, this) else {
+/// Change something about a buffer; one that is playing goes on from where
+/// it is, changed.
+fn change(ctx: &mut Ctx<'_>, this: u32, edit: impl FnOnce(&mut Buffer)) -> Result<u32, Stop> {
+    let millis = ctx.clock_millis;
+    let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
     };
-    let was_playing = sound.started.take().is_some();
-    sound.offset = args[0];
-    let looping = sound.looping;
-    if was_playing {
-        return play(ctx, this, &[0, 0, u32::from(looping)]);
+    edit(b);
+    if b.started.is_some() {
+        b.started = Some(millis);
+        return start_voice(ctx, this);
     }
     Ok(S_OK)
 }
 
 fn set_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // SetFormat(format): the primary buffer's, which is what the mix is heard
-    // at. The mix is the machine's own rate whatever it is set to.
+    // SetFormat(format): the primary buffer's, which is what a card would
+    // play the mix at. The mix is the machine's own rate whatever it is set
+    // to, so it is logged rather than kept.
     let format = read_format(ctx, args[0])?;
     ctx.log.line(&format!(
         "dsound primary format {} Hz, {} channels, {} bits",
@@ -888,58 +974,12 @@ fn set_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> 
     Ok(S_OK)
 }
 
-fn get_volume(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let volume = buffer(ctx, this).map_or(0, |b| b.volume);
-    ctx.mem
-        .write_u32(args[0], volume as u32)
-        .map_err(Stop::Fault)?;
-    Ok(S_OK)
-}
-
-fn set_volume(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(b) = buffer(ctx, this) {
-        b.volume = (args[0] as i32).clamp(-10_000, 0);
-    }
-    Ok(S_OK)
-}
-
-fn get_pan(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let pan = buffer(ctx, this).map_or(0, |b| b.pan);
-    ctx.mem
-        .write_u32(args[0], pan as u32)
-        .map_err(Stop::Fault)?;
-    Ok(S_OK)
-}
-
-fn set_pan(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(b) = buffer(ctx, this) {
-        b.pan = (args[0] as i32).clamp(-10_000, 10_000);
-    }
-    Ok(S_OK)
-}
-
-fn get_frequency(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let rate = buffer(ctx, this)
-        .and_then(|b| pace(b).map(|(rate, _)| rate))
-        .unwrap_or(RATE);
-    ctx.mem.write_u32(args[0], rate).map_err(Stop::Fault)?;
-    Ok(S_OK)
-}
-
-fn set_frequency(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // DSBFREQUENCY_ORIGINAL, zero, is the format's own rate.
-    if let Some(b) = buffer(ctx, this) {
-        b.frequency = (args[0] != 0).then_some(args[0]);
-    }
-    Ok(S_OK)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{gain, progress, resample, weights, Buffer, Listener, Place};
+    use super::{gain, resample, weights, Buffer, Listener, Place};
     use crate::sound::Format;
 
-    fn pcm(rate: u32) -> Format {
+    fn mono_16bit(rate: u32) -> Format {
         Format {
             tag: 1,
             channels: 1,
@@ -952,13 +992,16 @@ mod tests {
 
     #[test]
     fn a_buffer_is_where_the_declared_clock_has_played_it_to() {
-        let mut b = Buffer::new(Some(pcm(22_050)), false);
+        // Two seconds of mono sixteen-bit is 88200 bytes.
+        let mut b = Buffer::new(0, 88_200, Some(mono_16bit(22_050)), false);
         b.started = Some(1_000);
-        // Two seconds of mono sixteen-bit is 88200 bytes; half a second in.
-        assert_eq!(progress(&b, 88_200, 1_500), (22_050, false));
-        assert_eq!(progress(&b, 88_200, 4_000), (88_200, true), "played out");
+        assert_eq!(b.progress(1_500), (22_050, true), "half a second in");
+        // Played to its end, it is stopped and back at its beginning.
+        b.settle(4_000);
+        assert_eq!((b.offset, b.started), (0, None));
+        b.started = Some(1_000);
         b.looping = true;
-        assert!(!progress(&b, 88_200, 4_000).1, "a loop goes round");
+        assert_eq!(b.progress(4_000), (44_100, true), "a loop goes round");
     }
 
     #[test]
@@ -970,8 +1013,8 @@ mod tests {
         );
         assert_eq!(gain(-10_000), 0.0);
 
-        let listener = Listener::default();
-        let mut b = Buffer::new(Some(pcm(22_050)), true);
+        let mut listener = Listener::default();
+        let mut b = Buffer::new(0, 0, Some(mono_16bit(22_050)), true);
         // To the right of a listener looking down z: only the right side.
         b.place = Some(Place {
             position: [2.0, 0.0, 0.0],
@@ -982,6 +1025,12 @@ mod tests {
         assert!(
             (right - 0.5).abs() < 1e-9,
             "twice the minimum distance is half as loud"
+        );
+        listener.rolloff_factor = 2.0;
+        let (_, right) = weights(&b, &listener);
+        assert!(
+            (right - 0.25).abs() < 1e-9,
+            "twice the rolloff, twice as fast"
         );
     }
 

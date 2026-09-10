@@ -180,8 +180,35 @@ struct Voice {
     looping: bool,
     /// Stereo samples at the mix's rate.
     samples: Vec<i16>,
-    /// The frame of the mix its first sample lands on.
+    /// The frame of the mix it starts at, and the frame of its samples it
+    /// starts from.
     start: u64,
+    first: u64,
+    /// The frame of the mix it stops at, once something has stopped it.
+    end: Option<u64>,
+}
+
+impl Voice {
+    fn frames(&self) -> u64 {
+        (self.samples.len() / 2) as u64
+    }
+
+    /// The pair of samples a frame of the mix hears from this voice, if any.
+    fn at(&self, frame: u64) -> Option<&[i16]> {
+        if frame < self.start || self.end.is_some_and(|end| frame >= end) {
+            return None;
+        }
+        let n = self.first + (frame - self.start);
+        let n = if self.looping { n % self.frames() } else { n };
+        let i = n as usize * 2;
+        self.samples.get(i..i + 2)
+    }
+
+    /// Whether nothing from this frame of the mix on hears it.
+    fn over(&self, frame: u64) -> bool {
+        self.end.is_some_and(|end| frame >= end)
+            || (!self.looping && self.start + self.frames().saturating_sub(self.first) <= frame)
+    }
 }
 
 /// Everything playing, and how much of the mix has been handed out.
@@ -198,14 +225,16 @@ pub fn frame_at(nanos: u64) -> u64 {
 }
 
 impl Mixer {
-    /// Start a sound at a declared time, replacing one with the same id.
+    /// Start a sound at a declared time, from its beginning, once.
     pub fn play(&mut self, id: u32, samples: Vec<i16>, nanos: u64) {
-        self.play_from(id, samples, nanos, false);
+        self.start(id, samples, 0, nanos, false);
     }
 
-    /// Start a sound at a declared time, once or round and round.
-    pub fn play_from(&mut self, id: u32, samples: Vec<i16>, nanos: u64, looping: bool) {
-        self.stop(id);
+    /// Start a sound at a declared time from one of its frames, once or round
+    /// and round. A sound already playing under the same id stops where this
+    /// one starts.
+    pub fn start(&mut self, id: u32, samples: Vec<i16>, first: u64, nanos: u64, looping: bool) {
+        self.stop(id, nanos);
         if samples.len() < 2 {
             return;
         }
@@ -214,11 +243,22 @@ impl Mixer {
             looping,
             samples,
             start: frame_at(nanos),
+            first,
+            end: None,
         });
     }
 
-    pub fn stop(&mut self, id: u32) {
-        self.voices.retain(|v| v.id != id);
+    /// Stop a sound at a declared time: what the mix has not reached by then
+    /// is not heard, and what it has, was.
+    pub fn stop(&mut self, id: u32, nanos: u64) {
+        let at = frame_at(nanos);
+        for voice in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.id == id && v.end.is_none())
+        {
+            voice.end = Some(at);
+        }
     }
 
     /// Every block whose last frame the declared clock has passed.
@@ -228,22 +268,14 @@ impl Mixer {
         while (self.blocks + 1) * BLOCK_FRAMES as u64 <= now {
             let first = self.blocks * BLOCK_FRAMES as u64;
             let mut block = vec![0i32; BLOCK_FRAMES * 2];
-            for voice in &self.voices {
-                for (frame, pair) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                    let Some(offset) = (first + frame as u64).checked_sub(voice.start) else {
-                        continue;
-                    };
-                    let frames = (voice.samples.len() / 2) as u64;
-                    let offset = if voice.looping {
-                        offset % frames
-                    } else {
-                        offset
-                    };
-                    let at = offset as usize * 2;
-                    if let Some(s) = voice.samples.get(at..at + 2) {
-                        pair[0] += i32::from(s[0]);
-                        pair[1] += i32::from(s[1]);
-                    }
+            for (frame, pair) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                for s in self
+                    .voices
+                    .iter()
+                    .filter_map(|v| v.at(first + frame as u64))
+                {
+                    pair[0] += i32::from(s[0]);
+                    pair[1] += i32::from(s[1]);
                 }
             }
             out.push(
@@ -254,8 +286,7 @@ impl Mixer {
             );
             self.blocks += 1;
             let end = self.blocks * BLOCK_FRAMES as u64;
-            self.voices
-                .retain(|v| v.looping || v.start + (v.samples.len() / 2) as u64 > end);
+            self.voices.retain(|v| !v.over(end));
         }
         out
     }
@@ -301,12 +332,37 @@ mod tests {
         let blocks = mixer.due(block_nanos + 1_000_000);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].iter().all(|s| *s == 70));
-        mixer.stop(1);
+        // Stopped where the first block ends: the second hears only the other.
+        mixer.stop(1, block_nanos);
         let blocks = mixer.due(3 * block_nanos);
         assert!(blocks
             .last()
             .expect("more blocks")
             .iter()
             .all(|s| *s == -30));
+    }
+
+    #[test]
+    fn a_loop_goes_round_its_whole_sound_from_wherever_it_started() {
+        let mut mixer = Mixer::default();
+        // Four frames, started from the third, round and round.
+        mixer.start(1, vec![1, 1, 2, 2, 3, 3, 4, 4], 2, 0, true);
+        let block_nanos = BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(RATE);
+        let block = mixer.due(block_nanos + 1_000_000).remove(0);
+        assert_eq!(block[..10], [3, 3, 4, 4, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn a_sound_stopped_is_heard_up_to_the_frame_it_stopped_at() {
+        let mut mixer = Mixer::default();
+        mixer.play(1, vec![5; BLOCK_FRAMES * 4], 0);
+        // Stopped a tenth of the way through the first block.
+        let tenth = BLOCK_FRAMES as u64 / 10 * 1_000_000_000 / u64::from(RATE);
+        mixer.stop(1, tenth);
+        let block_nanos = BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(RATE);
+        let block = mixer.due(block_nanos + 1_000_000).remove(0);
+        let heard = block.iter().filter(|s| **s == 5).count() / 2;
+        assert!((95..=102).contains(&heard), "{heard} frames heard");
+        assert!(mixer.due(3 * block_nanos).iter().flatten().all(|s| *s == 0));
     }
 }

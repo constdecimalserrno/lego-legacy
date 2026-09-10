@@ -522,9 +522,9 @@ pub enum ComState {
     None,
     /// An input device, and which one.
     Device { keyboard: bool, acquired: bool },
-    /// A sound buffer: where its samples are, how many it holds, and whether
-    /// the guest has started it.
-    Sound { store: u32, bytes: u32 },
+    /// A sound buffer, whose bytes and playing state DirectSound keeps
+    /// (`dsound::Sounds`).
+    Sound,
     /// A drawing surface: guest memory, and how to read it.
     Surface {
         pixels: u32,
