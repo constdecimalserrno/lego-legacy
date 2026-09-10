@@ -281,3 +281,182 @@ pub fn pressing_path(title: &str, pressing: &str) -> PathBuf {
 pub fn open_pressing(title: &str, pressing: &str) -> Result<Iso, DiscError> {
     Iso::open(&pressing_path(title, pressing))
 }
+
+/// One sector of a raw rip. On an audio track it is a seventy-fifth of a
+/// second of 44.1 kHz stereo sixteen-bit samples.
+const RAW_SECTOR: u64 = 2352;
+
+/// Sectors in a second of Red Book audio.
+pub const SECTORS_PER_SECOND: u64 = 75;
+
+// A disc's audio reaches the mix two frames to one.
+const _: () = assert!(crate::sound::RATE * 2 == 44_100);
+
+/// One audio track, by the sectors of its rip: where its pregap starts, which
+/// a drive already reports as the track, and where its music starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Track {
+    pub number: u32,
+    pub pregap: u64,
+    pub start: u64,
+}
+
+/// A pressing's Red Book audio: its raw rip, and its audio tracks as its cue
+/// sheet lists them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedBook {
+    bin: PathBuf,
+    pub tracks: Vec<Track>,
+    /// How many sectors the whole rip holds: where the disc ends.
+    pub sectors: u64,
+}
+
+impl RedBook {
+    /// The audio tracks a cue sheet lists, by their `INDEX` lines: `00` where
+    /// the pregap starts, `01` where the music does, each as minutes, seconds
+    /// and sectors from the start of the rip.
+    #[must_use]
+    pub fn parse_cue(cue: &str) -> Vec<Track> {
+        let at = |msf: &str| -> Option<u64> {
+            let parts: Vec<u64> = msf
+                .split(':')
+                .map(|p| p.parse().ok())
+                .collect::<Option<_>>()?;
+            match parts[..] {
+                [m, s, f] => Some((m * 60 + s) * SECTORS_PER_SECOND + f),
+                _ => None,
+            }
+        };
+        let mut tracks: Vec<Track> = Vec::new();
+        let mut audio = None;
+        for line in cue.lines() {
+            match line.split_whitespace().collect::<Vec<_>>()[..] {
+                ["TRACK", number, kind] => {
+                    audio = (kind == "AUDIO").then(|| number.parse().ok()).flatten();
+                }
+                ["INDEX", index, msf] => {
+                    let (Some(number), Some(sector)) = (audio, at(msf)) else {
+                        continue;
+                    };
+                    if tracks.last().is_none_or(|t| t.number != number) {
+                        tracks.push(Track {
+                            number,
+                            pregap: sector,
+                            start: sector,
+                        });
+                    }
+                    let track = tracks.last_mut().expect("pushed");
+                    if index == "01" {
+                        track.start = sector;
+                    }
+                }
+                _ => {}
+            }
+        }
+        tracks
+    }
+
+    /// The track a sector is in, as a drive reports it.
+    #[must_use]
+    pub fn track_at(&self, sector: u64) -> Option<u32> {
+        self.tracks
+            .iter()
+            .rev()
+            .find(|t| sector >= t.pregap)
+            .map(|t| t.number)
+    }
+
+    /// Every sample from a sector to the end of the disc, stereo at the mix's
+    /// rate: each two of the disc's frames averaged into one.
+    // ponytail: averaging two frames is the whole of the filter, so what is
+    // above the mix's half rate folds back a little; a better one is a few
+    // more taps when an ear hears it.
+    ///
+    /// # Errors
+    /// When the rip cannot be read.
+    pub fn samples_from(&self, sector: u64) -> Result<Vec<i16>, DiscError> {
+        let mut file = File::open(&self.bin)?;
+        file.seek(SeekFrom::Start(sector * RAW_SECTOR))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .flat_map(|f| {
+                let s = |i: usize| i32::from(i16::from_le_bytes([f[i], f[i + 1]]));
+                [((s(0) + s(4)) / 2) as i16, ((s(2) + s(6)) / 2) as i16]
+            })
+            .collect())
+    }
+}
+
+/// Open one pressing's Red Book audio: the cue sheet beside its image, and
+/// the raw rip of the whole disc beside that.
+///
+/// # Errors
+/// When the cue sheet or its rip is absent or unreadable.
+pub fn open_red_book(title: &str, pressing: &str) -> Result<RedBook, DiscError> {
+    let image = pressing_path(title, pressing);
+    let (cue_path, bin) = (image.with_extension("cue"), image.with_extension("bin"));
+    // A file not there is a rip not ripped; any other failure is the host's.
+    let missing = |path: &Path, e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::NotFound => DiscError::Missing(path.to_path_buf()),
+        _ => DiscError::Io(e),
+    };
+    let cue = std::fs::read_to_string(&cue_path).map_err(|e| missing(&cue_path, e))?;
+    let len = std::fs::metadata(&bin).map_err(|e| missing(&bin, e))?.len();
+    Ok(RedBook {
+        tracks: RedBook::parse_cue(&cue),
+        sectors: len / RAW_SECTOR,
+        bin,
+    })
+}
+
+#[cfg(test)]
+mod red_book {
+    use super::{RedBook, Track};
+
+    #[test]
+    fn a_cue_sheet_gives_each_audio_track_its_pregap_and_its_start() {
+        // Rock Raiders' original pressing, as ripped.
+        let cue = "FILE \"rock-raiders.bin\" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    INDEX 00 60:51:09
+    INDEX 01 60:53:09
+  TRACK 03 AUDIO
+    INDEX 00 63:54:05
+    INDEX 01 63:56:05
+";
+        let tracks = RedBook::parse_cue(cue);
+        assert_eq!(
+            tracks,
+            [
+                Track {
+                    number: 2,
+                    pregap: 3651 * 75 + 9,
+                    start: 3653 * 75 + 9,
+                },
+                Track {
+                    number: 3,
+                    pregap: 3834 * 75 + 5,
+                    start: 3836 * 75 + 5,
+                },
+            ]
+        );
+        let disc = RedBook {
+            bin: "rock-raiders.bin".into(),
+            tracks,
+            sectors: 400_000,
+        };
+        assert_eq!(disc.track_at(1000), None, "the data track is no audio");
+        assert_eq!(disc.track_at(3653 * 75 + 9), Some(2));
+        assert_eq!(
+            disc.track_at(3834 * 75 + 5),
+            Some(3),
+            "a pregap is its track's"
+        );
+    }
+}

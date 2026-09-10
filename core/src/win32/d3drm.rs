@@ -14,13 +14,29 @@ use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_O
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
-pub const SHIMS: &[Shim] = &[Shim {
-    dll: "d3drm",
-    name: "Direct3DRMCreate",
-    args: 1,
-    convention: Convention::Stdcall,
-    run: create,
-}];
+pub const SHIMS: &[Shim] = &[
+    Shim {
+        dll: "d3drm",
+        name: "Direct3DRMCreate",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: create,
+    },
+    Shim {
+        dll: "d3drm",
+        name: "D3DRMVectorRotate",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: vector_rotate,
+    },
+    Shim {
+        dll: "d3drm",
+        name: "D3DRMVectorRandom",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: vector_random,
+    },
+];
 
 /// An object this machine never made, or made as something else.
 const D3DRMERR_BADOBJECT: u32 = 0x8876_030d;
@@ -201,8 +217,8 @@ pub static VIEWPORT2: Interface = Interface {
         method("SetUniformScaling", 1, viewport_set_uniform_scaling),
         method("SetCamera", 1, viewport_set_camera),
         method("SetProjection", 1, viewport_set_projection),
-        wall("Transform", 2),
-        wall("InverseTransform", 2),
+        method("Transform", 2, viewport_transform),
+        method("InverseTransform", 2, viewport_inverse_transform),
         wall("Configure", 4),
         wall("ForceUpdate", 4),
         method("SetPlane", 4, viewport_set_plane),
@@ -233,7 +249,7 @@ pub static FRAME3: Interface = Interface {
         ADD_REF,
         RELEASE,
         wall("Clone", 3),
-        wall("AddDestroyCallback", 2),
+        method("AddDestroyCallback", 2, destroy_callback),
         wall("DeleteDestroyCallback", 2),
         method("SetAppData", 1, set_app_data),
         method("GetAppData", 0, get_app_data),
@@ -280,10 +296,10 @@ pub static FRAME3: Interface = Interface {
         method("SetSceneBackgroundRGB", 3, set_scene_background_rgb),
         wall("SetSceneBackgroundDepth", 1),
         wall("SetSceneBackgroundImage", 1),
-        wall("SetSceneFogEnable", 1),
-        wall("SetSceneFogColor", 1),
-        wall("SetSceneFogMode", 1),
-        wall("SetSceneFogParams", 3),
+        method("SetSceneFogEnable", 1, set_scene_fog_enable),
+        method("SetSceneFogColor", 1, set_scene_fog_color),
+        method("SetSceneFogMode", 1, set_scene_fog_mode),
+        method("SetSceneFogParams", 3, set_scene_fog_params),
         method("SetColor", 1, set_color),
         method("SetColorRGB", 3, set_color_rgb),
         method("GetZbufferMode", 0, get_zbuffer_mode),
@@ -314,7 +330,7 @@ pub static FRAME3: Interface = Interface {
         wall("InverseTransformVectors", 4),
         wall("SetTraversalOptions", 1),
         wall("GetTraversalOptions", 1),
-        wall("SetSceneFogMethod", 1),
+        method("SetSceneFogMethod", 1, set_scene_fog_method),
         wall("GetSceneFogMethod", 1),
         wall("SetMaterialOverride", 1),
         wall("GetMaterialOverride", 1),
@@ -533,8 +549,8 @@ pub static MATERIAL2: Interface = Interface {
         method("GetName", 2, get_name),
         method("GetClassName", 2, get_class_name),
         wall("SetPower", 1),
-        wall("SetSpecular", 3),
-        wall("SetEmissive", 3),
+        method("SetSpecular", 3, material_unread),
+        method("SetEmissive", 3, material_unread),
         wall("GetPower", 0),
         wall("GetSpecular", 3),
         wall("GetEmissive", 3),
@@ -757,6 +773,35 @@ fn light(ctx: &mut Ctx<'_>, kind: u32, colour: u32, out: u32) -> Result<u32, Sto
 fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreateMaterial(power, out).
     make(ctx, &MATERIAL2, args[1])
+}
+
+fn material_unread(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // SetSpecular and SetEmissive(red, green, blue). Only a retained-mode mesh
+    // is drawn with a retained-mode material, and Render stops at a mesh, so
+    // nothing here would read what they set.
+    Ok(S_OK)
+}
+
+fn destroy_callback(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // AddDestroyCallback(callback, argument): what retained mode calls when
+    // the object is destroyed. Nothing on this machine is ever destroyed
+    // (`crate::com::RELEASE`), so there is nothing to call it for, and nothing
+    // to keep.
+    Ok(S_OK)
+}
+
+fn vector_rotate(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // D3DRMVectorRotate(result, vector, axis, theta): the vector turned about
+    // the axis, as a frame's rotation turns it, into the result, which is
+    // what it answers.
+    // ponytail: the answer keeps the vector's length. Wine's d3drm answers a
+    // vector of length one, and normalises the caller's axis where it lies;
+    // what native retained mode does is unmeasured, and a title that rotates
+    // a vector that is not of length one is where the difference shows.
+    let (vector, axis) = (read_vector(ctx, args[1])?, read_vector(ctx, args[2])?);
+    let turned = super::scene::direct(&super::scene::rotation(axis, value(args[3])), vector);
+    write_vector(ctx, args[0], turned)?;
+    Ok(args[0])
 }
 
 fn device_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1118,6 +1163,18 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     };
     let mut visits = Vec::new();
     let scene = ctx.state.identity(args[0]);
+    // A scene's fog is kept when a title sets it up, and nothing here draws it.
+    let root = ctx
+        .state
+        .scene
+        .root(scene)
+        .and_then(|r| ctx.state.scene.frame(r));
+    if root.is_some_and(|f| f.fog.enabled) {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Render: a scene with its fog on".to_owned(),
+            caller: 0,
+        });
+    }
     collect_visits(ctx, scene, &mut visits, 0)?;
     let mut lights = Vec::new();
     collect_lights(ctx, scene, &mut lights, 0)?;
@@ -1421,10 +1478,29 @@ fn set_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     if ctx.state.scene.frame(ctx.state.identity(this)).is_none() {
         return Ok(D3DRMERR_BADOBJECT);
     }
-    let from = reference(ctx, "SetPosition", this, args[0])?;
-    let point = super::scene::transform(&from, [value(args[1]), value(args[2]), value(args[3])]);
-    let [x, y, z] = super::scene::transform(&into_parent(ctx, "SetPosition", this)?, point);
+    let into = reference_into_parent(ctx, "SetPosition", this, args[0])?;
+    let [x, y, z] =
+        super::scene::transform(&into, [value(args[1]), value(args[2]), value(args[3])]);
     with_frame(ctx, this, |f| f.local[3] = [x, y, z, 1.0])
+}
+
+/// What takes a point in a reference frame's space into the space of the
+/// frame's parent, where the frame's own transform is. A reference that is
+/// the parent needs nothing at all, which a parent that flattens space (one
+/// scaled to nothing, as a title hides a thing) still allows.
+fn reference_into_parent(ctx: &Ctx<'_>, method: &str, frame: u32, at: u32) -> Result<Matrix, Stop> {
+    let parent = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(frame))
+        .map_or(0, |f| f.parent);
+    if ctx.state.identity(at) == parent {
+        return Ok(super::scene::IDENTITY);
+    }
+    Ok(super::scene::multiply(
+        &reference(ctx, method, frame, at)?,
+        &into_parent(ctx, method, frame)?,
+    ))
 }
 
 fn frame_or_bad(ctx: &Ctx<'_>, at: u32) -> bool {
@@ -1564,6 +1640,25 @@ fn add_rotation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 /// A frame's transform into a reference frame's space, or into the scene's
 /// when the reference is null.
 fn relative(ctx: &Ctx<'_>, method: &str, this: u32, reference: u32) -> Result<Matrix, Stop> {
+    // A reference the frame hangs under needs no inverse: it is the frame's
+    // own transforms from there down, which a reference that flattens space
+    // still has.
+    let under = ctx.state.identity(reference);
+    if under != 0 {
+        let (mut at, mut down) = (ctx.state.identity(this), super::scene::IDENTITY);
+        for _ in 0..=ctx.state.scene.frames.len() {
+            if at == under {
+                return Ok(down);
+            }
+            match ctx.state.scene.frame(at) {
+                Some(f) if f.parent != 0 => {
+                    down = super::scene::multiply(&down, &f.local);
+                    at = f.parent;
+                }
+                _ => break,
+            }
+        }
+    }
     let world = ctx
         .state
         .scene
@@ -1704,6 +1799,57 @@ fn delete_light(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     with_frame(ctx, this, |f| f.lights.retain(|l| *l != light))
 }
 
+fn vector_random(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // D3DRMVectorRandom(result): a vector of length one, into the result,
+    // which is what it answers. Each of its three parts is the C library's
+    // rand, whose sequence this is from its documented seed of one, so the
+    // same vectors come in the same order on every run; and as rand is never
+    // negative, neither is a part.
+    // ponytail: that is Wine's d3drm, whose generator native retained mode's
+    // has not been measured against.
+    let mut next = || {
+        let state = ctx.state.scene.random.get_or_insert(1);
+        *state = state.wrapping_mul(214_013).wrapping_add(2_531_011);
+        ((*state >> 16) & 0x7fff) as f32
+    };
+    let v = [next(), next(), next()];
+    let unit = super::scene::normalise(v).unwrap_or([1.0, 0.0, 0.0]);
+    write_vector(ctx, args[0], unit)?;
+    Ok(args[0])
+}
+
+fn set_scene_fog_enable(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.fog.enabled = args[0] != 0)
+}
+
+fn set_scene_fog_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |f| f.fog.color = args[0])
+}
+
+fn set_scene_fog_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // D3DRMFOG_LINEAR, _EXPONENTIAL and _EXPONENTIALSQUARED.
+    if args[0] > 2 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    with_frame(ctx, this, |f| f.fog.mode = args[0])
+}
+
+fn set_scene_fog_params(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetSceneFogParams(start, end, density).
+    let (start, end, density) = (value(args[0]), value(args[1]), value(args[2]));
+    with_frame(ctx, this, |f| {
+        f.fog.start = start;
+        f.fog.end = end;
+        f.fog.density = density;
+    })
+}
+
+fn set_scene_fog_method(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // D3DRMFOGMETHOD_VERTEX, _TABLE or _ANY: where a card computes fog. Kept
+    // for reading back; a scene that turns its fog on stops at Render.
+    with_frame(ctx, this, |f| f.fog.method = args[0])
+}
+
 fn set_scene_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     with_frame(ctx, this, |f| f.background = args[0])
 }
@@ -1742,11 +1888,11 @@ fn set_orientation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
     // along the direction and its y axis as near the up vector as a right
     // angle allows, both in the reference frame's space. Where the frame is
     // does not move.
-    use super::scene::{cross, direct, invert, normalise};
+    use super::scene::{cross, direct, normalise};
     if !frame_or_bad(ctx, this) {
         return Ok(D3DRMERR_BADOBJECT);
     }
-    let from = reference(ctx, "SetOrientation", this, args[0])?;
+    let into = reference_into_parent(ctx, "SetOrientation", this, args[0])?;
     let dir = [value(args[1]), value(args[2]), value(args[3])];
     let up = [value(args[4]), value(args[5]), value(args[6])];
     let (Some(dir), Some(right)) = (normalise(dir), normalise(cross(up, dir))) else {
@@ -1754,25 +1900,7 @@ fn set_orientation(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         return Ok(D3DRMERR_BADVALUE);
     };
     let up = cross(dir, right);
-    let parent = ctx
-        .state
-        .scene
-        .frame(ctx.state.identity(this))
-        .map_or(0, |f| f.parent);
-    let into = if parent == 0 {
-        super::scene::IDENTITY
-    } else {
-        let world = ctx
-            .state
-            .scene
-            .world(parent)
-            .unwrap_or(super::scene::IDENTITY);
-        invert(&world).ok_or_else(|| Stop::NotWritten {
-            what: "IDirect3DRMFrame3::SetOrientation: a parent that flattens space".to_owned(),
-            caller: 0,
-        })?
-    };
-    let axes = [right, up, dir].map(|axis| direct(&into, direct(&from, axis)));
+    let axes = [right, up, dir].map(|axis| direct(&into, axis));
     with_frame(ctx, this, |f| {
         for (row, axis) in f.local.iter_mut().zip(axes) {
             *row = [axis[0], axis[1], axis[2], 0.0];
@@ -2273,6 +2401,76 @@ fn viewport_state(ctx: &Ctx<'_>, this: u32) -> Option<ComState> {
     ctx.state.com(this).map(|o| o.state.clone())
 }
 
+/// What a viewport sees through: its view, its rectangle, and where its
+/// camera is in its scene.
+fn looking(
+    ctx: &Ctx<'_>,
+    method: &str,
+    this: u32,
+) -> Result<Option<(super::scene::View, super::scene::Rect, Matrix)>, Stop> {
+    let (Some(ComState::Viewport { camera, .. }), Some(view)) =
+        (viewport_state(ctx, this), view(ctx, this))
+    else {
+        return Ok(None);
+    };
+    if view.projection != 0 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMViewport2::{method}: projection {}, which is not perspective",
+                view.projection
+            ),
+            caller: 0,
+        });
+    }
+    let camera = ctx.state.scene.world(ctx.state.identity(camera));
+    Ok(camera.map(|camera| (view, viewport_rect(ctx, this), camera)))
+}
+
+fn viewport_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Transform(destination, source): a point in the scene, on the device, as
+    // four values to divide by the fourth.
+    let Some((view, rect, camera)) = looking(ctx, "Transform", this)? else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let point = read_vector(ctx, args[1])?;
+    let Some(screen) = view.to_screen(rect, &camera, point) else {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Transform: a camera that flattens space".to_owned(),
+            caller: 0,
+        });
+    };
+    for (i, v) in screen.iter().enumerate() {
+        ctx.mem
+            .write_u32(args[0] + 4 * i as u32, v.to_bits())
+            .map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn viewport_inverse_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // InverseTransform(destination, source): a place on the device, as four
+    // values, back into the scene.
+    let Some((view, rect, camera)) = looking(ctx, "InverseTransform", this)? else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let mut screen = [0.0; 4];
+    for (i, v) in screen.iter_mut().enumerate() {
+        *v = value(
+            ctx.mem
+                .read_u32(args[1] + 4 * i as u32)
+                .map_err(Stop::Fault)?,
+        );
+    }
+    let Some(point) = view.from_screen(rect, &camera, screen) else {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DRMViewport2::InverseTransform: {screen:?}, which is no point"),
+            caller: 0,
+        });
+    };
+    write_vector(ctx, args[0], point)?;
+    Ok(S_OK)
+}
+
 fn viewport_get_camera(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(ComState::Viewport { camera, .. }) = viewport_state(ctx, this) else {
         return Ok(D3DRMERR_BADOBJECT);
@@ -2292,7 +2490,7 @@ fn viewport_get_device(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32
     Ok(S_OK)
 }
 
-fn viewport_rect(ctx: &Ctx<'_>, this: u32) -> (u32, u32, u32, u32) {
+fn viewport_rect(ctx: &Ctx<'_>, this: u32) -> super::scene::Rect {
     match viewport_state(ctx, this) {
         Some(ComState::Viewport {
             x,

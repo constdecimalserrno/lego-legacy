@@ -39,6 +39,9 @@ pub struct Frame {
     pub material: u32,
 }
 
+/// A scene's fog: whether it is on, its colour, how it thickens (linear,
+/// exponential or exponential squared) and over what distances, and where
+/// the title asked for it to be computed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fog {
     pub enabled: bool,
@@ -47,6 +50,7 @@ pub struct Fog {
     pub start: f32,
     pub end: f32,
     pub density: f32,
+    pub method: u32,
 }
 
 impl Default for Frame {
@@ -90,6 +94,10 @@ pub struct Light {
     /// The frame whose visuals it lights, when it lights only one's.
     pub enable_frame: u32,
 }
+
+/// A viewport's rectangle on its device: across, down, wide and high, in
+/// pixels.
+pub type Rect = (u32, u32, u32, u32);
 
 /// How a viewport sees its scene: the planes it clips against and how it
 /// projects. What retained mode starts a viewport with is what Wine's tests
@@ -155,6 +163,50 @@ impl View {
             [0.0, 0.0, -n * q, 0.0],
         ]
     }
+
+    /// Where a point in the scene lands on the device, seen from a camera
+    /// placed by `camera`, through a viewport over `rect`: across and down in
+    /// pixels, and depth from the front plane to the back one, each times the
+    /// point's distance in front of the camera, which is the fourth.
+    #[must_use]
+    pub fn to_screen(&self, rect: Rect, camera: &Matrix, point: [f32; 3]) -> Option<[f32; 4]> {
+        let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
+        let clip_from_world = multiply(&invert(camera)?, &self.perspective(rect.2, rect.3));
+        let [cx, cy, cz, cw] =
+            super::pipeline::project(&clip_from_world, [point[0], point[1], point[2], 1.0]);
+        Some([
+            (x + width / 2.0) * cw + cx * width / 2.0,
+            (y + height / 2.0) * cw - cy * height / 2.0,
+            cz,
+            cw,
+        ])
+    }
+
+    /// The point in the scene a place on the device is: [`View::to_screen`]
+    /// undone. A place with no distance, or at the depth the back plane
+    /// only reaches at infinity, is no point, and answers `None`.
+    #[must_use]
+    pub fn from_screen(&self, rect: Rect, camera: &Matrix, screen: [f32; 4]) -> Option<[f32; 3]> {
+        let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
+        let w = screen[3];
+        let [sx, sy, depth] = [screen[0] / w, screen[1] / w, screen[2] / w];
+        let p = self.perspective(rect.2, rect.3);
+        // Depth goes q(z - front)/z, with q the back over the distance
+        // between the planes.
+        let (q, front) = (p[2][2], self.front);
+        if w == 0.0 || depth == q {
+            return None;
+        }
+        let z = q * front / (q - depth);
+        let across = (sx - x - width / 2.0) / (width / 2.0);
+        let up = (y + height / 2.0 - sy) / (height / 2.0);
+        let eye = [
+            z * (across - p[2][0]) / p[0][0],
+            z * (up - p[2][1]) / p[1][1],
+            z,
+        ];
+        Some(transform(camera, eye))
+    }
 }
 
 /// Every frame the guest has made, by the pointer it holds; every light and
@@ -164,6 +216,8 @@ pub struct Scene {
     pub frames: BTreeMap<u32, Frame>,
     pub lights: BTreeMap<u32, Light>,
     pub viewports: BTreeMap<u32, View>,
+    /// Where `D3DRMVectorRandom`'s sequence has got to, once it has started.
+    pub random: Option<u32>,
 }
 
 impl Scene {
@@ -381,6 +435,35 @@ mod tests {
         let mut m = IDENTITY;
         m[3] = [x, y, z, 1.0];
         m
+    }
+
+    #[test]
+    fn a_point_put_on_the_screen_comes_back_to_where_it_was() {
+        let view = super::View {
+            back: 50.0,
+            ..super::View::default()
+        };
+        // A camera moved and turned a quarter about y.
+        let camera: Matrix = [
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [3.0, 2.0, 1.0, 1.0],
+        ];
+        let rect = (10, 20, 320, 240);
+        // Straight ahead of the camera is the middle of its viewport.
+        let ahead = transform(&camera, [0.0, 0.0, 5.0]);
+        let screen = view.to_screen(rect, &camera, ahead).unwrap();
+        assert_eq!(
+            [screen[0] / screen[3], screen[1] / screen[3]],
+            [170.0, 140.0]
+        );
+        let point = transform(&camera, [0.5, -0.25, 7.0]);
+        let screen = view.to_screen(rect, &camera, point).unwrap();
+        let back = view.from_screen(rect, &camera, screen).unwrap();
+        for (b, p) in back.iter().zip(point) {
+            assert!((b - p).abs() < 1e-4, "{back:?} is not {point:?}");
+        }
     }
 
     #[test]

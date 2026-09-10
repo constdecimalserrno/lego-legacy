@@ -176,6 +176,46 @@ fn the_control_word_is_written_and_read_back() {
 }
 
 #[test]
+fn the_register_forms_subtract_and_divide_the_way_round_intel_documents() {
+    // st(1) = 10 and st(0) = 4. The escape picks where the answer goes (d8:
+    // st(0); dc: st(1); de: st(1), then pop); the operation reads the same
+    // either way: /4 is st(0) - st(i), /5 st(i) - st(0), /6 st(0) / st(i) and
+    // /7 st(i) / st(0). Rock Raiders divides its keyframe interval with
+    // `de f9`, fdivp st(1): (t - lo) / (hi - lo), not its reciprocal.
+    const FXCH: [u8; 2] = [0xd9, 0xc9];
+    for (op, expected) in [
+        ([0xd8, 0xe1], -6.0),
+        ([0xd8, 0xe9], 6.0),
+        ([0xd8, 0xf1], 0.4),
+        ([0xd8, 0xf9], 2.5),
+        ([0xdc, 0xe1], -6.0),
+        ([0xdc, 0xe9], 6.0),
+        ([0xdc, 0xf1], 0.4),
+        ([0xdc, 0xf9], 2.5),
+        ([0xde, 0xe1], -6.0),
+        ([0xde, 0xe9], 6.0),
+        ([0xde, 0xf1], 0.4),
+        ([0xde, 0xf9], 2.5),
+    ] {
+        let mut code = vec![
+            0xdd, 0x05, 0x00, 0x00, 0x50, 0x00, // fld qword [DATA]    10
+            0xdd, 0x05, 0x08, 0x00, 0x50, 0x00, // fld qword [DATA+8]  4
+        ];
+        code.extend(op);
+        // The answer to st(0), wherever it went.
+        if op[0] == 0xdc {
+            code.extend(FXCH);
+        }
+        code.extend([0xdd, 0x1d, 0x10, 0x00, 0x50, 0x00]); // fstp qword [DATA+16]
+        let (_cpu, mem) = run(&code, |mem| {
+            put_double(mem, DATA, 10.0);
+            put_double(mem, DATA + 8, 4.0);
+        });
+        assert_eq!(get_double(&mem, DATA + 16), expected, "{op:02x?}");
+    }
+}
+
+#[test]
 fn single_precision_control_rounds_what_the_unit_computes() {
     // With the precision field set to single, a third computed in the unit
     // must equal a third computed in a float.

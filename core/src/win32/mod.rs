@@ -135,6 +135,8 @@ pub struct State {
     pub sound: dsound::Sounds,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
+    /// The CD audio device.
+    pub cd: winmm::CdAudio,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
@@ -195,6 +197,7 @@ impl State {
             volume_label: String::new(),
             waited_millis: 0,
             players: BTreeMap::new(),
+            cd: winmm::CdAudio::default(),
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
             installed_files: 0,

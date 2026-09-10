@@ -5,7 +5,7 @@
 # screen, and the main menu at flip 4603. The pointer moves onto Start Game and
 # clicks it. The title brings a fall of rocks down over the menu, drawn in 3D:
 # retained mode calls the title's own visuals, and they draw textured triangles
-# through the Direct3D device underneath. By flip 4656 the rocks have passed
+# through the Direct3D device underneath. By flip 4700 the rocks have passed
 # and the level select is up, waiting for a cavern to be chosen.
 #
 # On the way it is heard: the menu loops its ambience, and the rocks come down

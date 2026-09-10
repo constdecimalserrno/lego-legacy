@@ -1,6 +1,6 @@
 //! The multimedia library: the declared clock as a title of this era reads
-//! it, what it asks of sound hardware, and the RIFF reader it loads its sounds
-//! with.
+//! it, what it asks of sound hardware, the RIFF reader it loads its sounds
+//! with, and the drive it plays its Red Book audio from.
 
 use super::{Convention, Ctx, Object, Shim};
 use crate::cpu::Stop;
@@ -84,7 +84,178 @@ pub const SHIMS: &[Shim] = &[
         convention: Convention::Stdcall,
         run: mmio_close,
     },
+    Shim {
+        dll: "WINMM",
+        name: "mciSendStringA",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: mci_send_string,
+    },
+    Shim {
+        dll: "WINMM",
+        name: "mciGetErrorStringA",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: mci_error_string,
+    },
 ];
+
+/// The `cdaudio` device: the title's Red Book pressing, once it is open;
+/// whether it counts positions in tracks; and the sector it started playing
+/// from and the declared millisecond it started at, while it plays.
+#[derive(Default)]
+pub struct CdAudio {
+    disc: Option<crate::disc::RedBook>,
+    tracks: bool,
+    playing: Option<(u64, u64)>,
+}
+
+impl CdAudio {
+    /// The sector the drive has played to at a declared millisecond, while it
+    /// is playing: past the end of the disc, it has stopped.
+    fn at(&self, millis: u64) -> Option<u64> {
+        let (disc, (sector, started)) = (self.disc.as_ref()?, self.playing?);
+        let at = sector + millis.saturating_sub(started) * crate::disc::SECTORS_PER_SECOND / 1000;
+        (at < disc.sectors).then_some(at)
+    }
+}
+
+/// `MCIERR_HARDWARE`, `_DEVICE_NOT_READY` and `_OUTOFRANGE`.
+const MCIERR_HARDWARE: u32 = 262;
+const MCIERR_DEVICE_NOT_READY: u32 = 276;
+const MCIERR_OUTOFRANGE: u32 = 282;
+
+/// Which voice of the mix the drive plays in: no COM object is at address
+/// zero.
+const CD_VOICE: u32 = 0;
+
+fn mci_send_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // mciSendStringA(command, answer, answer length, window). The commands a
+    // title of this era plays its Red Book audio with: open the drive, count
+    // in tracks, play from a track to the end of the disc, ask whether it is
+    // still playing and which track it is on, stop, close. The tracks are the
+    // title's Red Book pressing's (ADR-0006), mixed on the declared clock
+    // like every other sound, and where the drive has got to follows from
+    // when it started.
+    let command = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let lower = command.to_ascii_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let millis = ctx.clock_millis;
+    let nanos = millis * 1_000_000;
+    let answer = match words[..] {
+        ["open", "cdaudio"] => {
+            let red_book = ctx
+                .title
+                .red_book
+                .map(|pressing| crate::disc::open_red_book(ctx.title.image.disc_dir, pressing));
+            match red_book {
+                // A drive with no disc of audio in it is not ready; one whose
+                // rip cannot be read has a problem.
+                None | Some(Err(crate::disc::DiscError::Missing(_))) => {
+                    Err(MCIERR_DEVICE_NOT_READY)
+                }
+                Some(Err(_)) => Err(MCIERR_HARDWARE),
+                Some(Ok(disc)) => {
+                    ctx.state.cd.disc = Some(disc);
+                    Ok(String::new())
+                }
+            }
+        }
+        // Tracks, minutes, seconds and frames: a position is a track.
+        ["set", "cdaudio", "time", "format", "tmsf"] => {
+            ctx.state.cd.tracks = true;
+            Ok(String::new())
+        }
+        ["play", "cdaudio", "from", _] if !ctx.state.cd.tracks => {
+            return Err(Stop::NotWritten {
+                what: format!("mciSendStringA(\"{command}\"): a position that is not a track"),
+                caller: 0,
+            })
+        }
+        ["play", "cdaudio", "from", track] => {
+            let wanted: Option<u32> = track.parse().ok();
+            let cd = &ctx.state.cd;
+            match (cd.disc.as_ref(), wanted) {
+                (None, _) => Err(MCIERR_DEVICE_NOT_READY),
+                (Some(disc), Some(n)) => match disc.tracks.iter().find(|t| t.number == n) {
+                    None => Err(MCIERR_OUTOFRANGE),
+                    // ponytail: everything from the track to the end of the
+                    // disc is read and decoded when it is asked for, a pause
+                    // of a fraction of a second on the host at each track; a
+                    // host that stutters there wants the mix to read the rip
+                    // as it goes.
+                    Some(track) => match disc.samples_from(track.start) {
+                        Err(_) => Err(MCIERR_HARDWARE),
+                        Ok(samples) => {
+                            ctx.state.cd.playing = Some((track.start, millis));
+                            ctx.state.mixer.play(CD_VOICE, samples, nanos);
+                            Ok(String::new())
+                        }
+                    },
+                },
+                (Some(_), None) => Err(MCIERR_OUTOFRANGE),
+            }
+        }
+        ["status", "cdaudio", "mode"] => match (&ctx.state.cd.disc, ctx.state.cd.at(millis)) {
+            (None, _) => Err(MCIERR_DEVICE_NOT_READY),
+            (Some(_), Some(_)) => Ok("playing".to_owned()),
+            (Some(_), None) => Ok("stopped".to_owned()),
+        },
+        ["status", "cdaudio", "current", "track"] => {
+            let cd = &ctx.state.cd;
+            match &cd.disc {
+                None => Err(MCIERR_DEVICE_NOT_READY),
+                // A drive that is not playing is on the first track.
+                Some(disc) => Ok(cd
+                    .at(millis)
+                    .and_then(|at| disc.track_at(at))
+                    .unwrap_or(1)
+                    .to_string()),
+            }
+        }
+        ["stop", "cdaudio"] | ["close", "cdaudio"] => {
+            ctx.state.cd.playing = None;
+            ctx.state.mixer.stop(CD_VOICE, nanos);
+            if words[0] == "close" {
+                ctx.state.cd = CdAudio::default();
+            }
+            Ok(String::new())
+        }
+        _ => {
+            return Err(Stop::NotWritten {
+                what: format!("mciSendStringA(\"{command}\")"),
+                caller: 0,
+            })
+        }
+    };
+    // Few enough to keep in every run's log, and what a person asks first
+    // when what is heard is wrong.
+    ctx.log
+        .line(&format!("mci \"{command}\" answered {answer:?}"));
+    match answer {
+        Ok(text) => {
+            ctx.write_string(args[1], args[2], &text)
+                .map_err(Stop::Fault)?;
+            Ok(0)
+        }
+        Err(code) => Ok(code),
+    }
+}
+
+fn mci_error_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // mciGetErrorStringA(error, buffer, length): what an error code says, in
+    // the words Windows uses for it. A title asks when a command failed, as
+    // `open cdaudio` does with no Red Book pressing to play from.
+    let text = match args[0] {
+        MCIERR_HARDWARE => "There is a problem with your media device.",
+        MCIERR_DEVICE_NOT_READY => "The device is not ready.",
+        MCIERR_OUTOFRANGE => "The specified parameter is out of range for the specified command.",
+        _ => return Ok(0),
+    };
+    ctx.write_string(args[1], args[2], text)
+        .map_err(Stop::Fault)?;
+    Ok(1)
+}
 
 fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Milliseconds on the declared clock, wrapping as the real counter does

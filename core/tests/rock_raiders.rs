@@ -714,13 +714,13 @@ fn a_persons_click_reaches_the_title_through_its_window_procedure() {
 }
 
 /// The flip the level select has come in by, after Start Game is clicked.
-const LEVEL_SELECT: u64 = 4656;
+const LEVEL_SELECT: u64 = 4700;
 
 /// A flip in the fall of rocks between the menu and the level select.
 const ROCKFALL: u64 = 4648;
 
 /// A flip well after the level select came in, with nothing clicked since.
-const WAITING_IN_THE_LEVEL_SELECT: u64 = 4700;
+const WAITING_IN_THE_LEVEL_SELECT: u64 = 4750;
 
 /// Enough instructions for the level select and a couple of hundred flips of
 /// it: the rockfall is fifty flips after the menu, and the level select waits
@@ -728,32 +728,46 @@ const WAITING_IN_THE_LEVEL_SELECT: u64 = 4700;
 /// menu's ambience to go past the end of the buffer it is streamed through.
 const LEVEL_SELECT_BUDGET: u64 = FIRST_LIGHT_BUDGET + 25_000_000;
 
-/// The committed route to the level select, replayed, keeping the frames the
-/// tests look at.
-fn to_the_level_select(
+/// A committed route, replayed once into its slot to a budget, keeping the
+/// frames the tests look at.
+fn following(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    route: &str,
+    keep: &[u64],
+    budget: u64,
 ) -> Option<&'static testkit::Ran> {
     slot.get_or_init(|| {
         if !scratch() {
             return None;
         }
-        let host =
-            Headless::new().keeping(&[MENU, ROCKFALL, LEVEL_SELECT, WAITING_IN_THE_LEVEL_SELECT]);
         let cli = Cli {
             route: Some(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../titles/lego-rock-raiders/routes/level-select.route"),
+                    .join("../titles/lego-rock-raiders/routes")
+                    .join(route),
             ),
             ..Cli::default()
         };
         Some(testkit::run_on(
-            host,
+            Headless::new().keeping(keep),
             &ROCK_RAIDERS,
             &cli,
-            LEVEL_SELECT_BUDGET,
+            budget,
         ))
     })
     .as_ref()
+}
+
+/// The committed route to the level select.
+fn to_the_level_select(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    following(
+        slot,
+        "level-select.route",
+        &[MENU, ROCKFALL, LEVEL_SELECT, WAITING_IN_THE_LEVEL_SELECT],
+        LEVEL_SELECT_BUDGET,
+    )
 }
 
 static LEVEL_SELECT_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
@@ -959,5 +973,131 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     assert!(
         first.host.audio_blocks == second.host.audio_blocks,
         "and what it mixed"
+    );
+}
+
+/// A flip on the loading screen, after the cavern was clicked.
+const LOADING_THE_MISSION: u64 = 4750;
+
+/// A flip with the Mission Brief up over the level.
+const MISSION_BRIEF: u64 = 5350;
+
+/// A flip in the mission, the brief dismissed, its tutorial waiting.
+const IN_THE_MISSION: u64 = 5450;
+
+/// A minute of the mission, in flips.
+const A_MINUTE_OF_THE_MISSION: u64 = 60 * 60;
+
+/// Enough instructions for the mission's load, its brief, and a minute of it
+/// playing, at a little over a million instructions a flip.
+const FIRST_MISSION_BUDGET: u64 = 13_000_000_000;
+
+/// The committed route into the first mission.
+fn to_the_first_mission(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    following(
+        slot,
+        "first-mission.route",
+        &[LOADING_THE_MISSION, MISSION_BRIEF, IN_THE_MISSION],
+        FIRST_MISSION_BUDGET,
+    )
+}
+
+static FIRST_MISSION_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static FIRST_MISSION_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+#[test]
+fn choosing_the_first_mission_loads_it_and_plays_it_in_3d_with_its_red_book_audio() {
+    let Some(ran) = to_the_first_mission(&FIRST_MISSION_FIRST) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing from the level select to a minute into the mission stops the run"
+    );
+    assert!(
+        ran.finish.flips > IN_THE_MISSION + A_MINUTE_OF_THE_MISSION,
+        "the budget reaches a minute into the mission: {} flips",
+        ran.finish.flips
+    );
+    let loading = ran
+        .host
+        .frame(LOADING_THE_MISSION)
+        .expect("the loading screen is kept");
+    let brief = ran.host.frame(MISSION_BRIEF).expect("the brief is kept");
+    let mission = ran.host.frame(IN_THE_MISSION).expect("the mission is kept");
+
+    // Where the level's lava and water are, once the brief has gone: drawn in
+    // 3D, textured, and nothing like the loading screen.
+    let level = (250, 150, 450, 250);
+    let area = 200 * 100;
+    assert!(
+        busy(mission, level) > 0.3,
+        "flip {IN_THE_MISSION} should show the level, textured"
+    );
+    assert!(
+        differing(loading, mission, level) > area * 9 / 10,
+        "and not the loading screen"
+    );
+    // Behind the brief, above it, the level is already drawn: the cavern's
+    // rock, which the loading screen does not have there.
+    let above_the_brief = (160, 40, 520, 120);
+    assert!(
+        differing(loading, brief, above_the_brief) > 360 * 80 / 2,
+        "flip {MISSION_BRIEF} should have the level behind its brief"
+    );
+
+    // The mission starts its Red Book audio, when the pressing is there to
+    // play it from, and the drive says it is playing when the title asks.
+    if disc::open_red_book("rock-raiders", "rock-raiders").is_ok() {
+        ran.assert_logged("mci \"play cdaudio from");
+        ran.assert_logged("mci \"status cdaudio mode\" answered Ok(\"playing\")");
+    }
+    let heard = ran
+        .host
+        .audio_blocks
+        .iter()
+        .zip(&ran.host.audio_flips)
+        .filter(|(_, flip)| **flip > IN_THE_MISSION)
+        .any(|(block, _)| block.iter().any(|s| *s != 0));
+    assert!(heard, "the mission is heard");
+}
+
+#[test]
+fn the_first_mission_route_replays_to_the_same_machine_every_time() {
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| to_the_first_mission(&FIRST_MISSION_SECOND));
+        (
+            to_the_first_mission(&FIRST_MISSION_FIRST),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    assert_eq!(
+        (
+            first.finish.cursor,
+            first.finish.flips,
+            first.finish.declared_millis
+        ),
+        (
+            second.finish.cursor,
+            second.finish.flips,
+            second.finish.declared_millis
+        )
+    );
+    assert_eq!(first.digest, second.digest, "the machine ends the same way");
+    for flip in [MISSION_BRIEF, IN_THE_MISSION] {
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
+            "and presents flip {flip} the same way"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks,
+        "and mixes the same"
     );
 }

@@ -820,14 +820,16 @@ fn register_form_op(cpu: &mut super::Cpu, escape: u8, reg: u8, index: usize) -> 
                 }
                 return Ok(());
             }
-            let (a, b) = if to_top { (top, other) } else { (other, top) };
+            // Where the answer goes differs by escape; the operation does not:
+            // Intel's tables read the same in st(0) and st(i) for all three,
+            // the reverse of what the mnemonics on dc and de suggest.
             let result = match reg {
-                0 => a + b,
-                1 => a * b,
-                4 => a - b,
-                5 => b - a,
-                6 => a / b,
-                7 => b / a,
+                0 => top + other,
+                1 => top * other,
+                4 => top - other,
+                5 => other - top,
+                6 => top / other,
+                7 => other / top,
                 _ => {
                     return Err(Stop::Undecoded {
                         eip: 0,

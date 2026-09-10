@@ -478,6 +478,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "wsprintfA",
+        args: 2,
+        convention: Convention::Cdecl,
+        run: wsprintf,
+    },
+    Shim {
+        dll: "USER32",
         name: "wvsprintfA",
         args: 3,
         convention: Convention::Stdcall,
@@ -497,6 +504,145 @@ pub const SHIMS: &[Shim] = &[
 /// A handle rather than a pointer, and a fixed one: a title that keeps it and
 /// compares it later gets the same answer.
 pub const WINDOW: u32 = 0x0001_0010;
+
+fn wsprintf(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // wsprintfA(buffer, format, ...): what follows the format on the stack is
+    // what it formats, and Windows writes at most 1024 bytes of it.
+    let format = ctx.string(args[1]).map_err(Stop::Fault)?;
+    let first = ctx.cpu.r[crate::cpu::ESP] + 12;
+    let fault = std::cell::Cell::new(None);
+    let taken = std::cell::Cell::new(0);
+    let text = {
+        let ctx = &*ctx;
+        fn or_fault<T>(
+            fault: &std::cell::Cell<Option<crate::guest::Fault>>,
+            read: Result<T, crate::guest::Fault>,
+            empty: T,
+        ) -> T {
+            read.unwrap_or_else(|f| {
+                fault.set(Some(f));
+                empty
+            })
+        }
+        printf(
+            &format,
+            || {
+                taken.set(taken.get() + 1);
+                or_fault(&fault, ctx.mem.read_u32(first + 4 * (taken.get() - 1)), 0)
+            },
+            |at| or_fault(&fault, ctx.string(at), String::new()),
+        )
+    };
+    if let Some(f) = fault.get() {
+        return Err(Stop::Fault(f));
+    }
+    let text = text.map_err(|what| Stop::NotWritten {
+        what: format!("wsprintfA(\"{format}\"): {what}"),
+        caller: 0,
+    })?;
+    ctx.write_string(args[0], 1024, &text).map_err(Stop::Fault)
+}
+
+/// Format as `wsprintf` does: `-` and `0` flags, a width, a precision, `l`
+/// and `h` sizes, and `d`, `i`, `u`, `x`, `X`, `c`, `s` and `%`. Each argument
+/// is a word taken by `word`; a string is the text `text` reads at the word.
+///
+/// # Errors
+/// A conversion with no body here, named.
+fn printf(
+    format: &str,
+    mut word: impl FnMut() -> u32,
+    text: impl Fn(u32) -> String,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let (mut left, mut zero) = (false, false);
+        while let Some(&flag) = chars.peek().filter(|f| matches!(f, '-' | '0' | '#')) {
+            if flag == '#' {
+                return Err("the # flag".to_owned());
+            }
+            left |= flag == '-';
+            zero |= flag == '0';
+            chars.next();
+        }
+        let number = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+            let mut n = None;
+            while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+                n = Some(n.unwrap_or(0) * 10 + d as usize);
+                chars.next();
+            }
+            n
+        };
+        let width = number(&mut chars).unwrap_or(0);
+        let precision = if chars.peek() == Some(&'.') {
+            chars.next();
+            number(&mut chars)
+        } else {
+            None
+        };
+        // A long is a word already; a short is the word's low half.
+        let mut short = false;
+        while let Some(&size) = chars.peek().filter(|c| matches!(c, 'l' | 'h')) {
+            short = size == 'h';
+            chars.next();
+        }
+        let mut word = || if short { word() & 0xffff } else { word() };
+        let (body, numeric) = match chars.next() {
+            Some('d' | 'i') if short => ((word() as i16).to_string(), true),
+            Some('d' | 'i') => ((word() as i32).to_string(), true),
+            Some('u') => (word().to_string(), true),
+            Some('x') => (format!("{:x}", word()), true),
+            Some('X') => (format!("{:X}", word()), true),
+            Some('c') => (char::from(word() as u8).to_string(), false),
+            Some('s') => {
+                let s = text(word());
+                (
+                    precision.map_or(s.clone(), |p| s.chars().take(p).collect()),
+                    false,
+                )
+            }
+            Some('%') => ("%".to_owned(), false),
+            other => return Err(format!("the conversion {other:?}")),
+        };
+        let pad = width.saturating_sub(body.chars().count());
+        if left {
+            out.push_str(&body);
+            out.extend(std::iter::repeat_n(' ', pad));
+        } else if zero && numeric {
+            let (sign, digits) = body.split_at(usize::from(body.starts_with('-')));
+            out.push_str(sign);
+            out.extend(std::iter::repeat_n('0', pad));
+            out.push_str(digits);
+        } else {
+            out.extend(std::iter::repeat_n(' ', pad));
+            out.push_str(&body);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod printf_tests {
+    #[test]
+    fn a_format_takes_its_arguments_in_order() {
+        let mut args = [3u32, (-7i32) as u32, 0xbeef, 0x5678, 0x1_ffff].into_iter();
+        let text = super::printf(
+            "play cdaudio from %i, %03d|%-4X|%s%%|%hd",
+            || args.next().unwrap_or(0),
+            |at| format!("<{at:x}>"),
+        );
+        assert_eq!(
+            text.as_deref(),
+            Ok("play cdaudio from 3, -07|BEEF|<5678>%|-1")
+        );
+        assert!(super::printf("%f", || 0, |_| String::new()).is_err());
+    }
+}
 
 fn succeed(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)

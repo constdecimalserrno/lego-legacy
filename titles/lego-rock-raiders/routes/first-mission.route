@@ -1,0 +1,21 @@
+#lego-legacy-route 1
+# LEGO Rock Raiders, from its boot through the level select into its first
+# mission, playing.
+#
+# The boot and the level select are level-select.route's. At flip 4700 the
+# pointer moves onto the one open cavern, top left, and clicks it. The title
+# loads the mission with its loading screen up, and by flip 4800 puts up the
+# Mission Brief over the level, which is drawn in 3D behind it, turning to
+# its second page by itself. Space at 5300 and again at 5400; by 5450 the
+# brief is gone, its Red Book audio is playing, and the tutorial's first
+# instruction waits over the level while its raiders walk.
+flip 4610 move 320 222
+flip 4620 down
+flip 4622 up
+flip 4700 move 155 160
+flip 4710 down
+flip 4712 up
+flip 5300 key Space down
+flip 5302 key Space up
+flip 5400 key Space down
+flip 5402 key Space up
