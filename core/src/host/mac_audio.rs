@@ -5,25 +5,34 @@
 //! and lets the queue pull them on its own thread.
 
 use super::{sys, HostError};
-use crate::sound::RATE;
+use crate::sound::{BLOCK_FRAMES, RATE};
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 const AUDIO_TOOLBOX: &str = "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox";
 
 /// Bytes in one frame: two channels of sixteen-bit samples.
 const FRAME_BYTES: u32 = 4;
 
+/// `kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked`, and no
+/// big-endian flag: the mix's own samples.
+const SIGNED_PACKED_LITTLE_ENDIAN: u32 = 0x4 | 0x8;
+
 /// Frames in one of the queue's buffers, about 23 ms at the mix's rate.
 const BUFFER_FRAMES: u32 = 512;
 
-/// Buffers the queue holds at once: how far behind the mix a person hears.
+/// Buffers the queue holds at once.
 const BUFFERS: usize = 3;
 
-/// Samples kept waiting before the oldest are dropped, a quarter of a second:
-/// a run that falls behind the wall clock plays late, not ever later.
-const MOST_WAITING: usize = RATE as usize / 4 * 2;
+/// Samples kept waiting before the oldest are dropped: two of the mix's
+/// blocks, about 93 ms. The mix hands over a block at a time, so this much
+/// comes and goes on its own; more than it means the run stalled and then
+/// caught up, and what a person hears catches up with it.
+const MOST_WAITING: usize = 2 * BLOCK_FRAMES * 2;
+
+/// `AudioQueueDispose`'s "stop now, not after what is queued".
+const IMMEDIATELY: u8 = 1;
 
 /// An `AudioStreamBasicDescription`.
 #[repr(C)]
@@ -52,7 +61,7 @@ struct Buffer {
 }
 
 type Queue = *mut c_void;
-type Refill = extern "C" fn(*mut c_void, Queue, *mut Buffer);
+type Refill = unsafe extern "C" fn(*mut c_void, Queue, *mut Buffer);
 type NewOutput = unsafe extern "C" fn(
     *const Format,
     Refill,
@@ -73,13 +82,19 @@ struct Shared {
     enqueue: EnqueueBuffer,
 }
 
+impl Shared {
+    fn waiting(&self) -> MutexGuard<'_, VecDeque<i16>> {
+        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The Mac's default output, playing the mix.
 pub struct MacAudio {
     queue: Queue,
     dispose: Dispose,
-    /// Read by the queue's thread until the queue is disposed, so it is
-    /// dropped after.
-    shared: Box<Shared>,
+    /// Made with `Box::into_raw` and read by the queue's thread; given back to
+    /// a box only once the queue is disposed of.
+    shared: *mut Shared,
     _toolbox: sys::Library,
 }
 
@@ -90,27 +105,20 @@ impl MacAudio {
     /// When AudioToolbox is not there or the queue will not start.
     pub fn open() -> Result<Self, HostError> {
         let toolbox = sys::Library::open(AUDIO_TOOLBOX)?;
-        // Safety: each symbol is cast to the signature AudioQueue.h gives it.
+        // Safety: each type is the signature AudioQueue.h gives the function.
         let (new_output, allocate, enqueue, start, dispose) = unsafe {
             (
-                std::mem::transmute::<*mut c_void, NewOutput>(
-                    toolbox.symbol("AudioQueueNewOutput")?,
-                ),
-                std::mem::transmute::<*mut c_void, AllocateBuffer>(
-                    toolbox.symbol("AudioQueueAllocateBuffer")?,
-                ),
-                std::mem::transmute::<*mut c_void, EnqueueBuffer>(
-                    toolbox.symbol("AudioQueueEnqueueBuffer")?,
-                ),
-                std::mem::transmute::<*mut c_void, Start>(toolbox.symbol("AudioQueueStart")?),
-                std::mem::transmute::<*mut c_void, Dispose>(toolbox.symbol("AudioQueueDispose")?),
+                toolbox.function::<NewOutput>("AudioQueueNewOutput")?,
+                toolbox.function::<AllocateBuffer>("AudioQueueAllocateBuffer")?,
+                toolbox.function::<EnqueueBuffer>("AudioQueueEnqueueBuffer")?,
+                toolbox.function::<Start>("AudioQueueStart")?,
+                toolbox.function::<Dispose>("AudioQueueDispose")?,
             )
         };
         let format = Format {
             sample_rate: f64::from(RATE),
             format_id: u32::from_be_bytes(*b"lpcm"),
-            // Signed integers, packed, little-endian: what the mix makes.
-            format_flags: 0x4 | 0x8,
+            format_flags: SIGNED_PACKED_LITTLE_ENDIAN,
             bytes_per_packet: FRAME_BYTES,
             frames_per_packet: 1,
             bytes_per_frame: FRAME_BYTES,
@@ -118,25 +126,30 @@ impl MacAudio {
             bits_per_channel: 16,
             reserved: 0,
         };
-        let shared = Box::new(Shared {
+        let shared = Box::into_raw(Box::new(Shared {
             waiting: Mutex::new(VecDeque::new()),
             enqueue,
-        });
+        }));
         let mut queue: Queue = std::ptr::null_mut();
-        // Safety: the format and the shared state outlive the queue, which
-        // calls back on its own thread because no run loop is given.
-        let status = unsafe {
+        // Safety: the queue copies the format; the shared state lives until
+        // the queue is disposed of, and the queue calls back on its own thread
+        // because no run loop is given.
+        let made = unsafe {
             new_output(
                 &format,
                 refill,
-                std::ptr::from_ref::<Shared>(&shared).cast_mut().cast(),
+                shared.cast(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
                 &mut queue,
             )
         };
-        checked("AudioQueueNewOutput", status)?;
+        if let Err(e) = status("AudioQueueNewOutput", made) {
+            // Safety: no queue was made, so nothing else holds the pointer.
+            drop(unsafe { Box::from_raw(shared) });
+            return Err(e);
+        }
         // From here the queue is disposed of if anything below fails.
         let audio = Self {
             queue,
@@ -146,59 +159,49 @@ impl MacAudio {
         };
         for _ in 0..BUFFERS {
             let mut buffer: *mut Buffer = std::ptr::null_mut();
-            // Safety: a live queue; the buffer it hands back is its own.
-            checked("AudioQueueAllocateBuffer", unsafe {
-                allocate(audio.queue, BUFFER_FRAMES * FRAME_BYTES, &mut buffer)
-            })?;
-            // The first buffers are silence; each one the queue finishes is
-            // refilled from what is waiting.
-            refill(
-                std::ptr::from_ref::<Shared>(&audio.shared)
-                    .cast_mut()
-                    .cast(),
-                audio.queue,
-                buffer,
-            );
+            // Safety: a live queue, and the buffer it hands back is its own,
+            // with `capacity` bytes behind `data`. The first buffers are
+            // silence; each one the queue finishes is refilled from what is
+            // waiting.
+            unsafe {
+                status(
+                    "AudioQueueAllocateBuffer",
+                    allocate(queue, BUFFER_FRAMES * FRAME_BYTES, &mut buffer),
+                )?;
+                std::slice::from_raw_parts_mut((*buffer).data, (*buffer).capacity as usize).fill(0);
+                (*buffer).size = (*buffer).capacity;
+                status(
+                    "AudioQueueEnqueueBuffer",
+                    enqueue(queue, buffer, 0, std::ptr::null()),
+                )?;
+            }
         }
         // Safety: a live queue with buffers enqueued; a null time is now.
-        checked("AudioQueueStart", unsafe {
-            start(audio.queue, std::ptr::null())
-        })?;
+        status("AudioQueueStart", unsafe { start(queue, std::ptr::null()) })?;
         Ok(audio)
     }
 
     /// Take one block of the mix, to be heard as soon as the queue gets to it.
     pub fn play(&self, samples: &[i16]) {
-        let mut waiting = self
-            .shared
-            .waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        keep(&mut waiting, samples);
-    }
-
-    /// How many samples are still waiting to be heard.
-    #[must_use]
-    pub fn waiting(&self) -> usize {
-        self.shared
-            .waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        // Safety: the shared state lives as long as `self`.
+        let shared = unsafe { &*self.shared };
+        add_waiting(&mut shared.waiting(), samples);
     }
 }
 
 impl Drop for MacAudio {
     fn drop(&mut self) {
-        // Safety: disposing of the queue we made, at once, so its thread has
-        // stopped calling back before the shared state goes.
+        // Safety: the queue is ours; disposing of it immediately stops its
+        // thread calling back, after which the shared state is ours alone.
         unsafe {
-            (self.dispose)(self.queue, 1);
+            (self.dispose)(self.queue, IMMEDIATELY);
+            drop(Box::from_raw(self.shared));
         }
     }
 }
 
-fn checked(what: &'static str, status: i32) -> Result<(), HostError> {
+/// An `OSStatus` as a result.
+fn status(what: &'static str, status: i32) -> Result<(), HostError> {
     if status == 0 {
         Ok(())
     } else {
@@ -207,20 +210,19 @@ fn checked(what: &'static str, status: i32) -> Result<(), HostError> {
 }
 
 /// Fill a buffer the queue has finished with and hand it back.
-extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut Buffer) {
-    // Safety: `user` is the shared state, alive until the queue is disposed,
-    // and `buffer` is one of this queue's own, with `capacity` bytes behind
-    // `data`.
+///
+/// A refused enqueue has nowhere to be reported from the queue's thread; the
+/// queue then stops asking, and the run carries on silent.
+///
+/// # Safety
+/// `user` must be the shared state and `buffer` one of `queue`'s own.
+unsafe extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut Buffer) {
+    // Safety: as the caller promises, with `capacity` bytes behind `data`.
     unsafe {
         let shared = &*user.cast::<Shared>();
         let buffer = &mut *buffer;
         let bytes = std::slice::from_raw_parts_mut(buffer.data, buffer.capacity as usize);
-        let mut waiting = shared
-            .waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        take(&mut waiting, bytes);
-        drop(waiting);
+        fill_frames(&mut shared.waiting(), bytes);
         buffer.size = buffer.capacity;
         (shared.enqueue)(queue, buffer, 0, std::ptr::null());
     }
@@ -228,7 +230,7 @@ extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut Buffer) {
 
 /// Add samples to those waiting, dropping the oldest whole frames past
 /// [`MOST_WAITING`].
-fn keep(waiting: &mut VecDeque<i16>, samples: &[i16]) {
+fn add_waiting(waiting: &mut VecDeque<i16>, samples: &[i16]) {
     waiting.extend(samples);
     let over = waiting.len().saturating_sub(MOST_WAITING) & !1;
     waiting.drain(..over);
@@ -236,7 +238,7 @@ fn keep(waiting: &mut VecDeque<i16>, samples: &[i16]) {
 
 /// Fill `bytes` with whole frames of what is waiting, and silence where there
 /// is not a whole frame to take, so the channels never swap.
-fn take(waiting: &mut VecDeque<i16>, bytes: &mut [u8]) {
+fn fill_frames(waiting: &mut VecDeque<i16>, bytes: &mut [u8]) {
     for frame in bytes.as_chunks_mut::<{ FRAME_BYTES as usize }>().0 {
         let (left, right) = match (waiting.front(), waiting.get(1)) {
             (Some(&left), Some(&right)) => {
@@ -252,43 +254,42 @@ fn take(waiting: &mut VecDeque<i16>, bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep, take, MacAudio, MOST_WAITING};
+    use super::{add_waiting, fill_frames, MacAudio, MOST_WAITING};
     use std::collections::VecDeque;
 
     #[test]
     fn a_buffer_takes_whole_frames_and_is_silent_past_them() {
         let mut waiting = VecDeque::from([1, -1, 2, -2, 3]);
         let mut bytes = [0xaa; 12];
-        take(&mut waiting, &mut bytes);
+        fill_frames(&mut waiting, &mut bytes);
         assert_eq!(bytes, [1, 0, 0xff, 0xff, 2, 0, 0xfe, 0xff, 0, 0, 0, 0]);
         assert_eq!(waiting, [3], "half a frame waits for its other half");
     }
 
     #[test]
-    fn a_run_that_falls_behind_drops_its_oldest_frames() {
+    fn a_run_that_stalls_and_catches_up_drops_its_oldest_frames() {
         let mut waiting = VecDeque::new();
         let block: Vec<i16> = (0..2048).collect();
-        for _ in 0..(MOST_WAITING / block.len() + 2) {
-            keep(&mut waiting, &block);
+        for _ in 0..5 {
+            add_waiting(&mut waiting, &block);
         }
-        assert!(waiting.len() <= MOST_WAITING);
-        assert_eq!(waiting.len() % 2, 0);
+        assert_eq!(waiting.len(), MOST_WAITING);
         assert_eq!(waiting.back(), Some(&2047), "the newest is kept");
         assert_eq!(waiting.front().map(|s| s % 2), Some(0), "a frame's left");
     }
 
     #[test]
+    #[ignore = "starts the real audio device; run with --ignored to check the queue"]
     fn the_device_pulls_what_it_is_given() {
-        let Ok(audio) = MacAudio::open() else {
-            println!("skipping: no audio device to open");
-            return;
-        };
-        // Silence, so a test run stays silent: a tenth of a second of it.
+        let audio = MacAudio::open().expect("the default output opens");
+        // Silence: a tenth of a second of it.
         audio.play(&[0; 4410]);
+        // Safety: the shared state lives as long as `audio`.
+        let shared = unsafe { &*audio.shared };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while audio.waiting() > 0 && std::time::Instant::now() < deadline {
+        while !shared.waiting().is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(audio.waiting(), 0, "the queue took the samples");
+        assert!(shared.waiting().is_empty(), "the queue took the samples");
     }
 }

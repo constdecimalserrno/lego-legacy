@@ -108,6 +108,19 @@ impl Library {
         &self.name
     }
 
+    /// A function out of the library, by name.
+    ///
+    /// # Errors
+    /// When the library does not export it.
+    ///
+    /// # Safety
+    /// `T` must be that function's signature.
+    pub unsafe fn function<T: Copy>(&self, name: &str) -> Result<T, HostError> {
+        let p = self.symbol(name)?;
+        // Safety: as the caller promises.
+        Ok(unsafe { std::mem::transmute_copy(&p) })
+    }
+
     /// Read one symbol out of the library.
     ///
     /// # Errors

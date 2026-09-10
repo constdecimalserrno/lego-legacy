@@ -94,7 +94,7 @@ pub enum HostError {
     Unsupported(&'static str),
     /// The operating system refused, with its own errno.
     Os { what: &'static str, errno: i32 },
-    /// A system framework refused, with the status it returned.
+    /// An operating system framework refused, with the status it returned.
     Status { what: &'static str, status: i32 },
 }
 

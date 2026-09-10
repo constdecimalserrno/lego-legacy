@@ -190,12 +190,13 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     // The mix runs either way; `--audio` only lets it be heard, and a Mac with
     // no output to open runs silent rather than not at all.
     if cli.audio {
-        match crate::host::mac_audio::MacAudio::open() {
-            Ok(device) => host.play_through(device),
-            Err(e) => eprintln!("lego-legacy: --audio: running silent, no audio device: {e}"),
+        if let Err(e) = host.open_audio() {
+            eprintln!("lego-legacy: --audio: running silent, no audio device: {e}");
         }
     }
-    match run(title, cli, &mut host, u64::MAX) {
+    let ran = run(title, cli, &mut host, u64::MAX);
+    host.close_audio();
+    match ran {
         Ok((finish, log)) => {
             println!("{}: {}", title.key, finish.outcome);
             println!(

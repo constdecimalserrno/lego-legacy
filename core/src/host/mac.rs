@@ -126,8 +126,8 @@ impl Runtime {
     /// # Safety
     /// `T` must be that function's signature.
     unsafe fn graphics<T: Copy>(&self, name: &str) -> Result<T, HostError> {
-        let p = self.core_graphics.symbol(name)?;
-        Ok(unsafe { std::mem::transmute_copy(&p) })
+        // Safety: as the caller promises.
+        unsafe { self.core_graphics.function(name) }
     }
 }
 
@@ -450,9 +450,19 @@ impl MacWindow {
         self.closed
     }
 
-    /// Let the mix be heard through this device from now on.
-    pub fn play_through(&mut self, device: super::mac_audio::MacAudio) {
-        self.audio = Some(device);
+    /// Let the mix be heard through the Mac's output from now on, or say why
+    /// it cannot be.
+    ///
+    /// # Errors
+    /// When there is no output to open.
+    pub fn open_audio(&mut self) -> Result<(), HostError> {
+        self.audio = Some(super::mac_audio::MacAudio::open()?);
+        Ok(())
+    }
+
+    /// Stop the output, once there is no more mix to hear.
+    pub fn close_audio(&mut self) {
+        self.audio = None;
     }
 
     /// Take everything the window system has for us, turning what a person did
