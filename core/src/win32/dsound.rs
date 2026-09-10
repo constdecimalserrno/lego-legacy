@@ -5,17 +5,17 @@
 //! host device is `--audio`'s business and the host's.
 //!
 //! A buffer the title plays becomes a voice in the machine's mixer at the
-//! declared time it was played: its samples decoded from the buffer's own
-//! format, taken to the mix's rate, and weighed by its volume, its pan, and
-//! where it is from the listener. Where it has got to, and whether it is still
-//! playing, follow from the declared clock (ADR-0003).
+//! declared time it was played: its samples read from the buffer's own bytes
+//! as the mix reaches them, taken to the mix's rate, and weighed by its volume,
+//! its pan, and where it is from the listener. Where it has got to, and whether
+//! it is still playing, follow from the declared clock (ADR-0003).
 
 use super::{ComState, Convention, Ctx, Shim, State};
 use crate::com::{wall, Interface, Method, ADD_REF, QUERY_INTERFACE, S_OK};
 use crate::cpu::x87::maths;
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
-use crate::sound::{frame_at, Format, RATE};
+use crate::sound::{frame_at, Format, Pcm};
 use std::collections::BTreeMap;
 
 pub const SHIMS: &[Shim] = &[
@@ -625,7 +625,10 @@ impl Buffer {
     }
 
     /// Bring its state up to a declared millisecond: where it is, and whether
-    /// it has stopped by playing to its end.
+    /// it has stopped by playing to its end. Only a change to how it plays
+    /// does this: a buffer asked where it is every flip and moved on each time
+    /// would lose the part of a frame each move rounds away, and drift behind
+    /// the mix.
     fn settle(&mut self, millis: u64) {
         if self.started.is_some() && self.format.is_some() {
             let (at, playing) = self.progress(millis);
@@ -637,10 +640,7 @@ impl Buffer {
 
 fn buffer<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> Option<&'a mut Buffer> {
     let identity = ctx.state.identity(this);
-    let millis = ctx.clock_millis;
-    let buffer = ctx.state.sound.buffers.get_mut(&identity)?;
-    buffer.settle(millis);
-    Some(buffer)
+    ctx.state.sound.buffers.get_mut(&identity)
 }
 
 fn place(ctx: &mut Ctx<'_>, this: u32) -> Option<Place> {
@@ -765,7 +765,7 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(DSERR_INVALIDCALL);
     };
     let at = if b.format.is_some() {
-        b.offset
+        b.progress(millis).0
     } else {
         (frame_at(millis * 1_000_000) * 4) as u32
     };
@@ -779,23 +779,25 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn status(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetStatus(out): whether it plays, and whether round and round.
-    let word = buffer(ctx, this).map(|b| match (b.started, b.looping) {
-        (None, _) => 0,
-        (Some(_), false) => DSBSTATUS_PLAYING,
-        (Some(_), true) => DSBSTATUS_PLAYING | DSBSTATUS_LOOPING,
+    let millis = ctx.clock_millis;
+    let word = buffer(ctx, this).map(|b| match (b.progress(millis).1, b.looping) {
+        (false, _) => 0,
+        (true, false) => DSBSTATUS_PLAYING,
+        (true, true) => DSBSTATUS_PLAYING | DSBSTATUS_LOOPING,
     });
     write_word(ctx, args[0], word)
 }
 
 fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Lock(offset, bytes, out1, len1, out2, len2, flags). The guest is handed
-    // real guest memory to write its samples into, which is what makes the
-    // mixer able to read them back.
-    // ponytail: what is written into a buffer already playing is not heard
-    // until it is played again; a title that streams into a looping buffer
-    // needs the mixer to read the buffer as it goes.
+    // real guest memory to write its samples into, which is what the mixer
+    // reads as it plays: what a title streams into a buffer already playing
+    // is heard when the mix gets to it.
     const DSBLOCK_FROMWRITECURSOR: u32 = 0x1;
     const DSBLOCK_ENTIREBUFFER: u32 = 0x2;
+    ctx.state
+        .mixer
+        .catch_up(ctx.clock_millis * 1_000_000, &*ctx.mem);
     let Some((store, bytes)) = buffer(ctx, this).map(|b| (b.store, b.bytes)) else {
         return Ok(DSERR_INVALIDCALL);
     };
@@ -872,13 +874,18 @@ fn weights(buffer: &Buffer, listener: &Listener) -> (f64, f64) {
 
 fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Play(reserved, priority, flags): from where the buffer is, round and
-    // round when DSBPLAY_LOOPING asks.
+    // round when DSBPLAY_LOOPING asks. A buffer already playing only takes
+    // the flag, and goes on from where it is.
     const DSBPLAY_LOOPING: u32 = 0x1;
     let looping = args[2] & DSBPLAY_LOOPING != 0;
     let millis = ctx.clock_millis;
     let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
     };
+    if b.progress(millis).1 && b.looping == looping {
+        return Ok(S_OK);
+    }
+    b.settle(millis);
     b.looping = looping;
     b.started = Some(millis);
     start_voice(ctx, this)
@@ -886,11 +893,9 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 /// Put a playing buffer's sound in the mixer, from where it is now.
 ///
-/// ponytail: the whole buffer is decoded and taken to the mix's rate each time
-/// it starts; and its volume, pan and
-/// position are taken then, so a title moving a sound while it plays is heard
-/// where it last started. A buffer changed often while it plays wants the
-/// mixer to read it and weigh it as it goes.
+/// ponytail: its volume, pan and position are taken when it starts, so a
+/// title moving a 3D sound while it plays is heard where it last started; a
+/// sound moved while it plays wants the mixer to weigh it as it goes.
 fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let millis = ctx.clock_millis;
@@ -902,58 +907,28 @@ fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
     let (Some(format), Some(rate), Some(_)) = (b.format.as_ref(), b.rate(), b.started) else {
         return Ok(S_OK);
     };
-    let data = ctx
-        .mem
-        .slice(b.store, b.bytes as usize)
-        .map_err(Stop::Fault)?;
-    let decoded = format.stereo(data).map_err(|e| Stop::NotWritten {
-        what: format!("IDirectSoundBuffer::Play: {e}"),
-        caller: 0,
+    // A DirectSound buffer holds PCM, and nothing else.
+    let pcm = Pcm::new(b.store, b.bytes, format, rate, weights(&b, &listener)).map_err(|e| {
+        Stop::NotWritten {
+            what: format!("IDirectSoundBuffer: {e}"),
+            caller: 0,
+        }
     })?;
-    let (left, right) = weights(&b, &listener);
-    let samples = resample(&decoded, rate, left, right);
-    let first = u64::from(b.offset / b.align()) * u64::from(RATE) / u64::from(rate);
+    let first = u64::from(b.offset / b.align());
     ctx.state
         .mixer
-        .start(identity, samples, first, millis * 1_000_000, b.looping);
+        .play_buffer(identity, pcm, first, millis * 1_000_000, b.looping);
     Ok(S_OK)
-}
-
-/// Stereo samples at one rate taken to the mix's, each output sample drawn
-/// straight between the two input samples either side of it, and weighed on
-/// each side.
-fn resample(stereo: &[i16], rate: u32, left: f64, right: f64) -> Vec<i16> {
-    let frames = stereo.len() / 2;
-    if frames == 0 {
-        return Vec::new();
-    }
-    let (rate, mix) = (u64::from(rate.max(1)), u64::from(RATE));
-    let out_frames = (frames as u64 * mix / rate) as usize;
-    let weigh = |s: f64, w: f64| (s * w).round().clamp(-32768.0, 32767.0) as i16;
-    (0..out_frames as u64)
-        .flat_map(|n| {
-            // Where this output frame falls in the input, in whole frames and
-            // the part of a frame past them, exactly.
-            let (whole, part) = (
-                (n * rate / mix) as usize,
-                (n * rate % mix) as f64 / mix as f64,
-            );
-            let (this, next) = (whole.min(frames - 1) * 2, (whole + 1).min(frames - 1) * 2);
-            let between = |i: usize| {
-                f64::from(stereo[this + i]) * (1.0 - part) + f64::from(stereo[next + i]) * part
-            };
-            [weigh(between(0), left), weigh(between(1), right)]
-        })
-        .collect()
 }
 
 fn stop_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
-    let nanos = ctx.clock_millis * 1_000_000;
+    let millis = ctx.clock_millis;
     if let Some(b) = buffer(ctx, this) {
+        b.settle(millis);
         b.started = None;
     }
-    ctx.state.mixer.stop(identity, nanos);
+    ctx.state.mixer.stop(identity, millis * 1_000_000);
     Ok(S_OK)
 }
 
@@ -964,6 +939,7 @@ fn change(ctx: &mut Ctx<'_>, this: u32, edit: impl FnOnce(&mut Buffer)) -> Resul
     let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
     };
+    b.settle(millis);
     edit(b);
     if b.started.is_some() {
         b.started = Some(millis);
@@ -986,7 +962,7 @@ fn set_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> 
 
 #[cfg(test)]
 mod tests {
-    use super::{gain, resample, weights, Buffer, Listener, Place};
+    use super::{gain, weights, Buffer, Listener, Place};
     use crate::sound::Format;
 
     fn mono_16bit(rate: u32) -> Format {
@@ -1041,15 +1017,6 @@ mod tests {
         assert!(
             (right - 0.25).abs() < 1e-9,
             "twice the rolloff, twice as fast"
-        );
-    }
-
-    #[test]
-    fn a_sound_at_half_the_rate_takes_twice_as_long_and_is_drawn_between() {
-        let stereo = [100, -100, 200, -200];
-        assert_eq!(
-            resample(&stereo, 11_025, 1.0, 0.5),
-            [100, -50, 150, -75, 200, -100, 200, -100]
         );
     }
 }

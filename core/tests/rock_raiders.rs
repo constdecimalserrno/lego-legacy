@@ -722,11 +722,11 @@ const ROCKFALL: u64 = 4648;
 /// A flip well after the level select came in, with nothing clicked since.
 const WAITING_IN_THE_LEVEL_SELECT: u64 = 4700;
 
-/// Enough instructions for the level select and a few dozen flips of it: the
-/// rockfall is fifty flips after the menu and the level select waits at tens
-/// of thousands of instructions a flip, where the menu's first-light budget
-/// already leaves room.
-const LEVEL_SELECT_BUDGET: u64 = FIRST_LIGHT_BUDGET;
+/// Enough instructions for the level select and a couple of hundred flips of
+/// it: the rockfall is fifty flips after the menu, and the level select waits
+/// at about a quarter of a million instructions a flip, long enough for the
+/// menu's ambience to go past the end of the buffer it is streamed through.
+const LEVEL_SELECT_BUDGET: u64 = FIRST_LIGHT_BUDGET + 25_000_000;
 
 /// The committed route to the level select, replayed, keeping the frames the
 /// tests look at.
@@ -864,6 +864,29 @@ fn the_sounds_the_title_plays_are_mixed_on_the_declared_clock() {
         "the rockfall is heard over the menu: {} against {}",
         mean(&rockfall),
         mean(&menu)
+    );
+
+    // The ambience is a minute and a half of sound streamed through a buffer
+    // three seconds long, the title writing each next part into the part
+    // already played (#23). Three seconds on, in the level select, what is
+    // heard is the next part rather than the first three seconds again.
+    const STREAM_BUFFER_FRAMES: usize = 3 * lego_legacy_core::sound::RATE as usize;
+    let mix = ran.host.audio_blocks.concat();
+    let block = ran.host.audio_blocks[0].len();
+    let menu_at = block
+        * ran
+            .host
+            .audio_flips
+            .iter()
+            .position(|flip| *flip >= AMBIENCE_PLAYS)
+            .expect("mixed in the menu");
+    // A fifth of a second of stereo samples from a point in the mix.
+    let heard = |from: usize| mix.get(from..from + 8820).expect("mixed this far");
+    let later = heard(menu_at + STREAM_BUFFER_FRAMES * 2);
+    assert!(later.iter().any(|s| *s != 0), "the ambience is still heard");
+    assert!(
+        heard(menu_at) != later,
+        "the ambience goes on past its buffer's first three seconds"
     );
 }
 

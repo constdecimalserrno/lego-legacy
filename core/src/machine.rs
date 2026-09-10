@@ -901,7 +901,7 @@ impl Machine {
     /// Hand the host every block of the mix the declared clock has passed.
     /// Mixing runs whether or not a device takes the samples.
     fn mix(&mut self, host: &mut dyn Host) {
-        for block in self.state.mixer.due(self.clock.nanos()) {
+        for block in self.state.mixer.due(self.clock.nanos(), &self.arena) {
             host.audio(&block);
         }
     }
