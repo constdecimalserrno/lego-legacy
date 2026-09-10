@@ -36,6 +36,8 @@ pub enum Outcome {
     Wall { what: String },
     /// The instruction budget ran out first.
     BudgetExhausted,
+    /// The person closed the window.
+    Closed,
 }
 
 impl fmt::Display for Outcome {
@@ -44,6 +46,7 @@ impl fmt::Display for Outcome {
             Self::Exited { code } => write!(f, "exited {code}"),
             Self::Wall { what } => write!(f, "wall: {what}"),
             Self::BudgetExhausted => write!(f, "budget exhausted"),
+            Self::Closed => write!(f, "window closed"),
         }
     }
 }
@@ -160,6 +163,11 @@ impl Machine {
         let outcome = loop {
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
+            }
+            // A person closing the window ends the run there and then, with
+            // the log written up to the instruction it stopped on.
+            if host.closed() {
+                break Outcome::Closed;
             }
             // A call that lands on the boundary is a call into something
             // Microsoft wrote. Either it is implemented here, or the run stops

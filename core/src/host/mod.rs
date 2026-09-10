@@ -6,6 +6,8 @@
 //! [`Host`] and nothing else.
 
 pub mod headless;
+#[cfg(target_os = "macos")]
+pub mod mac;
 pub mod sys;
 
 use std::fmt;
@@ -125,6 +127,12 @@ pub trait Host {
     /// # Errors
     /// When the backend has no dynamic loader, or the library is absent.
     fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError>;
+
+    /// Whether the person has ended the run from outside it, by closing the
+    /// window. A host with no window never has.
+    fn closed(&self) -> bool {
+        false
+    }
 
     /// Hold presentation back so that a game-second takes a wall-second
     /// (ADR-0003). A headless host does nothing here and runs uncapped.

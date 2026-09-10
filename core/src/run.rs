@@ -61,13 +61,12 @@ pub fn main(title: &Title) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if !cli.headless {
-        eprintln!("lego-legacy: no window is built yet (#6); run with --headless for now");
-        return ExitCode::FAILURE;
-    }
     if cli.repl {
         eprintln!("lego-legacy: the debugger is not built yet (#14)");
         return ExitCode::FAILURE;
+    }
+    if !cli.headless {
+        return windowed(title, &cli);
     }
     let mut host = Headless::new();
     match run(title, &cli, &mut host, u64::MAX) {
@@ -92,4 +91,58 @@ pub fn main(title: &Title) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Run a title in a window on the host's screen.
+///
+/// The window stays open after the guest has finished, because a frame that
+/// flashes past is not something a person can look at.
+#[cfg(target_os = "macos")]
+fn windowed(title: &Title, cli: &Cli) -> ExitCode {
+    use crate::host::mac::MacWindow;
+
+    // The window opens at the declared machine's own screen size; the guest's
+    // frame is scaled into it, its aspect kept, and the guest is never told.
+    let mut host = match MacWindow::open(title.key, 640, 480) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("lego-legacy: no window: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(title, cli, &mut host, u64::MAX) {
+        Ok((finish, log)) => {
+            println!("{}: {}", title.key, finish.outcome);
+            println!(
+                "cursor {} flips {} declared-ms {} log {}",
+                finish.cursor,
+                finish.flips,
+                finish.declared_millis,
+                log.dir().join("log").display()
+            );
+            if finish.flips > 0 {
+                println!("close the window to end");
+                while !host.closed() {
+                    host.pump();
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+            }
+            match finish.outcome {
+                Outcome::Exited { code } => {
+                    ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0xff))
+                }
+                _ => ExitCode::FAILURE,
+            }
+        }
+        Err(e) => {
+            eprintln!("lego-legacy: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn windowed(_title: &Title, _cli: &Cli) -> ExitCode {
+    eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
+    ExitCode::FAILURE
 }
