@@ -151,6 +151,15 @@ pub struct State {
     pub keys_down: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
     pub mouse_delta: (i32, i32),
+    /// What a person did, waiting in the buffered lane: where in the device's
+    /// data format it happened and what the value there became, oldest first.
+    /// A title reads one of these lanes or the other, and this machine keeps
+    /// both because which one it reads is the title's business.
+    pub mouse_data: VecDeque<(u32, u32)>,
+    pub keyboard_data: VecDeque<(u32, u32)>,
+    /// The number the next buffered event carries. DirectInput's own sequence
+    /// numbers only have to rise.
+    pub input_sequence: u32,
     /// Whether the pointer's button is down.
     pub mouse_down: bool,
     /// Window messages waiting for the title to take them, oldest first.
@@ -225,6 +234,9 @@ impl State {
             cleared: 0,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
+            mouse_data: VecDeque::new(),
+            keyboard_data: VecDeque::new(),
+            input_sequence: 0,
             mouse_down: false,
             messages: VecDeque::new(),
             dialog: None,
@@ -274,6 +286,27 @@ impl State {
             }
         }
         state
+    }
+
+    /// Put one thing a person did in a device's buffered lane.
+    ///
+    /// A lane nobody reads does not grow without end: past what a device
+    /// buffers, the oldest goes, which is what a real device does when a
+    /// title stops asking.
+    // ponytail: a declared 1024 events a device, which is more than any
+    // title asks for; a title that asks for more is the reason to read
+    // DIPROP_BUFFERSIZE.
+    pub fn buffer_input(&mut self, keyboard: bool, offset: u32, value: u32) {
+        const MOST: usize = 1024;
+        let lane = if keyboard {
+            &mut self.keyboard_data
+        } else {
+            &mut self.mouse_data
+        };
+        lane.push_back((offset, value));
+        while lane.len() > MOST {
+            lane.pop_front();
+        }
     }
 
     /// What the guest reads out of the mouse device: three axes and four

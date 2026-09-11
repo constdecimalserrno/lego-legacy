@@ -239,13 +239,62 @@ fn device_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     Ok(DI_OK)
 }
 
-fn device_data(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // GetDeviceData(size, out, count, flags). Nothing is buffered: this
-    // machine delivers input at the flip boundary and a title reads the state
-    // rather than a queue.
-    let count_at = args[2];
+/// `DIGDD_PEEK`: look at what is waiting without taking it.
+const PEEK: u32 = 1;
+
+fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetDeviceData(size, out, count, flags). A title that reads its device
+    // this way gets what a person did, oldest first; one that reads the state
+    // instead gets the same input through `device_state`.
+    let (size, out, count_at, flags) = (args[0], args[1], args[2], args[3]);
+    let keyboard = matches!(
+        ctx.state.com(this).map(|o| &o.state),
+        Some(ComState::Device { keyboard: true, .. })
+    );
+    let asked = if count_at == 0 {
+        0
+    } else {
+        ctx.mem.read_u32(count_at).map_err(Stop::Fault)?
+    };
+    let waiting = if keyboard {
+        ctx.state.keyboard_data.len()
+    } else {
+        ctx.state.mouse_data.len()
+    };
+    // A title asks how much is waiting by passing no buffer, and empties the
+    // lane by passing none and not peeking.
+    let take = (asked as usize).min(waiting);
+    let stamp = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
+    for i in 0..take {
+        let lane = if keyboard {
+            &mut ctx.state.keyboard_data
+        } else {
+            &mut ctx.state.mouse_data
+        };
+        let Some(&(offset, value)) = lane.get(i) else {
+            break;
+        };
+        if out != 0 {
+            let at = out + u32::try_from(i).unwrap_or(0) * size;
+            ctx.state.input_sequence += 1;
+            let sequence = ctx.state.input_sequence;
+            for (field, word) in [(0, offset), (4, value), (8, stamp), (12, sequence)] {
+                ctx.mem.write_u32(at + field, word).map_err(Stop::Fault)?;
+            }
+        }
+    }
+    if flags & PEEK == 0 {
+        let lane = if keyboard {
+            &mut ctx.state.keyboard_data
+        } else {
+            &mut ctx.state.mouse_data
+        };
+        lane.drain(..take);
+    }
     if count_at != 0 {
-        ctx.mem.write_u32(count_at, 0).map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(count_at, u32::try_from(take).unwrap_or(0))
+            .map_err(Stop::Fault)?;
     }
     Ok(DI_OK)
 }

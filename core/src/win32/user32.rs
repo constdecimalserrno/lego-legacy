@@ -688,6 +688,15 @@ fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(if ctx.state.window_made { WINDOW } else { 0 })
 }
 
+/// Where the mouse's own data format keeps what moved: the two axes, and the
+/// first button. `c_dfDIMouse`, which is the format a title asks for by name.
+const DIMOUSE_X: u32 = 0;
+const DIMOUSE_Y: u32 = 4;
+const DIMOUSE_BUTTON0: u32 = 12;
+
+/// What a device says about a button or a key that is down.
+const DOWN: u32 = 0x80;
+
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
@@ -700,8 +709,17 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
     use crate::host::Input;
     match event {
         Input::Move { x, y } => {
-            state.mouse_delta.0 += x - state.last_move.0;
-            state.mouse_delta.1 += y - state.last_move.1;
+            let (dx, dy) = (x - state.last_move.0, y - state.last_move.1);
+            state.mouse_delta.0 += dx;
+            state.mouse_delta.1 += dy;
+            // The buffered lane carries each axis that moved, where the
+            // mouse's data format keeps it.
+            if dx != 0 {
+                state.buffer_input(false, DIMOUSE_X, dx as u32);
+            }
+            if dy != 0 {
+                state.buffer_input(false, DIMOUSE_Y, dy as u32);
+            }
             state.last_move = (x, y);
             state.pointer = (x, y);
             let buttons = if state.mouse_down { MK_LBUTTON } else { 0 };
@@ -709,19 +727,23 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
         }
         Input::Down => {
             state.mouse_down = true;
+            state.buffer_input(false, DIMOUSE_BUTTON0, DOWN);
             post(state, WM_LBUTTONDOWN, MK_LBUTTON, time);
         }
         Input::Up => {
             state.mouse_down = false;
+            state.buffer_input(false, DIMOUSE_BUTTON0, 0);
             post(state, WM_LBUTTONUP, 0, time);
         }
         Input::Key { code, down } => {
             // Keys reach a title through DirectInput's keyboard, numbered as
-            // that device numbers them.
+            // that device numbers them, and a key's own number is where it
+            // sits in that device's data format.
             state.keys_down.retain(|k| *k != code);
             if down {
                 state.keys_down.push(code);
             }
+            state.buffer_input(true, code, if down { DOWN } else { 0 });
         }
     }
 }
@@ -1153,7 +1175,7 @@ fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deliver, WINDOW};
+    use super::{deliver, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW};
     use crate::host::Input;
     use crate::win32::State;
 
@@ -1204,5 +1226,48 @@ mod tests {
         let second = state.take_mouse_state();
         assert_eq!(second[..8], [2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(state.take_mouse_state()[..8], [0; 8], "looking took it");
+    }
+
+    #[test]
+    fn directinput_buffers_what_a_person_did_for_a_title_that_reads_a_queue() {
+        let mut state = State::new();
+        deliver(&mut state, Input::Move { x: 10, y: 20 }, 0);
+        deliver(&mut state, Input::Down, 0);
+        deliver(&mut state, Input::Move { x: 10, y: 18 }, 0);
+        deliver(&mut state, Input::Up, 0);
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0x39,
+                down: true,
+            },
+            0,
+        );
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0x39,
+                down: false,
+            },
+            0,
+        );
+
+        // The mouse's lane: each axis that moved, where its data format keeps
+        // it, and the button as it went down and came back up. An axis that
+        // did not move is not an event.
+        let mouse: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
+        assert_eq!(
+            mouse,
+            [
+                (DIMOUSE_X, 10),
+                (DIMOUSE_Y, 20),
+                (DIMOUSE_BUTTON0, DOWN),
+                (DIMOUSE_Y, (-2i32) as u32),
+                (DIMOUSE_BUTTON0, 0),
+            ]
+        );
+        // The keyboard's: a key is its own offset.
+        let keys: Vec<(u32, u32)> = state.keyboard_data.iter().copied().collect();
+        assert_eq!(keys, [(0x39, DOWN), (0x39, 0)]);
     }
 }
