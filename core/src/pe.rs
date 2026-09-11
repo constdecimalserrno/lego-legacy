@@ -19,6 +19,10 @@ pub enum PeError {
         scheme: &'static str,
     },
     Truncated(&'static str),
+    /// An image that has to be moved and carries nothing saying how.
+    Immovable {
+        preferred: u32,
+    },
     Fault(Fault),
 }
 
@@ -27,6 +31,11 @@ impl fmt::Display for PeError {
         match self {
             Self::NotPe(why) => write!(f, "not a PE image: {why}"),
             Self::WrongMachine(m) => write!(f, "image is for machine {m:#06x}, not x86-32"),
+            Self::Immovable { preferred } => write!(
+                f,
+                "this image asks to be loaded at {preferred:#010x}, where another one already \
+                 is, and carries no relocations to be moved by"
+            ),
             Self::Wrapped { scheme } => write!(
                 f,
                 "this image is wrapped in {scheme} copy protection. The emulator names a \
@@ -169,10 +178,25 @@ pub fn inspect(bytes: &[u8]) -> Result<Image, PeError> {
 /// When the bytes are not a 32-bit PE image, when the image is a copy
 /// protection wrapper, or when it will not fit in the arena.
 pub fn load(bytes: &[u8], mem: &mut Arena) -> Result<Image, PeError> {
+    let at = inspect(bytes)?.preferred_base;
+    load_at(bytes, at, mem)
+}
+
+/// Map an image at an address of the machine's choosing, relocating it if that
+/// is not where it asked to go.
+///
+/// A title that ships nine DLLs built against the same preferred base has
+/// eight of them to put somewhere else (#55).
+///
+/// # Errors
+/// When the bytes are not a 32-bit PE image, when the image is a copy
+/// protection wrapper, when it cannot be moved, or when it will not fit.
+pub fn load_at(bytes: &[u8], at: u32, mem: &mut Arena) -> Result<Image, PeError> {
     let mut image = inspect(bytes)?;
     if let Some(scheme) = wrapper_scheme(&image.sections) {
         return Err(PeError::Wrapped { scheme });
     }
+    image.base = at;
 
     let pe_at = u32_at(bytes, 0x3c).unwrap_or(0) as usize;
     let optional = pe_at + 24;
@@ -207,8 +231,149 @@ pub fn load(bytes: &[u8], mem: &mut Arena) -> Result<Image, PeError> {
         }
     }
 
+    if image.base != image.preferred_base {
+        let (directory, size) = (
+            u32_at(bytes, optional + 136).unwrap_or(0),
+            u32_at(bytes, optional + 140).unwrap_or(0),
+        );
+        if directory == 0 || size == 0 {
+            return Err(PeError::Immovable {
+                preferred: image.preferred_base,
+            });
+        }
+        relocate(bytes, &image, mem)?;
+    }
     image.imports = read_imports(bytes, image.base, optional)?;
     Ok(image)
+}
+
+/// Where an address inside an image sits in the file it was read from.
+///
+/// Reading a table out of the file rather than out of the arena, so every
+/// address has to come back through the section table.
+fn to_file(bytes: &[u8], rva: u32) -> Option<usize> {
+    let pe_at = u32_at(bytes, 0x3c)? as usize;
+    let optional_size = u16_at(bytes, pe_at + 20)? as usize;
+    let count = u16_at(bytes, pe_at + 6)? as usize;
+    let table = pe_at + 24 + optional_size;
+    for i in 0..count {
+        let at = table + i * 40;
+        let va = u32_at(bytes, at + 12)?;
+        let vsize = u32_at(bytes, at + 8)?;
+        let raw_size = u32_at(bytes, at + 16)?;
+        let raw = u32_at(bytes, at + 20)?;
+        let span = vsize.max(raw_size);
+        if rva >= va && rva < va.saturating_add(span) {
+            return Some((raw + (rva - va)) as usize);
+        }
+    }
+    None
+}
+
+/// A NUL-terminated name at an address inside an image.
+fn name_at(bytes: &[u8], rva: u32) -> Option<String> {
+    let at = to_file(bytes, rva)?;
+    let end = bytes.get(at..)?.iter().position(|b| *b == 0)? + at;
+    Some(String::from_utf8_lossy(&bytes[at..end]).into_owned())
+}
+
+/// What a binary offers to everything that imports it.
+///
+/// A name, an ordinal, or a forwarder: a name that stands for one in another
+/// binary, which is how MSVCP60 hands half of itself off to MSVCRT.
+#[derive(Debug, Default)]
+pub struct Exports {
+    /// Exported names, to the address inside the image.
+    pub by_name: std::collections::BTreeMap<String, u32>,
+    /// Exported ordinals, to the same.
+    pub by_ordinal: std::collections::BTreeMap<u16, u32>,
+    /// Names that stand for a name somewhere else, as `DLL.Name`.
+    pub forwards: std::collections::BTreeMap<String, String>,
+    /// Ordinals that do the same.
+    pub forwards_by_ordinal: std::collections::BTreeMap<u16, String>,
+}
+
+/// Read what an image exports, as addresses inside it.
+///
+/// # Errors
+/// When the bytes are not a 32-bit PE image.
+pub fn exports(bytes: &[u8]) -> Result<Exports, PeError> {
+    inspect(bytes)?;
+    let pe_at = u32_at(bytes, 0x3c).unwrap_or(0) as usize;
+    let optional = pe_at + 24;
+    let (directory, size) = (
+        u32_at(bytes, optional + 96).unwrap_or(0),
+        u32_at(bytes, optional + 100).unwrap_or(0),
+    );
+    let mut out = Exports::default();
+    if directory == 0 {
+        return Ok(out);
+    }
+    let Some(at) = to_file(bytes, directory) else {
+        return Ok(out);
+    };
+    let first = u32_at(bytes, at + 16).unwrap_or(0);
+    let functions = u32_at(bytes, at + 20).unwrap_or(0);
+    let named = u32_at(bytes, at + 24).unwrap_or(0);
+    let addresses = u32_at(bytes, at + 28).unwrap_or(0);
+    let names = u32_at(bytes, at + 32).unwrap_or(0);
+    let ordinals = u32_at(bytes, at + 36).unwrap_or(0);
+
+    // An address inside the export directory itself is not code: it is the
+    // name of what stands in for it, somewhere else.
+    let forwarded = |rva: u32| rva >= directory && rva < directory.saturating_add(size);
+
+    let address_of =
+        |index: u32| -> Option<u32> { u32_at(bytes, to_file(bytes, addresses + index * 4)?) };
+    for index in 0..functions {
+        let Some(rva) = address_of(index) else {
+            continue;
+        };
+        if rva == 0 {
+            continue;
+        }
+        let ordinal = u16::try_from(first + index).unwrap_or(0);
+        if forwarded(rva) {
+            if let Some(to) = name_at(bytes, rva) {
+                out.forwards_by_ordinal.insert(ordinal, to);
+            }
+        } else {
+            out.by_ordinal.insert(ordinal, rva);
+        }
+    }
+    for i in 0..named {
+        let Some(name_rva) = to_file(bytes, names + i * 4).and_then(|a| u32_at(bytes, a)) else {
+            continue;
+        };
+        let Some(name) = name_at(bytes, name_rva) else {
+            continue;
+        };
+        let Some(index) = to_file(bytes, ordinals + i * 2).and_then(|a| u16_at(bytes, a)) else {
+            continue;
+        };
+        let Some(rva) = address_of(u32::from(index)) else {
+            continue;
+        };
+        if forwarded(rva) {
+            if let Some(to) = name_at(bytes, rva) {
+                out.forwards.insert(name, to);
+            }
+        } else {
+            out.by_name.insert(name, rva);
+        }
+    }
+    Ok(out)
+}
+
+/// What an image imports, as addresses inside it once it is at `base`.
+///
+/// # Errors
+/// When the bytes are not a 32-bit PE image, or its import table runs off the
+/// end of them.
+pub fn imports_of(bytes: &[u8], base: u32) -> Result<Vec<Import>, PeError> {
+    inspect(bytes)?;
+    let pe_at = u32_at(bytes, 0x3c).unwrap_or(0) as usize;
+    read_imports(bytes, base, pe_at + 24)
 }
 
 /// The names an image imports, in the order its own tables give them.
@@ -299,9 +464,11 @@ pub fn relocate(bytes: &[u8], image: &Image, mem: &mut Arena) -> Result<usize, P
     }
     let pe_at = u32_at(bytes, 0x3c).unwrap_or(0) as usize;
     let optional = pe_at + 24;
+    // Data directory five. It was read as seven, which is the architecture
+    // directory and is always empty, so nothing had ever been relocated (#55).
     let (directory, size) = (
-        u32_at(bytes, optional + 152).unwrap_or(0),
-        u32_at(bytes, optional + 156).unwrap_or(0),
+        u32_at(bytes, optional + 136).unwrap_or(0),
+        u32_at(bytes, optional + 140).unwrap_or(0),
     );
     if directory == 0 || size == 0 {
         return Ok(0);

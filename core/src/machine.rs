@@ -76,6 +76,11 @@ pub struct Machine {
     pub boundary: Boundary,
     /// The image this machine is running, once one is loaded.
     pub image: Option<crate::pe::Image>,
+    /// The binaries the title ships beside it, loaded as guest code (#55).
+    pub modules: crate::loader::Modules,
+    /// How many names were bound across every image, which is what the run log
+    /// says about the loader's work.
+    pub bound_names: usize,
     /// Everything the guest holds that is not memory.
     pub state: State,
     /// What the declared machine has on its disc.
@@ -127,6 +132,8 @@ impl Machine {
             flips: 0,
             boundary: Boundary::new(),
             image: None,
+            modules: crate::loader::Modules::new(),
+            bound_names: 0,
             state: State::new(),
             tree: crate::install::Tree::new(),
             title,
@@ -471,9 +478,47 @@ impl Machine {
         // The guest starts where it was installed, as a player double-clicking
         // it would.
         self.state.current_directory = title.install_dir.to_owned();
-        self.boundary.bind(&image.imports, &mut self.arena)?;
+
+        // Every binary the title ships beside its executable, loaded as guest
+        // code (ADR-0002, #55). What the declared tree does not hold is
+        // Microsoft's, and the boundary stands where its exports would be.
+        for import in &image.imports {
+            self.modules.load(
+                &import.dll,
+                title.install_dir,
+                &mut self.tree,
+                &mut self.arena,
+            )?;
+        }
+        let mut bound = 0;
+        for module in 0..self.modules.modules().len() {
+            let (name, base) = {
+                let m = &self.modules.modules()[module];
+                (m.name.clone(), m.base)
+            };
+            let bytes = self
+                .tree
+                .read(&format!("{}\\{name}", title.install_dir))
+                .unwrap_or_default();
+            let imports = crate::pe::imports_of(&bytes, base)?;
+            bound += imports.len();
+            self.modules
+                .bind(&imports, &mut self.boundary, &mut self.arena)?;
+        }
+        self.modules
+            .bind(&image.imports, &mut self.boundary, &mut self.arena)?;
+        let attach = self
+            .modules
+            .attach_program(image.base.wrapping_add(image.entry), &mut self.boundary);
+        self.arena
+            .write(crate::loader::ATTACH_PROGRAM, &attach)
+            .map_err(crate::pe::PeError::Fault)?;
+        self.bound_names = bound + image.imports.len();
+
         self.cpu = Cpu {
-            eip: image.base.wrapping_add(image.entry),
+            // The guest starts in the loader's own program, which attaches
+            // every module and jumps to the title's entry point.
+            eip: crate::loader::ATTACH_PROGRAM,
             r: {
                 let mut r = [0u32; 8];
                 r[crate::cpu::ESP] = STACK_TOP - 16;
@@ -502,6 +547,17 @@ impl Machine {
             None => {
                 let bound = match self.boundary.at(addr) {
                     Some(Entry::Return) => return self.guest_returned(log),
+                    // The loader's own program jumped here, which a module
+                    // only makes it do by refusing to attach (#55).
+                    Some(Entry::Attach { module }) => {
+                        return Err(Stop::NotWritten {
+                            what: format!(
+                                "{module} did not attach: its DllMain answered zero, and a \
+                                 module that says it is not there is not called into"
+                            ),
+                            caller: self.cpu.eip,
+                        })
+                    }
                     Some(Entry::Method { interface, slot }) => {
                         Bound::Method(win32::com_method(interface, *slot))
                     }
@@ -575,6 +631,7 @@ impl Machine {
             title: self.title,
             log,
             tree: &mut self.tree,
+            modules: &mut self.modules,
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
             call_guest: None,
@@ -866,6 +923,7 @@ impl Machine {
             title: self.title,
             log,
             tree: &mut self.tree,
+            modules: &mut self.modules,
             clock_millis: self.clock.millis(),
             boundary: &mut self.boundary,
             call_guest: None,

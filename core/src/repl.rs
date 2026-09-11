@@ -161,8 +161,16 @@ pub fn drive(
                 }
                 let _ = writeln!(output, "eip {:#010x}", machine.cpu.eip);
                 let _ = writeln!(output, "eflags {:#010x}", machine.cpu.flags.to_eflags());
-                for (name, value) in SEG_NAMES.iter().zip(machine.cpu.seg) {
-                    let _ = writeln!(output, "{name} {value:#06x}");
+                for (i, (name, value)) in SEG_NAMES.iter().zip(machine.cpu.seg).enumerate() {
+                    // A segment with a base of its own is `fs` over the thread
+                    // information block (#54), and what it adds to an address
+                    // is the only interesting thing about it here.
+                    let base = machine.cpu.seg_base[i];
+                    if base == 0 {
+                        let _ = writeln!(output, "{name} {value:#06x}");
+                    } else {
+                        let _ = writeln!(output, "{name} {value:#06x} base {base:#010x}");
+                    }
                 }
                 let _ = writeln!(output, "cursor {}", machine.clock.cursor());
             }

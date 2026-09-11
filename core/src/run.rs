@@ -67,6 +67,16 @@ pub fn run_digested(
                 image.imports.len()
             ));
         }
+        // Every binary the title ships beside it runs as guest code
+        // (ADR-0002, #55), and where each one landed is worth saying: a
+        // wall's caller is otherwise an address in nothing.
+        for module in machine.modules.modules() {
+            log.line(&format!(
+                "module {} base {:#010x} dllmain {:#010x}",
+                module.name, module.base, module.entry
+            ));
+        }
+        log.line(&format!("bound {} names", machine.bound_names));
     }
     // A route is the run's only recorded input (ADR-0003).
     if let Some(path) = &cli.route {

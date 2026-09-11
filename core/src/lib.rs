@@ -16,6 +16,7 @@ pub mod host;
 pub mod inflate;
 pub mod install;
 pub mod iv50;
+pub mod loader;
 pub mod machine;
 pub mod pe;
 pub mod png;

@@ -122,15 +122,15 @@ fn the_title_starts_from_its_cabinet_and_walls_by_name() {
     testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 100_000)
         .assert_logged("image LEGOATeam.exe")
         .assert_logged("imports 328")
-        .assert_logged("installed 61 files")
-        .assert_wall("MSVCRT.dll!");
+        .assert_logged("installed 61 files");
 }
 
-/// An MSVC image installs an exception frame on `fs:[0]` before it does
-/// anything else. With `fs` flat that is guest address zero; with the declared
-/// thread information block it is the block's own first word (#54).
+/// An MSVC image reads and writes `fs:[0]` before it does anything else, and
+/// every one of the twelve this title ships is an MSVC image. With `fs` flat
+/// that address is guest zero; the declared thread information block is what
+/// it is instead (#54).
 #[test]
-fn the_first_thing_the_title_does_is_push_a_frame_onto_its_thread_block() {
+fn fs_is_based_at_the_declared_thread_information_block() {
     if !scratch() {
         return;
     }
@@ -139,25 +139,133 @@ fn the_first_thing_the_title_does_is_push_a_frame_onto_its_thread_block() {
         &ALPHA_TEAM,
         &Cli::default(),
         &mut host,
-        // Eight instructions in, the prologue has pushed its frame and
-        // pointed the chain head at it.
-        "until cursor 8\nregs\nmem 0x00200000 8\nquit\n",
+        "regs\nmem 0x00200000 0x38\nquit\n",
     )
     .expect("the title loads");
 
-    // The chain head is the frame the guest just pushed, which is on its own
-    // stack rather than at the arena's bottom.
-    let head = out
+    assert!(out.contains("fs 0x0000 base 0x00200000"), "{out}");
+    // The block itself, as the debugger dumped it.
+    let bytes: Vec<u8> = out
         .lines()
-        .find(|l| l.contains("00200000"))
-        .expect("the block reads");
-    assert!(
-        head.contains("dc ff 1f 00"),
-        "the chain head points at the frame on the stack: {head}"
+        .filter(|l| l.contains("0x0020"))
+        .flat_map(str::split_whitespace)
+        .filter(|t| t.len() == 2)
+        .filter_map(|b| u8::from_str_radix(b, 16).ok())
+        .collect();
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    assert_eq!(word(0x00), 0xffff_ffff, "the chain ends where it starts");
+    assert_eq!(word(0x04), lego_legacy_core::machine::STACK_TOP);
+    assert_eq!(
+        word(0x08),
+        lego_legacy_core::machine::STACK_TOP - lego_legacy_core::machine::STACK_BYTES
     );
-    // Which is also where esp is: the frame the prologue pushed.
-    assert!(out.contains("esp 0x001fffdc"), "{out}");
-    // And what it read out of the block first was the end of the chain, so
-    // the read came from the block and not from the arena's bottom.
-    assert!(out.contains("eax 0xffffffff"), "{out}");
+    assert_eq!(word(0x18), 0x0020_0000, "a block points at itself");
+    assert_eq!(word(0x20), 0x0000_1234, "the declared process");
+    assert_eq!(word(0x24), 0x0000_1000, "the declared thread");
+    assert_eq!(word(0x30), 0x0020_1000, "the process block");
+}
+
+/// Everything this title ships beside its executable is loaded as guest code,
+/// deepest first, and none of them lands where another one is (#55).
+#[test]
+fn every_binary_the_title_ships_is_loaded_in_the_order_it_has_to_attach() {
+    if !scratch() {
+        return;
+    }
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 200_000);
+    let modules: Vec<&str> = ran
+        .log
+        .lines()
+        .filter_map(|l| l.strip_prefix("module "))
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(modules.len(), 11, "{modules:?}");
+
+    // The C runtime is under everything, and the piece that reaches for the
+    // most is on top.
+    assert_eq!(modules.first(), Some(&"MSVCRT.dll"));
+    assert_eq!(modules.last(), Some(&"LoadComp.dll"));
+    // Each of these comes after what it imports.
+    for (module, needs) in [
+        ("MSVCP60.dll", "MSVCRT.dll"),
+        ("NiMain.dll", "DDPackedDirFileLib.dll"),
+        ("NiAnimation.dll", "NiMain.dll"),
+        ("BehaviorComp.dll", "BaseClassComp.dll"),
+        ("LoadComp.dll", "NiDirect3d.dll"),
+    ] {
+        let at = |name| modules.iter().position(|m| *m == name);
+        assert!(
+            at(module) > at(needs),
+            "{module} attaches after {needs}: {modules:?}"
+        );
+    }
+
+    // Nine of the twelve ask to be loaded at the same address, so eight of
+    // them went somewhere else and every one is somewhere of its own.
+    let mut bases: Vec<&str> = ran
+        .log
+        .lines()
+        .filter_map(|l| l.split(" base ").nth(1))
+        .map(|l| l.split_whitespace().next().unwrap_or(""))
+        .collect();
+    bases.sort_unstable();
+    let count = bases.len();
+    bases.dedup();
+    assert_eq!(bases.len(), count, "no two images share an address");
+}
+
+/// The imports are bound to real addresses inside those binaries rather than
+/// to places on the boundary: 328 of the entry image's own and the rest its
+/// engine's (#55).
+#[test]
+fn the_names_the_title_imports_are_bound_to_the_code_that_exports_them() {
+    if !scratch() {
+        return;
+    }
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 200_000);
+    ran.assert_logged("bound 2576 names");
+    // The run is inside the C runtime's own code by the time it stops, which
+    // it could only reach by being bound to it.
+    assert!(
+        ran.log.contains("called from 0x2"),
+        "the wall's caller is inside a loaded module: {}",
+        ran.log.lines().last().unwrap_or_default()
+    );
+}
+
+/// A forwarded export stands for one somewhere else, and this loader does not
+/// follow one. Nothing on this disc has one, and this is what says so: if a
+/// pressing ever does, the following gets written (#55).
+#[test]
+fn nothing_this_title_ships_forwards_an_export() {
+    if !scratch() {
+        return;
+    }
+    let mut tree = tree();
+    for name in [
+        "NiMain.dll",
+        "LoadComp.dll",
+        "NiAnimation.dll",
+        "NiDirect3d.dll",
+        "NiCollision.dll",
+        "NiA3dSound.dll",
+        "BaseClassComp.dll",
+        "BehaviorComp.dll",
+        "LegoLogicComp.dll",
+        "DDPackedDirFileLib.dll",
+        "MSVCRT.DLL",
+        "MSVCP60.DLL",
+        "a3dapi.dll",
+    ] {
+        let bytes = tree
+            .read(&format!("{ROOT}\\{name}"))
+            .unwrap_or_else(|| panic!("{name} is declared"));
+        let exports = lego_legacy_core::pe::exports(&bytes).expect("it is a PE image");
+        assert!(
+            exports.forwards.is_empty() && exports.forwards_by_ordinal.is_empty(),
+            "{name} forwards {} exports",
+            exports.forwards.len() + exports.forwards_by_ordinal.len()
+        );
+        assert!(!exports.by_name.is_empty(), "{name} exports something");
+    }
 }

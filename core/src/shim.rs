@@ -46,6 +46,9 @@ pub enum Entry {
         interface: &'static str,
         slot: usize,
     },
+    /// Where the loader's own program jumps when a module answers that it did
+    /// not attach (#55). Reaching it is a wall naming the module.
+    Attach { module: String },
 }
 
 /// The addresses a title's imports were bound to, and what stands behind each.
@@ -108,6 +111,16 @@ impl Boundary {
             .get(((addr - THUNK_BASE) / THUNK_STRIDE) as usize)
     }
 
+    /// Give a module a place the loader's program can jump to when its
+    /// `DllMain` says it did not attach.
+    pub fn bind_attach(&mut self, module: &str) -> u32 {
+        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
+        self.slots.push(Entry::Attach {
+            module: module.to_owned(),
+        });
+        addr
+    }
+
     /// Give an interface's slots addresses of their own, and hand back the
     /// address of each in slot order. What a vtable is filled with.
     pub fn bind_interface(&mut self, interface: &'static str, slots: usize) -> Vec<u32> {
@@ -142,7 +155,7 @@ impl Boundary {
     pub fn imports(&self) -> impl Iterator<Item = &Import> {
         self.slots.iter().filter_map(|e| match e {
             Entry::Import(import) => Some(import),
-            Entry::Method { .. } | Entry::Return => None,
+            Entry::Method { .. } | Entry::Return | Entry::Attach { .. } => None,
         })
     }
 }

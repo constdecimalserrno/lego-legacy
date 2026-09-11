@@ -658,6 +658,9 @@ pub struct Ctx<'a> {
     pub log: &'a mut RunLog,
     /// What the declared machine has on its disc.
     pub tree: &'a mut crate::install::Tree,
+    /// The binaries the title ships beside it, which a guest may ask for more
+    /// of while it runs (#55).
+    pub modules: &'a mut crate::loader::Modules,
     /// What the declared clock reads, in milliseconds.
     pub clock_millis: u64,
     /// Where an interface's methods get their addresses from.

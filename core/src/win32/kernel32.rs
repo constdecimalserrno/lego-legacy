@@ -1555,16 +1555,42 @@ fn get_windows_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // A library the title ships is a guest binary and belongs on the tree; one
-    // Microsoft wrote is written here and has no image to load. Either way the
-    // guest gets a handle, and what it does with it decides whether the run
-    // goes on.
+    // A library the title ships is a guest binary and is loaded and run as
+    // one (ADR-0002, #55); one Microsoft wrote that the disc does not carry is
+    // written here and has no image to load. Either way the guest gets a
+    // handle, and what it does with it decides whether the run goes on.
     let name = ctx.string(args[0]).map_err(Stop::Fault)?;
     ctx.log.line(&format!("load library {name}"));
-    if let Some(handle) = ctx.state.module(&name) {
-        return Ok(handle);
+    // A path is one the installer would have written; only the file at the end
+    // of it is the title's own.
+    let file = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_owned();
+    if let Some(module) = ctx.modules.base_of_name(&file) {
+        return Ok(module);
     }
-    Ok(ctx.state.give(Object::Module { name, base: 0 }))
+    let under = ctx.title.install_dir;
+    match ctx.modules.load(&file, under, ctx.tree, ctx.mem) {
+        Ok(Some(base)) => {
+            let imports = ctx
+                .tree
+                .read(&format!("{under}\\{file}"))
+                .and_then(|bytes| crate::pe::imports_of(&bytes, base).ok())
+                .unwrap_or_default();
+            ctx.modules
+                .bind(&imports, ctx.boundary, ctx.mem)
+                .map_err(Stop::Fault)?;
+            // Its own code attaches it, as it does for the ones loaded before
+            // the title started. A dynamic load passes no reserved argument.
+            if let Some(entry) = ctx.modules.entry_of(&file).filter(|e| *e != 0) {
+                ctx.call_guest = Some((entry, vec![base, 1, 0]));
+            }
+            Ok(base)
+        }
+        Ok(None) => Ok(ctx.state.give(Object::Module { name, base: 0 })),
+        Err(e) => Err(Stop::NotWritten {
+            what: format!("{file} will not load: {e}"),
+            caller: 0,
+        }),
+    }
 }
 
 fn free_library(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -1572,11 +1598,21 @@ fn free_library(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn get_proc_address(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // What a guest asks a library for by name. Answering with an address that
-    // is not there would be worse than answering with nothing: a title that
-    // probes for a symbol and finds it will then call it.
-    let name = ctx.string(args[1]).map_err(Stop::Fault)?;
+    // What a guest asks a library for by name. A library the title ships has
+    // an export table to answer from (#55); for anything else, answering with
+    // an address that is not there would be worse than answering with nothing,
+    // because a title that probes for a symbol and finds it will then call it.
+    // The top half of the argument being zero is how Windows says an ordinal
+    // rather than a pointer.
+    let name = if args[1] < 0x1_0000 {
+        format!("#{}", args[1])
+    } else {
+        ctx.string(args[1]).map_err(Stop::Fault)?
+    };
     ctx.log.line(&format!("proc address {name}"));
+    if let Some(addr) = ctx.modules.resolve_in(args[0], &name) {
+        return Ok(addr);
+    }
     ctx.state.last_error = 127;
     Ok(0)
 }
