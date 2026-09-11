@@ -306,6 +306,12 @@ impl Machine {
             if let Some(outcome) = self.run_guest(host, log, budget) {
                 break outcome;
             }
+            // The mix reaches the host between flips as well as at them: a
+            // title that goes a long way without flipping — loading a level,
+            // or thinking hard about one — would otherwise hand over nothing
+            // for as long as that took, and the device would run dry and
+            // drop what came late.
+            self.mix(host);
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
             }
