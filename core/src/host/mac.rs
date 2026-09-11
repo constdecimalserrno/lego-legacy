@@ -470,6 +470,15 @@ impl MacWindow {
         self.audio = None;
     }
 
+    /// Whether an event happened in our own window. One that did not is one
+    /// the pointer was outside the window for, and its location is in screen
+    /// coordinates.
+    fn event_is_ours(&self, event: Id) -> bool {
+        // Safety: `window` on an NSEvent, which answers a window or nil.
+        let window: Id = unsafe { self.rt.send::<MsgId>()(event, self.rt.sel("window")) };
+        std::ptr::eq(window, self.window)
+    }
+
     /// Take everything the window system has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
@@ -497,6 +506,13 @@ impl MacWindow {
                 }
                 let kind: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("type"));
                 match kind {
+                    // A mouse event of nobody's window carries screen
+                    // coordinates rather than the window's, so taking one
+                    // would throw the pointer somewhere else. Ignored, the
+                    // pointer stays where it last was inside the window,
+                    // which is what a title scrolling its camera from a
+                    // pointer held at an edge needs.
+                    1 | 2 | 5 | 6 if !self.event_is_ours(event) => {}
                     // Mouse down, mouse up, mouse moved, dragged.
                     1 => self.pending.push(Input::Down),
                     2 => self.pending.push(Input::Up),
