@@ -344,6 +344,8 @@ pub struct MacWindow {
     /// of that distance handed to the title at the moment it takes the mouse.
     last_told: (f64, f64),
     cg_associate: unsafe extern "C" fn(bool) -> i32,
+    cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
+    cg_main_display: u32,
     cg_event_field: unsafe extern "C" fn(Id, u32) -> i64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
@@ -446,9 +448,15 @@ impl MacWindow {
             let colour_space = create_space(*name.cast::<*const c_char>());
 
             let cg_associate = rt.graphics("CGAssociateMouseAndMouseCursorPosition")?;
+            let cg_show_cursor: unsafe extern "C" fn(u32) -> i32 =
+                rt.graphics("CGDisplayShowCursor")?;
+            let main_display: unsafe extern "C" fn() -> u32 = rt.graphics("CGMainDisplayID")?;
+            let cg_main_display = main_display();
             let cg_event_field = rt.graphics("CGEventGetIntegerValueField")?;
             Ok(Self {
                 cg_associate,
+                cg_show_cursor,
+                cg_main_display,
                 cg_event_field,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
@@ -734,6 +742,17 @@ impl Host for MacWindow {
         // Graphics' own switch for whether the pointer follows the mouse. Let
         // go of it, and how far the mouse moved keeps arriving however far
         // past the edge of the screen a person pushes.
+        // A run that takes the pointer arms the way back, because the pointer
+        // belongs to the person and not to the run: a signal that ends the
+        // process skips every destructor, and what is left behind is a machine
+        // with no pointer and nothing on screen saying why (#45).
+        if !show {
+            arm_the_way_back(self.cg_associate, self.cg_show_cursor, self.cg_main_display);
+        }
+        // Safety: NSCursor's own class methods, which take nothing, and Core
+        // Graphics' own switch for whether the pointer follows the mouse. Let
+        // go of it, and how far the mouse moved keeps arriving however far
+        // past the edge of the screen a person pushes.
         unsafe {
             let cursor = self.rt.class("NSCursor");
             let what = if show { "unhide" } else { "hide" };
@@ -923,4 +942,96 @@ mod tests {
         // In the bar is at the picture's edge.
         assert_eq!(guest_point(wide, (640, 480), 10.0, 480.0), (0, 240));
     }
+}
+
+/// The way back to a pointer, for a run that does not get to finish.
+///
+/// The pointer belongs to the person sitting there, not to the run. A title
+/// that draws its own takes the host's away and lets go of the one the mouse
+/// moves, and `Drop` puts both back — but a signal that ends the process runs
+/// no destructor, and what is left behind is a machine with no pointer and
+/// nothing on screen saying why (#45).
+///
+/// So the two calls that put it back are kept where a signal handler can reach
+/// them, and the handler puts the pointer back before letting the signal do
+/// what it was going to do anyway.
+mod way_back {
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    static ASSOCIATE: AtomicUsize = AtomicUsize::new(0);
+    static SHOW: AtomicUsize = AtomicUsize::new(0);
+    static DISPLAY: AtomicU32 = AtomicU32::new(0);
+    static ARMED: AtomicUsize = AtomicUsize::new(0);
+
+    /// `SIG_DFL`, and the signals that end a run someone is watching.
+    const SIG_DFL: usize = 0;
+    const SIGNALS: [i32; 3] = [1, 2, 15];
+
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+        fn raise(sig: i32) -> i32;
+    }
+
+    /// Put the pointer back, from wherever this is called.
+    ///
+    /// Safe to call when nothing was ever taken: both slots are empty and it
+    /// does nothing.
+    pub fn restore() {
+        let (associate, show) = (
+            ASSOCIATE.load(Ordering::Relaxed),
+            SHOW.load(Ordering::Relaxed),
+        );
+        if associate == 0 || show == 0 {
+            return;
+        }
+        // Safety: the two addresses were taken from Core Graphics' own symbols
+        // with these signatures, and are only ever written once.
+        unsafe {
+            let associate: unsafe extern "C" fn(bool) -> i32 = std::mem::transmute(associate);
+            let show: unsafe extern "C" fn(u32) -> i32 = std::mem::transmute(show);
+            associate(true);
+            show(DISPLAY.load(Ordering::Relaxed));
+        }
+    }
+
+    extern "C" fn on_signal(sig: i32) {
+        restore();
+        // Then let the signal be what it was: the default for it, raised
+        // again, so the run ends the way whoever sent it meant it to.
+        // Safety: libc's own, and this process is on its way out.
+        unsafe {
+            signal(sig, SIG_DFL);
+            raise(sig);
+        }
+    }
+
+    /// Remember how to put the pointer back, and arm the signals. Once.
+    pub fn arm(associate: usize, show: usize, display: u32) {
+        ASSOCIATE.store(associate, Ordering::Relaxed);
+        SHOW.store(show, Ordering::Relaxed);
+        DISPLAY.store(display, Ordering::Relaxed);
+        if ARMED.swap(1, Ordering::Relaxed) == 1 {
+            return;
+        }
+        for sig in SIGNALS {
+            // Safety: libc's own, with a handler of the shape it asks for.
+            unsafe {
+                signal(sig, on_signal as *const () as usize);
+            }
+        }
+    }
+}
+
+/// Remember how to give the pointer back, and arm the signals that would
+/// otherwise take it away for good.
+fn arm_the_way_back(
+    associate: unsafe extern "C" fn(bool) -> i32,
+    show: unsafe extern "C" fn(u32) -> i32,
+    display: u32,
+) {
+    way_back::arm(
+        associate as *const () as usize,
+        show as *const () as usize,
+        display,
+    );
 }
