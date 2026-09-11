@@ -506,13 +506,14 @@ impl MacWindow {
                 }
                 let kind: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("type"));
                 match kind {
-                    // A mouse event of nobody's window carries screen
-                    // coordinates rather than the window's, so taking one
-                    // would throw the pointer somewhere else. Ignored, the
-                    // pointer stays where it last was inside the window,
-                    // which is what a title scrolling its camera from a
-                    // pointer held at an edge needs.
-                    1 | 2 | 5 | 6 if !self.event_is_ours(event) => {}
+                    // A move of nobody's window carries screen coordinates
+                    // rather than the window's, so taking one would throw the
+                    // pointer somewhere else. Ignored, the pointer stays where
+                    // it last was inside the window, which is what a title
+                    // scrolling its camera from a pointer held at an edge
+                    // needs. A button is not ignored: a press that is dropped
+                    // is a button the guest never sees let go of.
+                    5 | 6 if !self.event_is_ours(event) => {}
                     // Mouse down, mouse up, mouse moved, dragged.
                     1 => self.pending.push(Input::Down),
                     2 => self.pending.push(Input::Up),
