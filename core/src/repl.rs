@@ -119,6 +119,9 @@ pub fn drive(
         machine.load_stub()?;
     } else {
         machine.load_title(title)?;
+        machine
+            .tree
+            .set_profile(crate::run::profile_dir(title, cli));
     }
 
     let mut breaks: Vec<u32> = Vec::new();

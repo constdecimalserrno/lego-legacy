@@ -1135,6 +1135,25 @@ fn release_mutex(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Letting go of a file the guest wrote is what puts it in the profile,
+    // where the next run will read it back: a save outlives its run.
+    if let Some(Object::File {
+        path,
+        bytes,
+        writing: true,
+        ..
+    }) = ctx.state.object_mut(args[0])
+    {
+        let (path, bytes) = (path.clone(), std::mem::take(bytes));
+        match ctx.tree.write(&path, &bytes) {
+            Ok(at) => ctx.log.line(&format!(
+                "file written {path}, {} bytes, to {}",
+                bytes.len(),
+                at.display()
+            )),
+            Err(e) => ctx.log.line(&format!("file write refused {path}: {e}")),
+        }
+    }
     Ok(u32::from(ctx.state.close(args[0])))
 }
 
@@ -1158,23 +1177,42 @@ fn set_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 const INVALID_HANDLE: u32 = 0xffff_ffff;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 
+/// The access bit that makes a handle one the guest can write through.
+const GENERIC_WRITE: u32 = 0x4000_0000;
+
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    match ctx.open_guest_file(&path) {
-        Some(bytes) => {
-            ctx.log
-                .at(crate::cli::Trace::Shims, || format!("file opened {path}"));
-            ctx.state.last_error = 0;
-            Ok(ctx.state.give(Object::File { path, bytes, at: 0 }))
-        }
+    // CreateFileA(path, access, share, security, disposition, flags, template).
+    let named = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let path = ctx.absolute(&named);
+    let writing = args[1] & GENERIC_WRITE != 0;
+    // CREATE_NEW, CREATE_ALWAYS and TRUNCATE_EXISTING all start the file
+    // empty, whatever was there before.
+    let opened = if writing && matches!(args[4], 1 | 2 | 5) {
+        Some(Vec::new())
+    } else {
+        ctx.open_guest_file(&path)
+    };
+    let bytes = match opened {
+        Some(bytes) => bytes,
+        // OPEN_ALWAYS makes what is not there.
+        None if writing && args[4] == 4 => Vec::new(),
         None => {
             // Recorded rather than passed over: what a title opens is how the
             // declared install tree learns what it has to hold.
             ctx.log.line(&format!("file missing {path}"));
             ctx.state.last_error = ERROR_FILE_NOT_FOUND;
-            Ok(INVALID_HANDLE)
+            return Ok(INVALID_HANDLE);
         }
-    }
+    };
+    ctx.log
+        .at(crate::cli::Trace::Shims, || format!("file opened {path}"));
+    ctx.state.last_error = 0;
+    Ok(ctx.state.give(Object::File {
+        path,
+        bytes,
+        at: 0,
+        writing,
+    }))
 }
 
 fn read_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1199,13 +1237,38 @@ fn read_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Writing is the profile's business, and the profile is #8's own ticket
-    // rather than this one's: what the guest writes is counted as written so
-    // it carries on, and where it lands is recorded.
-    let (handle, want, wrote_at) = (args[0], args[2], args[3]);
-    if let Some(Object::File { path, .. }) = ctx.state.object(handle) {
-        let path = path.clone();
-        ctx.log.line(&format!("file write {want} bytes to {path}"));
+    // WriteFile(handle, buffer, want, wrote, overlapped). What the guest
+    // writes is kept in the open file and reaches its profile when the file
+    // is closed.
+    let (handle, buffer, want, wrote_at) = (args[0], args[1], args[2], args[3]);
+    let given = ctx
+        .mem
+        .slice(buffer, want as usize)
+        .map_err(Stop::Fault)?
+        .to_vec();
+    match ctx.state.object_mut(handle) {
+        Some(Object::File {
+            bytes,
+            at,
+            writing: true,
+            ..
+        }) => {
+            let start = *at as usize;
+            if bytes.len() < start + given.len() {
+                bytes.resize(start + given.len(), 0);
+            }
+            bytes[start..start + given.len()].copy_from_slice(&given);
+            *at = u32::try_from(start + given.len()).unwrap_or(u32::MAX);
+        }
+        // A standard stream: the declared machine has no console to show it
+        // in, so what is written there is written and gone.
+        Some(Object::Std(_)) => {}
+        // A handle that cannot be written through says so, rather than
+        // letting a title believe its save was kept. ERROR_ACCESS_DENIED.
+        _ => {
+            ctx.state.last_error = 5;
+            return Ok(0);
+        }
     }
     if wrote_at != 0 {
         ctx.mem.write_u32(wrote_at, want).map_err(Stop::Fault)?;
@@ -1459,9 +1522,20 @@ fn find_close(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn delete_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    ctx.log.line(&format!("delete {path}"));
-    Ok(1)
+    // Only what the guest itself wrote is the guest's to delete; the
+    // pressing's own files are not, and a title is told so rather than
+    // believing a file it can still open has gone.
+    let named = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let path = ctx.absolute(&named);
+    let gone = ctx.tree.remove(&path);
+    ctx.log.line(&format!(
+        "delete {path}{}",
+        if gone { "" } else { ": nothing written there" }
+    ));
+    if !gone {
+        ctx.state.last_error = ERROR_FILE_NOT_FOUND;
+    }
+    Ok(u32::from(gone))
 }
 
 fn create_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

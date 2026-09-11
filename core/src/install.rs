@@ -4,9 +4,14 @@
 //! rather than produced by running the installer. Every file the guest can
 //! open is one the pressing carries; nothing on the host is reachable, because
 //! the guest is not on the host.
+//!
+//! What the guest writes is the one exception, and it does not reach the host
+//! either: it lands in the title's profile, a directory of its own that the
+//! guest sees as part of its disc and nothing else can be read from.
 
 use crate::disc::Iso;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 /// Where one of the guest's files comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +33,9 @@ pub struct Tree {
     /// stands behind them.
     files: BTreeMap<String, Source>,
     iso: Option<Iso>,
+    /// Where what the guest writes lands, so that a save outlives the run that
+    /// made it. Without one the guest's disc is read-only.
+    profile: Option<PathBuf>,
     /// Every path the guest asked for and did not find, in the order it asked.
     pub missing: Vec<String>,
 }
@@ -45,6 +53,7 @@ impl Tree {
             cabinet: None,
             files: BTreeMap::new(),
             iso: None,
+            profile: None,
             missing: Vec::new(),
         }
     }
@@ -52,6 +61,54 @@ impl Tree {
     /// Give the tree the pressing its files come from.
     pub fn set_disc(&mut self, iso: Iso) {
         self.iso = Some(iso);
+    }
+
+    /// Give the tree somewhere to keep what the guest writes.
+    pub fn set_profile(&mut self, dir: PathBuf) {
+        self.profile = Some(dir);
+    }
+
+    /// Where in the profile a guest path lives: one host directory per path
+    /// component, the drive letter dropped and every name as the declared
+    /// machine reads it, so a file written as one spelling is found by any
+    /// other. Nothing above the profile is reachable.
+    fn profile_path(&self, guest_path: &str) -> Option<PathBuf> {
+        let mut path = self.profile.clone()?;
+        let mut parts = 0;
+        for part in Self::key(guest_path).split('\\') {
+            if part.is_empty() || part == "." || part == ".." || part.ends_with(':') {
+                continue;
+            }
+            path.push(part);
+            parts += 1;
+        }
+        (parts > 0).then_some(path)
+    }
+
+    /// Keep what the guest wrote, where the guest will read it back from.
+    ///
+    /// # Errors
+    /// When there is no profile to write to, or the host refuses the write.
+    pub fn write(&mut self, guest_path: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+        let path = self.profile_path(guest_path).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "this run has no profile to write to",
+            )
+        })?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
+    /// Take back a file the guest wrote. What the pressing itself holds is
+    /// not the guest's to delete, and saying so is honest: a title that
+    /// deletes a save sees it go, and one that deletes its own data does not.
+    pub fn remove(&mut self, guest_path: &str) -> bool {
+        self.profile_path(guest_path)
+            .is_some_and(|path| std::fs::remove_file(path).is_ok())
     }
 
     /// The form a guest path is looked up by: case does not matter on the
@@ -109,12 +166,20 @@ impl Tree {
     #[must_use]
     pub fn holds(&self, guest_path: &str) -> bool {
         self.files.contains_key(&Self::key(guest_path))
+            || self
+                .profile_path(guest_path)
+                .is_some_and(|path| path.exists())
     }
 
     /// Read a file the guest named, recording a miss so the tree can be told
     /// about it.
     pub fn read(&mut self, guest_path: &str) -> Option<Vec<u8>> {
         let key = Self::key(guest_path);
+        // What the guest wrote stands in front of what the pressing holds:
+        // writing over a file is how a title keeps its settings.
+        if let Some(bytes) = self.profile_path(&key).and_then(|p| std::fs::read(p).ok()) {
+            return Some(bytes);
+        }
         match self.files.get(&key).cloned() {
             Some(Source::Declared(bytes)) => Some(bytes),
             Some(Source::Packed(index)) => {

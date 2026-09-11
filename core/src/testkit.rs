@@ -91,6 +91,20 @@ impl Ran {
     }
 }
 
+/// A directory of this run's own, under the scratch root the tests run in,
+/// for whatever the guest writes.
+fn scratch_data_root() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let at = crate::runlog::runs_root().join(format!(
+        "data-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&at);
+    at
+}
+
 /// Run a title headless within an instruction budget.
 ///
 /// The run directory goes under `LEGO_LEGACY_RUNS`, which a test sets to its
@@ -136,6 +150,10 @@ fn try_run_on(
 ) -> Result<Ran, String> {
     let headless = Cli {
         headless: true,
+        // Every test run starts from a machine with nothing written on it:
+        // what one run's guest saves is not what the next one boots with,
+        // and two runs side by side do not write over each other.
+        data_root: cli.data_root.clone().or_else(|| Some(scratch_data_root())),
         ..cli.clone()
     };
     let (finish, log, digest) =

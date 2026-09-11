@@ -11,6 +11,16 @@ use crate::runlog::RunLog;
 use crate::Title;
 use std::process::ExitCode;
 
+/// Where a run keeps what its guest writes: beside the pressing it was made
+/// from, unless the run was told to keep it somewhere of its own, which is
+/// how a test gives one run a machine nothing has been written on.
+pub(crate) fn profile_dir(title: &Title, cli: &Cli) -> std::path::PathBuf {
+    cli.data_root.as_ref().map_or_else(
+        || crate::disc::profile_dir(title.image.disc_dir),
+        |root| root.join("profile"),
+    )
+}
+
 /// Run one title on one host, from a parsed command line.
 ///
 /// # Errors
@@ -65,6 +75,7 @@ pub fn run_digested(
         machine.recording = Some(crate::route::Route::new());
     }
     machine.screenshots = cli.screenshots.clone();
+    machine.tree.set_profile(profile_dir(title, cli));
 
     // Snapshots are off unless asked for: scrubbability costs nothing until a
     // person wants it.

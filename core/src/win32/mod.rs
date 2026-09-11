@@ -61,11 +61,14 @@ pub enum Object {
     Heap,
     /// One of the three standard streams.
     Std(u32),
-    /// A file the guest opened, and where it is reading.
+    /// A file the guest opened, and where it is reading or writing.
     File {
         path: String,
         bytes: Vec<u8>,
         at: u32,
+        /// Whether the guest asked to write through this handle. What it
+        /// writes reaches the profile when it closes the file.
+        writing: bool,
     },
     /// Something named that only has to be distinct: an event, a mutex.
     Named { kind: &'static str, name: String },

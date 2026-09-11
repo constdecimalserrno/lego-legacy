@@ -46,7 +46,7 @@ pub struct Cli {
     pub snapshot_every: Option<u64>,
     /// Which flips to write into the run directory as pictures.
     pub screenshots: Screenshots,
-    /// Where the declared install tree and the writable profile live.
+    /// Where what the guest writes lands, instead of beside the pressing.
     pub data_root: Option<PathBuf>,
     /// Drive the machine from a debugger on standard input.
     pub repl: bool,
@@ -107,7 +107,7 @@ usage: <title> [flags]
   --screenshot <flip,...>  write these flips as PNGs into the run directory,
                            as shots/<flip, ten digits>.png
   --screenshot-every <n>   write every nth flip as a PNG
-  --data-root <dir>        where the install tree and profile live
+  --data-root <dir>        keep what the guest writes here, not beside the rip
   --repl                   drive the machine from a debugger on stdin
   --stub                   run the machine's own stub guest
   -h, --help               this";

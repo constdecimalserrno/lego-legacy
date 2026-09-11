@@ -265,6 +265,16 @@ pub fn game_data_root() -> PathBuf {
         .map_or_else(|| PathBuf::from("game-data"), PathBuf::from)
 }
 
+/// Where a title keeps what its guest writes: `<root>/<title>/profile`.
+///
+/// A save belongs to the pressing it was made from, so it lives beside the
+/// rip rather than anywhere on the host: the guest's disc is writable, the
+/// host's is not.
+#[must_use]
+pub fn profile_dir(title_dir: &str) -> PathBuf {
+    game_data_root().join(title_dir).join("profile")
+}
+
 /// The image of one pressing: `<root>/<title>/<pressing>/<pressing>.iso`.
 #[must_use]
 pub fn pressing_path(title: &str, pressing: &str) -> PathBuf {
