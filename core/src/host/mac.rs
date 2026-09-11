@@ -572,6 +572,18 @@ impl MacWindow {
                     break;
                 }
                 let kind: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("type"));
+                // A key this window took is a key the title read, and handing
+                // it on to AppKit as well means offering it to a responder
+                // chain in which nothing answers keys: what comes back is the
+                // system beep, once a keystroke, which is what a person
+                // driving with the arrow keys hears (#47). A key held with
+                // Command is not the title's — it is how a person quits or
+                // closes the window — so that one is still offered.
+                let ours_alone = matches!(kind, 10 | 11) && {
+                    const COMMAND: u64 = 1 << 20;
+                    let flags: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("modifierFlags"));
+                    flags & COMMAND == 0
+                };
                 match kind {
                     // A move of nobody's window carries screen coordinates
                     // rather than the window's, so taking one would throw the
@@ -632,7 +644,9 @@ impl MacWindow {
                     }
                     _ => {}
                 }
-                self.rt.send::<MsgVoidId>()(self.app, self.rt.sel("sendEvent:"), event);
+                if !ours_alone {
+                    self.rt.send::<MsgVoidId>()(self.app, self.rt.sel("sendEvent:"), event);
+                }
             }
 
             // A key let go while another application has the keyboard is
