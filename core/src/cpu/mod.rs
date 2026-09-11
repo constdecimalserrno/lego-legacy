@@ -176,26 +176,17 @@ pub trait CpuEngine {
     fn step(&mut self, cpu: &mut Cpu, mem: &mut Arena) -> Result<(), Stop>;
 
     /// Retire up to `count` instructions, stopping early before one whose
-    /// address `until` names, and say how many retired and why it stopped. An
-    /// interrupt or a halt retires the instruction that raised it; any other
-    /// stop does not.
+    /// address is in `outside`, and say how many retired and why it stopped:
+    /// exactly what as many calls to [`CpuEngine::step`] would retire. An
+    /// interrupt retires the instruction that raised it; any other stop does
+    /// not.
     fn run(
         &mut self,
         cpu: &mut Cpu,
         mem: &mut Arena,
         count: u64,
-        until: fn(u32) -> bool,
-    ) -> (u64, Result<(), Stop>) {
-        let mut retired = 0;
-        while retired < count && !until(cpu.eip) {
-            match self.step(cpu, mem) {
-                Ok(()) => retired += 1,
-                Err(stop @ (Stop::Interrupt(_) | Stop::Halted)) => return (retired + 1, Err(stop)),
-                Err(stop) => return (retired, Err(stop)),
-            }
-        }
-        (retired, Ok(()))
-    }
+        outside: std::ops::Range<u32>,
+    ) -> (u64, Result<(), Stop>);
 
     /// What this engine is called, for the run log.
     fn name(&self) -> &'static str;

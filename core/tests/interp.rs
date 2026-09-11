@@ -83,7 +83,7 @@ fn code_is_decoded_once_however_often_it_runs() {
 
     let mut engine = Interp::new(Mode::FLAT);
     let mut cpu = start;
-    let (retired, stopped) = engine.run(&mut cpu, &mut mem, 100, |_| false);
+    let (retired, stopped) = engine.run(&mut cpu, &mut mem, 100, 0..0);
     // The run stops at the stub's first software interrupt, which retires:
     // two setup instructions, its loop's three instructions three times over,
     // the write, and the interrupt.
@@ -99,9 +99,63 @@ fn code_is_decoded_once_however_often_it_runs() {
 
     // Run again from the start: nothing more is decoded.
     let mut cpu = start;
-    let _ = engine.run(&mut cpu, &mut mem, 100, |_| false);
+    let _ = engine.run(&mut cpu, &mut mem, 100, 0..0);
     assert_eq!(engine.cached(), decoded, "the second time decodes nothing");
 
     engine.forget();
     assert_eq!(engine.cached(), 0);
+}
+
+#[test]
+fn a_run_retires_exactly_what_as_many_steps_would() {
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    mem.write(
+        lego_legacy_core::stub::ENTRY,
+        lego_legacy_core::stub::program(),
+    )
+    .unwrap();
+    let start = Cpu {
+        eip: lego_legacy_core::stub::ENTRY,
+        ..Cpu::default()
+    };
+    // Every budget from nothing to past the stub's first stop, which is an
+    // interrupt and retires: the run ends where that many steps end, mid-run
+    // or not.
+    for budget in 0..16 {
+        let (mut stepped, mut ran) = (start, start);
+        let mut by_step = Interp::new(Mode::FLAT);
+        let (mut steps, mut step_stop) = (0, Ok(()));
+        while steps < budget {
+            match by_step.step(&mut stepped, &mut mem) {
+                Ok(()) => steps += 1,
+                Err(stop @ Stop::Interrupt(_)) => {
+                    steps += 1;
+                    step_stop = Err(stop);
+                    break;
+                }
+                Err(stop) => {
+                    step_stop = Err(stop);
+                    break;
+                }
+            }
+        }
+        let (retired, run_stop) = Interp::new(Mode::FLAT).run(&mut ran, &mut mem, budget, 0..0);
+        assert_eq!(
+            (retired, run_stop, ran.eip, ran.r),
+            (steps, step_stop, stepped.eip, stepped.r),
+            "a budget of {budget}"
+        );
+    }
+    // A run stops before an address it is told is outside, straight-line code
+    // or not: here the third instruction's.
+    let mut third = start;
+    let mut engine = Interp::new(Mode::FLAT);
+    for _ in 0..2 {
+        engine.step(&mut third, &mut mem).unwrap();
+    }
+    let mut ran = start;
+    let (retired, stopped) =
+        Interp::new(Mode::FLAT).run(&mut ran, &mut mem, 100, third.eip..third.eip + 1);
+    assert_eq!((retired, stopped, ran.eip), (2, Ok(()), third.eip));
 }

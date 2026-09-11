@@ -924,7 +924,7 @@ impl Machine {
         let count = budget.min(self.clock.cursor() + BURST) - self.clock.cursor().min(budget);
         let (retired, result) =
             self.engine
-                .run(&mut self.cpu, &mut self.arena, count, Boundary::in_range);
+                .run(&mut self.cpu, &mut self.arena, count, Boundary::RANGE);
         self.clock.retire_many(retired);
         match result {
             Ok(()) => host.closed().then_some(Outcome::Closed),

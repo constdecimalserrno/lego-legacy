@@ -17,9 +17,10 @@ pub struct Interp {
     /// transfer of control, next to each other, so executing one after
     /// another reads memory in order.
     //
-    // ponytail: no invalidation. Guest code that rewrites itself would run its
-    // old form. Nothing on the roster has been measured doing so; the first
-    // title that does gets a write watch over cached ranges.
+    // ponytail: no invalidation, and a run is decoded ahead of where the guest
+    // has been: code rewritten after its run was decoded, even before it first
+    // runs, runs its old form. Nothing on the roster has been measured doing
+    // so; the first title that does gets a write watch over cached ranges.
     insns: Vec<Insn>,
     /// Each run, as where its first instruction is in `insns` and how many
     /// there are.
@@ -208,16 +209,16 @@ impl CpuEngine for Interp {
         cpu: &mut Cpu,
         mem: &mut Arena,
         count: u64,
-        until: fn(u32) -> bool,
+        outside: std::ops::Range<u32>,
     ) -> (u64, Result<(), Stop>) {
         let mut retired = 0;
-        while retired < count && !until(cpu.eip) {
+        while retired < count && !outside.contains(&cpu.eip) {
             let (first, length) = match self.run_at(cpu.seg_base[CS].wrapping_add(cpu.eip), mem) {
                 Ok(run) => run,
                 Err(stop) => return (retired, Err(stop)),
             };
             for index in first..first + length {
-                if retired >= count {
+                if retired >= count || outside.contains(&cpu.eip) {
                     break;
                 }
                 let (next, base) = (
@@ -227,9 +228,7 @@ impl CpuEngine for Interp {
                 );
                 match self.execute_one(index, cpu, mem) {
                     Ok(()) => retired += 1,
-                    Err(stop @ (Stop::Interrupt(_) | Stop::Halted)) => {
-                        return (retired + 1, Err(stop))
-                    }
+                    Err(stop @ Stop::Interrupt(_)) => return (retired + 1, Err(stop)),
                     Err(stop) => return (retired, Err(stop)),
                 }
                 // Somewhere else now: the run it is in is another one.

@@ -134,6 +134,9 @@ impl View {
     /// shape instead, as uniform scaling reads in retained mode's
     /// documentation, a raider stands a third too tall and the level's edges
     /// fall outside what the title works out it can see, and are left black.
+    // ponytail: measured against the previous tree's frames of that mission,
+    // which a person played, not against native retained mode; a title drawn
+    // for the cut would show it.
     #[must_use]
     pub fn perspective(&self) -> Matrix {
         let [left, right, bottom, top] = self.plane;
