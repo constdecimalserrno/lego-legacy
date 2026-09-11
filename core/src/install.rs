@@ -27,7 +27,8 @@ pub enum Source {
 
 /// The declared machine's disc.
 pub struct Tree {
-    /// The pressing's own archive, and where its data lives on the disc.
+    /// The pressing's own archive, and the stem its data files are named
+    /// with: a cabinet's volume N lives in `<stem>N.CAB` beside the header.
     cabinet: Option<(crate::cabinet::Cabinet, String)>,
     /// Guest paths, upper-cased and with their separators normalised, to what
     /// stands behind them.
@@ -124,12 +125,16 @@ impl Tree {
     /// A packed entry becomes a file the guest can open; one the header names
     /// but does not pack sits loose on the disc, and is mapped there instead.
     ///
+    /// `data_stem` names the cabinet's data files: volume N is `<stem>N.CAB`,
+    /// which is what both pressings on the roster that carry a cabinet do.
+    /// Rock Raiders has one volume and Alpha Team has two.
+    ///
     /// # Errors
     /// When the header is not a cabinet.
     pub fn set_cabinet(
         &mut self,
         header: &[u8],
-        data_path: &str,
+        data_stem: &str,
         root: &str,
     ) -> Result<usize, crate::cabinet::CabinetError> {
         let cabinet = crate::cabinet::Cabinet::open(header)?;
@@ -148,7 +153,7 @@ impl Tree {
             }
             declared += 1;
         }
-        self.cabinet = Some((cabinet, data_path.to_owned()));
+        self.cabinet = Some((cabinet, data_stem.to_owned()));
         Ok(declared)
     }
 
@@ -226,11 +231,15 @@ impl Tree {
         match self.files.get(&key).cloned() {
             Some(Source::Declared(bytes)) => Some(bytes),
             Some(Source::Packed(index)) => {
-                let (cabinet, data_path) = self.cabinet.as_ref()?;
+                let (cabinet, data_stem) = self.cabinet.as_ref()?;
                 let entry = cabinet.entries().get(index)?.clone();
+                // An entry names the volume it is in, and the volume names the
+                // file: Alpha Team's game is in DATA2.CAB and only its
+                // installer is in DATA1.CAB.
+                let data_path = format!("{data_stem}{}.CAB", entry.volume);
                 let iso = self.iso.as_mut()?;
                 let span = iso
-                    .read_range(data_path, entry.offset, entry.compressed as usize)
+                    .read_range(&data_path, entry.offset, entry.compressed as usize)
                     .ok()?;
                 let (cabinet, _) = self.cabinet.as_ref()?;
                 match cabinet.unpack(&entry, &span) {

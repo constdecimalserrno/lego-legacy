@@ -1,10 +1,16 @@
 //! The pressing's own archive.
 //!
-//! An InstallShield 5 cabinet: a header file naming what is inside, and a data
-//! file holding it. A title's data lives in here rather than loose on the
-//! disc, so the declared install tree reads it from here.
+//! An InstallShield cabinet: a header file naming what is inside, and one or
+//! more data files holding it. A title's data lives in here rather than loose
+//! on the disc, so the declared install tree reads it from here.
 //!
-//! Everything below was measured against the pressing itself, because the
+//! Two versions are on the roster. Rock Raiders ships version 5, whose header
+//! ends in a table of per-file offsets. Alpha Team ships version 6, whose file
+//! descriptors are a flat array and whose data is split across two volumes
+//! (#52). They share the common header, the cabinet descriptor and the way the
+//! bytes are compressed; everything between differs.
+//!
+//! Everything below was measured against the pressings themselves, because the
 //! format has no specification anyone published.
 
 use crate::inflate::inflate;
@@ -14,7 +20,12 @@ use std::fmt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CabinetError {
     NotACabinet,
+    /// A cabinet of a version this reader has not been taught.
+    UnknownVersion(u32),
     Truncated(&'static str),
+    /// A size or an offset past four gigabytes, which nothing on this roster
+    /// has and this reader would silently truncate.
+    TooBig,
     /// An entry compressed a way this reader does not know.
     UnknownCompression {
         name: String,
@@ -35,7 +46,17 @@ impl fmt::Display for CabinetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotACabinet => write!(f, "not an InstallShield cabinet"),
+            Self::UnknownVersion(major) => write!(
+                f,
+                "an InstallShield {major} cabinet, and this reader has been taught 5 and 6; \
+                 reading it as a version it is not would hand back wrong bytes"
+            ),
             Self::Truncated(what) => write!(f, "the cabinet header ends inside its {what}"),
+            Self::TooBig => write!(
+                f,
+                "the header carries a size or an offset past four gigabytes, which this reader \
+                 would have to truncate"
+            ),
             Self::UnknownCompression { name, flags } => write!(
                 f,
                 "{name} is stored with flags {flags:#06x}, which this reader has not been \
@@ -67,6 +88,9 @@ pub struct Entry {
     /// Bit two says it is compressed; an entry with none of these set is not
     /// in the cabinet and sits loose on the disc instead.
     pub flags: u16,
+    /// Which of the cabinet's data files holds it, counting from one. A
+    /// version 5 cabinet on this roster has one; Alpha Team's has two.
+    pub volume: u16,
 }
 
 impl Entry {
@@ -94,6 +118,7 @@ impl Entry {
 /// A cabinet's header, read.
 pub struct Cabinet {
     entries: Vec<Entry>,
+    major: u32,
 }
 
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
@@ -109,8 +134,26 @@ fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
+/// A version 6 size or offset, which the header writes as sixty-four bits.
+///
+/// Nothing on this roster needs the top half — the largest entry anywhere is
+/// Alpha Team's 126 MB `Ambient.pac` — but a cabinet that did would be read
+/// wrong rather than refused, so the top half is checked rather than dropped.
+fn u64_at(b: &[u8], at: usize) -> Option<u32> {
+    let low = u32_at(b, at)?;
+    if u32_at(b, at + 4)? == 0 {
+        Some(low)
+    } else {
+        None
+    }
+}
+
 /// How far apart two file descriptors are.
 const DESCRIPTOR: usize = 58;
+
+/// How far apart two version 6 file descriptors are, which is how that version
+/// finds them at all: they are an array rather than a table of offsets.
+const DESCRIPTOR6: usize = 0x57;
 
 impl Cabinet {
     /// Read a cabinet's header.
@@ -121,6 +164,11 @@ impl Cabinet {
         if header.get(..4) != Some(b"ISc(") {
             return Err(CabinetError::NotACabinet);
         }
+        // The version word's shape: Rock Raiders' is 0x01005201 and Alpha
+        // Team's is 0x0100600c, and the digit that matters is the same one in
+        // both.
+        let major =
+            (u32_at(header, 0x04).ok_or(CabinetError::Truncated("common header"))? >> 12) & 0xf;
         let descriptor =
             u32_at(header, 0x0c).ok_or(CabinetError::Truncated("common header"))? as usize;
         let table = descriptor
@@ -141,32 +189,73 @@ impl Cabinet {
             String::from_utf8_lossy(header.get(start..end).unwrap_or(&[])).into_owned()
         };
 
-        // The table is one offset per directory, then one per file.
+        // The table is one offset per directory, then — in version 5 — one per
+        // file.
         let offset_of = |index: usize| -> Option<usize> {
             u32_at(header, table + index * 4).map(|o| o as usize)
         };
 
         let mut entries = Vec::with_capacity(files);
-        for i in 0..files {
-            let Some(at) = offset_of(directories + i).map(|o| table + o) else {
-                break;
-            };
-            let Some(name_offset) = u32_at(header, at) else {
-                break;
-            };
-            let directory_index = u32_at(header, at + 4).unwrap_or(0) as usize;
-            let directory = offset_of(directory_index).map_or_else(String::new, name_at);
-            entries.push(Entry {
-                name: name_at(name_offset as usize),
-                directory,
-                flags: u16_at(header, at + 8).unwrap_or(0),
-                expanded: u32_at(header, at + 0x0a).unwrap_or(0),
-                compressed: u32_at(header, at + 0x0e).unwrap_or(0),
-                offset: u32_at(header, at + 0x26).unwrap_or(0),
-            });
-            let _ = DESCRIPTOR;
+        match major {
+            5 => {
+                for i in 0..files {
+                    let Some(at) = offset_of(directories + i).map(|o| table + o) else {
+                        break;
+                    };
+                    let Some(name_offset) = u32_at(header, at) else {
+                        break;
+                    };
+                    let directory_index = u32_at(header, at + 4).unwrap_or(0) as usize;
+                    let directory = offset_of(directory_index).map_or_else(String::new, name_at);
+                    entries.push(Entry {
+                        name: name_at(name_offset as usize),
+                        directory,
+                        flags: u16_at(header, at + 8).unwrap_or(0),
+                        expanded: u32_at(header, at + 0x0a).unwrap_or(0),
+                        compressed: u32_at(header, at + 0x0e).unwrap_or(0),
+                        offset: u32_at(header, at + 0x26).unwrap_or(0),
+                        // Every entry of the one version 5 cabinet on this
+                        // roster is in DATA1.CAB, and nothing here reads a
+                        // volume it was not told about.
+                        volume: 1,
+                    });
+                    let _ = DESCRIPTOR;
+                }
+            }
+            // Version 6 drops the per-file offsets and lays the descriptors out
+            // as a flat array of their own, at a second offset the cabinet
+            // descriptor carries.
+            6 => {
+                let second = u32_at(header, descriptor + 0x2c)
+                    .ok_or(CabinetError::Truncated("descriptor"))?
+                    as usize;
+                for i in 0..files {
+                    let at = table + second + i * DESCRIPTOR6;
+                    let Some(name_offset) = u32_at(header, at + 0x3a) else {
+                        break;
+                    };
+                    let directory_index = u16_at(header, at + 0x3e).unwrap_or(0) as usize;
+                    let directory = offset_of(directory_index).map_or_else(String::new, name_at);
+                    entries.push(Entry {
+                        name: name_at(name_offset as usize),
+                        directory,
+                        flags: u16_at(header, at).unwrap_or(0),
+                        expanded: u64_at(header, at + 0x02).ok_or(CabinetError::TooBig)?,
+                        compressed: u64_at(header, at + 0x0a).ok_or(CabinetError::TooBig)?,
+                        offset: u64_at(header, at + 0x12).ok_or(CabinetError::TooBig)?,
+                        volume: u16_at(header, at + 0x55).unwrap_or(1),
+                    });
+                }
+            }
+            _ => return Err(CabinetError::UnknownVersion(major)),
         }
-        Ok(Self { entries })
+        Ok(Self { entries, major })
+    }
+
+    /// Which version of the format this header is written in.
+    #[must_use]
+    pub fn major_version(&self) -> u32 {
+        self.major
     }
 
     #[must_use]
@@ -199,6 +288,13 @@ impl Cabinet {
             return Err(CabinetError::NotInCabinet {
                 name: entry.name.clone(),
             });
+        }
+        // A header may name a file it holds no bytes for: version 6 cabinets
+        // carry placeholders the installer would have filled in, and Alpha
+        // Team's has seven of them. An empty file is what they are, and that
+        // is not a compression scheme to guess at.
+        if entry.compressed == 0 {
+            return Ok(Vec::new());
         }
         if entry.flags & !0x0004 != 0 {
             return Err(CabinetError::UnknownCompression {

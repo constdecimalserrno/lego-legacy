@@ -395,8 +395,7 @@ impl Machine {
         self.state.installed_files = match title.installed {
             crate::title::Installed::Cabinet => {
                 let header = iso.read("DATA1.HDR")?;
-                self.tree
-                    .set_cabinet(&header, "DATA1.CAB", title.install_dir)?
+                self.tree.set_cabinet(&header, "DATA", title.install_dir)?
             }
             crate::title::Installed::Copied(from) => {
                 self.tree.set_copied(&mut iso, from, title.install_dir)?

@@ -527,7 +527,7 @@ fn wad_names() -> std::collections::BTreeSet<String> {
         .expect("the pressing opens");
     let header = iso.read("DATA1.HDR").expect("the cabinet's header");
     let mut tree = lego_legacy_core::install::Tree::new();
-    tree.set_cabinet(&header, "DATA1.CAB", ROCK_RAIDERS.install_dir)
+    tree.set_cabinet(&header, "DATA", ROCK_RAIDERS.install_dir)
         .expect("the cabinet reads");
     tree.set_disc(iso);
     let mut names = std::collections::BTreeSet::new();

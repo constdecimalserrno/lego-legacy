@@ -35,7 +35,7 @@ fn installed(path: &str) -> Option<Vec<u8>> {
         .read("DATA1.HDR")
         .expect("the pressing's cabinet header");
     let mut tree = install::Tree::new();
-    tree.set_cabinet(&header, "DATA1.CAB", "C:\\LEGORR")
+    tree.set_cabinet(&header, "DATA", "C:\\LEGORR")
         .expect("the cabinet reads");
     tree.set_disc(iso);
     Some(tree.read(path).expect("the file is installed"))
