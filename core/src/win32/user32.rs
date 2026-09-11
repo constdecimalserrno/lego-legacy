@@ -1234,6 +1234,30 @@ mod tests {
     }
 
     #[test]
+    fn the_mouses_first_move_is_measured_from_the_middle_of_the_screen() {
+        // Where Windows leaves the pointer after a mode is set, and so where
+        // a title that draws its own pointer starts it (#48).
+        let mut state = State::new();
+        deliver(&mut state, Input::Move { x: 320, y: 240 }, 0);
+        assert!(
+            state.mouse_data.is_empty(),
+            "to the middle is no move at all"
+        );
+        deliver(&mut state, Input::Move { x: 325, y: 233 }, 0);
+        let moved: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
+        assert_eq!(moved, [(DIMOUSE_X, 5), (DIMOUSE_Y, (-7i32) as u32)]);
+
+        // A new mode puts the pointer in the middle of that one.
+        state.display_mode = (800, 600, 16);
+        state.pointer = (400, 300);
+        state.last_move = (400, 300);
+        state.mouse_data.clear();
+        deliver(&mut state, Input::Move { x: 401, y: 300 }, 0);
+        let moved: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
+        assert_eq!(moved, [(DIMOUSE_X, 1)]);
+    }
+
+    #[test]
     fn a_persons_mouse_reaches_the_window_as_windows_would_send_it() {
         let mut state = State::new();
         // No window yet, so nowhere to send anything.
@@ -1268,7 +1292,8 @@ mod tests {
     #[test]
     fn directinput_reads_how_far_the_mouse_moved_since_it_last_looked() {
         let mut state = State::new();
-        deliver(&mut state, Input::Move { x: 10, y: 20 }, 0);
+        // Ten right and twenty down from the middle, where the mouse starts.
+        deliver(&mut state, Input::Move { x: 330, y: 260 }, 0);
         deliver(&mut state, Input::Down, 0);
         let first = state.take_mouse_state();
         assert_eq!(first[..8], [10, 0, 0, 0, 20, 0, 0, 0]);
@@ -1276,7 +1301,7 @@ mod tests {
 
         // The title putting the pointer somewhere is not the mouse moving.
         state.pointer = (300, 300);
-        deliver(&mut state, Input::Move { x: 12, y: 19 }, 0);
+        deliver(&mut state, Input::Move { x: 332, y: 259 }, 0);
         let second = state.take_mouse_state();
         assert_eq!(second[..8], [2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(state.take_mouse_state()[..8], [0; 8], "looking took it");
@@ -1285,9 +1310,9 @@ mod tests {
     #[test]
     fn directinput_buffers_what_a_person_did_for_a_title_that_reads_a_queue() {
         let mut state = State::new();
-        deliver(&mut state, Input::Move { x: 10, y: 20 }, 0);
+        deliver(&mut state, Input::Move { x: 330, y: 260 }, 0);
         deliver(&mut state, Input::Down, 0);
-        deliver(&mut state, Input::Move { x: 10, y: 18 }, 0);
+        deliver(&mut state, Input::Move { x: 330, y: 258 }, 0);
         deliver(&mut state, Input::Up, 0);
         deliver(
             &mut state,

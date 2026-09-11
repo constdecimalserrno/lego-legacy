@@ -226,8 +226,14 @@ impl State {
             window_procedure: 0,
             window_made: false,
             quit_asked: false,
-            pointer: (0, 0),
-            last_move: (0, 0),
+            // The middle of the screen: where Windows leaves the pointer when
+            // a mode is set, and so where a title that draws its own starts
+            // it. The first thing the mouse does is measured from here, and
+            // measured from anywhere else it is a move nobody made, and the
+            // title's pointer and the person's are apart by that much until an
+            // edge of the screen happens to bring one axis back (#48).
+            pointer: (320, 240),
+            last_move: (320, 240),
             display_mode: (640, 480, 16),
             color_keys: BTreeMap::new(),
             clipped: std::collections::BTreeSet::new(),

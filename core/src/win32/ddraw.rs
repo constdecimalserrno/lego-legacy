@@ -813,6 +813,12 @@ fn set_display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
     // title asks for, because refusing would send it down a path nobody has
     // measured.
     ctx.state.display_mode = (args[0], args[1], args[2]);
+    // A new mode puts the pointer in the middle of it, as Windows does, and a
+    // title that draws its own pointer starts that in the middle too: the
+    // mouse's first move is measured from there (#48).
+    let middle = (args[0] as i32 / 2, args[1] as i32 / 2);
+    ctx.state.pointer = middle;
+    ctx.state.last_move = middle;
     ctx.log
         .line(&format!("display mode {}x{}x{}", args[0], args[1], args[2]));
     Ok(S_OK)
