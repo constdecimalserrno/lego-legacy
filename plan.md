@@ -41,7 +41,8 @@ memory mapping and dynamic loading. macOS backend reaches AppKit, CoreGraphics a
 
 **Boundary** (ADR-0002): the title's own executable and DLLs run as guest x86. Microsoft's and
 vendor DLLs (KERNEL32, USER32, MSVCRT, DDRAW, D3DIM, D3DRM, DSOUND, DINPUT, A3D) are Rust shims at
-their export tables. A DLL shipped on the disc may run instead when that is cheaper. An import no
+their export tables. A binary the title's own disc ships may run instead, whoever wrote it, when
+that is cheaper than writing it; nothing from the host and no redistributable ever runs. An import no
 shim implements is a **wall**: the run stops and names the import, caller and cursor. Every chosen
 return value is a declared value with its reason beside it.
 

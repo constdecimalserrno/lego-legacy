@@ -2,11 +2,39 @@
 
 A title's own binaries (its executable and the DLLs it ships) run as guest x86. Microsoft's DLLs
 (KERNEL32, USER32, MSVCRT, DDRAW, D3DIM, D3DRM, DSOUND, DINPUT, and vendor audio such as A3D) are
-written in Rust as shims at their export tables; no Microsoft binary is ever required or run.
-Run-versus-write is priced per binary: a DLL that ships on the disc may run as guest code when
-that is cheaper than writing it.
+written in Rust as shims at their export tables. Run-versus-write is priced per binary: a binary
+that the title's own disc ships may run as guest code when that is cheaper than writing it,
+whoever wrote it. No binary from the host, and none from a redistributable this emulator would
+have to install, is ever run.
 
 ## Considered options
 
 - **Running the DirectX redistributable the discs ship**: pushes the boundary down to the display
   driver and kernel, a wider and undocumented surface; rejected.
+
+## Amended for Alpha Team (#51)
+
+This said "no Microsoft binary is ever required or run" alongside the priced-per-binary sentence,
+and LEGO Alpha Team is the title where the two stop agreeing. Its cabinet ships `MSVCRT.DLL` and
+`MSVCP60.DLL`, and its ten engine DLLs import 284 names from them — 128 from MSVCRT, 156 from
+MSVCP60, the second lot almost entirely `std::basic_string` and the C++ exception machinery. None
+of that is the title's own code, and writing it in Rust is the largest single piece of work the
+title would ask for.
+
+So the priced-per-binary sentence is the rule, and the absolute is gone. What it costs: the loader
+that maps, relocates, binds and initialises a PE that was never a shim (#55), which this title
+needs anyway for `NiMain.dll` and the nine beside it. What it does not buy: any right to reach for
+the host's own `msvcrt.dll`, or to run a redistributable off the disc. The bytes that run are the
+bytes the player's own pressing carries, hashed like any other.
+
+`a3dapi.dll` is the same question and is not settled here. It ships in the same cabinet, and
+whether it runs or is shimmed at its COM interfaces is decided by the ticket that reaches sound
+(#60), which records which was taken and why.
+
+## Consequences
+
+- A binary that runs as guest code is declared, per title, like everything else the machine is
+  told: which file, from which pressing, and the reason running it was cheaper than writing it.
+- The shim tables stay the boundary for everything the disc does not ship. A title that imports
+  KERNEL32 still meets Rust, because no disc on the roster ships KERNEL32.
+- An import no shim implements is still a wall. A DLL the tree does not hold is still a refusal.
