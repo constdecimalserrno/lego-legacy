@@ -1241,6 +1241,8 @@ const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_WRITE_PROTECT: u32 = 19;
 /// A seek to before the start of a file, which is nowhere.
 const ERROR_NEGATIVE_SEEK: u32 = 131;
+/// A handle that cannot be written through.
+const ERROR_ACCESS_DENIED: u32 = 5;
 
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateFileA(path, access, share, security, disposition, flags, template).
@@ -1256,7 +1258,17 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(INVALID_HANDLE);
     }
 
-    let there = ctx.open_guest_file(&path);
+    // A title about to make a file asks whether one is there already. That is
+    // not the pressing failing to hold something, so it is asked without
+    // recording a miss: the list of what the declared tree is missing is how
+    // the tree learns what it has to ship, and a player's own save is not
+    // something it ships (#44). OPEN_ALWAYS keeps what is there, so it reads.
+    let making = writing && matches!(args[4], CREATE_NEW | CREATE_ALWAYS | TRUNCATE_EXISTING);
+    let there = if making {
+        ctx.guest_file_is_there(&path).then(Vec::new)
+    } else {
+        ctx.open_guest_file(&path)
+    };
     let bytes = match (there, args[4]) {
         // CREATE_NEW is a title asking for a file that is not there yet, and
         // it has to be told when one is.
@@ -1323,6 +1335,17 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // writes is kept in the open file and reaches its profile when the file
     // is closed.
     let (handle, buffer, want, wrote_at) = (args[0], args[1], args[2], args[3]);
+    // The handle before the buffer, as `read_file` does: a write through a
+    // handle this machine does not hold is refused, and a fault reading the
+    // buffer would have ended the run at a wall naming memory rather than
+    // answering the call the title actually made (#43).
+    match ctx.state.object(handle) {
+        Some(Object::File { writing: true, .. } | Object::Std(_)) => {}
+        _ => {
+            ctx.state.last_error = ERROR_ACCESS_DENIED;
+            return Ok(0);
+        }
+    }
     let given = ctx
         .mem
         .slice(buffer, want as usize)
@@ -1347,10 +1370,9 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         // A standard stream: the declared machine has no console to show it
         // in, so what is written there is written and gone.
         Some(Object::Std(_)) => {}
-        // A handle that cannot be written through says so, rather than
-        // letting a title believe its save was kept. ERROR_ACCESS_DENIED.
+        // Refused above; nothing else reaches here.
         _ => {
-            ctx.state.last_error = 5;
+            ctx.state.last_error = ERROR_ACCESS_DENIED;
             return Ok(0);
         }
     }

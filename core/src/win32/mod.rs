@@ -475,7 +475,7 @@ impl State {
     /// Give the guest a handle to a registry key, making the key if the guest
     /// is creating it.
     pub fn open_key(&mut self, path: &str) -> u32 {
-        self.registry.entry(path.to_owned()).or_default();
+        self.registry.entry(folded(path)).or_default();
         self.give(Object::Key {
             path: path.to_owned(),
         })
@@ -492,21 +492,24 @@ impl State {
 
     #[must_use]
     pub fn registry_has(&self, path: &str) -> bool {
-        self.registry.contains_key(path)
+        self.registry.contains_key(&folded(path))
     }
 
     /// One value out of the registry, by key and name.
     #[must_use]
     pub fn registry_value(&self, path: &str, name: &str) -> Option<(u32, Vec<u8>)> {
-        self.registry.get(path)?.get(name).cloned()
+        self.registry
+            .get(&folded(path))?
+            .get(&folded(name))
+            .cloned()
     }
 
     /// Write a value the guest gave us.
     pub fn set_registry_value(&mut self, path: &str, name: &str, kind: u32, bytes: Vec<u8>) {
         self.registry
-            .entry(path.to_owned())
+            .entry(folded(path))
             .or_default()
-            .insert(name.to_owned(), (kind, bytes));
+            .insert(folded(name), (kind, bytes));
     }
 
     /// Seed a declared key, as a title's installer would have left it.
@@ -522,6 +525,17 @@ impl State {
             _ => None,
         })
     }
+}
+
+/// A registry path or value name, folded the way Windows compares them.
+///
+/// The registry is not case-sensitive, and a declared row is a claim about
+/// what a title's installer left behind rather than about how the title
+/// spells it when it asks. Told apart by case, a title asking for
+/// `Software\Mattel\...` would be answered "no such value" for a row that is
+/// there, and would fall back to a path nobody declared (#42).
+fn folded(name: &str) -> String {
+    name.to_uppercase()
 }
 
 /// One window message, as a `MSG` holds it.
@@ -722,6 +736,13 @@ impl Ctx<'_> {
         self.tree.read(&self.absolute(path))
     }
 
+    /// Whether the tree holds a file the guest named, without recording a
+    /// miss: what a title about to make one asks (#44).
+    #[must_use]
+    pub fn guest_file_is_there(&self, path: &str) -> bool {
+        self.tree.holds(&self.absolute(path))
+    }
+
     /// A path the guest gave us, resolved the way the guest means it: a
     /// relative one is against wherever the guest believes it is.
     #[must_use]
@@ -871,4 +892,35 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+
+    #[test]
+    fn a_declared_registry_row_is_found_however_a_title_spells_it() {
+        let mut state = State::new();
+        state.declare_registry(
+            "HKLM\\SOFTWARE\\MATTEL\\STUNT TRACK DRIVER\\1.0",
+            "InstallPath",
+            crate::win32::advapi32::REG_SZ,
+            b"C:\\Program Files\\Mattel\\Stunt Track Driver\0".to_vec(),
+        );
+        // The registry is not case-sensitive, and neither is this one.
+        assert!(state
+            .registry_value(
+                "hklm\\software\\mattel\\stunt track driver\\1.0",
+                "installpath"
+            )
+            .is_some());
+        assert!(state.registry_has("HKLM\\Software\\Mattel\\Stunt Track Driver\\1.0"));
+        // A value that really is not there is still not there.
+        assert!(state
+            .registry_value(
+                "HKLM\\SOFTWARE\\MATTEL\\STUNT TRACK DRIVER\\1.0",
+                "CdDataDir"
+            )
+            .is_none());
+    }
 }

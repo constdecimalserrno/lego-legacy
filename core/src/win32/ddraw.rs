@@ -1172,10 +1172,16 @@ fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // onto it, and letting go of the whole of it is the moment its frame
     // exists: there is nothing else for it to become. Letting go of a corner
     // is not: a title that draws its frame in pieces has not finished one.
-    let whole = args.first().copied().unwrap_or(0) == 0;
+    let given = args.first().copied().unwrap_or(0);
     let Some((pixels, width, height, pitch, depth, true, 0)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
+    // What this argument is depends on which interface the title holds.
+    // `IDirectDrawSurface` through `IDirectDrawSurface4` take the pointer
+    // `Lock` handed back; only `IDirectDrawSurface7` takes a rectangle. So the
+    // surface's own address is the whole surface, as null is, and anything
+    // else is a rectangle inside it (#41).
+    let whole = given == 0 || given == pixels;
     if !whole {
         return Ok(S_OK);
     }
