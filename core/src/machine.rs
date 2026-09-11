@@ -880,24 +880,20 @@ impl Machine {
         if self.stub || log.trace() >= Trace::Insns || self.state.present.is_some() {
             return None;
         }
-        let end = budget.min(self.clock.cursor() + BURST);
-        while self.clock.cursor() < end && !Boundary::in_range(self.cpu.eip) {
-            match self.engine.step(&mut self.cpu, &mut self.arena) {
-                Ok(()) => self.clock.retire(),
-                Err(Stop::Interrupt(n)) => {
-                    self.clock.retire();
-                    return Some(Outcome::Wall {
-                        what: format!("int {n:#04x}"),
-                    });
-                }
-                Err(stop) => {
-                    return Some(Outcome::Wall {
-                        what: stop.to_string(),
-                    })
-                }
-            }
+        let count = budget.min(self.clock.cursor() + BURST) - self.clock.cursor().min(budget);
+        let (retired, result) =
+            self.engine
+                .run(&mut self.cpu, &mut self.arena, count, Boundary::in_range);
+        self.clock.retire_many(retired);
+        match result {
+            Ok(()) => host.closed().then_some(Outcome::Closed),
+            Err(Stop::Interrupt(n)) => Some(Outcome::Wall {
+                what: format!("int {n:#04x}"),
+            }),
+            Err(stop) => Some(Outcome::Wall {
+                what: stop.to_string(),
+            }),
         }
-        host.closed().then_some(Outcome::Closed)
     }
 
     /// Hand the host every block of the mix the declared clock has passed.

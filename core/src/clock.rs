@@ -68,6 +68,11 @@ impl Clock {
         self.cursor += 1;
     }
 
+    /// Charge instructions an engine retired in one run.
+    pub fn retire_many(&mut self, count: u64) {
+        self.cursor += count;
+    }
+
     /// Charge a presented frame at the title's declared flip cost.
     pub fn present(&mut self, cost: FlipCost) {
         match cost {

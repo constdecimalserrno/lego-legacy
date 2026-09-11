@@ -68,7 +68,7 @@ fn an_opcode_the_engine_does_not_decode_stops_the_run_where_it_stands() {
 }
 
 #[test]
-fn an_address_is_decoded_once_however_often_it_runs() {
+fn code_is_decoded_once_however_often_it_runs() {
     let mut host = Headless::new();
     let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
     mem.write(
@@ -76,27 +76,31 @@ fn an_address_is_decoded_once_however_often_it_runs() {
         lego_legacy_core::stub::program(),
     )
     .unwrap();
-
-    let mut cpu = Cpu {
+    let start = Cpu {
         eip: lego_legacy_core::stub::ENTRY,
         ..Cpu::default()
     };
-    let mut engine = Interp::new(Mode::FLAT);
-    let mut retired = 0;
-    while engine.step(&mut cpu, &mut mem).is_ok() {
-        retired += 1;
-        assert!(retired < 100, "the stub guest does not run forever");
-    }
 
-    // The run stops at the stub's first software interrupt. Its loop ran its
-    // three instructions three times over, and every address on the way was
-    // decoded exactly once: two setup instructions, three in the loop, the
-    // write, and the interrupt itself.
+    let mut engine = Interp::new(Mode::FLAT);
+    let mut cpu = start;
+    let (retired, stopped) = engine.run(&mut cpu, &mut mem, 100, |_| false);
+    // The run stops at the stub's first software interrupt, which retires:
+    // two setup instructions, its loop's three instructions three times over,
+    // the write, and the interrupt.
     assert_eq!(
-        retired, 12,
-        "twelve instructions retired before the first stop"
+        retired, 13,
+        "thirteen instructions retired to the first stop"
     );
-    assert_eq!(engine.cached(), 7, "seven distinct addresses decoded");
+    assert!(matches!(stopped, Err(Stop::Interrupt(_))));
+    // Decoded as it went, in runs to each transfer of control: the setup
+    // into the loop, the loop from its top, and what follows it.
+    let decoded = engine.cached();
+    assert_eq!(decoded, 10);
+
+    // Run again from the start: nothing more is decoded.
+    let mut cpu = start;
+    let _ = engine.run(&mut cpu, &mut mem, 100, |_| false);
+    assert_eq!(engine.cached(), decoded, "the second time decodes nothing");
 
     engine.forget();
     assert_eq!(engine.cached(), 0);
