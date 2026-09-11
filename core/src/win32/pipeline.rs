@@ -312,6 +312,14 @@ fn lerp(a: &Clipped, b: &Clipped, t: f32) -> Clipped {
 /// Cut a polygon to the view volume: `-w <= x, y <= w` and `0 <= z <= w`.
 #[must_use]
 pub fn clip(polygon: &[Clipped]) -> Vec<Clipped> {
+    // Most of what a title draws is wholly inside, and cutting nothing is
+    // cheaper said than done.
+    if polygon.iter().all(|v| {
+        let [x, y, z, w] = v.clip;
+        -w <= x && x <= w && -w <= y && y <= w && 0.0 <= z && z <= w
+    }) {
+        return polygon.to_vec();
+    }
     // Each plane as the distance of a clip-space point inside it.
     let planes: [fn(&[f32; 4]) -> f32; 6] = [
         |c| c[3] + c[0],

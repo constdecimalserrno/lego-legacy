@@ -90,6 +90,10 @@ pub struct Machine {
     continuations: Vec<(u32, u32)>,
     /// Which parked calls are a modal dialog's turns, by their depth.
     dialog_turns: Vec<usize>,
+    /// What each boundary slot was found to stand for the first time it was
+    /// called, by the slot: looking a shim or a method up by its name on every
+    /// call is most of what a call costs.
+    bound: Vec<Option<Bound>>,
     /// Which parked calls are a render pass's turns, by their depth, with
     /// where the stack stood before the pass's first call: the title's
     /// callbacks leave their arguments for the caller to take.
@@ -125,6 +129,7 @@ impl Machine {
             present_buffer: Vec::new(),
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
+            bound: Vec::new(),
             render_turns: Vec::new(),
             input: Vec::new(),
             route: None,
@@ -327,6 +332,14 @@ impl Machine {
     }
 }
 
+/// What a boundary slot stands for, once it has been called: the shim or the
+/// COM method behind it, or nothing written.
+#[derive(Clone, Copy)]
+enum Bound {
+    Shim(Option<&'static win32::Shim>),
+    Method(Option<&'static crate::com::Method>),
+}
+
 /// Where the guest's stack lives, and how much of it there is.
 ///
 /// A declared value: the address is chosen, not measured, and it sits below
@@ -401,27 +414,54 @@ impl Machine {
     /// answer goes back in `eax`, and the stack is left as the real library
     /// would have left it.
     fn cross(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        use crate::shim::{Entry, THUNK_BASE, THUNK_STRIDE};
         let addr = self.cpu.eip;
-        let entry = self.boundary.at(addr).cloned();
-        if let Some(crate::shim::Entry::Return) = entry {
-            return self.guest_returned(log);
-        }
-        if let Some(crate::shim::Entry::Method { interface, slot }) = entry {
-            return self.cross_com(interface, slot, log);
-        }
-        let Some(crate::shim::Entry::Import(import)) = entry else {
-            return Err(Stop::Undecoded {
-                eip: addr,
-                byte: 0,
-                group: None,
-                why: "an address inside the boundary that no import was bound to",
-            });
+        let index = (addr.wrapping_sub(THUNK_BASE) / THUNK_STRIDE) as usize;
+        let bound = match self.bound.get(index).copied().flatten() {
+            Some(bound) => bound,
+            None => {
+                let bound = match self.boundary.at(addr) {
+                    Some(Entry::Return) => return self.guest_returned(log),
+                    Some(Entry::Method { interface, slot }) => {
+                        Bound::Method(win32::com_method(interface, *slot))
+                    }
+                    Some(Entry::Import(import)) => {
+                        Bound::Shim(win32::find(&import.dll, &import.name))
+                    }
+                    None => {
+                        return Err(Stop::Undecoded {
+                            eip: addr,
+                            byte: 0,
+                            group: None,
+                            why: "an address inside the boundary that no import was bound to",
+                        })
+                    }
+                };
+                if self.bound.len() <= index {
+                    self.bound.resize(index + 1, None);
+                }
+                self.bound[index] = Some(bound);
+                bound
+            }
         };
-        let what = || format!("{}!{}", import.dll, import.name);
+        let found = match bound {
+            Bound::Method(method) => {
+                let Some(Entry::Method { interface, slot }) = self.boundary.at(addr) else {
+                    unreachable!("a slot bound to a method is one");
+                };
+                return self.cross_com(interface, *slot, method, log);
+            }
+            Bound::Shim(shim) => shim,
+        };
+        let boundary = &self.boundary;
+        let what = || match boundary.at(addr) {
+            Some(Entry::Import(import)) => format!("{}!{}", import.dll, import.name),
+            _ => String::new(),
+        };
         let esp = self.cpu.r[crate::cpu::ESP];
         let caller = self.arena.read_u32(esp).map_err(Stop::Fault)?;
 
-        let Some(shim) = win32::find(&import.dll, &import.name) else {
+        let Some(shim) = found else {
             let cursor = self.clock.cursor();
             log.at(Trace::Shims, || {
                 format!("wall {} from {caller:#010x} cursor {cursor}", what())
@@ -708,6 +748,7 @@ impl Machine {
         &mut self,
         interface: &'static str,
         slot: usize,
+        method: Option<&'static crate::com::Method>,
         log: &mut RunLog,
     ) -> Result<(), Stop> {
         let esp = self.cpu.r[crate::cpu::ESP];
@@ -715,7 +756,7 @@ impl Machine {
         // Every COM method is called with the object first.
         let this = self.arena.read_u32(esp + 4).map_err(Stop::Fault)?;
 
-        let Some(method) = crate::win32::com_method(interface, slot) else {
+        let Some(method) = method else {
             return Err(Stop::NotWritten {
                 what: format!("{interface} slot {slot}"),
                 caller,

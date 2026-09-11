@@ -9,6 +9,7 @@ use super::{Cpu, Mode, Stop, EAX, EBX, ECX, EDI, EDX, ESI, ESP};
 use crate::guest::{Arena, GuestMem};
 
 /// Where a value comes from and goes back to.
+#[inline(always)]
 fn read_reg(cpu: &Cpu, reg: u8, w: Width) -> u32 {
     let i = reg as usize;
     match w {
@@ -25,6 +26,7 @@ fn read_reg(cpu: &Cpu, reg: u8, w: Width) -> u32 {
     }
 }
 
+#[inline(always)]
 fn write_reg(cpu: &mut Cpu, reg: u8, w: Width, value: u32) {
     let i = reg as usize;
     match w {
@@ -43,6 +45,7 @@ fn write_reg(cpu: &mut Cpu, reg: u8, w: Width, value: u32) {
 }
 
 /// The offset a memory operand forms, before its segment is added.
+#[inline(always)]
 fn effective_offset(cpu: &Cpu, m: &MemRef) -> u32 {
     if m.addr16 {
         // Sixteen-bit addressing forms the offset from sixteen-bit registers.
@@ -57,6 +60,7 @@ fn effective_offset(cpu: &Cpu, m: &MemRef) -> u32 {
 }
 
 /// The address a memory operand names.
+#[inline(always)]
 fn effective(cpu: &Cpu, m: &MemRef) -> u32 {
     place(cpu, m, effective_offset(cpu, m))
 }
@@ -66,11 +70,13 @@ fn effective(cpu: &Cpu, m: &MemRef) -> u32 {
 /// A sixteen-bit address wraps inside its 64K segment; a thirty-two-bit one
 /// does not, even in real mode, because the address size widens the arithmetic
 /// rather than the segment.
+#[inline(always)]
 fn place(cpu: &Cpu, m: &MemRef, off: u32) -> u32 {
     let off = if m.addr16 { off & 0xffff } else { off };
     cpu.seg_base[m.seg.index()].wrapping_add(off)
 }
 
+#[inline(always)]
 fn read_mem(mem: &Arena, addr: u32, w: Width) -> Result<u32, Stop> {
     let s = mem.slice(addr, w.bytes() as usize).map_err(Stop::Fault)?;
     Ok(match w {
@@ -80,12 +86,14 @@ fn read_mem(mem: &Arena, addr: u32, w: Width) -> Result<u32, Stop> {
     })
 }
 
+#[inline(always)]
 fn write_mem(mem: &mut Arena, addr: u32, w: Width, value: u32) -> Result<(), Stop> {
     let bytes = value.to_le_bytes();
     mem.write(addr, &bytes[..w.bytes() as usize])
         .map_err(Stop::Fault)
 }
 
+#[inline(always)]
 fn read_op(cpu: &Cpu, mem: &Arena, op: &Op, w: Width) -> Result<u32, Stop> {
     match op {
         Op::Reg(r) => Ok(read_reg(cpu, *r, w)),
@@ -94,6 +102,7 @@ fn read_op(cpu: &Cpu, mem: &Arena, op: &Op, w: Width) -> Result<u32, Stop> {
     }
 }
 
+#[inline(always)]
 fn write_op(cpu: &mut Cpu, mem: &mut Arena, op: &Op, w: Width, value: u32) -> Result<(), Stop> {
     match op {
         Op::Reg(r) => {
@@ -109,6 +118,7 @@ fn write_op(cpu: &mut Cpu, mem: &mut Arena, op: &Op, w: Width, value: u32) -> Re
 }
 
 /// How wide the stack pointer's own arithmetic is.
+#[inline(always)]
 fn stack_width(mode: Mode) -> Width {
     if stack32(mode) {
         Width::B32
@@ -118,10 +128,12 @@ fn stack_width(mode: Mode) -> Width {
 }
 
 /// Whether the stack pointer is used in full, or only its low half.
+#[inline(always)]
 fn stack32(mode: Mode) -> bool {
     !mode.real
 }
 
+#[inline(always)]
 fn push(cpu: &mut Cpu, mem: &mut Arena, value: u32, w: Width, mode: Mode) -> Result<(), Stop> {
     let n = w.bytes();
     let sp = if stack32(mode) {
@@ -134,6 +146,7 @@ fn push(cpu: &mut Cpu, mem: &mut Arena, value: u32, w: Width, mode: Mode) -> Res
     write_mem(mem, cpu.seg_base[super::SS].wrapping_add(off), w, value)
 }
 
+#[inline(always)]
 fn pop(cpu: &mut Cpu, mem: &Arena, w: Width, mode: Mode) -> Result<u32, Stop> {
     let n = w.bytes();
     let off = if stack32(mode) {
@@ -152,6 +165,7 @@ fn pop(cpu: &mut Cpu, mem: &Arena, w: Width, mode: Mode) -> Result<u32, Stop> {
 
 /// Whether a condition code holds, given the flags.
 #[must_use]
+#[inline(always)]
 pub fn condition(cc: u8, cpu: &Cpu) -> bool {
     let f = cpu.flags;
     match cc {
