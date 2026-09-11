@@ -360,6 +360,27 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "CreateEventA",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: create_event,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "SetEvent",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: set_event,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "WaitForSingleObject",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: wait_for_single_object,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "ReleaseMutex",
         args: 1,
         convention: Convention::Stdcall,
@@ -1134,6 +1155,34 @@ fn release_mutex(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+fn create_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // CreateEventA(security, manual reset, initial state, name). A title
+    // makes one for a device to signal it on; on a machine where nothing else
+    // runs, nothing ever waits on one for long.
+    let name = ctx.string(args[3]).map_err(Stop::Fault)?;
+    ctx.state.last_error = 0;
+    Ok(ctx.state.give(Object::Named {
+        kind: "event",
+        name,
+    }))
+}
+
+fn set_event(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // Nothing is waiting to be woken: the only thread there is set it.
+    Ok(1)
+}
+
+fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Nothing else runs on this machine: no other thread holds a mutex, and
+    // no other process sets an event. A wait is over as soon as it is asked
+    // for. WAIT_OBJECT_0, and WAIT_FAILED for a handle nobody was given.
+    if ctx.state.object(args[0]).is_none() {
+        ctx.state.last_error = 6;
+        return Ok(0xffff_ffff);
+    }
+    Ok(0)
+}
+
 fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Letting go of a file the guest wrote is what puts it in the profile,
     // where the next run will read it back: a save outlives its run.
@@ -1141,6 +1190,7 @@ fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         path,
         bytes,
         writing: true,
+        wrote: true,
         ..
     }) = ctx.state.object_mut(args[0])
     {
@@ -1180,23 +1230,45 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 /// The access bit that makes a handle one the guest can write through.
 const GENERIC_WRITE: u32 = 0x4000_0000;
 
+/// What a title says it wants done with a file that is or is not there.
+const CREATE_NEW: u32 = 1;
+const CREATE_ALWAYS: u32 = 2;
+const OPEN_ALWAYS: u32 = 4;
+const TRUNCATE_EXISTING: u32 = 5;
+
+/// The file is already there, and the disc cannot be written to.
+const ERROR_FILE_EXISTS: u32 = 80;
+const ERROR_WRITE_PROTECT: u32 = 19;
+
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateFileA(path, access, share, security, disposition, flags, template).
     let named = ctx.string(args[0]).map_err(Stop::Fault)?;
     let path = ctx.absolute(&named);
     let writing = args[1] & GENERIC_WRITE != 0;
-    // CREATE_NEW, CREATE_ALWAYS and TRUNCATE_EXISTING all start the file
-    // empty, whatever was there before.
-    let opened = if writing && matches!(args[4], 1 | 2 | 5) {
-        Some(Vec::new())
-    } else {
-        ctx.open_guest_file(&path)
-    };
-    let bytes = match opened {
-        Some(bytes) => bytes,
-        // OPEN_ALWAYS makes what is not there.
-        None if writing && args[4] == 4 => Vec::new(),
-        None => {
+
+    // The declared machine's D: is a CD-ROM, and a disc is not written to.
+    if writing && path.to_ascii_uppercase().starts_with("D:") {
+        ctx.log
+            .line(&format!("write refused, D: is a disc: {path}"));
+        ctx.state.last_error = ERROR_WRITE_PROTECT;
+        return Ok(INVALID_HANDLE);
+    }
+
+    let there = ctx.open_guest_file(&path);
+    let bytes = match (there, args[4]) {
+        // CREATE_NEW is a title asking for a file that is not there yet, and
+        // it has to be told when one is.
+        (Some(_), CREATE_NEW) if writing => {
+            ctx.state.last_error = ERROR_FILE_EXISTS;
+            return Ok(INVALID_HANDLE);
+        }
+        // What was there is thrown away, whatever it was.
+        (Some(_), CREATE_ALWAYS | TRUNCATE_EXISTING) if writing => Vec::new(),
+        (Some(bytes), _) => bytes,
+        // Nothing there: only a title that says it is making one gets a
+        // handle, which leaves TRUNCATE_EXISTING and OPEN_EXISTING refused.
+        (None, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS) if writing => Vec::new(),
+        (None, _) => {
             // Recorded rather than passed over: what a title opens is how the
             // declared install tree learns what it has to hold.
             ctx.log.line(&format!("file missing {path}"));
@@ -1212,6 +1284,7 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         bytes,
         at: 0,
         writing,
+        wrote: false,
     }))
 }
 
@@ -1251,8 +1324,10 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             bytes,
             at,
             writing: true,
+            wrote,
             ..
         }) => {
+            *wrote = true;
             let start = *at as usize;
             if bytes.len() < start + given.len() {
                 bytes.resize(start + given.len(), 0);
@@ -1278,7 +1353,10 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (handle, distance, method) = (args[0], args[1] as i32, args[3]);
-    let Some(Object::File { bytes, at, .. }) = ctx.state.object(handle) else {
+    let Some(Object::File {
+        bytes, at, writing, ..
+    }) = ctx.state.object(handle)
+    else {
         return Ok(INVALID_HANDLE);
     };
     let len = u32::try_from(bytes.len()).unwrap_or(0);
@@ -1287,7 +1365,11 @@ fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         1 => *at,
         _ => len,
     };
-    let moved = base.wrapping_add(distance as u32).min(len);
+    // A title laying a file out seeks past the end of what it has written so
+    // far, and what it writes there is what makes the file that long. Reading
+    // cannot go past what is there.
+    let moved = base.wrapping_add(distance as u32);
+    let moved = if *writing { moved } else { moved.min(len) };
     if let Some(Object::File { at, .. }) = ctx.state.object_mut(handle) {
         *at = moved;
     }

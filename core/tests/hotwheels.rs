@@ -1,0 +1,197 @@
+//! Hot Wheels Stunt Track Driver, from the rip to first light (#33).
+//!
+//! Everything here goes through the run seam on the headless host: what the
+//! title presented, what it logged, and how the run ended.
+
+use lego_legacy_core::cli::{Cli, Trace};
+use lego_legacy_core::clock::FlipCost;
+use lego_legacy_core::disc;
+use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::roster::HOT_WHEELS as ENTRY;
+use lego_legacy_core::testkit;
+use lego_legacy_core::title::{Declared, Installed, Title, WINDOWS_98_SE};
+
+/// The title as its own crate declares it.
+const HOT_WHEELS: Title = Title {
+    key: ENTRY.key,
+    flip_cost: FlipCost::Refresh(60),
+    image: ENTRY.image,
+    red_book: ENTRY.red_book,
+    declared: Declared {
+        windows: WINDOWS_98_SE,
+        megabytes: 128,
+        modes: &[(640, 480, 16)],
+        computer: "LEGO-LEGACY",
+        user: "LEGO-LEGACY",
+        why: "the title crate's own, repeated here because a test crate cannot depend on a \
+              binary",
+    },
+    installed: Installed::Copied("SETUP/HOT98"),
+    registry: &[
+        (
+            "HKLM\\SOFTWARE\\MATTEL\\STUNT TRACK DRIVER\\1.0",
+            "InstallPath",
+            "C:\\Program Files\\Mattel\\Stunt Track Driver",
+        ),
+        (
+            "HKLM\\SOFTWARE\\MATTEL\\STUNT TRACK DRIVER\\1.0",
+            "CDDATADIR",
+            "D:\\SETUP\\HOT98\\DATA",
+        ),
+    ],
+    install_dir: "C:\\Program Files\\Mattel\\Stunt Track Driver",
+};
+
+/// Point the run at the checkout's rips and keep run directories out of it.
+fn scratch() -> bool {
+    std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
+    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
+
+    let present = disc::pressing_path(ENTRY.image.disc_dir, ENTRY.image.pressing).is_file();
+    if !present {
+        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
+        assert!(
+            !required,
+            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
+        );
+        eprintln!(
+            "skipping: no rips under {} (rip your own discs there)",
+            root.display()
+        );
+    }
+    present
+}
+
+/// Enough instructions to reach the splash and watch it fade up.
+///
+/// This title paces itself by reading the tick count in a loop rather than by
+/// sleeping, so it retires about fifteen million instructions between frames
+/// waiting for its next one to be due: a declared Pentium II's worth of
+/// spinning, and most of this budget.
+const FIRST_LIGHT_BUDGET: u64 = 2_200_000_000;
+
+/// The flip the title's own picture first reaches the screen at: the
+/// developer's splash, fading up through a palette that starts black.
+const FIRST_LIGHT: u64 = 101;
+
+#[test]
+fn the_entry_image_loads_from_the_disc_and_starts_calling() {
+    if !scratch() {
+        return;
+    }
+    let cli = Cli {
+        trace: Trace::Shims,
+        ..Cli::default()
+    };
+    let ran = testkit::try_run_headless(&HOT_WHEELS, &cli, 100_000).expect("the rip loads");
+
+    ran.assert_logged("imports 73")
+        .assert_logged("base 0x00400000")
+        .assert_logged("call KERNEL32.DLL!GetVersion");
+}
+
+#[test]
+fn the_declared_tree_holds_what_the_installer_would_have_copied() {
+    if !scratch() {
+        return;
+    }
+    let ran = testkit::try_run_headless(&HOT_WHEELS, &Cli::default(), 100_000).expect("it loads");
+
+    // Every file under the disc's own HOT98 directory, and nothing from the
+    // installer or the DirectX redistributable beside it.
+    ran.assert_logged("installed 246 files");
+}
+
+/// The run every first light test looks at, replayed once.
+fn boot() -> Option<&'static testkit::Ran> {
+    use std::sync::OnceLock;
+    static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+    RAN.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let host = Headless::new().keeping(&[FIRST_LIGHT - 1, FIRST_LIGHT]);
+        Some(testkit::run_on(
+            host,
+            &HOT_WHEELS,
+            &Cli::default(),
+            FIRST_LIGHT_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+#[test]
+fn the_title_reaches_first_light_and_puts_its_own_picture_on_the_screen() {
+    let Some(ran) = boot() else { return };
+
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way to the splash stops the run"
+    );
+
+    // The title has only the screen to draw on: no flipping chain, so every
+    // frame is a lock and a letting go of the primary surface.
+    ran.assert_logged("surface 640x480x8 at")
+        .assert_logged("dinput mouse at");
+
+    let lit = ran
+        .host
+        .frames
+        .iter()
+        .find(|f| !f.is_uniform())
+        .expect("the title puts a picture on the screen");
+    assert_eq!(
+        lit.flip, FIRST_LIGHT,
+        "first light moved: it is now flip {}",
+        lit.flip
+    );
+    assert_eq!((lit.width, lit.height), (640, 480));
+
+    // Before it, the screen is one colour: the picture is already drawn and
+    // the palette it is read through is still black.
+    let before = ran
+        .host
+        .frame(FIRST_LIGHT - 1)
+        .expect("the frame before it is kept");
+    assert!(
+        before.is_uniform(),
+        "the frame before first light should be a screen of one colour"
+    );
+}
+
+#[test]
+fn the_boot_replays_to_the_same_machine_every_time() {
+    let Some(first) = boot() else { return };
+    let Some(second) = ({
+        use std::sync::OnceLock;
+        static AGAIN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+        AGAIN
+            .get_or_init(|| {
+                if !scratch() {
+                    return None;
+                }
+                Some(testkit::run_headless(
+                    &HOT_WHEELS,
+                    &Cli::default(),
+                    FIRST_LIGHT_BUDGET,
+                ))
+            })
+            .as_ref()
+    }) else {
+        return;
+    };
+
+    assert_eq!(first.finish.cursor, second.finish.cursor);
+    assert_eq!(first.finish.flips, second.finish.flips);
+    assert_eq!(
+        first.finish.declared_millis, second.finish.declared_millis,
+        "the same declared time"
+    );
+    assert_eq!(
+        first.digest, second.digest,
+        "and the machine ends the same way"
+    );
+}

@@ -2,7 +2,7 @@
 
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::roster::ROCK_RAIDERS as ENTRY;
-use lego_legacy_core::title::{Declared, WINDOWS_98_SE};
+use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
 use lego_legacy_core::{run, Title};
 use std::process::ExitCode;
 
@@ -41,6 +41,11 @@ pub const ROCK_RAIDERS: Title = Title {
               checks for; the rest is the roster's baseline, unmeasured against this title \
               because it has not asked for any of it yet",
     },
+    // This pressing ships its data in an InstallShield cabinet, which the
+    // declared tree unpacks from (#16).
+    installed: Installed::Cabinet,
+    // Its installer writes nothing this title reads back.
+    registry: &[],
     // Where this title's installer puts it, spelled the way the guest will
     // read it back from the machine.
     install_dir: "C:\\LEGORR",

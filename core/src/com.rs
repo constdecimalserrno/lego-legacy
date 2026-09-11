@@ -140,6 +140,15 @@ const FACES: &[(&str, &str, &str)] = &[
         "b3a6f3e0-2b43-11cf-a2de-00aa00b93356",
         "IDirectDraw4",
     ),
+    // DirectX 5's input device, which a title asks its device for to decide
+    // the machine has DirectX 5 or newer. It adds force feedback and Poll
+    // after Initialize and agrees slot for slot before that, so one table
+    // answers both.
+    (
+        "IDirectInputDeviceA",
+        "5944e682-c92e-11cf-bfc7-444553540000",
+        "IDirectInputDeviceA",
+    ),
     // DirectX 6's retained mode, which the roster's titles ask for by name.
     (
         "IDirect3DRM",

@@ -1166,7 +1166,26 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn unlock(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // A title with a flipping chain presents by flipping, and this is the
+    // middle of its frame. A title that has only the screen draws straight
+    // onto it, and letting go of the whole of it is the moment its frame
+    // exists: there is nothing else for it to become. Letting go of a corner
+    // is not: a title that draws its frame in pieces has not finished one.
+    let whole = args.first().copied().unwrap_or(0) == 0;
+    let Some((pixels, width, height, pitch, depth, true, 0)) = surface_of(ctx, this) else {
+        return Ok(S_OK);
+    };
+    if !whole {
+        return Ok(S_OK);
+    }
+    ctx.state.present = Some(super::Present {
+        pixels,
+        width,
+        height,
+        pitch,
+        depth,
+    });
     Ok(S_OK)
 }
 

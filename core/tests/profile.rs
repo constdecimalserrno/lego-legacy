@@ -26,8 +26,8 @@ fn a_save_outlives_the_run_that_wrote_it_and_the_disc_underneath_it_does_not_cha
         "spelled whichever way the guest asks for it"
     );
     assert!(
-        dir.join("LEGORR/DATA/SAVES/0.SAV").exists(),
-        "under the profile, and nowhere above it"
+        dir.join("C/LEGORR/DATA/SAVES/0.SAV").exists(),
+        "under the profile, the drive among the directories, and nowhere above it"
     );
 
     // What the guest wrote stands in front of what the pressing holds.

@@ -7,7 +7,7 @@
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::host::headless::{Headless, Presented};
-use lego_legacy_core::title::{Declared, EntryImage, WINDOWS_98_SE};
+use lego_legacy_core::title::{Declared, EntryImage, Installed, WINDOWS_98_SE};
 use lego_legacy_core::{disc, testkit, Title};
 
 /// The title as its own crate declares it.
@@ -30,6 +30,8 @@ const ROCK_RAIDERS: Title = Title {
         user: "LEGO-LEGACY",
         why: "the title crate's own values",
     },
+    installed: Installed::Cabinet,
+    registry: &[],
     install_dir: "C:\\LEGORR",
 };
 
@@ -53,6 +55,8 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
         user: "LEGO-LEGACY",
         why: "the title crate's own values",
     },
+    installed: Installed::Cabinet,
+    registry: &[],
     install_dir: "C:\\LEGORR",
 };
 

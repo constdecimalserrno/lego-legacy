@@ -37,11 +37,28 @@ pub const ROCK_RAIDERS: Entry = Entry {
     red_book: Some("rock-raiders"),
 };
 
+/// Hot Wheels Stunt Track Driver, the roster's second title.
+pub const HOT_WHEELS: Entry = Entry {
+    key: "hotwheels-stunt-track-driver",
+    name: "Hot Wheels Stunt Track Driver",
+    image: EntryImage {
+        disc_dir: "hotwheels-stunt-track-driver",
+        pressing: "hotwheels-stunt-track-driver",
+        path: "SETUP/HOT98/STUNT.EXE",
+        sha256: "a938949d705e2e06af80c22bdd76b10b52df811342e5a5b28bc23ba716903850",
+        why: "this title has one pressing and its executable is on the disc unwrapped, \
+              beside the data an installer would have copied from the same directory",
+    },
+    // The disc carries one data track and no audio tracks: this title's music
+    // is in its own files, not on the disc as Red Book audio.
+    red_book: None,
+};
+
 /// The whole roster, in the order the titles are being taken.
 ///
-/// Three of the four are not here yet: a title joins when its own crate does,
+/// Two of the four are not here yet: a title joins when its own crate does,
 /// so the launcher never offers something that cannot be started.
-pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS];
+pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS, &HOT_WHEELS];
 
 /// What the launcher found when it went looking for a title.
 #[derive(Clone, Debug, PartialEq, Eq)]

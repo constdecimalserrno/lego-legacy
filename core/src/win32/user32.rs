@@ -82,6 +82,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "WaitMessage",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: wait_message,
+    },
+    Shim {
+        dll: "USER32",
         name: "PeekMessageA",
         args: 5,
         convention: Convention::Stdcall,
@@ -831,6 +838,14 @@ fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The title puts the pointer somewhere, and that is where it is until a
     // person moves it.
     ctx.state.pointer = (args[0] as i32, args[1] as i32);
+    Ok(1)
+}
+
+fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // Waiting for a message would wait forever: this machine delivers input at
+    // a flip, and a title that is inside a call is not flipping. It comes back
+    // at once and the title looks at its queue, which is what it would have
+    // done anyway.
     Ok(1)
 }
 

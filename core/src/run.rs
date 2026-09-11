@@ -52,6 +52,12 @@ pub fn run_digested(
         machine.load_stub()?;
     } else {
         machine.load_title(title)?;
+        // What the declared install tree holds, which is what the title's own
+        // installer would have put on the machine's disc.
+        log.line(&format!(
+            "installed {} files",
+            machine.state.installed_files
+        ));
         if let Some(image) = &machine.image {
             log.line(&format!(
                 "image {} base {:#010x} entry {:#010x} imports {}",

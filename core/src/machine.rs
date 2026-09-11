@@ -384,15 +384,29 @@ impl Machine {
         self.state.volume_label = iso.label.clone();
 
         // What this title's installer would have put on the machine's disc,
-        // declared from the pressing's own cabinet rather than by running the
+        // declared from the pressing itself rather than by running the
         // installer (#16).
         let mut iso = iso;
-        if let Ok(header) = iso.read("DATA1.HDR") {
-            self.state.installed_files =
+        self.state.installed_files = match title.installed {
+            crate::title::Installed::Cabinet => {
+                let header = iso.read("DATA1.HDR")?;
                 self.tree
-                    .set_cabinet(&header, "DATA1.CAB", title.install_dir)?;
-        }
+                    .set_cabinet(&header, "DATA1.CAB", title.install_dir)?
+            }
+            crate::title::Installed::Copied(from) => {
+                self.tree.set_copied(&mut iso, from, title.install_dir)?
+            }
+        };
         self.tree.set_disc(iso);
+
+        // What this title's installer would have left in the registry, which
+        // is where a title looks to find itself and its disc.
+        for (key, name, value) in title.registry {
+            let mut bytes = value.as_bytes().to_vec();
+            bytes.push(0);
+            self.state
+                .declare_registry(key, name, crate::win32::advapi32::REG_SZ, bytes);
+        }
 
         let image = crate::pe::load(&bytes, &mut self.arena)?;
         // The guest starts where it was installed, as a player double-clicking

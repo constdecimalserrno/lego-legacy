@@ -66,9 +66,16 @@ fn main() -> ExitCode {
 fn list() -> Vec<Found> {
     println!("lego-legacy");
     let mut found = Vec::new();
+    // The names line up against the longest one on the roster, whatever joins
+    // it later.
+    let column = roster::ROSTER
+        .iter()
+        .map(|e| e.name.len())
+        .max()
+        .unwrap_or(0);
     for (i, entry) in roster::ROSTER.iter().enumerate() {
         let what = roster::look_for(entry);
-        println!("  {}. {:<22} {what}", i + 1, entry.name);
+        println!("  {}. {:<column$} {what}", i + 1, entry.name);
         if let Some(pressing) = entry.red_book {
             if pressing != entry.image.pressing {
                 println!("     music comes from the {pressing} pressing");

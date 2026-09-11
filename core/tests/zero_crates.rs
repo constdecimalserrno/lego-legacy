@@ -7,10 +7,11 @@
 use std::path::Path;
 
 /// Every package this workspace is allowed to resolve.
-const MEMBERS: [&str; 3] = [
+const MEMBERS: [&str; 4] = [
     "lego-legacy-core",
     "lego-legacy-launcher",
     "lego-rock-raiders",
+    "hotwheels-stunt-track-driver",
 ];
 
 #[test]

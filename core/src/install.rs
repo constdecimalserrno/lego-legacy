@@ -69,14 +69,16 @@ impl Tree {
     }
 
     /// Where in the profile a guest path lives: one host directory per path
-    /// component, the drive letter dropped and every name as the declared
+    /// component, the drive among them, and every name as the declared
     /// machine reads it, so a file written as one spelling is found by any
-    /// other. Nothing above the profile is reachable.
+    /// other and two drives never land on one file. Nothing above the profile
+    /// is reachable.
     fn profile_path(&self, guest_path: &str) -> Option<PathBuf> {
         let mut path = self.profile.clone()?;
         let mut parts = 0;
         for part in Self::key(guest_path).split('\\') {
-            if part.is_empty() || part == "." || part == ".." || part.ends_with(':') {
+            let part = part.trim_end_matches(':');
+            if part.is_empty() || part == "." || part == ".." {
                 continue;
             }
             path.push(part);
@@ -147,6 +149,47 @@ impl Tree {
             declared += 1;
         }
         self.cabinet = Some((cabinet, data_path.to_owned()));
+        Ok(declared)
+    }
+
+    /// Declare everything a directory of the pressing holds, under a root:
+    /// what an installer that copies files rather than unpacking a cabinet
+    /// would have put on the machine's disc.
+    ///
+    /// # Errors
+    /// When the image holds no such directory, or cannot be read.
+    pub fn set_copied(
+        &mut self,
+        iso: &mut Iso,
+        from: &str,
+        root: &str,
+    ) -> Result<usize, crate::disc::DiscError> {
+        let mut declared = 0;
+        let mut dirs = vec![String::new()];
+        while let Some(under) = dirs.pop() {
+            let here = if under.is_empty() {
+                from.to_owned()
+            } else {
+                format!("{from}/{under}")
+            };
+            for entry in iso.list(&here)? {
+                let below = if under.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{under}/{}", entry.name)
+                };
+                if entry.is_dir {
+                    dirs.push(below);
+                } else {
+                    let guest = format!("{root}\\{}", below.replace('/', "\\"));
+                    self.files.insert(
+                        Self::key(&guest),
+                        Source::Disc(format!("{here}/{}", entry.name)),
+                    );
+                    declared += 1;
+                }
+            }
+        }
         Ok(declared)
     }
 

@@ -48,6 +48,20 @@ pub struct Declared {
 /// clear to say it is not Windows NT.
 pub const WINDOWS_98_SE: u32 = 0x0a04 | (2222 << 16);
 
+/// How a title's files reached the declared machine's disc.
+///
+/// A declared value like every other: which of these it is comes from the
+/// pressing, not from sniffing the disc for one and falling back to the
+/// other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Installed {
+    /// Unpacked out of the pressing's InstallShield cabinet (#16).
+    Cabinet,
+    /// Copied whole out of a directory of the disc, which is what an
+    /// installer does for a title that ships its files loose.
+    Copied(&'static str),
+}
+
 /// One supported game, identified by the bytes of its entry image.
 ///
 /// The roster key is the name of the title's binary and of its data-root
@@ -65,6 +79,13 @@ pub struct Title {
     pub red_book: Option<&'static str>,
     /// The machine this title is told it is running on.
     pub declared: Declared,
+    /// How this title's own files got onto that machine's disc.
+    pub installed: Installed,
+    /// What this title's installer left in the registry for it to read back,
+    /// as key, value name and string. A declared value like the rest: the
+    /// installer is never run, so what it would have written is written down
+    /// here instead.
+    pub registry: &'static [(&'static str, &'static str, &'static str)],
     /// Where the declared machine has this title installed.
     ///
     /// A declared value: the guest reads this path back from the machine and
@@ -99,6 +120,8 @@ impl Title {
             why: "the stub guest asks the machine nothing, and these are the roster's own \
                   baseline values rather than anything measured for it",
         },
+        installed: Installed::Cabinet,
+        registry: &[],
         install_dir: "C:\\STUB",
     };
 }

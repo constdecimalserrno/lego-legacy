@@ -1,0 +1,13 @@
+[package]
+name = "hotwheels-stunt-track-driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hotwheels-stunt-track-driver"
+path = "src/main.rs"
+
+[dependencies]
+lego-legacy-core = { path = "../../core" }

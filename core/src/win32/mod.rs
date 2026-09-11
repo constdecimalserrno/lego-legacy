@@ -69,6 +69,9 @@ pub enum Object {
         /// Whether the guest asked to write through this handle. What it
         /// writes reaches the profile when it closes the file.
         writing: bool,
+        /// Whether it actually wrote anything. A file opened for writing and
+        /// never written to is not one the profile keeps a copy of.
+        wrote: bool,
     },
     /// Something named that only has to be distinct: an event, a mutex.
     Named { kind: &'static str, name: String },
