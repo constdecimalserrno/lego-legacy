@@ -141,6 +141,11 @@ pub trait Host {
     /// When the backend has no dynamic loader, or the library is absent.
     fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError>;
 
+    /// Draw the pointer a person is really moving, or stop: a title that
+    /// draws its own wants one pointer on the screen, not two. A host with no
+    /// window has nothing to do here.
+    fn show_pointer(&mut self, _show: bool) {}
+
     /// Whether the person has ended the run from outside it, by closing the
     /// window. A host with no window never has.
     fn closed(&self) -> bool {

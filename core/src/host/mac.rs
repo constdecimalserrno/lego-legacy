@@ -328,6 +328,9 @@ pub struct MacWindow {
     audio: Option<super::mac_audio::MacAudio>,
     /// Whether the person closed the window.
     closed: bool,
+    /// Whether we have hidden the pointer. AppKit counts hides, so it is
+    /// hidden once and shown once.
+    pointer_hidden: bool,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -443,6 +446,7 @@ impl MacWindow {
                 held: Vec::new(),
                 audio: None,
                 closed: false,
+                pointer_hidden: false,
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -586,6 +590,9 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
+        // A run that ended with the pointer hidden would leave a person
+        // without one.
+        self.show_pointer(true);
         // Safety: closing a window we opened.
         unsafe {
             self.rt.send::<MsgVoid>()(self.window, self.rt.sel("close"));
@@ -645,6 +652,19 @@ impl Host for MacWindow {
     fn audio(&mut self, samples: &[i16]) {
         if let Some(device) = &self.audio {
             device.play(samples);
+        }
+    }
+
+    fn show_pointer(&mut self, show: bool) {
+        if show == !self.pointer_hidden {
+            return;
+        }
+        self.pointer_hidden = !show;
+        // Safety: NSCursor's own class methods, which take nothing.
+        unsafe {
+            let cursor = self.rt.class("NSCursor");
+            let what = if show { "unhide" } else { "hide" };
+            self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
         }
     }
 

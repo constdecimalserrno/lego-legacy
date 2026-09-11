@@ -141,7 +141,7 @@ pub const SHIMS: &[Shim] = &[
         name: "ShowCursor",
         args: 1,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: show_cursor,
     },
     Shim {
         dll: "USER32",
@@ -854,6 +854,18 @@ fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .line(&format!("window procedure given message {message:#06x}"));
     ctx.call_guest = Some((procedure, vec![window, message, wparam, lparam]));
     Ok(0)
+}
+
+fn show_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // A count, not a flag, as Windows keeps it: the pointer is drawn while it
+    // is zero or more. A title that draws its own pointer takes it below zero,
+    // and the host stops drawing the one a person is really moving, so that
+    // there is one pointer on the screen rather than two.
+    ctx.state.cursor_shown += if args[0] == 0 { -1 } else { 1 };
+    let count = ctx.state.cursor_shown;
+    ctx.log
+        .at(crate::cli::Trace::Shims, || format!("cursor count {count}"));
+    Ok(count as u32)
 }
 
 fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

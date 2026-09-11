@@ -162,6 +162,9 @@ pub struct State {
     pub input_sequence: u32,
     /// Whether the pointer's button is down.
     pub mouse_down: bool,
+    /// Windows' own show count for the pointer: it is drawn while this is
+    /// zero or more, and a title that draws its own takes it below zero.
+    pub cursor_shown: i32,
     /// Window messages waiting for the title to take them, oldest first.
     pub messages: VecDeque<Message>,
     /// The modal dialog a title has up, while it has one.
@@ -238,6 +241,7 @@ impl State {
             keyboard_data: VecDeque::new(),
             input_sequence: 0,
             mouse_down: false,
+            cursor_shown: 0,
             messages: VecDeque::new(),
             dialog: None,
             names: BTreeMap::new(),

@@ -1270,8 +1270,15 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         (None, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS) if writing => Vec::new(),
         (None, _) => {
             // Recorded rather than passed over: what a title opens is how the
-            // declared install tree learns what it has to hold.
-            ctx.log.line(&format!("file missing {path}"));
+            // declared install tree learns what it has to hold, and who asked
+            // is how a name nobody can explain is chased back to the code that
+            // built it.
+            let caller = ctx
+                .mem
+                .read_u32(ctx.cpu.r[crate::cpu::ESP])
+                .unwrap_or_default();
+            ctx.log
+                .line(&format!("file missing {path}, asked from {caller:#010x}"));
             ctx.state.last_error = ERROR_FILE_NOT_FOUND;
             return Ok(INVALID_HANDLE);
         }

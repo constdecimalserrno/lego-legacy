@@ -86,6 +86,10 @@ pub struct Machine {
     pub input: Vec<(u64, crate::host::Input)>,
     /// Where a guest frame is turned into something the host can show.
     present_buffer: Vec<u8>,
+    /// Whether the host is drawing the pointer, so that it is told only when
+    /// that changes: hiding is counted, and telling it twice would take two
+    /// showings to undo.
+    pointer_shown: bool,
     /// Calls the machine made into guest code, waiting to come back.
     continuations: Vec<(u32, u32)>,
     /// Which parked calls are a modal dialog's turns, by their depth.
@@ -127,6 +131,7 @@ impl Machine {
             tree: crate::install::Tree::new(),
             title,
             present_buffer: Vec::new(),
+            pointer_shown: true,
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
             bound: Vec::new(),
@@ -1158,6 +1163,13 @@ impl Machine {
             frame.depth
         ));
         host.pace(self.clock.nanos());
+        // One pointer on the screen: the host stops drawing its own once the
+        // title has said it draws one itself (ShowCursor's count).
+        let shown = self.state.cursor_shown >= 0;
+        if shown != self.pointer_shown {
+            self.pointer_shown = shown;
+            host.show_pointer(shown);
+        }
         self.mix(host);
         self.deliver_input(host, log);
         self.flips += 1;
