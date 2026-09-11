@@ -681,7 +681,31 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         args[6] as i32, args[7] as i32, args[4] as i32, args[5] as i32
     ));
     ctx.state.window_made = true;
+    let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
+    activate(ctx.state, time);
     Ok(WINDOW)
+}
+
+/// What Windows tells a title when its own application becomes the active one.
+const WM_ACTIVATEAPP: u32 = 0x001c;
+
+/// Tell the title that its application is the one in front.
+///
+/// The declared machine runs one title and nothing else, so the window it
+/// makes is the active window from the moment it exists, and Windows says so.
+/// A title that is never told believes it is in the background: Hot Wheels
+/// draws a whole race into its own frame buffer and puts none of it on the
+/// screen until it has heard this, which is a black race with its sound
+/// playing (#38).
+fn activate(state: &mut super::State, time: u32) {
+    state.messages.push_back(super::Message {
+        window: WINDOW,
+        message: WM_ACTIVATEAPP,
+        wparam: 1,
+        lparam: 0,
+        time,
+        point: state.pointer,
+    });
 }
 
 fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -1187,9 +1211,21 @@ fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deliver, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW};
+    use super::WM_ACTIVATEAPP;
+    use super::{activate, deliver, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW};
     use crate::host::Input;
     use crate::win32::State;
+
+    #[test]
+    fn a_window_made_here_is_the_active_application() {
+        let mut state = State::new();
+        state.window_made = true;
+        activate(&mut state, 7);
+        let first = state.messages[0];
+        assert_eq!((first.window, first.message), (WINDOW, WM_ACTIVATEAPP));
+        assert_eq!(first.wparam, 1, "active, not deactivated");
+        assert_eq!(first.time, 7);
+    }
 
     #[test]
     fn a_persons_mouse_reaches_the_window_as_windows_would_send_it() {

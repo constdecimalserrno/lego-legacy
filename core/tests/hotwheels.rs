@@ -124,6 +124,16 @@ fn boot() -> Option<&'static testkit::Ran> {
 }
 
 #[test]
+fn the_title_is_told_its_application_is_the_one_in_front() {
+    let Some(ran) = boot() else { return };
+
+    // WM_ACTIVATEAPP. This title turns its own drawing on when it hears it and
+    // off when it hears the other one: never told, it renders a whole race
+    // into its own frame buffer and puts none of it on the screen (#38).
+    ran.assert_logged("window procedure given message 0x001c");
+}
+
+#[test]
 fn the_title_reaches_first_light_and_puts_its_own_picture_on_the_screen() {
     let Some(ran) = boot() else { return };
 
@@ -194,5 +204,63 @@ fn the_boot_replays_to_the_same_machine_every_time() {
     assert_eq!(
         first.digest, second.digest,
         "and the machine ends the same way"
+    );
+}
+
+/// The flip the starting line is on the screen at, its lights still red.
+const RACE_STARTS: u64 = 7200;
+
+/// Forty flips later, with the car away down the track.
+const RACE_RUNNING: u64 = 7240;
+
+/// Enough to replay the committed route through the race's first frames.
+///
+/// Most of it is the boot and the menus; the race itself is the last half
+/// billion. It is the price of a gate on a title that only reaches its own
+/// play through seven thousand flips of a person's own clicking.
+const FIRST_RACE_BUDGET: u64 = 11_000_000_000;
+
+/// The committed route to a race, replayed once.
+fn racing() -> Option<&'static testkit::Ran> {
+    use std::sync::OnceLock;
+    static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+    RAN.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../titles/hotwheels-stunt-track-driver/routes/first-race.route"),
+            ),
+            ..Cli::default()
+        };
+        let host = Headless::new().keeping(&[RACE_STARTS, RACE_RUNNING]);
+        Some(testkit::run_on(host, &HOT_WHEELS, &cli, FIRST_RACE_BUDGET))
+    })
+    .as_ref()
+}
+
+#[test]
+fn the_route_reaches_a_race_and_the_race_is_a_moving_picture() {
+    let Some(ran) = racing() else { return };
+
+    let line = ran
+        .host
+        .frame(RACE_STARTS)
+        .expect("the run reaches the starting line inside its budget");
+    let running = ran
+        .host
+        .frame(RACE_RUNNING)
+        .expect("the run reaches forty flips past it");
+
+    assert!(
+        !line.is_uniform() && !running.is_uniform(),
+        "a race that draws is not a screen of one colour"
+    );
+    assert_ne!(
+        line.pixels, running.pixels,
+        "a race that draws is a different picture forty flips later: the same one twice is \
+         the title rendering into its own frame buffer and presenting none of it (#38)"
     );
 }
