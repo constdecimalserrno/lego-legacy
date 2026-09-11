@@ -115,7 +115,7 @@ impl Machine {
         Ok(Self {
             arena: Arena::new(host, ARENA_BYTES)?,
             cpu: Cpu::default(),
-            clock: Clock::new(),
+            clock: Clock::at(title.declared.hz),
             engine: Box::new(Interp::new(Mode::FLAT)),
             flip_cost: title.flip_cost,
             surface: None,
@@ -1097,15 +1097,21 @@ impl Machine {
                 }
             }
             8 => {
-                // Through the palette the guest set.
+                // Through the palette the guest set. A screen it has not given
+                // a palette to is black: there are no colours to read yet, and
+                // reading them from wherever address zero lands would paint
+                // the screen one nobody chose.
                 let palette = self.state.palette;
                 for y in 0..frame.height as usize {
                     for x in 0..frame.width as usize {
                         let index = source[y * frame.pitch as usize + x];
-                        let entry = self
-                            .arena
-                            .read_u32(palette + u32::from(index) * 4)
-                            .unwrap_or(0);
+                        let entry = if palette == 0 {
+                            0
+                        } else {
+                            self.arena
+                                .read_u32(palette + u32::from(index) * 4)
+                                .unwrap_or(0)
+                        };
                         let out = (y * frame.width as usize + x) * 4;
                         let [r, g, b, _] = entry.to_le_bytes();
                         self.present_buffer[out] = b;
