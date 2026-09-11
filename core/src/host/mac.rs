@@ -41,7 +41,6 @@ type MsgIdCharPtr = unsafe extern "C" fn(Id, Sel, *const c_char) -> Id;
 type MsgIdEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, bool) -> Id;
 type MsgU64 = unsafe extern "C" fn(Id, Sel) -> u64;
 type MsgPoint = unsafe extern "C" fn(Id, Sel) -> Point;
-type MsgF64 = unsafe extern "C" fn(Id, Sel) -> f64;
 type MsgRect = unsafe extern "C" fn(Id, Sel) -> Rect;
 
 #[repr(C)]
@@ -339,6 +338,7 @@ pub struct MacWindow {
     /// knowing about the other.
     captured_at: (f64, f64),
     cg_associate: unsafe extern "C" fn(bool) -> i32,
+    cg_event_field: unsafe extern "C" fn(Id, u32) -> i64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -440,8 +440,10 @@ impl MacWindow {
             let colour_space = create_space(*name.cast::<*const c_char>());
 
             let cg_associate = rt.graphics("CGAssociateMouseAndMouseCursorPosition")?;
+            let cg_event_field = rt.graphics("CGEventGetIntegerValueField")?;
             Ok(Self {
                 cg_associate,
+                cg_event_field,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
                 cg_provider_release: rt.graphics("CGDataProviderRelease")?,
@@ -483,6 +485,26 @@ impl MacWindow {
     /// Stop the output, once there is no more mix to hear.
     pub fn close_audio(&mut self) {
         self.audio = None;
+    }
+
+    /// How far the mouse itself moved for this event, the device's own
+    /// numbers rather than the pointer's accelerated ones.
+    fn mouse_delta(&self, event: Id) -> (f64, f64) {
+        // `kCGMouseEventDeltaX` and `kCGMouseEventDeltaY`.
+        const DELTA_X: u32 = 96;
+        const DELTA_Y: u32 = 97;
+        // Safety: `CGEvent` on an NSEvent answers the event Core Graphics made
+        // it from, and the two fields are integers on a mouse event. An event
+        // with no Core Graphics event behind it answers nil, and the fields
+        // come back zero, which is no movement.
+        unsafe {
+            let cg: Id = self.rt.send::<MsgId>()(event, self.rt.sel("CGEvent"));
+            if cg.is_null() {
+                return (0.0, 0.0);
+            }
+            let field = self.cg_event_field;
+            (field(cg, DELTA_X) as f64, field(cg, DELTA_Y) as f64)
+        }
     }
 
     /// Whether an event happened in our own window. One that did not is one
@@ -535,11 +557,17 @@ impl MacWindow {
                     5 | 6 => {
                         let (x, y) = if self.pointer_hidden {
                             // The pointer is the title's own and the host's is
-                            // out of the way: how far the mouse moved is the
-                            // whole story, and it keeps coming when a person
-                            // pushes past the edge of the screen.
-                            let dx: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
-                            let dy: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
+                            // out of the way: how far the mouse itself moved is
+                            // the whole story, and it keeps coming when a
+                            // person pushes past the edge of the screen.
+                            //
+                            // The mouse's own movement, not the pointer's:
+                            // AppKit's deltas have the operating system's
+                            // pointer acceleration in them, and a title reading
+                            // a mouse through DirectInput is reading the device
+                            // rather than the desktop's pointer. Core Graphics
+                            // keeps the device's own numbers on the event.
+                            let (dx, dy) = self.mouse_delta(event);
                             let (w, h) = self.frame_size;
                             let (mut cx, mut cy) = self.captured_at;
                             cx = (cx + dx).clamp(0.0, f64::from(w.max(1) - 1));
