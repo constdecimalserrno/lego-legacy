@@ -197,3 +197,66 @@ fn a_repeated_scan_stops_on_the_byte_it_was_looking_for() {
         "and counts down once for every byte it looked at"
     );
 }
+
+/// What the declared processor says it is, and what it says it can do: only
+/// what this emulator can actually run (#56).
+#[test]
+fn cpuid_answers_with_the_declared_processor_and_nothing_it_cannot_run() {
+    use lego_legacy_core::cpu::{EBX, ECX, EDX};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    mem.write(0x0040_0000, &[0x0f, 0xa2]).unwrap();
+    let mut cpu = Interp::new(Mode::FLAT);
+
+    let mut regs = Cpu {
+        eip: 0x0040_0000,
+        ..Cpu::default()
+    };
+    cpu.step(&mut regs, &mut mem).expect("cpuid is decoded");
+    assert_eq!(regs.r[EAX], 1, "one leaf past the first");
+    let vendor: Vec<u8> = [regs.r[EBX], regs.r[EDX], regs.r[ECX]]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    assert_eq!(&vendor, b"GenuineIntel");
+
+    let mut regs = Cpu {
+        eip: 0x0040_0000,
+        r: [1, 0, 0, 0, 0, 0, 0, 0],
+        ..Cpu::default()
+    };
+    cpu.step(&mut regs, &mut mem).expect("cpuid is decoded");
+    assert_eq!(regs.r[EAX], 0x0652, "family 6, model 5: a Pentium II");
+    assert_eq!(regs.r[EDX] & 1, 1, "it has a floating point unit");
+    assert_eq!(regs.r[EDX] & (1 << 4), 1 << 4, "and a cycle counter");
+    assert_eq!(
+        regs.r[EDX] & (1 << 23),
+        0,
+        "and no MMX, which this emulator does not decode"
+    );
+}
+
+/// The cycle counter a title times itself against is the declared clock's,
+/// carried on one to the instruction (#56).
+#[test]
+fn rdtsc_reads_the_declared_cycle_counter() {
+    use lego_legacy_core::cpu::EDX;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    // Two of them, a nop apart.
+    mem.write(0x0040_0000, &[0x0f, 0x31, 0x90, 0x0f, 0x31])
+        .unwrap();
+    let mut cpu = Interp::new(Mode::FLAT);
+    let mut regs = Cpu {
+        eip: 0x0040_0000,
+        tsc: 0x1_0000_0000,
+        ..Cpu::default()
+    };
+    let (retired, result) = cpu.run(&mut regs, &mut mem, 3, 0..1);
+    result.expect("three instructions retire");
+    assert_eq!(retired, 3);
+    // Started past what one register holds, so the count is in both: the
+    // second reading is two instructions after the first.
+    assert_eq!(regs.r[EDX], 1, "the top half of the count");
+    assert_eq!(regs.r[EAX], 2, "and the bottom, two instructions on");
+}

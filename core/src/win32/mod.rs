@@ -103,6 +103,10 @@ pub struct State {
     pub last_call: Option<String>,
     /// What the guest will read from `GetLastError`.
     pub last_error: u32,
+    /// Which failures the guest asked to be shown rather than handed back.
+    /// Kept so that `SetErrorMode` can answer with what it was, and read by
+    /// nothing: this machine puts no dialog up.
+    pub error_mode: u32,
     /// Where the guest believes it is.
     pub current_directory: String,
     /// The label on the disc in the declared machine's drive.
@@ -215,6 +219,7 @@ impl State {
             command_line: None,
             last_call: None,
             last_error: 0,
+            error_mode: 0,
             current_directory: String::new(),
             volume_label: String::new(),
             waited_millis: 0,

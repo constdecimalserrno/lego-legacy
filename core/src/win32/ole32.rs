@@ -19,6 +19,20 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "ole32",
+        name: "CoUninitialize",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: uninitialize,
+    },
+    Shim {
+        dll: "ole32",
+        name: "CoTaskMemFree",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: task_mem_free,
+    },
+    Shim {
+        dll: "ole32",
         name: "CoCreateInstance",
         args: 5,
         convention: Convention::Stdcall,
@@ -31,6 +45,21 @@ fn initialize(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // was asked. Nothing is kept, because the classes this machine makes need
     // no apartment.
     Ok(S_OK)
+}
+
+fn uninitialize(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // Nothing was kept when the library came up, so there is nothing to put
+    // down. The objects a title still holds are its own to release.
+    Ok(0)
+}
+
+fn task_mem_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // What COM allocated for a title came off the guest heap, so it goes back
+    // there. A null pointer is not an error, which is what COM says too.
+    if args[0] != 0 {
+        ctx.state.heap.free(args[0]);
+    }
+    Ok(0)
 }
 
 fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

@@ -229,6 +229,11 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         Kind::Nop => {}
         Kind::Int(n) => return Err(Stop::Interrupt(n)),
         Kind::Hlt => return Err(Stop::Halted),
+        Kind::Cpuid => cpuid(cpu),
+        Kind::Rdtsc => {
+            cpu.r[super::EAX] = (cpu.tsc & 0xffff_ffff) as u32;
+            cpu.r[super::EDX] = (cpu.tsc >> 32) as u32;
+        }
         Kind::Mov => {
             let src = insn.src.expect("mov has a source");
             let v = read_op(cpu, mem, &src, w)?;
@@ -1177,5 +1182,46 @@ fn advance(cpu: &mut Cpu, reg: usize, step: u32, addr32: bool) {
         cpu.r[reg] = cpu.r[reg].wrapping_add(step);
     } else {
         cpu.r[reg] = (cpu.r[reg] & !0xffff) | (cpu.r[reg].wrapping_add(step) & 0xffff);
+    }
+}
+
+/// What the declared processor answers when a title asks what it is.
+///
+/// Declared values, like the rest of the machine: a Pentium II, and a feature
+/// word naming only what this emulator can actually run. Saying MMX here would
+/// have a title reach for instructions the interpreter does not decode, so it
+/// does not say it (ADR-0004).
+fn cpuid(cpu: &mut Cpu) {
+    use super::{EAX, EBX, ECX, EDX};
+    match cpu.r[EAX] {
+        0 => {
+            // One leaf past this one, and "GenuineIntel" in the order the
+            // three registers spell it.
+            cpu.r[EAX] = 1;
+            cpu.r[EBX] = u32::from_le_bytes(*b"Genu");
+            cpu.r[EDX] = u32::from_le_bytes(*b"ineI");
+            cpu.r[ECX] = u32::from_le_bytes(*b"ntel");
+        }
+        1 => {
+            // Family 6, model 5, stepping 2: a Pentium II, which is the
+            // processor the roster's declared machine has.
+            cpu.r[EAX] = 0x0000_0652;
+            cpu.r[EBX] = 0;
+            cpu.r[ECX] = 0;
+            // Floating point, the time stamp counter and conditional moves,
+            // which is what this machine can actually run. Not MMX, and not
+            // compare-and-exchange-eight: a title told it had those would
+            // reach for instructions the interpreter does not decode
+            // (ADR-0004).
+            cpu.r[EDX] = (1 << 0) | (1 << 4) | (1 << 15);
+        }
+        _ => {
+            // Including the extended leaves, which is where a title looks for
+            // a vendor's own additions: this machine has none.
+            cpu.r[EAX] = 0;
+            cpu.r[EBX] = 0;
+            cpu.r[ECX] = 0;
+            cpu.r[EDX] = 0;
+        }
     }
 }

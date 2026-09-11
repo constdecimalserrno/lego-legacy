@@ -91,6 +91,11 @@ pub struct Cpu {
     pub flags: Flags,
     /// The floating-point unit.
     pub fpu: x87::X87,
+    /// The declared machine's cycle counter, which `rdtsc` reads (#56). The
+    /// machine puts the declared clock's own count here before each run and
+    /// the engine carries it forward one to the instruction, because a title
+    /// timing a few hundred instructions has to see them go by.
+    pub tsc: u64,
 }
 
 impl Cpu {

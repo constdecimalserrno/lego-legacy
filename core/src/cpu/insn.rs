@@ -200,6 +200,12 @@ pub enum Kind {
     Hlt,
     /// `int n`.
     Int(u8),
+    /// `cpuid`: what the processor says it is. The declared machine's answer,
+    /// like every other number a title reads about the machine (#56).
+    Cpuid,
+    /// `rdtsc`: the declared machine's cycle counter, which is what a title
+    /// times itself against.
+    Rdtsc,
 }
 
 /// Which shift or rotate.

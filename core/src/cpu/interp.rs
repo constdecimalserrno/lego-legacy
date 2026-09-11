@@ -227,7 +227,10 @@ impl CpuEngine for Interp {
                     cpu.seg_base[CS],
                 );
                 match self.execute_one(index, cpu, mem) {
-                    Ok(()) => retired += 1,
+                    Ok(()) => {
+                        retired += 1;
+                        cpu.tsc += 1;
+                    }
                     Err(stop @ Stop::Interrupt(_)) => return (retired + 1, Err(stop)),
                     Err(stop) => return (retired, Err(stop)),
                 }

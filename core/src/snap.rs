@@ -261,6 +261,7 @@ impl Snap for crate::cpu::Cpu {
             seg_base,
             flags,
             fpu,
+            tsc,
         } = self;
         for value in r {
             v.u32(value);
@@ -274,6 +275,10 @@ impl Snap for crate::cpu::Cpu {
         }
         flags.snap(v);
         fpu.snap(v);
+        // The cycle counter is the declared clock's own, put here before every
+        // run (#56), so a snapshot carries it for completeness rather than
+        // because resuming needs it.
+        v.u64(tsc);
     }
 }
 

@@ -38,6 +38,195 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "GetEnvironmentVariableA",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: get_environment_variable,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetSystemTimeAsFileTime",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: get_system_time_as_file_time,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "InterlockedIncrement",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: interlocked_increment,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "InterlockedDecrement",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: interlocked_decrement,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "InterlockedExchange",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: interlocked_exchange,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "IsBadReadPtr",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: is_bad_read_ptr,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "IsBadWritePtr",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: is_bad_read_ptr,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "IsBadCodePtr",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: is_bad_code_ptr,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "DisableThreadLibraryCalls",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: disable_thread_library_calls,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "SetErrorMode",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: set_error_mode,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "SetStdHandle",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: set_std_handle,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "FlushFileBuffers",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: flush_file_buffers,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetSystemInfo",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: get_system_info,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "TerminateProcess",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: terminate_process,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetCurrentThread",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: get_current_thread,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetTimeZoneInformation",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: get_time_zone_information,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetLogicalDriveStringsA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: get_logical_drive_strings,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetCommandLineW",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: get_command_line_w,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetUserDefaultLCID",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: user_default_lcid,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetUserDefaultLangID",
+        args: 0,
+        convention: Convention::Stdcall,
+        run: user_default_lang_id,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "IsValidCodePage",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: is_valid_code_page,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "IsValidLocale",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: is_valid_locale,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetLocaleInfoA",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: get_locale_info_a,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetLocaleInfoW",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: get_locale_info_w,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "EnumSystemLocalesA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: enum_system_locales,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "CompareStringA",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: compare_string_a,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "CompareStringW",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: compare_string_w,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "GetCommandLineA",
         args: 0,
         convention: Convention::Stdcall,
@@ -695,6 +884,22 @@ fn get_command_line(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(addr)
 }
 
+fn get_command_line_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The same line, two bytes a character: what a C runtime asks for when it
+    // was built to handle both.
+    let addr = get_command_line(ctx, args)?;
+    let line = ctx.string(addr).map_err(Stop::Fault)?;
+    let wide: Vec<u8> = line
+        .as_bytes()
+        .iter()
+        .flat_map(|b| [*b, 0])
+        .chain([0, 0])
+        .collect();
+    let at = ctx.state.heap.alloc(u32::try_from(wide.len()).unwrap_or(0));
+    ctx.mem.write(at, &wide).map_err(Stop::Fault)?;
+    Ok(at)
+}
+
 fn get_startup_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // STARTUPINFOA is 68 bytes. Everything zero but its own size, and no
     // flags: the guest is being started by a person, not by a shell handing
@@ -889,6 +1094,310 @@ fn get_cp_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// without being given a host's own environment, which would make a run depend
 /// on the machine it was taken on.
 const ENVIRONMENT: &str = "PATH=C:\\WINDOWS;C:\\WINDOWS\\COMMAND\0TEMP=C:\\WINDOWS\\TEMP\0\0";
+
+/// The locale the declared machine is set to: US English, which is the one
+/// every pressing on this roster was authored against. A run that read the
+/// host's own would sort and format differently on somebody else's machine.
+const LCID: u32 = 0x0409;
+
+fn user_default_lcid(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(LCID)
+}
+
+fn user_default_lang_id(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(LCID)
+}
+
+/// The code pages the declared machine has, which are the two it answers with
+/// from `GetACP` and `GetOEMCP`, plus the two names every Windows has.
+fn is_valid_code_page(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(u32::from(matches!(args[0], 0 | 1 | 2 | 3 | 437 | 1252)))
+}
+
+/// Whether the machine has a locale. It has the one it declares.
+fn is_valid_locale(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The system and user defaults name the declared locale too.
+    Ok(u32::from(matches!(
+        args[0],
+        LCID | 0x0400 | 0x0800 | 0x1000
+    )))
+}
+
+/// What a locale is called and how it writes numbers, dates and money.
+///
+/// Only what a C runtime reads on its way up. A field this machine has not
+/// declared answers as empty rather than as something invented, and the caller
+/// then uses the C locale's own.
+fn locale_field(what: u32) -> Option<&'static str> {
+    Some(match what & 0xffff {
+        0x0001 => "0409", // the locale itself, as the hexadecimal it is
+        0x0002 => "ENU",  // its abbreviated name
+        0x0003 => "0009", // the language
+        0x0004 => "English (United States)",
+        0x0005 => "US",
+        0x0006 => "USA",
+        0x0007 => "United States",
+        0x000e => ".", // the decimal separator
+        0x000f => ",", // and the thousands one
+        0x0014 => "$",
+        0x001d => "/", // how a date is written
+        0x001e => ":", // and a time
+        0x0011 => "M/d/yyyy",
+        0x0012 => "h:mm:ss tt",
+        0x1004 => "1252", // the code page it is written in
+        _ => return None,
+    })
+}
+
+fn get_locale_info_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetLocaleInfoA(locale, what, buffer, size).
+    let Some(value) = locale_field(args[1]) else {
+        // ERROR_INVALID_FLAGS: a field the declared machine does not carry.
+        ctx.state.last_error = 1004;
+        return Ok(0);
+    };
+    let mut bytes = value.as_bytes().to_vec();
+    bytes.push(0);
+    let needed = u32::try_from(bytes.len()).unwrap_or(0);
+    if args[3] == 0 {
+        return Ok(needed);
+    }
+    if args[3] < needed {
+        ctx.state.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
+        return Ok(0);
+    }
+    ctx.mem.write(args[2], &bytes).map_err(Stop::Fault)?;
+    Ok(needed)
+}
+
+fn get_locale_info_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let Some(value) = locale_field(args[1]) else {
+        ctx.state.last_error = 1004;
+        return Ok(0);
+    };
+    let wide: Vec<u8> = value
+        .as_bytes()
+        .iter()
+        .flat_map(|b| [*b, 0])
+        .chain([0, 0])
+        .collect();
+    let needed = u32::try_from(wide.len() / 2).unwrap_or(0);
+    if args[3] == 0 {
+        return Ok(needed);
+    }
+    if args[3] < needed {
+        ctx.state.last_error = 122;
+        return Ok(0);
+    }
+    ctx.mem.write(args[2], &wide).map_err(Stop::Fault)?;
+    Ok(needed)
+}
+
+/// Every locale the declared machine has, handed to the guest's own callback.
+///
+/// There is one, so the callback is called once, with the locale written the
+/// way this call writes it: eight hexadecimal digits.
+fn enum_system_locales(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let name = format!("{LCID:08x}\0");
+    let addr = ctx.state.heap.alloc(u32::try_from(name.len()).unwrap_or(0));
+    ctx.mem.write(addr, name.as_bytes()).map_err(Stop::Fault)?;
+    ctx.call_guest = Some((args[0], vec![addr]));
+    Ok(1)
+}
+
+/// How two strings sort against each other. One is less, two is equal, three
+/// is greater; zero is a failure.
+fn compare(left: &[u8], right: &[u8], flags: u32) -> u32 {
+    let fold = |s: &[u8]| -> Vec<u8> {
+        if flags & 0x0000_0001 == 0 {
+            s.to_vec()
+        } else {
+            s.to_ascii_lowercase()
+        }
+    };
+    match fold(left).cmp(&fold(right)) {
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Equal => 2,
+        std::cmp::Ordering::Greater => 3,
+    }
+}
+
+fn compare_string_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // CompareStringA(locale, flags, left, left len, right, right len).
+    let left = byte_len(ctx, args[2], args[3])?;
+    let left = ctx.mem.slice(args[2], left).map_err(Stop::Fault)?.to_vec();
+    let right = byte_len(ctx, args[4], args[5])?;
+    let right = ctx.mem.slice(args[4], right).map_err(Stop::Fault)?.to_vec();
+    Ok(compare(&left, &right, args[1]))
+}
+
+fn compare_string_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let read = |ctx: &mut Ctx<'_>, at: u32, count: u32| -> Result<Vec<u8>, Stop> {
+        if count == 0xffff_ffff {
+            return Ok(ctx.wide_string(at).map_err(Stop::Fault)?.into_bytes());
+        }
+        let bytes = ctx
+            .mem
+            .slice(at, count as usize * 2)
+            .map_err(Stop::Fault)?
+            .to_vec();
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .map(|u| u8::try_from(u).unwrap_or(b'?'))
+            .collect())
+    };
+    let left = read(ctx, args[2], args[3])?;
+    let right = read(ctx, args[4], args[5])?;
+    Ok(compare(&left, &right, args[1]))
+}
+
+/// One variable out of the declared environment.
+fn get_environment_variable(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetEnvironmentVariableA(name, buffer, size). The environment is the
+    // declared one: nothing the host was started with reaches the guest.
+    let name = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let found = ENVIRONMENT
+        .split('\0')
+        .filter_map(|row| row.split_once('='))
+        .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+        .map(|(_, value)| value.to_owned());
+    let Some(value) = found else {
+        // ERROR_ENVVAR_NOT_FOUND: a variable that is not set is not an empty
+        // one, and a runtime asking for TZ has to hear the difference.
+        ctx.state.last_error = 203;
+        return Ok(0);
+    };
+    let needed = u32::try_from(value.len()).unwrap_or(0);
+    if args[1] == 0 || args[2] <= needed {
+        // What it would take to hold it, the terminator included.
+        return Ok(needed + 1);
+    }
+    let mut bytes = value.into_bytes();
+    bytes.push(0);
+    ctx.mem.write(args[1], &bytes).map_err(Stop::Fault)?;
+    Ok(needed)
+}
+
+/// The declared clock as Windows counts it: hundreds of nanoseconds since the
+/// start of 1601.
+fn get_system_time_as_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The same declared moment `GetSystemTime` answers with — 1999-10-04,
+    // plus however long this run has been going — counted the other way.
+    const EPOCH: u64 = 11_644_473_600;
+    const NINETEEN_NINETY_NINE: u64 = 939_000_000;
+    let ticks = (EPOCH + NINETEEN_NINETY_NINE) * 10_000_000 + ctx.declared_millis() * 10_000;
+    ctx.mem
+        .write(args[0], &ticks.to_le_bytes())
+        .map_err(Stop::Fault)?;
+    Ok(0)
+}
+
+/// Nothing else runs on this machine, so the lock these take is already held
+/// (ADR-0005): the read and the write cannot be interrupted.
+fn interlocked_increment(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let value = ctx
+        .mem
+        .read_u32(args[0])
+        .map_err(Stop::Fault)?
+        .wrapping_add(1);
+    ctx.mem.write_u32(args[0], value).map_err(Stop::Fault)?;
+    Ok(value)
+}
+
+fn interlocked_decrement(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let value = ctx
+        .mem
+        .read_u32(args[0])
+        .map_err(Stop::Fault)?
+        .wrapping_sub(1);
+    ctx.mem.write_u32(args[0], value).map_err(Stop::Fault)?;
+    Ok(value)
+}
+
+fn interlocked_exchange(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let was = ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[0], args[1]).map_err(Stop::Fault)?;
+    Ok(was)
+}
+
+/// Whether a pointer is one the guest can use. Zero means it can.
+fn is_bad_read_ptr(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The arena is the whole of what the guest owns, so the question is
+    // whether the span is inside it. A length of zero is always fine, which is
+    // what Windows says too.
+    let ok = args[1] == 0 || (args[0] != 0 && ctx.mem.slice(args[0], args[1] as usize).is_ok());
+    Ok(u32::from(!ok))
+}
+
+fn is_bad_code_ptr(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let ok = args[0] != 0 && ctx.mem.slice(args[0], 1).is_ok();
+    Ok(u32::from(!ok))
+}
+
+/// A module saying it does not want to hear about threads. There is one thread
+/// and its attach has already happened, so there is nothing to stop telling it.
+fn disable_thread_library_calls(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(1)
+}
+
+/// Which failures the machine shows a person rather than handing back. Nothing
+/// on this machine puts a dialog up, so the mode is kept and never read.
+fn set_error_mode(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(std::mem::replace(&mut ctx.state.error_mode, args[0]))
+}
+
+/// Where the standard handles go. The declared machine has no console, and a
+/// runtime redirecting its own output is told the change was made.
+fn set_std_handle(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(1)
+}
+
+/// Everything the guest writes is already through the tree, which writes it
+/// when it is written: there is nothing held back to flush.
+fn flush_file_buffers(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(1)
+}
+
+/// The declared machine, as SYSTEM_INFO describes one.
+fn get_system_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Declared values, every one: a run that read the host's own processor
+    // count or page size would replay differently on another machine.
+    let at = args[0];
+    let fields: [(u32, u32); 9] = [
+        (0x00, 0),           // x86, and no reserved word
+        (0x04, 0x0000_1000), // a four kilobyte page
+        (0x08, 0x0001_0000), // the lowest address an application gets
+        (0x0c, 0x7fff_ffff), // and the highest
+        (0x10, 1),           // one processor, which is the mask of it
+        (0x14, 1),           // and one of them
+        (0x18, 586),         // a Pentium II, as the declared machine says
+        (0x1c, 0x0001_0000), // images are handed out this far apart
+        (0x20, 0x0006_0000), // model 6, stepping 0
+    ];
+    for (offset, value) in fields {
+        ctx.mem
+            .write(at + offset, &value.to_le_bytes())
+            .map_err(Stop::Fault)?;
+    }
+    Ok(1)
+}
+
+/// A process ending itself the hard way, which on this machine is the only
+/// process there is.
+fn terminate_process(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    ctx.log
+        .line(&format!("guest terminated itself {}", args[1]));
+    Err(Stop::Exited { code: args[1] })
+}
+
+/// The handle standing for the thread that is asking, which on this machine is
+/// the only one there is.
+fn get_current_thread(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(0xffff_fffe)
+}
 
 fn get_environment_strings(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     let bytes = ENVIRONMENT.as_bytes();
@@ -1455,6 +1964,35 @@ fn get_drive_type(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn get_logical_drives(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Bits for C and D, and nothing else.
     Ok((1 << 2) | (1 << 3))
+}
+
+/// What the declared machine's clock is offset from universal time by.
+///
+/// None: the declared clock is the machine's own and has no zone behind it
+/// (ADR-0003), so the two are the same and nothing a title formats moves with
+/// where the host happens to be.
+fn get_time_zone_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // TIME_ZONE_INFORMATION is 172 bytes: a bias, two names, two dates and two
+    // more biases. All zero says universal time with no daylight saving.
+    ctx.mem.write(args[0], &[0u8; 172]).map_err(Stop::Fault)?;
+    // TIME_ZONE_ID_UNKNOWN: there is no daylight saving to be in or out of.
+    Ok(0)
+}
+
+/// The declared machine's drives, written out as the roots they are.
+fn get_logical_drive_strings(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetLogicalDriveStringsA(size, buffer). The same two drives
+    // `GetLogicalDrives` names in bits: the disk the title is installed on and
+    // the drive its pressing is in.
+    const DRIVES: &[u8] = b"C:\\\0D:\\\0\0";
+    let needed = u32::try_from(DRIVES.len()).unwrap_or(0);
+    if args[0] < needed {
+        // What it would take, which is what a caller asking with nothing gets.
+        return Ok(needed);
+    }
+    ctx.mem.write(args[1], DRIVES).map_err(Stop::Fault)?;
+    // Everything but the last terminator, which is how this one counts.
+    Ok(needed - 1)
 }
 
 fn get_volume_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

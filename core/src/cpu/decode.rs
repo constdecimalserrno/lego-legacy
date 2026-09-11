@@ -785,6 +785,10 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
                         Some(m.rm)
                     )
                 }
+                // cpuid
+                0xa2 => done!(Kind::Cpuid, width, None, None),
+                // rdtsc
+                0x31 => done!(Kind::Rdtsc, width, None, None),
                 // imul r, r/m
                 0xaf => {
                     let m = decode_modrm(&mut r, seg, addr32, mode.real)?;

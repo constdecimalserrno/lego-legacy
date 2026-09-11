@@ -68,6 +68,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "FindWindowA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: find_window,
+    },
+    Shim {
+        dll: "USER32",
         name: "GetActiveWindow",
         args: 0,
         convention: Convention::Stdcall,
@@ -712,6 +719,14 @@ fn activate(state: &mut super::State, time: u32) {
         time,
         point: state.pointer,
     });
+}
+
+/// A window belonging to somebody else, by class or by name.
+///
+/// A title asks this to find out whether a copy of itself is already running.
+/// On this machine it is the only thing running, so there is never one.
+fn find_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(0)
 }
 
 fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

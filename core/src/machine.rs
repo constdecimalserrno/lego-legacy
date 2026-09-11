@@ -307,6 +307,9 @@ impl Machine {
         if let Some(frame) = self.state.present.take() {
             self.present_guest(&frame, host, log);
         }
+        // The cycle counter a title reads with `rdtsc` is the declared
+        // clock's own, and the engine carries it on from here (#56).
+        self.cpu.tsc = self.clock.cycles();
         match self.engine.step(&mut self.cpu, &mut self.arena) {
             Ok(()) => {
                 self.clock.retire();
@@ -1060,6 +1063,7 @@ impl Machine {
             return None;
         }
         let count = budget.min(self.clock.cursor() + BURST) - self.clock.cursor().min(budget);
+        self.cpu.tsc = self.clock.cycles();
         let (retired, result) =
             self.engine
                 .run(&mut self.cpu, &mut self.arena, count, Boundary::RANGE);

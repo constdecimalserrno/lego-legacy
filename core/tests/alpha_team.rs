@@ -224,13 +224,15 @@ fn the_names_the_title_imports_are_bound_to_the_code_that_exports_them() {
     }
     let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 200_000);
     ran.assert_logged("bound 2576 names");
-    // The run is inside the C runtime's own code by the time it stops, which
-    // it could only reach by being bound to it.
-    assert!(
-        ran.log.contains("called from 0x2"),
-        "the wall's caller is inside a loaded module: {}",
-        ran.log.lines().last().unwrap_or_default()
-    );
+    // Nothing the title imports from one of its own binaries is a wall: a name
+    // that did not bind would stop the run and say which binary it wanted.
+    for library in ["NiMain.dll!", "LoadComp.dll!", "MSVCP60.dll!"] {
+        assert!(
+            !ran.log.contains(library),
+            "no name goes unbound to {library}: {}",
+            ran.log.lines().last().unwrap_or_default()
+        );
+    }
 }
 
 /// A forwarded export stands for one somewhere else, and this loader does not
@@ -268,4 +270,30 @@ fn nothing_this_title_ships_forwards_an_export() {
         );
         assert!(!exports.by_name.is_empty(), "{name} exports something");
     }
+}
+
+/// The C runtime this title's disc ships runs as guest code, so everything it
+/// calls into the kernel is a call this machine has to answer. It gets all the
+/// way through its own startup and into the title's `main` (#56).
+#[test]
+fn the_c_runtime_the_disc_ships_gets_what_it_calls() {
+    if !scratch() {
+        return;
+    }
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 2_000_000);
+    let end = ran
+        .log
+        .lines()
+        .find(|l| l.starts_with("end "))
+        .unwrap_or_default();
+    for library in ["MSVCRT.dll!", "MSVCP60.dll!", "KERNEL32.dll!"] {
+        assert!(
+            !end.contains(library),
+            "the run no longer stops inside the runtime or the kernel: {end}"
+        );
+    }
+    // It reaches the title's own code, which goes looking for its archives.
+    ran.assert_logged("find first *.pac");
+    // And gets as far as asking for a renderer.
+    ran.assert_logged("Render create failed");
 }
