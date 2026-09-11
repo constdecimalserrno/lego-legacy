@@ -4,11 +4,13 @@
 //! of what the host's wall clock says. A run's timing therefore depends on the
 //! route alone, which is what makes a route replayable.
 
-/// Declared processor frequency: Pentium II 450, one instruction per cycle.
+/// The roster's baseline declared processor: Pentium II 450, one instruction
+/// per cycle.
 ///
-/// The processor is a declared value like any other. 450 MHz is the baseline
-/// the roster's titles shipped against; a title that measures otherwise
-/// re-declares it in its own crate.
+/// The processor is a declared value like any other, and this is the value a
+/// title takes unless its own crate declares another. It decides how much
+/// work a declared second holds, which is what a title that waits by reading
+/// the clock rather than by sleeping spends its time on.
 pub const DECLARED_HZ: u64 = 450_000_000;
 
 /// What one presented frame costs the declared clock.
@@ -34,12 +36,20 @@ pub enum FlipCost {
 /// The cursor is the count of guest instructions the machine has retired. It
 /// names one moment in a run: every log line, every route event and every
 /// snapshot is keyed to it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clock {
     cursor: u64,
     /// Declared cycles charged on top of instructions: presented frames, and
     /// time the guest spent waiting.
     charged_cycles: u64,
+    /// The declared processor this clock runs at, in cycles a second.
+    hz: u64,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self::at(DECLARED_HZ)
+    }
 }
 
 impl Clock {
@@ -48,12 +58,29 @@ impl Clock {
         Self::default()
     }
 
+    /// A clock on a declared processor of this frequency.
+    #[must_use]
+    pub fn at(hz: u64) -> Self {
+        Self {
+            cursor: 0,
+            charged_cycles: 0,
+            hz: hz.max(1),
+        }
+    }
+
+    /// What the declared processor runs at.
+    #[must_use]
+    pub fn hz(self) -> u64 {
+        self.hz
+    }
+
     /// Put a clock back where a snapshot left it.
     #[must_use]
     pub fn resumed(cursor: u64, cycles: u64) -> Self {
         Self {
             cursor,
             charged_cycles: cycles.saturating_sub(cursor),
+            hz: DECLARED_HZ,
         }
     }
 
@@ -80,7 +107,7 @@ impl Clock {
             FlipCost::Cycles(c) => self.charged_cycles += c,
             // The next refresh strictly after now, so no two flips share one.
             FlipCost::Refresh(hz) => {
-                let period = DECLARED_HZ / hz.max(1);
+                let period = self.hz / hz.max(1);
                 self.charged_cycles += period - self.cycles() % period;
             }
         }
@@ -89,7 +116,7 @@ impl Clock {
     /// Charge declared time the guest spent waiting: a sleep, or a blocking
     /// wait for something due later on the declared clock.
     pub fn wait(&mut self, millis: u64) {
-        self.charged_cycles += millis * DECLARED_HZ / 1000;
+        self.charged_cycles += millis * self.hz / 1000;
     }
 
     /// Declared cycles spent: one per retired instruction, plus what drawing
@@ -103,7 +130,7 @@ impl Clock {
     /// drift: the division happens once, at the end, not per instruction.
     #[must_use]
     pub fn nanos(self) -> u64 {
-        let n = u128::from(self.cycles()) * 1_000_000_000 / u128::from(DECLARED_HZ);
+        let n = u128::from(self.cycles()) * 1_000_000_000 / u128::from(self.hz);
         u64::try_from(n).unwrap_or(u64::MAX)
     }
 

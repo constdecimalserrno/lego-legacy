@@ -32,6 +32,10 @@ pub struct EntryImage {
 pub struct Declared {
     /// What `GetVersion` answers with, packed as Windows packs it.
     pub windows: u32,
+    /// The processor this machine has, in cycles a second, one instruction to
+    /// the cycle. It decides how much a declared second is worth in work,
+    /// which is what a title that waits by reading the clock spends.
+    pub hz: u64,
     /// How much memory the machine says it has.
     pub megabytes: u32,
     /// The screen sizes the machine offers, as width, height and bit depth.
@@ -113,6 +117,7 @@ impl Title {
         red_book: None,
         declared: Declared {
             windows: WINDOWS_98_SE,
+            hz: crate::clock::DECLARED_HZ,
             megabytes: 128,
             modes: &[(640, 480, 16)],
             computer: "LEGO-LEGACY",

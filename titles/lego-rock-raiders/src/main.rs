@@ -24,6 +24,9 @@ pub const ROCK_RAIDERS: Title = Title {
     red_book: ENTRY.red_book,
     declared: Declared {
         windows: WINDOWS_98_SE,
+        // The roster's baseline processor, which this title has never been
+        // seen to measure or to wait on.
+        hz: lego_legacy_core::clock::DECLARED_HZ,
         // A Pentium II era machine with 128 MB: what the box asked for, and
         // more than this title ever allocates. The figure only reaches the
         // guest through GlobalMemoryStatus, and a title that sized its caches

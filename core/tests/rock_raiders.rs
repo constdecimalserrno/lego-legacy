@@ -24,6 +24,7 @@ const ROCK_RAIDERS: Title = Title {
     red_book: Some("rock-raiders"),
     declared: Declared {
         windows: WINDOWS_98_SE,
+        hz: lego_legacy_core::clock::DECLARED_HZ,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
@@ -49,6 +50,7 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
     red_book: Some("rock-raiders"),
     declared: Declared {
         windows: WINDOWS_98_SE,
+        hz: lego_legacy_core::clock::DECLARED_HZ,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",

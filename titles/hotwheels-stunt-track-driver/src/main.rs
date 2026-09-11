@@ -20,6 +20,13 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     red_book: ENTRY.red_book,
     declared: Declared {
         windows: WINDOWS_98_SE,
+        // A Pentium 166: what this title's own box asks for, and not the
+        // roster's baseline. It matters more here than it does for a title
+        // that sleeps: this one waits for its next frame by reading the tick
+        // count in a loop, so the declared processor decides how much work a
+        // frame of waiting costs, and a machine far faster than the one it
+        // was written for spends its whole frame spinning.
+        hz: 166_000_000,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",

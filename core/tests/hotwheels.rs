@@ -19,6 +19,7 @@ const HOT_WHEELS: Title = Title {
     red_book: ENTRY.red_book,
     declared: Declared {
         windows: WINDOWS_98_SE,
+        hz: 166_000_000,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
