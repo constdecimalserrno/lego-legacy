@@ -537,6 +537,33 @@ impl MacWindow {
         }
     }
 
+    /// Where an event in our window landed on the guest's screen, or nothing
+    /// when it landed on the window's frame rather than on the picture: the
+    /// title bar, the edges a person resizes by. The frame is the window
+    /// system's and the pointer over it is the person's (#49).
+    fn on_the_picture(&self, event: Id) -> Option<(i32, i32)> {
+        // Safety: AppKit's own accessors, on an event in this window and on
+        // the window's content view; a point and two rectangles come back by
+        // value.
+        unsafe {
+            let p: Point = self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
+            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+            let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
+            let inside = p.x >= frame.x
+                && p.x < frame.x + frame.width
+                && p.y >= frame.y
+                && p.y < frame.y + frame.height;
+            inside.then(|| {
+                guest_point(
+                    (frame.width, frame.height),
+                    self.frame_size,
+                    p.x - frame.x,
+                    p.y - frame.y,
+                )
+            })
+        }
+    }
+
     /// Whether an event happened in our own window. One that did not is one
     /// the pointer was outside the window for, and its location is in screen
     /// coordinates.
@@ -602,20 +629,27 @@ impl MacWindow {
                     5 | 6 if !self.event_is_ours(event) => {
                         self.pointer_over_us = false;
                     }
-                    // Mouse down, mouse up, mouse moved, dragged.
-                    1 => self.pending.push(Input::Down),
-                    2 => self.pending.push(Input::Up),
-                    5 | 6 => {
-                        self.pointer_over_us = true;
-                        let p: Point =
-                            self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
-                        let view: Id =
-                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-                        let bounds: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
-                        let (x, y) =
-                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y);
-                        self.pending.push(Input::Move { x, y });
+                    // Mouse down, mouse up, mouse moved, dragged. A press on
+                    // the window's own frame — its title bar, its edges — is
+                    // the person taking hold of the window, not a click on the
+                    // title (#49). A release is never dropped: a press the
+                    // guest saw is a button it has to see let go of.
+                    1 => {
+                        if self.on_the_picture(event).is_some() {
+                            self.pending.push(Input::Down);
+                        }
                     }
+                    2 => self.pending.push(Input::Up),
+                    5 | 6 => match self.on_the_picture(event) {
+                        Some((x, y)) => {
+                            self.pointer_over_us = true;
+                            self.pending.push(Input::Move { x, y });
+                        }
+                        // On the frame the pointer is the person's, to resize
+                        // or move the window by, and the title's stays where it
+                        // last was on the picture.
+                        None => self.pointer_over_us = false,
+                    },
                     // Key down, key up, and a modifier pressed or let go. A
                     // key held down repeating is still the one press.
                     10..=12 => {
