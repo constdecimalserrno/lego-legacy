@@ -158,6 +158,43 @@ impl Machine {
         Ok(())
     }
 
+    /// Give `fs` a base, and put a thread information block under it.
+    ///
+    /// Every MSVC-built image starts by pushing an exception frame onto
+    /// `fs:[0]`, and a flat `fs` makes that guest address zero: the chain head
+    /// would be written over whatever is at the bottom of the arena and read
+    /// back from there. Each field below is a declared value, and the ones
+    /// this machine has no honest answer for are left zero rather than
+    /// invented (#54).
+    ///
+    /// # Errors
+    /// When the arena will not take it.
+    fn declare_tib(&mut self) -> Result<(), crate::guest::Fault> {
+        let w = |arena: &mut crate::guest::Arena, at: u32, v: u32| arena.write_u32(TIB + at, v);
+        // No handler is registered yet: the end of the chain is all ones, and
+        // the guest's own prologue pushes the first frame in front of it.
+        w(&mut self.arena, 0x00, 0xffff_ffff)?;
+        // The stack the machine gave it, which a runtime checks itself
+        // against when it grows one.
+        w(&mut self.arena, 0x04, STACK_TOP)?;
+        w(&mut self.arena, 0x08, STACK_TOP - STACK_BYTES)?;
+        // A thread block points at itself, which is how code that has `fs`
+        // gets an ordinary pointer to it.
+        w(&mut self.arena, 0x18, TIB)?;
+        w(&mut self.arena, 0x20, PROCESS_ID)?;
+        w(&mut self.arena, 0x24, THREAD_ID)?;
+        // The slots `TlsAlloc` hands out sit in the block itself, where
+        // Windows keeps them, and the pointer at 0x2c names them.
+        w(&mut self.arena, 0x2c, TIB + 0x0e10)?;
+        w(&mut self.arena, 0x30, PEB)?;
+        // The process block, of which one field is read often enough to be
+        // worth declaring: where the image was loaded.
+        self.arena
+            .write_u32(PEB + 0x08, self.image.as_ref().map_or(0, |i| i.base))?;
+        self.cpu.seg_base[crate::cpu::FS] = TIB;
+        Ok(())
+    }
+
     #[must_use]
     pub fn flips(&self) -> u64 {
         self.flips
@@ -358,6 +395,24 @@ enum Bound {
 pub const STACK_TOP: u32 = 0x0020_0000;
 pub const STACK_BYTES: u32 = 0x0010_0000;
 
+/// Where the declared machine keeps the thread information block, which `fs`
+/// is based at.
+///
+/// A declared value: a page of its own, above the stack and below every image
+/// the roster's titles ask to be loaded at. It has to be somewhere the guest
+/// can reach and nothing else claims, because the first thing an MSVC runtime
+/// does is read and write `fs:[0]` (#54).
+pub const TIB: u32 = 0x0020_0000;
+
+/// The process block the thread block points at, on the page after it.
+pub const PEB: u32 = 0x0020_1000;
+
+/// What a title's declared process and thread are called, matching what
+/// `GetCurrentProcessId` and `GetCurrentThreadId` answer with: a run must not
+/// depend on which process happened to host it.
+pub const PROCESS_ID: u32 = 0x0000_1234;
+pub const THREAD_ID: u32 = 0x0000_1000;
+
 impl Machine {
     /// Load a title's entry image out of its pressing and point the processor
     /// at it.
@@ -427,6 +482,7 @@ impl Machine {
             ..Cpu::default()
         };
         self.image = Some(image);
+        self.declare_tib()?;
         Ok(())
     }
 }

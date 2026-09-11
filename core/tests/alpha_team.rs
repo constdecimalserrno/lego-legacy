@@ -125,3 +125,39 @@ fn the_title_starts_from_its_cabinet_and_walls_by_name() {
         .assert_logged("installed 61 files")
         .assert_wall("MSVCRT.dll!");
 }
+
+/// An MSVC image installs an exception frame on `fs:[0]` before it does
+/// anything else. With `fs` flat that is guest address zero; with the declared
+/// thread information block it is the block's own first word (#54).
+#[test]
+fn the_first_thing_the_title_does_is_push_a_frame_onto_its_thread_block() {
+    if !scratch() {
+        return;
+    }
+    let mut host = lego_legacy_core::host::headless::Headless::new();
+    let out = lego_legacy_core::repl::transcript(
+        &ALPHA_TEAM,
+        &Cli::default(),
+        &mut host,
+        // Eight instructions in, the prologue has pushed its frame and
+        // pointed the chain head at it.
+        "until cursor 8\nregs\nmem 0x00200000 8\nquit\n",
+    )
+    .expect("the title loads");
+
+    // The chain head is the frame the guest just pushed, which is on its own
+    // stack rather than at the arena's bottom.
+    let head = out
+        .lines()
+        .find(|l| l.contains("00200000"))
+        .expect("the block reads");
+    assert!(
+        head.contains("dc ff 1f 00"),
+        "the chain head points at the frame on the stack: {head}"
+    );
+    // Which is also where esp is: the frame the prologue pushed.
+    assert!(out.contains("esp 0x001fffdc"), "{out}");
+    // And what it read out of the block first was the end of the chain, so
+    // the read came from the block and not from the arena's bottom.
+    assert!(out.contains("eax 0xffffffff"), "{out}");
+}
