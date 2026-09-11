@@ -159,3 +159,41 @@ fn a_run_retires_exactly_what_as_many_steps_would() {
         Interp::new(Mode::FLAT).run(&mut ran, &mut mem, 100, third.eip..third.eip + 1);
     assert_eq!((retired, stopped, ran.eip), (2, Ok(()), third.eip));
 }
+
+#[test]
+fn a_repeated_scan_stops_on_the_byte_it_was_looking_for() {
+    // The string-replacing idiom a title uses to swap a file's extension:
+    // scan for the terminator with `repne scasb`, step back onto it, and write
+    // from there. Getting `edi` wrong by one lands the new extension in the
+    // middle of the name.
+    use lego_legacy_core::cpu::{ECX, EDI};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let at = 0x0040_0000;
+    mem.write(at, &[0xf2, 0xae]).unwrap(); // repne scasb
+    let text = b"data\\car02.tid\0";
+    let buffer = 0x0050_0000;
+    mem.write(buffer, text).unwrap();
+
+    let mut regs = Cpu {
+        eip: at,
+        ..Cpu::default()
+    };
+    regs.r[EDI] = buffer;
+    regs.r[ECX] = u32::MAX;
+    regs.r[EAX] = 0;
+    let mut cpu = Interp::new(Mode::FLAT);
+    cpu.step(&mut regs, &mut mem).expect("the scan runs");
+
+    let nul = buffer + u32::try_from(text.len()).unwrap() - 1;
+    assert_eq!(
+        regs.r[EDI],
+        nul + 1,
+        "a scan stops one past the byte it matched"
+    );
+    assert_eq!(
+        regs.r[ECX],
+        u32::MAX - u32::try_from(text.len()).unwrap(),
+        "and counts down once for every byte it looked at"
+    );
+}

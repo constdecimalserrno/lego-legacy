@@ -41,6 +41,7 @@ type MsgIdCharPtr = unsafe extern "C" fn(Id, Sel, *const c_char) -> Id;
 type MsgIdEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, bool) -> Id;
 type MsgU64 = unsafe extern "C" fn(Id, Sel) -> u64;
 type MsgPoint = unsafe extern "C" fn(Id, Sel) -> Point;
+type MsgF64 = unsafe extern "C" fn(Id, Sel) -> f64;
 type MsgRect = unsafe extern "C" fn(Id, Sel) -> Rect;
 
 #[repr(C)]
@@ -331,6 +332,13 @@ pub struct MacWindow {
     /// Whether we have hidden the pointer. AppKit counts hides, so it is
     /// hidden once and shown once.
     pointer_hidden: bool,
+    /// Where the guest's own pointer is while the host's is hidden, in the
+    /// guest's own coordinates. A title that draws its own pointer moves it by
+    /// how far the mouse moved, so the machine follows the same arithmetic
+    /// from the same place, and the two stay together without either of them
+    /// knowing about the other.
+    captured_at: (f64, f64),
+    cg_associate: unsafe extern "C" fn(bool) -> i32,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -431,7 +439,9 @@ impl MacWindow {
             let name = rt.core_graphics.symbol("kCGColorSpaceSRGB")?;
             let colour_space = create_space(*name.cast::<*const c_char>());
 
+            let cg_associate = rt.graphics("CGAssociateMouseAndMouseCursorPosition")?;
             Ok(Self {
+                cg_associate,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
                 cg_provider_release: rt.graphics("CGDataProviderRelease")?,
@@ -447,6 +457,7 @@ impl MacWindow {
                 audio: None,
                 closed: false,
                 pointer_hidden: false,
+                captured_at: (f64::from(width) / 2.0, f64::from(height) / 2.0),
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -517,18 +528,33 @@ impl MacWindow {
                     // scrolling its camera from a pointer held at an edge
                     // needs. A button is not ignored: a press that is dropped
                     // is a button the guest never sees let go of.
-                    5 | 6 if !self.event_is_ours(event) => {}
+                    5 | 6 if !self.pointer_hidden && !self.event_is_ours(event) => {}
                     // Mouse down, mouse up, mouse moved, dragged.
                     1 => self.pending.push(Input::Down),
                     2 => self.pending.push(Input::Up),
                     5 | 6 => {
-                        let p: Point =
-                            self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
-                        let view: Id =
-                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-                        let bounds: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
-                        let (x, y) =
-                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y);
+                        let (x, y) = if self.pointer_hidden {
+                            // The pointer is the title's own and the host's is
+                            // out of the way: how far the mouse moved is the
+                            // whole story, and it keeps coming when a person
+                            // pushes past the edge of the screen.
+                            let dx: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
+                            let dy: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
+                            let (w, h) = self.frame_size;
+                            let (mut cx, mut cy) = self.captured_at;
+                            cx = (cx + dx).clamp(0.0, f64::from(w.max(1) - 1));
+                            cy = (cy + dy).clamp(0.0, f64::from(h.max(1) - 1));
+                            self.captured_at = (cx, cy);
+                            (cx as i32, cy as i32)
+                        } else {
+                            let p: Point =
+                                self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
+                            let view: Id =
+                                self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+                            let bounds: Rect =
+                                self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
+                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y)
+                        };
                         self.pending.push(Input::Move { x, y });
                     }
                     // Key down, key up, and a modifier pressed or let go. A
@@ -660,11 +686,21 @@ impl Host for MacWindow {
             return;
         }
         self.pointer_hidden = !show;
-        // Safety: NSCursor's own class methods, which take nothing.
+        // The guest's pointer starts where the host's was, in the middle of
+        // the screen, which is where a title puts its own.
+        if !show {
+            let (w, h) = self.frame_size;
+            self.captured_at = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+        }
+        // Safety: NSCursor's own class methods, which take nothing, and Core
+        // Graphics' own switch for whether the pointer follows the mouse. Let
+        // go of it, and how far the mouse moved keeps arriving however far
+        // past the edge of the screen a person pushes.
         unsafe {
             let cursor = self.rt.class("NSCursor");
             let what = if show { "unhide" } else { "hide" };
             self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
+            (self.cg_associate)(show);
         }
     }
 

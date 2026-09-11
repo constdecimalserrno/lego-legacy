@@ -134,6 +134,12 @@ fn reg_query_value_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(ERROR_FILE_NOT_FOUND);
     };
     let Some((kind, bytes)) = ctx.state.registry_value(&path, &name) else {
+        // Recorded the way a missing file is: what a title reads is how the
+        // declared machine learns what its installer would have written, and
+        // a title reading a value nobody wrote carries on with whatever was
+        // in the buffer it asked us to fill.
+        ctx.log
+            .line(&format!("registry value missing {path}\\{name}"));
         return Ok(ERROR_FILE_NOT_FOUND);
     };
     let needed = u32::try_from(bytes.len()).unwrap_or(0);
