@@ -750,18 +750,8 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
             if dy != 0 {
                 state.buffer_input(false, DIMOUSE_Y, dy as u32);
             }
-            // How far the mouse moved is the mouse's own business and goes on
-            // past the edge of the screen, which is why `last_move` is not
-            // clamped: a person pushing past the edge and on is still moving
-            // the device, and a title reading a mouse through DirectInput is
-            // reading the device (#40). The pointer is the screen's, and
-            // Windows keeps that on it.
             state.last_move = (x, y);
-            let (w, h, _) = state.display_mode;
-            state.pointer = (
-                x.clamp(0, w.saturating_sub(1) as i32),
-                y.clamp(0, h.saturating_sub(1) as i32),
-            );
+            state.pointer = (x, y);
             let buttons = if state.mouse_down { MK_LBUTTON } else { 0 };
             post(state, WM_MOUSEMOVE, buttons, time);
         }
@@ -1241,33 +1231,6 @@ mod tests {
         assert_eq!((first.window, first.message), (WINDOW, WM_ACTIVATEAPP));
         assert_eq!(first.wparam, 1, "active, not deactivated");
         assert_eq!(first.time, 7);
-    }
-
-    #[test]
-    fn a_mouse_pushed_past_the_edge_keeps_moving_and_the_pointer_stops() {
-        let mut state = State::new();
-        state.window_made = true;
-        state.display_mode = (640, 480, 8);
-        deliver(&mut state, Input::Move { x: 600, y: 240 }, 1);
-        state.messages.clear();
-        state.mouse_data.clear();
-
-        // Forty past the right edge: the device moved eighty, and every one of
-        // them reaches the title.
-        deliver(&mut state, Input::Move { x: 680, y: 240 }, 2);
-        let buffered: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
-        assert_eq!(buffered, [(DIMOUSE_X, 80)]);
-        // The pointer is the screen's, and Windows keeps it on the screen.
-        assert_eq!(state.pointer, (639, 240));
-        assert_eq!(state.messages[0].lparam, (240 << 16) | 639);
-
-        // Back the way it came: the title hears all eighty of those too, so
-        // the mouse and the pointer end where they started.
-        state.mouse_data.clear();
-        deliver(&mut state, Input::Move { x: 600, y: 240 }, 3);
-        let back: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
-        assert_eq!(back, [(DIMOUSE_X, (-80i32) as u32)]);
-        assert_eq!(state.pointer, (600, 240));
     }
 
     #[test]

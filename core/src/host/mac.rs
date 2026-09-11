@@ -575,15 +575,12 @@ impl MacWindow {
                             // rather than the desktop's pointer. Core Graphics
                             // keeps the device's own numbers on the event.
                             let (dx, dy) = self.mouse_delta(event);
-                            // Not clamped to the window: the mouse goes on
-                            // moving when a person pushes past the edge of the
-                            // screen, and that is the whole reason the pointer
-                            // was let go of. The machine clamps the pointer it
-                            // draws messages from; the device's own movement
-                            // reaches the title whole (#40).
-                            let (cx, cy) = self.captured_at;
-                            self.captured_at = (cx + dx, cy + dy);
-                            (self.captured_at.0 as i32, self.captured_at.1 as i32)
+                            let (w, h) = self.frame_size;
+                            let (mut cx, mut cy) = self.captured_at;
+                            cx = (cx + dx).clamp(0.0, f64::from(w.max(1) - 1));
+                            cy = (cy + dy).clamp(0.0, f64::from(h.max(1) - 1));
+                            self.captured_at = (cx, cy);
+                            (cx as i32, cy as i32)
                         } else {
                             let p: Point =
                                 self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
