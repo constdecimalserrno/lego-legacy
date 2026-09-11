@@ -331,22 +331,21 @@ pub struct MacWindow {
     /// Whether we have hidden the pointer. AppKit counts hides, so it is
     /// hidden once and shown once.
     pointer_hidden: bool,
-    /// Where the guest's own pointer is while the host's is hidden, in the
-    /// guest's own coordinates. A title that draws its own pointer moves it by
-    /// how far the mouse moved, so the machine follows the same arithmetic
-    /// from the same place, and the two stay together without either of them
-    /// knowing about the other.
-    captured_at: (f64, f64),
-    /// The last place the host said the pointer was, in the guest's own
-    /// coordinates. Taking the mouse starts from here rather than from the
-    /// middle of the window: the machine turns each place into how far the
-    /// mouse moved since the last one, so starting anywhere else is one jump
-    /// of that distance handed to the title at the moment it takes the mouse.
-    last_told: (f64, f64),
+    /// Whether the person's own pointer is over this window.
+    ///
+    /// A title that draws its own pointer wants the host's out of the way, but
+    /// only where its own is drawn: everywhere else the pointer is the
+    /// person's and they are using it. Starts true, because a window that has
+    /// just opened under the pointer has not been told otherwise.
+    pointer_over_us: bool,
+    /// Whether the host's pointer is hidden right now, which is not the same
+    /// as the title having asked for it: it is hidden only while the title
+    /// wants it gone *and* the person is over this window with this
+    /// application in front.
+    pointer_taken: bool,
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
     cg_main_display: u32,
-    cg_event_field: unsafe extern "C" fn(Id, u32) -> i64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -452,12 +451,10 @@ impl MacWindow {
                 rt.graphics("CGDisplayShowCursor")?;
             let main_display: unsafe extern "C" fn() -> u32 = rt.graphics("CGMainDisplayID")?;
             let cg_main_display = main_display();
-            let cg_event_field = rt.graphics("CGEventGetIntegerValueField")?;
             Ok(Self {
                 cg_associate,
                 cg_show_cursor,
                 cg_main_display,
-                cg_event_field,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
                 cg_provider_release: rt.graphics("CGDataProviderRelease")?,
@@ -473,8 +470,8 @@ impl MacWindow {
                 audio: None,
                 closed: false,
                 pointer_hidden: false,
-                captured_at: (f64::from(width) / 2.0, f64::from(height) / 2.0),
-                last_told: (f64::from(width) / 2.0, f64::from(height) / 2.0),
+                pointer_over_us: true,
+                pointer_taken: false,
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -502,23 +499,41 @@ impl MacWindow {
         self.audio = None;
     }
 
-    /// How far the mouse itself moved for this event, the device's own
-    /// numbers rather than the pointer's accelerated ones.
-    fn mouse_delta(&self, event: Id) -> (f64, f64) {
-        // `kCGMouseEventDeltaX` and `kCGMouseEventDeltaY`.
-        const DELTA_X: u32 = 96;
-        const DELTA_Y: u32 = 97;
-        // Safety: `CGEvent` on an NSEvent answers the event Core Graphics made
-        // it from, and the two fields are integers on a mouse event. An event
-        // with no Core Graphics event behind it answers nil, and the fields
-        // come back zero, which is no movement.
+    /// Put the host's pointer where it belongs, which is wherever the person
+    /// is not being shown the title's own.
+    ///
+    /// A title that draws its own pointer wants the host's out of the way, but
+    /// only over its own window and only while it is the application in front.
+    /// Anywhere else the pointer is the person's and they are using it — to
+    /// reach another window, to stop the run, to do something else entirely —
+    /// and taking it from them there is taking their machine.
+    ///
+    /// Hiding is a count on AppKit's side, so this keeps its own flag and only
+    /// ever moves it by one.
+    fn draw_pointer_where_it_belongs(&mut self) {
+        // Safety: `isActive` on NSApplication. A BOOL is one byte, and the
+        // rest of the register is not ours to read.
+        let active = unsafe {
+            let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
+            v & 0xff != 0
+        };
+        let take = self.pointer_hidden && self.pointer_over_us && active;
+        if take == self.pointer_taken {
+            return;
+        }
+        self.pointer_taken = take;
+        // A run that takes the pointer arms the way back, because the pointer
+        // belongs to the person and not to the run: a signal that ends the
+        // process skips every destructor, and what is left behind is a machine
+        // with no pointer and nothing on screen saying why (#45).
+        if take {
+            arm_the_way_back(self.cg_associate, self.cg_show_cursor, self.cg_main_display);
+        }
+        // Safety: NSCursor's own class methods, which take nothing.
         unsafe {
-            let cg: Id = self.rt.send::<MsgId>()(event, self.rt.sel("CGEvent"));
-            if cg.is_null() {
-                return (0.0, 0.0);
-            }
-            let field = self.cg_event_field;
-            (field(cg, DELTA_X) as f64, field(cg, DELTA_Y) as f64)
+            let cursor = self.rt.class("NSCursor");
+            let what = if take { "hide" } else { "unhide" };
+            self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
         }
     }
 
@@ -565,40 +580,28 @@ impl MacWindow {
                     // scrolling its camera from a pointer held at an edge
                     // needs. A button is not ignored: a press that is dropped
                     // is a button the guest never sees let go of.
-                    5 | 6 if !self.pointer_hidden && !self.event_is_ours(event) => {}
+                    // A move of nobody's window is the pointer outside ours,
+                    // and its location is in screen coordinates rather than
+                    // the window's, so taking one would throw the guest's
+                    // pointer somewhere else. The pointer stays where it last
+                    // was inside the window; what the machine learns from the
+                    // move is only that the person's own pointer has left, so
+                    // that it can give it back to them.
+                    5 | 6 if !self.event_is_ours(event) => {
+                        self.pointer_over_us = false;
+                    }
                     // Mouse down, mouse up, mouse moved, dragged.
                     1 => self.pending.push(Input::Down),
                     2 => self.pending.push(Input::Up),
                     5 | 6 => {
-                        let (x, y) = if self.pointer_hidden {
-                            // The pointer is the title's own and the host's is
-                            // out of the way: how far the mouse itself moved is
-                            // the whole story, and it keeps coming when a
-                            // person pushes past the edge of the screen.
-                            //
-                            // The mouse's own movement, not the pointer's:
-                            // AppKit's deltas have the operating system's
-                            // pointer acceleration in them, and a title reading
-                            // a mouse through DirectInput is reading the device
-                            // rather than the desktop's pointer. Core Graphics
-                            // keeps the device's own numbers on the event.
-                            let (dx, dy) = self.mouse_delta(event);
-                            let (w, h) = self.frame_size;
-                            let (mut cx, mut cy) = self.captured_at;
-                            cx = (cx + dx).clamp(0.0, f64::from(w.max(1) - 1));
-                            cy = (cy + dy).clamp(0.0, f64::from(h.max(1) - 1));
-                            self.captured_at = (cx, cy);
-                            (cx as i32, cy as i32)
-                        } else {
-                            let p: Point =
-                                self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
-                            let view: Id =
-                                self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-                            let bounds: Rect =
-                                self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
-                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y)
-                        };
-                        self.last_told = (f64::from(x), f64::from(y));
+                        self.pointer_over_us = true;
+                        let p: Point =
+                            self.rt.send::<MsgPoint>()(event, self.rt.sel("locationInWindow"));
+                        let view: Id =
+                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+                        let bounds: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
+                        let (x, y) =
+                            guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y);
                         self.pending.push(Input::Move { x, y });
                     }
                     // Key down, key up, and a modifier pressed or let go. A
@@ -655,6 +658,10 @@ impl MacWindow {
                 self.closed = true;
             }
         }
+        // Where the person's pointer is and which application is in front are
+        // both things that change without the title being told, so this is
+        // settled every time the window system is asked what happened.
+        self.draw_pointer_where_it_belongs();
     }
 }
 
@@ -726,39 +733,8 @@ impl Host for MacWindow {
     }
 
     fn show_pointer(&mut self, show: bool) {
-        if show == !self.pointer_hidden {
-            return;
-        }
         self.pointer_hidden = !show;
-        // The guest's pointer carries on from where the host last said it was,
-        // because that is where the machine thinks it is: the machine turns
-        // each place into how far the mouse moved since the last one, so
-        // starting the capture anywhere else hands the title a single jump of
-        // that distance at the moment it takes the mouse.
-        if !show {
-            self.captured_at = self.last_told;
-        }
-        // Safety: NSCursor's own class methods, which take nothing, and Core
-        // Graphics' own switch for whether the pointer follows the mouse. Let
-        // go of it, and how far the mouse moved keeps arriving however far
-        // past the edge of the screen a person pushes.
-        // A run that takes the pointer arms the way back, because the pointer
-        // belongs to the person and not to the run: a signal that ends the
-        // process skips every destructor, and what is left behind is a machine
-        // with no pointer and nothing on screen saying why (#45).
-        if !show {
-            arm_the_way_back(self.cg_associate, self.cg_show_cursor, self.cg_main_display);
-        }
-        // Safety: NSCursor's own class methods, which take nothing, and Core
-        // Graphics' own switch for whether the pointer follows the mouse. Let
-        // go of it, and how far the mouse moved keeps arriving however far
-        // past the edge of the screen a person pushes.
-        unsafe {
-            let cursor = self.rt.class("NSCursor");
-            let what = if show { "unhide" } else { "hide" };
-            self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
-            (self.cg_associate)(show);
-        }
+        self.draw_pointer_where_it_belongs();
     }
 
     fn closed(&self) -> bool {
