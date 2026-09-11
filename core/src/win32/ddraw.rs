@@ -1535,7 +1535,9 @@ fn transfer(
         for x in cx0..cx1 {
             let sx = (sx0 + (x - dx0) * sw / dw) as usize * bytes;
             let pixel = &line[sx..sx + bytes];
-            if key.is_some_and(|k| k[..bytes] == *pixel) {
+            // Compared byte by byte, not as a slice, which calls out to
+            // memcmp: this is every pixel a keyed blit copies.
+            if key.is_some_and(|k| pixel.iter().zip(k).all(|(p, k)| p == &k)) {
                 continue;
             }
             let out = (x - cx0) as usize * bytes;

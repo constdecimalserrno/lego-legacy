@@ -529,6 +529,18 @@ pub fn triangle(
     ];
     const PLANES: usize = 11;
     let step: [f32; PLANES] = planes.map(|p| p.0);
+    // Only the planes this draw reads are carried along a row: depth and
+    // distance always; texture coordinates when there is a texture; colour
+    // when it is not flat; and specular when it is added.
+    let carried = if states.specular {
+        PLANES
+    } else if !states.flat {
+        8
+    } else if texture.is_some() {
+        4
+    } else {
+        2
+    };
 
     let pixel_channels = Channels::of(target.format);
     let texel_channels = texture.map(|t| Channels::of(t.format));
@@ -584,7 +596,7 @@ pub fn triangle(
 
         for px in from..=to {
             let here = value;
-            for (v, s) in value.iter_mut().zip(step) {
+            for (v, s) in value.iter_mut().zip(step).take(carried) {
                 *v += s;
             }
             if px < inside_from || px > inside_to {

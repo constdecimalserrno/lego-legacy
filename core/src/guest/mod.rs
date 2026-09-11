@@ -160,6 +160,44 @@ impl GuestMem for Arena {
     }
 }
 
+impl Arena {
+    /// Borrow one run of guest bytes to read and another, apart from it, to
+    /// change: what drawing from one surface into another needs, without a
+    /// copy of the one drawn from.
+    ///
+    /// # Errors
+    /// When either run is outside the arena, or the two overlap.
+    pub fn read_and_write(
+        &mut self,
+        (read, read_len): (u32, usize),
+        (write, write_len): (u32, usize),
+    ) -> Result<(&[u8], &mut [u8]), Fault> {
+        for (addr, len) in [(read, read_len), (write, write_len)] {
+            if !self.in_bounds(addr, len) {
+                return Err(Fault { addr, len });
+            }
+        }
+        let (r, w) = (read as usize, write as usize);
+        if r < w + write_len && w < r + read_len {
+            return Err(Fault {
+                addr: write,
+                len: write_len,
+            });
+        }
+        // Safety: both runs are bounds checked directly above and do not
+        // overlap, so the shared borrow and the exclusive one never alias;
+        // the mapping is live for both, and neither outlives the arena's own
+        // exclusive borrow.
+        unsafe {
+            let base = self.mapping.as_ptr();
+            Ok((
+                core::slice::from_raw_parts(base.add(r), read_len),
+                core::slice::from_raw_parts_mut(base.add(w), write_len),
+            ))
+        }
+    }
+}
+
 /// The engine's path into guest memory (ADR-0004).
 ///
 /// These skip the bounds check the trait above makes. The engine takes them

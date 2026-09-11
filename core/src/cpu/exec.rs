@@ -49,12 +49,24 @@ fn write_reg(cpu: &mut Cpu, reg: u8, w: Width, value: u32) {
 fn effective_offset(cpu: &Cpu, m: &MemRef) -> u32 {
     if m.addr16 {
         // Sixteen-bit addressing forms the offset from sixteen-bit registers.
-        let base = m.base.map_or(0, |b| cpu.r[b as usize] & 0xffff);
-        let index = m.index.map_or(0, |(i, _)| cpu.r[i as usize] & 0xffff);
+        let base = match m.base {
+            Some(b) => cpu.r[b as usize] & 0xffff,
+            None => 0,
+        };
+        let index = match m.index {
+            Some((i, _)) => cpu.r[i as usize] & 0xffff,
+            None => 0,
+        };
         (m.disp as u32).wrapping_add(base).wrapping_add(index)
     } else {
-        let base = m.base.map_or(0, |b| cpu.r[b as usize] << m.base_shift);
-        let index = m.index.map_or(0, |(i, s)| cpu.r[i as usize] << s);
+        let base = match m.base {
+            Some(b) => cpu.r[b as usize] << m.base_shift,
+            None => 0,
+        };
+        let index = match m.index {
+            Some((i, s)) => cpu.r[i as usize] << s,
+            None => 0,
+        };
         (m.disp as u32).wrapping_add(base).wrapping_add(index)
     }
 }
@@ -88,9 +100,15 @@ fn read_mem(mem: &Arena, addr: u32, w: Width) -> Result<u32, Stop> {
 
 #[inline(always)]
 fn write_mem(mem: &mut Arena, addr: u32, w: Width, value: u32) -> Result<(), Stop> {
-    let bytes = value.to_le_bytes();
-    mem.write(addr, &bytes[..w.bytes() as usize])
-        .map_err(Stop::Fault)
+    let s = mem
+        .slice_mut(addr, w.bytes() as usize)
+        .map_err(Stop::Fault)?;
+    // Byte by byte rather than as a copy of a run, which the compiler calls
+    // out to memmove for: this is every write an instruction makes.
+    for (to, byte) in s.iter_mut().zip(value.to_le_bytes()) {
+        *to = byte;
+    }
+    Ok(())
 }
 
 #[inline(always)]
@@ -258,7 +276,7 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 Kind::Sub | Kind::Cmp => cpu.flags.sub(a, b, false, w),
                 _ => cpu.flags.sub(a, b, carry, w),
             };
-            if insn.kind != Kind::Cmp {
+            if !matches!(insn.kind, Kind::Cmp) {
                 write_op(cpu, mem, &dst, w, r)?;
             }
         }
@@ -277,14 +295,14 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 _ => a ^ b,
             };
             cpu.flags.logic(r, w);
-            if insn.kind != Kind::Test {
+            if !matches!(insn.kind, Kind::Test) {
                 write_op(cpu, mem, &dst, w, r & w.mask())?;
             }
         }
         Kind::Inc | Kind::Dec => {
             let dst = insn.dst.expect("inc and dec have a destination");
             let before = read_op(cpu, mem, &dst, w)?;
-            let r = cpu.flags.inc_dec(before, insn.kind == Kind::Inc, w);
+            let r = cpu.flags.inc_dec(before, matches!(insn.kind, Kind::Inc), w);
             write_op(cpu, mem, &dst, w, r)?;
         }
         Kind::Neg => {
@@ -483,7 +501,7 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         Kind::Mul | Kind::Imul => {
             let src = read_op(cpu, mem, &insn.src.expect("multiply has a source"), w)?;
             let a = read_reg(cpu, EAX as u8, w);
-            let signed = insn.kind == Kind::Imul;
+            let signed = matches!(insn.kind, Kind::Imul);
             let full: u64 = if signed {
                 (sign_extend(a, w) as i64).wrapping_mul(sign_extend(src, w) as i64) as u64
             } else {
@@ -524,7 +542,7 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         }
         Kind::Div | Kind::Idiv => {
             let src = read_op(cpu, mem, &insn.src.expect("divide has a source"), w)?;
-            let signed = insn.kind == Kind::Idiv;
+            let signed = matches!(insn.kind, Kind::Idiv);
             let (low, high) = match w {
                 Width::B8 => (read_reg(cpu, EAX as u8, Width::B16), 0),
                 _ => (read_reg(cpu, EAX as u8, w), read_reg(cpu, EDX as u8, w)),

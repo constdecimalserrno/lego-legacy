@@ -1324,7 +1324,7 @@ fn draw(
 
     // The texture the first stage samples, in its own format.
     let texture_state = ctx.state.com(texture).map(|o| o.state.clone());
-    let (texels, texture_info) = match texture_state {
+    let texture_info = match texture_state {
         Some(ComState::Surface {
             pixels: at,
             width: tw,
@@ -1334,11 +1334,6 @@ fn draw(
             palette,
             ..
         }) => {
-            let texels = ctx
-                .mem
-                .slice(at, (tp * th) as usize)
-                .map_err(Stop::Fault)?
-                .to_vec();
             let palette = match ctx.state.com(palette).map(|o| &o.state) {
                 Some(ComState::Palette { store }) => {
                     let entries = ctx.mem.slice(*store, 256 * 4).map_err(Stop::Fault)?;
@@ -1357,9 +1352,9 @@ fn draw(
                 _ => None,
             };
             let key = ctx.state.color_keys.get(&at).copied();
-            (texels, Some((tw, th, tp, tf, palette, key)))
+            Some((at, tw, th, tp, tf, palette, key))
         }
-        _ => (Vec::new(), None),
+        _ => None,
     };
     if texture_info.is_none() {
         // With no texture, what a stage takes from it is the colour alone.
@@ -1373,9 +1368,24 @@ fn draw(
         states.colour = untextured(states.colour);
         states.alpha = untextured(states.alpha);
     }
+    // Into the surface, through the depth buffer, reading the texture where
+    // it lies unless it is the surface being drawn into.
+    let mut depth = take_depth(ctx.state, this, width, height);
+    let into = (pixels, (pitch * height) as usize);
+    let from = texture_info.map_or((0, 0), |(at, _, th, tp, ..)| (at, (tp * th) as usize));
+    let apart =
+        from.0 as usize >= into.0 as usize + into.1 || into.0 as usize >= from.0 as usize + from.1;
+    let (texels, target_pixels): (std::borrow::Cow<'_, [u8]>, &mut [u8]) = if apart {
+        let (texels, target) = ctx.mem.read_and_write(from, into).map_err(Stop::Fault)?;
+        (std::borrow::Cow::Borrowed(texels), target)
+    } else {
+        let texels = ctx.mem.slice(from.0, from.1).map_err(Stop::Fault)?.to_vec();
+        let target = ctx.mem.slice_mut(into.0, into.1).map_err(Stop::Fault)?;
+        (std::borrow::Cow::Owned(texels), target)
+    };
     let texture = texture_info
         .as_ref()
-        .map(|(tw, th, tp, tf, palette, key)| raster::Texture {
+        .map(|(_, tw, th, tp, tf, palette, key)| raster::Texture {
             bytes: &texels,
             width: *tw,
             height: *th,
@@ -1385,13 +1395,6 @@ fn draw(
             colour_key: *key,
             clamp,
         });
-
-    // Into the surface, through the depth buffer.
-    let mut depth = take_depth(ctx.state, this, width, height);
-    let target_pixels = ctx
-        .mem
-        .slice_mut(pixels, (pitch * height) as usize)
-        .map_err(Stop::Fault)?;
     let mut target = raster::Target {
         pixels: target_pixels,
         width,
