@@ -15,12 +15,41 @@ pub struct EntryImage {
     pub disc_dir: &'static str,
     /// The pressing directory under that.
     pub pressing: &'static str,
-    /// Where the executable sits inside that pressing's image.
+    /// Where the executable sits inside that pressing's image: a path on the
+    /// disc, or — when `packed` — the name the pressing's cabinet gives it.
     pub path: &'static str,
+    /// Whether the image is inside the pressing's cabinet rather than on the
+    /// disc as a file of its own. Alpha Team ships nothing of itself loose
+    /// (#53).
+    pub packed: bool,
     /// The bytes that make this title this title.
     pub sha256: &'static str,
     /// Why this pressing and not the other.
     pub why: &'static str,
+}
+
+impl EntryImage {
+    /// Read this image out of a pressing, wherever it is kept.
+    ///
+    /// # Errors
+    /// When the pressing does not hold it, or its cabinet will not give it up.
+    pub fn read(&self, iso: &mut crate::disc::Iso) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        if !self.packed {
+            return Ok(iso.read(self.path)?);
+        }
+        let header = iso.read("DATA1.HDR")?;
+        let cabinet = crate::cabinet::Cabinet::open(&header)?;
+        let entry = cabinet
+            .find(self.path)
+            .ok_or_else(|| format!("the cabinet does not hold {}", self.path))?
+            .clone();
+        let span = iso.read_range(
+            &format!("DATA{}.CAB", entry.volume),
+            entry.offset,
+            entry.compressed as usize,
+        )?;
+        Ok(cabinet.unpack(&entry, &span)?)
+    }
 }
 
 /// The machine a title is told it is running on.
@@ -111,6 +140,7 @@ impl Title {
             disc_dir: "",
             pressing: "",
             path: "",
+            packed: false,
             sha256: "",
             why: "the stub guest is assembled by hand in this crate and comes off no disc",
         },

@@ -367,7 +367,7 @@ impl Machine {
     /// the image is a copy-protection wrapper, or it will not fit.
     pub fn load_title(&mut self, title: &Title) -> Result<(), Box<dyn std::error::Error>> {
         let mut iso = crate::disc::open_pressing(title.image.disc_dir, title.image.pressing)?;
-        let bytes = iso.read(title.image.path)?;
+        let bytes = title.image.read(&mut iso)?;
 
         // A title is the bytes it is made of. A pressing that has been patched
         // or is simply the other one is refused by name rather than run.

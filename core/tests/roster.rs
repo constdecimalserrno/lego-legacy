@@ -131,3 +131,43 @@ fn every_title_on_the_roster_can_be_looked_for() {
         );
     }
 }
+
+/// Alpha Team's image is inside its pressing's cabinet rather than on the
+/// disc, and the launcher has to read it from there to know the bytes (#53).
+#[test]
+fn an_image_inside_the_cabinet_is_found_and_hashed_like_any_other() {
+    if !scratch() {
+        return;
+    }
+    assert_eq!(
+        roster::look_for(&roster::ALPHA_TEAM),
+        Found::Runnable {
+            pressing: "alpha-team".to_owned()
+        }
+    );
+}
+
+/// The same title pointed at an image the cabinet does not hold says where it
+/// looked rather than starting something else (#53).
+#[test]
+fn an_image_the_cabinet_does_not_hold_is_absent() {
+    if !scratch() {
+        return;
+    }
+    let absent = Entry {
+        key: "lego-alpha-team",
+        name: "LEGO Alpha Team",
+        image: EntryImage {
+            path: "NoSuchThing.exe",
+            ..roster::ALPHA_TEAM.image
+        },
+        red_book: None,
+    };
+    match roster::look_for(&absent) {
+        Found::Absent { looked_at } => assert!(
+            looked_at.contains("NoSuchThing.exe"),
+            "looked at {looked_at}"
+        ),
+        other => panic!("found {other} instead of saying where it looked"),
+    }
+}

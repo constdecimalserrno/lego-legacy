@@ -141,6 +141,17 @@ impl Tree {
         let mut declared = 0;
         for (index, entry) in cabinet.entries().iter().enumerate() {
             let guest = entry.guest_path(root);
+            // A header may name the same file twice, once per install size:
+            // Alpha Team's carries `LMap.pac` as 53 MB of hi-res lightmaps for
+            // a Typical install and 3.4 MB of low-res for a Minimum one. The
+            // declared machine had the Typical install — the one the
+            // installer offers first and a player takes — so the larger of
+            // two entries with one name wins.
+            if let Some(Source::Packed(before)) = self.files.get(&Self::key(&guest)) {
+                if cabinet.entries()[*before].expanded >= entry.expanded {
+                    continue;
+                }
+            }
             if entry.in_cabinet() {
                 self.files.insert(Self::key(&guest), Source::Packed(index));
             } else {

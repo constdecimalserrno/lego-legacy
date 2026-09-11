@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lego-alpha-team"
+version = "0.1.0"
+dependencies = [
+ "lego-legacy-core",
+]
+
+[[package]]
 name = "lego-legacy-core"
 version = "0.1.0"
 
