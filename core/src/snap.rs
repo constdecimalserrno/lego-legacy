@@ -305,6 +305,10 @@ impl Snap for crate::clock::Clock {
         let mut cycles = self.cycles();
         v.u64(&mut cursor);
         v.u64(&mut cycles);
-        *self = Self::resumed(cursor, cycles);
+        // The frequency is the declared processor's and is not in the
+        // snapshot: this runs on the way out as well as on the way back, so
+        // taking the roster's baseline here would change the live clock of any
+        // title that declares another one.
+        *self = Self::resumed(cursor, cycles, self.hz());
     }
 }

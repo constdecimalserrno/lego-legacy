@@ -1239,6 +1239,8 @@ const TRUNCATE_EXISTING: u32 = 5;
 /// The file is already there, and the disc cannot be written to.
 const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_WRITE_PROTECT: u32 = 19;
+/// A seek to before the start of a file, which is nowhere.
+const ERROR_NEGATIVE_SEEK: u32 = 131;
 
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateFileA(path, access, share, security, disposition, flags, template).
@@ -1375,12 +1377,28 @@ fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // A title laying a file out seeks past the end of what it has written so
     // far, and what it writes there is what makes the file that long. Reading
     // cannot go past what is there.
-    let moved = base.wrapping_add(distance as u32);
+    //
+    // Before the start of the file is nowhere, and a seek there moves nothing:
+    // Windows refuses it, and letting it wrap would put the next write four
+    // gigabytes along a file that the machine would then try to make that long.
+    let Some(moved) = seek_to(base, distance) else {
+        ctx.state.last_error = ERROR_NEGATIVE_SEEK;
+        return Ok(INVALID_HANDLE);
+    };
     let moved = if *writing { moved } else { moved.min(len) };
     if let Some(Object::File { at, .. }) = ctx.state.object_mut(handle) {
         *at = moved;
     }
     Ok(moved)
+}
+
+/// Where a seek from here lands, and nothing when that is off the file.
+///
+/// Before the start of a file is nowhere: Windows refuses a seek there rather
+/// than wrapping, and a wrap would put the next write four gigabytes along a
+/// file the machine would then try to make that long.
+fn seek_to(base: u32, distance: i32) -> Option<u32> {
+    u32::try_from(i64::from(base) + i64::from(distance)).ok()
 }
 
 fn get_file_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1719,4 +1737,20 @@ fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let text = ctx.string(args[0]).map_err(Stop::Fault)?;
     ctx.log.line(&format!("guest says {}", text.trim_end()));
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seek_to;
+
+    #[test]
+    fn a_seek_lands_where_it_is_asked_for_unless_that_is_off_the_file() {
+        assert_eq!(seek_to(0, 16), Some(16));
+        assert_eq!(seek_to(100, -4), Some(96));
+        assert_eq!(seek_to(4, -4), Some(0), "the start of the file is a place");
+        // Before the start is nowhere, and a title laying a file out is told
+        // so rather than being sent four gigabytes along it.
+        assert_eq!(seek_to(0, -4), None);
+        assert_eq!(seek_to(3, -4), None);
+    }
 }

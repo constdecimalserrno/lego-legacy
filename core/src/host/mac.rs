@@ -337,6 +337,12 @@ pub struct MacWindow {
     /// from the same place, and the two stay together without either of them
     /// knowing about the other.
     captured_at: (f64, f64),
+    /// The last place the host said the pointer was, in the guest's own
+    /// coordinates. Taking the mouse starts from here rather than from the
+    /// middle of the window: the machine turns each place into how far the
+    /// mouse moved since the last one, so starting anywhere else is one jump
+    /// of that distance handed to the title at the moment it takes the mouse.
+    last_told: (f64, f64),
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_event_field: unsafe extern "C" fn(Id, u32) -> i64,
     /// How far behind the declared clock the host has fallen and will not
@@ -460,6 +466,7 @@ impl MacWindow {
                 closed: false,
                 pointer_hidden: false,
                 captured_at: (f64::from(width) / 2.0, f64::from(height) / 2.0),
+                last_told: (f64::from(width) / 2.0, f64::from(height) / 2.0),
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -583,6 +590,7 @@ impl MacWindow {
                                 self.rt.send::<MsgRect>()(view, self.rt.sel("bounds"));
                             guest_point((bounds.width, bounds.height), self.frame_size, p.x, p.y)
                         };
+                        self.last_told = (f64::from(x), f64::from(y));
                         self.pending.push(Input::Move { x, y });
                     }
                     // Key down, key up, and a modifier pressed or let go. A
@@ -714,11 +722,13 @@ impl Host for MacWindow {
             return;
         }
         self.pointer_hidden = !show;
-        // The guest's pointer starts where the host's was, in the middle of
-        // the screen, which is where a title puts its own.
+        // The guest's pointer carries on from where the host last said it was,
+        // because that is where the machine thinks it is: the machine turns
+        // each place into how far the mouse moved since the last one, so
+        // starting the capture anywhere else hands the title a single jump of
+        // that distance at the moment it takes the mouse.
         if !show {
-            let (w, h) = self.frame_size;
-            self.captured_at = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+            self.captured_at = self.last_told;
         }
         // Safety: NSCursor's own class methods, which take nothing, and Core
         // Graphics' own switch for whether the pointer follows the mouse. Let

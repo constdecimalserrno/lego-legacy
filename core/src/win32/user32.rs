@@ -680,9 +680,15 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         "window {title:?} {}x{} at {},{}",
         args[6] as i32, args[7] as i32, args[4] as i32, args[5] as i32
     ));
+    // Only the first window: Windows activates an application once, not once
+    // a window, and a title that counts the message would hear one nobody
+    // sent.
+    let first = !ctx.state.window_made;
     ctx.state.window_made = true;
-    let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
-    activate(ctx.state, time);
+    if first {
+        let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
+        activate(ctx.state, time);
+    }
     Ok(WINDOW)
 }
 

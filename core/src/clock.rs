@@ -74,13 +74,20 @@ impl Clock {
         self.hz
     }
 
-    /// Put a clock back where a snapshot left it.
+    /// Put a clock back where a snapshot left it, on the processor the title
+    /// declares.
+    ///
+    /// The frequency comes from the caller rather than from the roster's
+    /// baseline: a snapshot does not carry it, and a title that declares
+    /// another one — Hot Wheels declares a Pentium 166 — would otherwise have
+    /// its clock quietly swapped for a faster machine's the first time a
+    /// snapshot was written.
     #[must_use]
-    pub fn resumed(cursor: u64, cycles: u64) -> Self {
+    pub fn resumed(cursor: u64, cycles: u64, hz: u64) -> Self {
         Self {
             cursor,
             charged_cycles: cycles.saturating_sub(cursor),
-            hz: DECLARED_HZ,
+            hz: hz.max(1),
         }
     }
 
@@ -153,6 +160,19 @@ mod tests {
         }
         assert_eq!(c.cursor(), 1000);
         assert_eq!(c.nanos(), 1000 * 1_000_000_000 / DECLARED_HZ);
+    }
+
+    #[test]
+    fn a_clock_written_down_keeps_the_processor_it_was_declared_on() {
+        let mut clock = Clock::at(166_000_000);
+        for _ in 0..1000 {
+            clock.retire();
+        }
+        let (cursor, cycles) = (clock.cursor(), clock.cycles());
+        // What `Snap` does on the way out as well as on the way back.
+        let put_back = Clock::resumed(cursor, cycles, clock.hz());
+        assert_eq!(put_back.hz(), 166_000_000);
+        assert_eq!(put_back.nanos(), clock.nanos());
     }
 
     #[test]
