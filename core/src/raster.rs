@@ -708,6 +708,18 @@ pub fn triangle(
 /// is drawn is the same on every host, and four bands is what took Rock
 /// Raiders' rockfall, 1.2 million pixels a frame of filtered, blended
 /// texture at 26 ms on one thread, back under a 60 Hz frame.
+///
+/// #72 asked for two changes here and both were built and measured, and
+/// neither is worth having. A pool of workers that outlive the draw, with
+/// this thread drawing the first band itself, moves the spawn and the wait
+/// off this thread exactly as predicted — `_pthread_create` and
+/// `_dispatch_semaphore_wait_slow` go from 371 of 6755 main-thread samples
+/// to 2 — and changes no wall clock at all, because the wait was never
+/// waste: it was this thread waiting for band work that still has to happen,
+/// on the same four cores either way. Eight bands is the same story: at
+/// Alpha Team's menu 106 against 105 M instructions a second, and Rock
+/// Raiders' rockfall 5.5 ms a flip against 5.6, both inside the noise of
+/// this host. The time at that menu is the interpreter's (#69, #70, #71).
 pub const BANDS: u32 = 4;
 
 /// The pixels a draw has to cover before it is worth splitting into bands:
