@@ -1129,6 +1129,29 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // four megabytes eats a heap five hundred megabytes wide.
     let (address, size) = (args[0], args[1]);
     if address != 0 {
+        // Inside the heap the address is inside a region this machine already
+        // handed out, and committing it again is nothing to do. Outside it the
+        // address is a claim on free address space, and Windows refuses a
+        // claim on space already taken: that refusal is how a guest's own DLL
+        // loader learns it must relocate the image it is about to map, instead
+        // of laying it over the one already there (#61).
+        use crate::guest::heap::{HEAP_BASE, HEAP_BYTES};
+        let end = address.saturating_add(size.max(1));
+        if address >= HEAP_BASE && end <= HEAP_BASE + HEAP_BYTES {
+            return Ok(address);
+        }
+        if ctx
+            .state
+            .claimed
+            .iter()
+            .any(|(s, e)| address < *e && *s < end)
+        {
+            ctx.log.line(&format!(
+                "address {address:#010x} is already taken: {size} bytes refused"
+            ));
+            return Ok(0);
+        }
+        ctx.state.claimed.push((address, end));
         return Ok(address);
     }
     // A new region starts on Windows' allocation granularity, sixty-four
@@ -1152,6 +1175,7 @@ fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const MEM_RELEASE: u32 = 0x8000;
     let (address, size, kind) = (args[0], args[1], args[2]);
     if kind & MEM_RELEASE != 0 {
+        ctx.state.claimed.retain(|(start, _)| *start != address);
         let whole = ctx.state.heap.size_of(address).unwrap_or(0);
         ctx.mem
             .write(address, &vec![0; whole as usize])

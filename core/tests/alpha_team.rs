@@ -363,6 +363,26 @@ fn the_archives_unpack_to_exactly_what_the_cabinet_says_they_are() {
     }
 }
 
+/// The title carries its own PE loader: it unpacks a level's code out of its
+/// archives and asks for the address that code was linked for. Every one of
+/// them was linked for the same address, so only the first can have it, and a
+/// machine that says yes to all of them lays each image over the last. The
+/// refusal is what sends the loader down its own relocating path (#61).
+#[test]
+fn a_second_image_asking_for_a_taken_address_is_refused_and_relocated() {
+    if !scratch() {
+        return;
+    }
+    // Far enough for the title to load a second level image over the first.
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 1_100_000_000);
+    ran.assert_logged("address 0x10000000 is already taken");
+    assert!(
+        !ran.log.contains("abnormal program termination"),
+        "the C runtime no longer gives up on a frame handler reached through \
+         code that has been overwritten"
+    );
+}
+
 /// The flip the title's own picture is first on the screen at: its Loading
 /// panel, drawn through Direct3D 7 (#58).
 const FIRST_LIGHT: u64 = 1;

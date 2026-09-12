@@ -161,6 +161,11 @@ pub struct State {
     /// Which thread holds each critical section the guest has entered, and how
     /// many times over (ADR-0005). A section nobody holds is not in here.
     pub sections: BTreeMap<u32, (u32, u32)>,
+    /// Address ranges the guest has claimed by naming an address to
+    /// `VirtualAlloc`, outside the heap. A second claim that overlaps one is
+    /// refused, which is what tells a guest's own DLL loader to relocate the
+    /// image rather than lay it over the last one (#61).
+    pub claimed: Vec<(u32, u32)>,
     /// Where the next file mapped into the arena will go. Mappings sit above
     /// everything else the machine hands out, because this title maps four
     /// hundred megabytes of archives and never lets go (#57).
@@ -297,6 +302,7 @@ impl State {
             }],
             thread: 0,
             next_thread_id: crate::machine::THREAD_ID,
+            claimed: Vec::new(),
             next_mapping: MAPPING_BASE,
             sections: BTreeMap::new(),
             tls_slots: 0,
