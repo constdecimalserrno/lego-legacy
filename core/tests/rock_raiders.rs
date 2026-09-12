@@ -409,6 +409,51 @@ fn a_movie_skipped_stops_being_heard() {
 }
 
 #[test]
+fn a_click_skips_a_movie_the_way_escape_does() {
+    if !scratch() {
+        return;
+    }
+    // #67 asked whether a click gets past this title's intro. It already
+    // does: the title takes a click during a movie exactly as it takes
+    // Escape, so the machine has nothing to translate. Measured headless —
+    // a click at flip 1000 lets go of `intro.avi` at flip 1001, where the
+    // same run with nobody clicking plays it to flip 4134.
+    const CLICKED_AT: u64 = 1000;
+    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("click-the-intro.route");
+    std::fs::write(
+        &route,
+        format!(
+            "#lego-legacy-route 1\nflip {CLICKED_AT} down\nflip {} up\n",
+            CLICKED_AT + 2
+        ),
+    )
+    .expect("the route writes");
+    let cli = Cli {
+        route: Some(route),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(Headless::new(), &ROCK_RAIDERS, &cli, 150_000_000);
+
+    ran.assert_logged("movie C:\\LEGORR\\Data\\avi\\intro.avi let go of");
+    let before = ran
+        .log
+        .split_once("intro.avi let go of")
+        .expect("the movie was let go of")
+        .0;
+    let flips_before = before
+        .lines()
+        .filter_map(|l| l.strip_prefix("flip "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|n| n.parse::<u64>().ok())
+        .next_back()
+        .unwrap_or(0);
+    assert!(
+        (CLICKED_AT..CLICKED_AT + 8).contains(&flips_before),
+        "the click is what ended the movie, not its own end: flip {flips_before}"
+    );
+}
+
+#[test]
 fn a_movies_sound_is_mixed_whether_or_not_anyone_is_listening() {
     let Some((_, ran)) = first_movie_picture(61_000_000) else {
         return;
