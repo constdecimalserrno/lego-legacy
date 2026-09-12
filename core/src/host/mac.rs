@@ -42,6 +42,7 @@ type MsgIdEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, bool) -> Id;
 type MsgU64 = unsafe extern "C" fn(Id, Sel) -> u64;
 type MsgPoint = unsafe extern "C" fn(Id, Sel) -> Point;
 type MsgRect = unsafe extern "C" fn(Id, Sel) -> Rect;
+type MsgF64 = unsafe extern "C" fn(Id, Sel) -> f64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -148,11 +149,41 @@ const PRESENT_BITMAP_INFO: u32 = (2 << 12) | 6;
 pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i32, i32) {
     let (cw, ch) = content;
     let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
-    let scale = (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE);
+    let scale = content_scale(content, frame);
     let (left, bottom) = ((cw - fw * scale) / 2.0, (ch - fh * scale) / 2.0);
     let gx = ((x - left) / scale).clamp(0.0, fw - 1.0);
     let gy = ((ch - y - bottom) / scale).clamp(0.0, fh - 1.0);
     (gx as i32, gy as i32)
+}
+
+/// How many points of the window's content one guest pixel covers.
+#[must_use]
+pub fn content_scale(content: (f64, f64), frame: (u32, u32)) -> f64 {
+    let (cw, ch) = content;
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE)
+}
+
+/// Where the pointer the guest is handed goes after the mouse moved, while the
+/// pointer is taken: the guest's own pointer, steered by how far the mouse
+/// moved rather than by where the person's pointer is, which is frozen.
+///
+/// The move is in points of the window's content, so it is scaled to guest
+/// pixels; the pointer keeps its fraction of a pixel between moves, and stays
+/// on the guest's screen as Windows keeps the cursor on the display.
+#[must_use]
+pub fn steered(
+    pointer: (f64, f64),
+    moved: (f64, f64),
+    content: (f64, f64),
+    frame: (u32, u32),
+) -> (f64, f64) {
+    let scale = content_scale(content, frame);
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    (
+        (pointer.0 + moved.0 / scale).clamp(0.0, fw - 1.0),
+        (pointer.1 + moved.1 / scale).clamp(0.0, fh - 1.0),
+    )
 }
 
 /// Where a point on the guest's screen is in the window's content: the
@@ -161,7 +192,7 @@ pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i
 pub fn content_point(content: (f64, f64), frame: (u32, u32), gx: i32, gy: i32) -> (f64, f64) {
     let (cw, ch) = content;
     let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
-    let scale = (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE);
+    let scale = content_scale(content, frame);
     let (left, bottom) = ((cw - fw * scale) / 2.0, (ch - fh * scale) / 2.0);
     let x = left + (f64::from(gx) + 0.5) * scale;
     let y = ch - bottom - (f64::from(gy) + 0.5) * scale;
@@ -356,17 +387,17 @@ pub struct MacWindow {
     /// wants it gone *and* the person is over this window with this
     /// application in front.
     pointer_taken: bool,
-    /// Whether this application is the one in front, as of the last time the
-    /// window system was asked. What decides whether a title that steers by
-    /// how far the mouse moved may keep putting the pointer back (#59).
-    in_front: bool,
+    /// The pointer the guest is handed while the pointer is taken, in guest
+    /// pixels with the fraction kept: where the title last put it, plus how
+    /// far the mouse has moved since. With the person's own pointer frozen,
+    /// this is the only pointer that moves (#64).
+    steer: (f64, f64),
+    /// The last place the guest was told the pointer was, so that a move too
+    /// small to reach the next pixel is not a move.
+    told: (i32, i32),
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
-    cg_warp: unsafe extern "C" fn(Point) -> i32,
     cg_main_display: u32,
-    /// How tall the display Core Graphics measures from is, so that a point in
-    /// the window can be turned over into the space a warp is asked in.
-    cg_display_height: f64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -472,14 +503,10 @@ impl MacWindow {
                 rt.graphics("CGDisplayShowCursor")?;
             let main_display: unsafe extern "C" fn() -> u32 = rt.graphics("CGMainDisplayID")?;
             let cg_main_display = main_display();
-            let pixels_high: unsafe extern "C" fn(u32) -> usize =
-                rt.graphics("CGDisplayPixelsHigh")?;
             Ok(Self {
                 cg_associate,
                 cg_show_cursor,
-                cg_warp: rt.graphics("CGWarpMouseCursorPosition")?,
                 cg_main_display,
-                cg_display_height: pixels_high(cg_main_display) as f64,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
                 cg_provider_release: rt.graphics("CGDataProviderRelease")?,
@@ -497,7 +524,8 @@ impl MacWindow {
                 pointer_hidden: false,
                 pointer_over_us: true,
                 pointer_taken: false,
-                in_front: true,
+                steer: (f64::from(width) / 2.0, f64::from(height) / 2.0),
+                told: (i32::MAX, i32::MAX),
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -543,7 +571,6 @@ impl MacWindow {
             let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
             v & 0xff != 0
         };
-        self.in_front = active;
         let take = self.pointer_hidden && self.pointer_over_us && active;
         if take == self.pointer_taken {
             return;
@@ -556,11 +583,21 @@ impl MacWindow {
         if take {
             arm_the_way_back(self.cg_associate, self.cg_show_cursor, self.cg_main_display);
         }
-        // Safety: NSCursor's own class methods, which take nothing.
+        // Safety: NSCursor's own class methods, which take nothing; then Core
+        // Graphics' switch between the mouse and the pointer.
         unsafe {
             let cursor = self.rt.class("NSCursor");
             let what = if take { "hide" } else { "unhide" };
             self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
+            // A taken pointer is also a frozen one: the mouse stops moving the
+            // person's pointer and moves the guest's instead, by how far it
+            // went (`steered`). That is what a title steering by distance
+            // needs, and it is why a hand can never outrun the window (#64,
+            // #40). It is switched off for the whole desktop, which is why it
+            // is only ever on while the title has asked, the person is over
+            // this window and this application is in front — settled on every
+            // pump, and undone by `arm_the_way_back` if the run is killed.
+            (self.cg_associate)(!take);
         }
     }
 
@@ -588,6 +625,17 @@ impl MacWindow {
                     p.y - frame.y,
                 )
             })
+        }
+    }
+
+    /// Hand the guest the steered pointer, once it has reached another pixel.
+    fn tell_where_the_pointer_is(&mut self) {
+        // Truncation is the intent: a pixel is where the pointer is until it
+        // has crossed into the next.
+        let now = (self.steer.0 as i32, self.steer.1 as i32);
+        if now != self.told {
+            self.told = now;
+            self.pending.push(Input::Move { x: now.0, y: now.1 });
         }
     }
 
@@ -667,9 +715,28 @@ impl MacWindow {
                         }
                     }
                     2 => self.pending.push(Input::Up),
+                    5 | 6 if self.pointer_taken => {
+                        // The person's pointer is frozen over the picture, so
+                        // where the event is says nothing; how far the mouse
+                        // moved is the whole message.
+                        let dx: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
+                        let dy: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
+                        let view: Id =
+                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+                        let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
+                        self.steer = steered(
+                            self.steer,
+                            (dx, dy),
+                            (frame.width, frame.height),
+                            self.frame_size,
+                        );
+                        self.tell_where_the_pointer_is();
+                    }
                     5 | 6 => match self.on_the_picture(event) {
                         Some((x, y)) => {
                             self.pointer_over_us = true;
+                            self.steer = (f64::from(x), f64::from(y));
+                            self.told = (x, y);
                             self.pending.push(Input::Move { x, y });
                         }
                         // On the frame the pointer is the person's, to resize
@@ -813,48 +880,13 @@ impl Host for MacWindow {
     }
 
     fn put_pointer(&mut self, x: i32, y: i32) {
-        // Only while the pointer is ours to move: this application is in
-        // front and the title has taken the pointer to draw its own (#46).
-        //
-        // Not also "and the person is still over the window", which is what
-        // this asked before. A title that steers by how far the mouse moved
-        // puts the pointer back in the middle after every frame and measures
-        // the next move from there, so the moment a hand outruns the window
-        // the putting-back is the only thing that brings it home: refusing
-        // then leaves the title's own pointer where it was and it never moves
-        // again, which is a hand that "does not follow" (#64). A window this
-        // size on a desk this size is easy to outrun. The pointer is still
-        // the person's to take back — this application stops being the one in
-        // front the moment they ask for another, and `arm_the_way_back` gives
-        // it back even if the run is killed.
-        if !(self.pointer_hidden && self.in_front) {
-            return;
-        }
-        // Safety: AppKit's own accessors on this window and its content view,
-        // then Core Graphics' warp, which takes a point by value.
-        unsafe {
-            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-            let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
-            let (vx, vy) = content_point((frame.width, frame.height), self.frame_size, x, y);
-            let in_window = Point {
-                x: frame.x + vx,
-                y: frame.y + vy,
-            };
-            let convert: unsafe extern "C" fn(Id, Sel, Point) -> Point =
-                self.rt
-                    .send::<unsafe extern "C" fn(Id, Sel, Point) -> Point>();
-            let on_screen = convert(self.window, self.rt.sel("convertPointToScreen:"), in_window);
-            // Core Graphics measures down from the top of the display and
-            // AppKit up from the bottom of it.
-            (self.cg_warp)(Point {
-                x: on_screen.x,
-                y: self.cg_display_height - on_screen.y,
-            });
-            // A warp stops the pointer following the mouse for a quarter of a
-            // second unless it is put back together with it, and a title that
-            // warps every frame would never hear the person again.
-            (self.cg_associate)(true);
-        }
+        // The pointer the guest is handed starts again from where the title
+        // put it, and the mouse's next move is measured from there. That is
+        // all `SetCursorPos` needs on this machine: the person's own pointer
+        // is never moved under their hand (#46), and while it is taken it does
+        // not move at all.
+        self.steer = (f64::from(x), f64::from(y));
+        self.told = (x, y);
     }
 
     fn closed(&self) -> bool {
@@ -890,7 +922,7 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, direct_input_key, direct_input_modifier, guest_point, Rect,
+        content_point, direct_input_key, direct_input_modifier, guest_point, steered, Rect,
         PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
@@ -911,6 +943,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A taken pointer moves by how far the mouse moved, in guest pixels
+    /// whatever the window is stretched to, keeps the fraction of a pixel it
+    /// has, and stops at the guest's screen edge as Windows stops the cursor
+    /// at the display's (#64).
+    #[test]
+    fn a_taken_pointer_is_steered_by_the_mouse_and_stays_on_the_screen() {
+        let frame = (640, 480);
+        let same = (640.0, 480.0);
+        assert_eq!(
+            steered((320.0, 240.0), (6.0, -4.0), same, frame),
+            (326.0, 236.0)
+        );
+        // Twice the window is twice the points for the same guest pixel.
+        let twice = (1280.0, 960.0);
+        assert_eq!(
+            steered((320.0, 240.0), (6.0, 0.0), twice, frame),
+            (323.0, 240.0)
+        );
+        // Half a pixel is kept, not lost.
+        let (x, _) = steered((320.0, 240.0), (0.5, 0.0), same, frame);
+        let (x, _) = steered((x, 240.0), (0.5, 0.0), same, frame);
+        assert_eq!(x, 321.0);
+        assert_eq!(
+            steered((630.0, 470.0), (500.0, 500.0), same, frame),
+            (639.0, 479.0)
+        );
+        assert_eq!(
+            steered((5.0, 5.0), (-500.0, -500.0), same, frame),
+            (0.0, 0.0)
+        );
     }
 
     #[test]

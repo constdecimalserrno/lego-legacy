@@ -1505,8 +1505,8 @@ impl Machine {
             host.show_pointer(shown);
         }
         // And where the title put it, while the title is the one drawing a
-        // pointer: everywhere else the pointer is the person's and moving it
-        // under their hand is not this machine's to do (#46, #59).
+        // pointer: the host measures the person's next move from there.
+        // Everywhere else the pointer is the person's (#46, #59, #64).
         if let Some((x, y)) = self.state.pointer_put.take() {
             if !shown {
                 host.put_pointer(x, y);
