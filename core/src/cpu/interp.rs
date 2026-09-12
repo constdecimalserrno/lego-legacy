@@ -17,10 +17,9 @@ pub struct Interp {
     /// transfer of control, next to each other, so executing one after
     /// another reads memory in order.
     //
-    // ponytail: no invalidation, and a run is decoded ahead of where the guest
-    // has been: code rewritten after its run was decoded, even before it first
-    // runs, runs its old form. Nothing on the roster has been measured doing
-    // so; the first title that does gets a write watch over cached ranges.
+    // A write to a page this has decoded out of throws the whole cache away,
+    // which is what a title that loads its own code needs: Alpha Team unpacks
+    // DLLs out of its archives into memory it has run before (#58).
     insns: Vec<Insn>,
     /// Each run, as where its first instruction is in `insns` and how many
     /// there are.
@@ -78,7 +77,12 @@ impl Interp {
 
     /// The run of instructions starting at a linear address, decoding it if
     /// this is the first time the engine has stood there.
-    fn run_at(&mut self, lin: u32, mem: &Arena) -> Result<(u32, u32), Stop> {
+    fn run_at(&mut self, lin: u32, mem: &mut Arena) -> Result<(u32, u32), Stop> {
+        // Bytes have been written over something this decoded: what is cached
+        // is no longer what is there (#58).
+        if std::mem::take(&mut mem.code_written) {
+            self.forget();
+        }
         let (region, page, slot) = (
             (lin >> 22) as usize,
             (lin >> 12) as usize & 0x3ff,
@@ -128,6 +132,15 @@ impl Interp {
         }
         let p = self.regions[r][page] as usize - 1;
         self.pages[p][slot] = place(self.runs.len());
+        // Every page this run was decoded out of is now watched.
+        let mut watched = lin;
+        loop {
+            mem.mark_code(watched);
+            if watched / 4096 >= at.wrapping_sub(1) / 4096 {
+                break;
+            }
+            watched = (watched / 4096 + 1) * 4096;
+        }
         Ok(run)
     }
 

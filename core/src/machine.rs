@@ -96,9 +96,16 @@ pub struct Machine {
     /// showings to undo.
     pointer_shown: bool,
     /// Calls the machine made into guest code, waiting to come back.
-    continuations: Vec<(u32, u32)>,
+    /// Calls the machine made into guest code, waiting to come back: where to
+    /// resume, what to answer with, and where the guest's stack stood when the
+    /// call was set up. The last of those is how an abandoned call is
+    /// recognised — an exception handler that goes to its catch never returns
+    /// (#54).
+    continuations: Vec<(u32, u32, u32)>,
     /// Which parked calls are a modal dialog's turns, by their depth.
     dialog_turns: Vec<usize>,
+    /// Which parked calls answer for themselves, by their depth (#60).
+    pass_through: Vec<usize>,
     /// What each boundary slot was found to stand for the first time it was
     /// called, by the slot: looking a shim or a method up by its name on every
     /// call is most of what a call costs.
@@ -141,6 +148,7 @@ impl Machine {
             pointer_shown: true,
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
+            pass_through: Vec::new(),
             bound: Vec::new(),
             render_turns: Vec::new(),
             input: Vec::new(),
@@ -606,6 +614,16 @@ impl Machine {
                         }
                         return Err(Stop::ThreadEnded);
                     }
+                    // The exception walk ran out of handlers (#54).
+                    Some(Entry::Unhandled { code }) => {
+                        return Err(Stop::NotWritten {
+                            what: format!(
+                                "an exception of {code:#010x} was raised and nothing on the \
+                                 guest's own handler chain took it"
+                            ),
+                            caller: self.cpu.eip,
+                        })
+                    }
                     // The loader's own program jumped here, which a module
                     // only makes it do by refusing to attach (#55).
                     Some(Entry::Attach { module }) => {
@@ -695,6 +713,7 @@ impl Machine {
             boundary: &mut self.boundary,
             call_guest: None,
             float_answer: None,
+            answer_is_the_call_s: false,
         };
         let answer = match (shim.run)(&mut ctx, &args) {
             // A shim that stops the run cannot see who called it.
@@ -704,6 +723,7 @@ impl Machine {
             other => other?,
         };
         let call_guest = ctx.call_guest.take();
+        let pass_through = ctx.answer_is_the_call_s;
 
         // The call returns: the return address comes off the stack, the
         // arguments come off with it when the callee owns them, and the answer
@@ -716,7 +736,11 @@ impl Machine {
         self.cpu.r[crate::cpu::EAX] = answer;
         self.cpu.eip = caller;
         if let Some((function, args)) = call_guest {
-            self.call_guest(function, &args, caller, answer)?;
+            if pass_through {
+                self.call_guest_for_its_answer(function, &args, caller)?;
+            } else {
+                self.call_guest(function, &args, caller, answer)?;
+            }
             // A dialog that has just come up parks its first turn here; the
             // guest's own callbacks inside it are ordinary calls.
             if let Some(dialog) = self.state.dialog.as_mut().filter(|d| !d.parked) {
@@ -987,6 +1011,7 @@ impl Machine {
             boundary: &mut self.boundary,
             call_guest: None,
             float_answer: None,
+            answer_is_the_call_s: false,
         };
         let answer = match (method.run)(&mut ctx, this, &args) {
             // A slot the header declares and nothing has written: the wall
@@ -1003,6 +1028,7 @@ impl Machine {
             other => other?,
         };
         let call_guest = ctx.call_guest.take();
+        let pass_through = ctx.answer_is_the_call_s;
         if let Some(value) = ctx.float_answer.take() {
             self.cpu.fpu.push(f64::from(value));
         }
@@ -1013,7 +1039,11 @@ impl Machine {
         self.cpu.eip = caller;
         if let Some((function, args)) = call_guest {
             let stack = self.cpu.r[crate::cpu::ESP];
-            self.call_guest(function, &args, caller, answer)?;
+            if pass_through {
+                self.call_guest_for_its_answer(function, &args, caller)?;
+            } else {
+                self.call_guest(function, &args, caller, answer)?;
+            }
             // A render pass that has just begun parks its first turn here.
             if let Some(pass) = self.state.render.as_mut().filter(|p| !p.parked) {
                 pass.parked = true;
@@ -1036,7 +1066,12 @@ impl Machine {
             }
             None => {
                 self.render_turns.pop();
-                let Some((resume_at, answer)) = self.continuations.pop() else {
+                // A call the machine only arranged answers for itself.
+                let pass_through = self.pass_through.last() == Some(&self.continuations.len());
+                if pass_through {
+                    self.pass_through.pop();
+                }
+                let Some((resume_at, answer, _)) = self.continuations.pop() else {
                     return Err(Stop::NotWritten {
                         what: "a render pass ended with no call waiting for it".to_owned(),
                         caller: self.cpu.eip,
@@ -1065,7 +1100,7 @@ impl Machine {
             log.line(&format!("dialog ended with {result}"));
             self.state.dialog = None;
             self.dialog_turns.pop();
-            let Some((resume_at, _)) = self.continuations.pop() else {
+            let Some((resume_at, _, _)) = self.continuations.pop() else {
                 return Err(Stop::NotWritten {
                     what: "a dialog ended with no call waiting for it".to_owned(),
                     caller: self.cpu.eip,
@@ -1221,8 +1256,24 @@ impl Machine {
         resume_at: u32,
         answer: u32,
     ) -> Result<(), Stop> {
+        let before = self.cpu.r[crate::cpu::ESP];
         self.push_call(function, args)?;
-        self.continuations.push((resume_at, answer));
+        self.continuations.push((resume_at, answer, before));
+        Ok(())
+    }
+
+    /// Run guest code and give the guest what it answers with, rather than
+    /// what the shim answered (#60).
+    fn call_guest_for_its_answer(
+        &mut self,
+        function: u32,
+        args: &[u32],
+        resume_at: u32,
+    ) -> Result<(), Stop> {
+        let before = self.cpu.r[crate::cpu::ESP];
+        self.push_call(function, args)?;
+        self.pass_through.push(self.continuations.len());
+        self.continuations.push((resume_at, 0, before));
         Ok(())
     }
 
@@ -1255,7 +1306,27 @@ impl Machine {
         {
             return self.render_turn(stack);
         }
-        let Some((resume_at, answer)) = self.continuations.pop() else {
+        // Calls the guest never came back from: an exception handler that goes
+        // to its catch leaves the stack above the frame the call was made
+        // from, and what was waiting for it is never going to happen. A call
+        // that returned the ordinary way leaves the stack exactly where it
+        // was, whoever cleaned the arguments (#54).
+        let esp = self.cpu.r[crate::cpu::ESP];
+        while self
+            .continuations
+            .last()
+            .is_some_and(|(_, _, at)| *at < esp)
+        {
+            self.continuations.pop();
+            self.pass_through.retain(|d| *d < self.continuations.len());
+            log.line("a parked call was abandoned by an unwind");
+        }
+        // A call the machine only arranged answers for itself.
+        let pass_through = self.pass_through.last() == Some(&self.continuations.len());
+        if pass_through {
+            self.pass_through.pop();
+        }
+        let Some((resume_at, answer, _)) = self.continuations.pop() else {
             return Err(Stop::NotWritten {
                 what: "a return into the machine with nothing waiting for it".to_owned(),
                 caller: self.cpu.eip,
@@ -1266,8 +1337,11 @@ impl Machine {
             format!("guest returned {eax:#x} cursor {cursor}")
         });
         // The callback's own answer is discarded: what the guest is waiting
-        // for is the answer to the call it made.
-        self.cpu.r[EAX] = answer;
+        // for is the answer to the call it made — unless the call was the
+        // answer, which is what a COM server the title ships hands back.
+        if !pass_through {
+            self.cpu.r[EAX] = answer;
+        }
         self.cpu.eip = resume_at;
         self.clock.retire();
         Ok(())

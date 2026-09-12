@@ -164,6 +164,79 @@ fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
+/// `IClassFactory` over DirectSound, which is how a title that goes through
+/// COM rather than through `DirectSoundCreate` asks for one (#60).
+///
+/// Alpha Team's sound server does exactly that: it makes DirectSound by class
+/// and then asks the factory for the object.
+pub static CLASS_FACTORY: Interface = Interface {
+    name: "IClassFactory(DirectSound)",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        crate::com::RELEASE,
+        Method {
+            name: "CreateInstance",
+            args: 3,
+            run: factory_create,
+        },
+        Method {
+            name: "LockServer",
+            args: 1,
+            run: lock_server,
+        },
+    ],
+};
+
+/// Make the class factory itself, which `CoCreateInstance` hands back.
+///
+/// # Errors
+/// When the object will not fit in guest memory.
+pub fn make_factory(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
+    State::make_com(ctx, &CLASS_FACTORY, ComState::None).map_err(Stop::Fault)
+}
+
+/// Make a DirectSound object, however it was asked for.
+///
+/// # Errors
+/// When the object will not fit in guest memory.
+pub fn make(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
+    let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
+    ctx.log.line(&format!("dsound created at {object:#010x}"));
+    Ok(object)
+}
+
+fn factory_create(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateInstance(outer, interface, out). The object is the same one
+    // `DirectSoundCreate` makes; what the caller asked for it as is checked
+    // the way every other face is.
+    let interface = crate::com::iid_text(&crate::com::read_iid(ctx, args[1])?);
+    // IID_IDirectSound, and IUnknown, which everything answers to.
+    if interface != "279afa83-4981-11ce-a521-0020af0be560"
+        && interface != "00000000-0000-0000-c000-000000000046"
+    {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IClassFactory(DirectSound)::CreateInstance: asked for {interface}, and this \
+                 factory makes IDirectSound"
+            ),
+            caller: 0,
+        });
+    }
+    let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "dsound created at {object:#010x} by its class factory"
+    ));
+    Ok(S_OK)
+}
+
+fn lock_server(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // Nothing is ever unloaded here, so a server that is asked to stay is
+    // already staying.
+    Ok(S_OK)
+}
+
 /// `IDirectSound`, in slot order.
 pub static DIRECT_SOUND: Interface = Interface {
     name: "IDirectSound",
@@ -532,6 +605,7 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
 };
 
 pub static INTERFACES: &[&Interface] = &[
+    &CLASS_FACTORY,
     &DIRECT_SOUND,
     &DIRECT_SOUND_BUFFER,
     &DIRECT_SOUND_3D_LISTENER,

@@ -164,6 +164,62 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "lstrcpyA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: lstrcpy,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "lstrcatA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: lstrcat,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "lstrlenA",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: lstrlen,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "lstrcmpiA",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: lstrcmpi,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "CompareFileTime",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: compare_file_time,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetFileTime",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: get_file_time,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "RtlUnwind",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: rtl_unwind,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "RaiseException",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: raise_exception,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "MulDiv",
         args: 3,
         convention: Convention::Stdcall,
@@ -920,8 +976,16 @@ fn get_module_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn get_module_file_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Where the guest believes it was started from. A declared value: the
-    // install tree's own path, not the host's.
-    let path = format!("{}\\LegoRR.exe", ctx.title.install_dir);
+    // install tree's own path, and the title's own image, not the host's and
+    // not the first title this machine ever ran (#58).
+    let image = ctx
+        .title
+        .image
+        .path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("game.exe");
+    let path = format!("{}\\{image}", ctx.title.install_dir);
     let written = ctx
         .write_string(args[1], args[2], &path)
         .map_err(Stop::Fault)?;
@@ -2137,6 +2201,275 @@ fn unmap_view_of_file(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// Which of two file times is the earlier.
+fn compare_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let read = |ctx: &mut Ctx<'_>, at: u32| -> Result<u64, Stop> {
+        let low = u64::from(ctx.mem.read_u32(at).map_err(Stop::Fault)?);
+        let high = u64::from(ctx.mem.read_u32(at + 4).map_err(Stop::Fault)?);
+        Ok(low | (high << 32))
+    };
+    let (left, right) = (read(ctx, args[0])?, read(ctx, args[1])?);
+    Ok(match left.cmp(&right) {
+        std::cmp::Ordering::Less => 0xffff_ffff,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// When a file was made, last read and last written.
+///
+/// One declared moment for all three, and the same one for every file: the
+/// pressing's own files were all written when it was pressed, and a run that
+/// read the host's clock here would replay differently tomorrow (ADR-0003).
+fn get_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetFileTime(file, created, accessed, written). 1999-10-04, as Windows
+    // counts: hundreds of nanoseconds since the start of 1601.
+    const WHEN: u64 = (11_644_473_600 + 939_000_000) * 10_000_000;
+    for at in &args[1..4] {
+        if *at != 0 {
+            ctx.mem
+                .write(*at, &WHEN.to_le_bytes())
+                .map_err(Stop::Fault)?;
+        }
+    }
+    Ok(1)
+}
+
+/// Raise an exception and offer it to the guest's own handlers (#54).
+///
+/// The chain is the guest's, at `fs:[0]`, and the handlers on it are guest
+/// code: what this does is walk it and call them, in order, until one takes
+/// the exception. A C++ throw is exactly this, and the handler that takes it
+/// does not come back — it goes to the catch.
+fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // RaiseException(code, flags, argument count, arguments).
+    let (code, flags, count, values) = (args[0], args[1], args[2].min(15), args[3]);
+    let raised_at = ctx.cpu.eip;
+
+    // EXCEPTION_RECORD: what was raised, where, and what was passed with it.
+    let record = ctx.state.heap.alloc(0x50);
+    ctx.mem.write(record, &[0u8; 0x50]).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(record, code).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(record + 4, flags).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(record + 12, raised_at)
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(record + 16, count).map_err(Stop::Fault)?;
+    for i in 0..count {
+        let value = ctx.mem.read_u32(values + i * 4).map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(record + 20 + i * 4, value)
+            .map_err(Stop::Fault)?;
+    }
+
+    // CONTEXT: where the processor stood. A handler that unwinds reads the
+    // stack and instruction pointers out of it.
+    let context = ctx.state.heap.alloc(0x2cc);
+    ctx.mem.write(context, &[0u8; 0x2cc]).map_err(Stop::Fault)?;
+    // CONTEXT_FULL: the integer, control and segment registers are here.
+    ctx.mem
+        .write_u32(context, 0x0001_0007)
+        .map_err(Stop::Fault)?;
+    let put = |ctx: &mut Ctx<'_>, at: u32, value: u32| {
+        ctx.mem.write_u32(context + at, value).map_err(Stop::Fault)
+    };
+    use crate::cpu::{EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
+    let r = ctx.cpu.r;
+    put(ctx, 0x9c, r[EDI])?;
+    put(ctx, 0xa0, r[ESI])?;
+    put(ctx, 0xa4, r[EBX])?;
+    put(ctx, 0xa8, r[EDX])?;
+    put(ctx, 0xac, r[ECX])?;
+    put(ctx, 0xb0, r[EAX])?;
+    put(ctx, 0xb4, r[EBP])?;
+    put(ctx, 0xb8, raised_at)?;
+    put(ctx, 0xc4, ctx.cpu.flags.to_eflags())?;
+    put(ctx, 0xc8, r[ESP])?;
+
+    // The chain, walked here so that the program below has every handler on
+    // it: a frame is the next frame and the handler, in that order.
+    let mut frames = Vec::new();
+    let mut frame = ctx
+        .mem
+        .read_u32(ctx.cpu.seg_base[crate::cpu::FS])
+        .map_err(Stop::Fault)?;
+    while frame != 0xffff_ffff && frame != 0 && frames.len() < 64 {
+        let handler = ctx.mem.read_u32(frame + 4).map_err(Stop::Fault)?;
+        frames.push((frame, handler));
+        let next = ctx.mem.read_u32(frame).map_err(Stop::Fault)?;
+        if next == frame {
+            break;
+        }
+        frame = next;
+    }
+    ctx.log.line(&format!(
+        "exception {code:#010x} raised at {raised_at:#010x}, {} handlers on the chain",
+        frames.len()
+    ));
+
+    // The program: each handler in turn, stopping at the first that does not
+    // say to keep looking. ExceptionContinueSearch is one; anything else has
+    // taken it, and a handler that goes to a catch never comes back at all.
+    let mut code_bytes: Vec<u8> = Vec::new();
+    let mut holes = Vec::new();
+    for (frame, handler) in &frames {
+        for value in [0u32, context, *frame, record] {
+            code_bytes.push(0x68);
+            code_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        code_bytes.push(0xb8);
+        code_bytes.extend_from_slice(&handler.to_le_bytes());
+        code_bytes.extend_from_slice(&[0xff, 0xd0]); // call eax
+        code_bytes.extend_from_slice(&[0x83, 0xc4, 0x10]); // add esp, 16
+        code_bytes.extend_from_slice(&[0x83, 0xf8, 0x01]); // cmp eax, 1
+        code_bytes.extend_from_slice(&[0x0f, 0x85]); // jne <done>
+        holes.push(code_bytes.len());
+        code_bytes.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    // Nothing took it.
+    let unhandled = ctx.boundary.bind_unhandled(code);
+    code_bytes.push(0xb8);
+    code_bytes.extend_from_slice(&unhandled.to_le_bytes());
+    code_bytes.extend_from_slice(&[0xff, 0xe0]); // jmp eax
+    let done = code_bytes.len();
+    for hole in holes {
+        let rel = u32::try_from(done - (hole + 4)).unwrap_or(0);
+        code_bytes[hole..hole + 4].copy_from_slice(&rel.to_le_bytes());
+    }
+    code_bytes.push(0xc3); // ret: a handler said to carry on where it was
+
+    let at = ctx
+        .state
+        .heap
+        .alloc(u32::try_from(code_bytes.len()).unwrap_or(0));
+    ctx.mem.write(at, &code_bytes).map_err(Stop::Fault)?;
+    ctx.call_guest = Some((at, Vec::new()));
+    Ok(0)
+}
+
+/// Unwind the guest's handler chain as far as a frame, telling every handler
+/// on the way that it is being unwound (#54).
+///
+/// What a handler that has decided to take an exception calls before it goes
+/// to its catch: the frames between are given their chance to clean up.
+fn rtl_unwind(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // RtlUnwind(target frame, target instruction, record, return value).
+    let (target, target_ip) = (args[0], args[1]);
+    // The usual form names the instruction after the call, which is where the
+    // machine is going to put the guest back anyway.
+    let returns_to = ctx
+        .mem
+        .read_u32(ctx.cpu.r[crate::cpu::ESP])
+        .map_err(Stop::Fault)?;
+    if target_ip != 0 && target_ip != returns_to {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "KERNEL32.dll!RtlUnwind: to {target_ip:#010x}, and this machine only unwinds \
+                 back to the caller"
+            ),
+            caller: 0,
+        });
+    }
+
+    // The record the caller passed, or one of this machine's own saying what
+    // is happening, with the unwinding flag set either way.
+    const EXCEPTION_UNWINDING: u32 = 2;
+    let record = if args[2] == 0 {
+        let at = ctx.state.heap.alloc(0x50);
+        ctx.mem.write(at, &[0u8; 0x50]).map_err(Stop::Fault)?;
+        // STATUS_UNWIND.
+        ctx.mem.write_u32(at, 0xc000_0027).map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(at + 4, EXCEPTION_UNWINDING)
+            .map_err(Stop::Fault)?;
+        at
+    } else {
+        let was = ctx.mem.read_u32(args[2] + 4).map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(args[2] + 4, was | EXCEPTION_UNWINDING)
+            .map_err(Stop::Fault)?;
+        args[2]
+    };
+
+    let head = ctx.cpu.seg_base[crate::cpu::FS];
+    let mut frames = Vec::new();
+    let mut frame = ctx.mem.read_u32(head).map_err(Stop::Fault)?;
+    while frame != 0xffff_ffff && frame != 0 && frame != target && frames.len() < 64 {
+        let handler = ctx.mem.read_u32(frame + 4).map_err(Stop::Fault)?;
+        frames.push((frame, handler));
+        let next = ctx.mem.read_u32(frame).map_err(Stop::Fault)?;
+        if next == frame {
+            break;
+        }
+        frame = next;
+    }
+    // The chain ends where the unwind was asked to stop, whether or not every
+    // handler between has run yet: that is what the frames below are being
+    // told.
+    ctx.mem.write_u32(head, target).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "unwinding {} handlers back to {target:#010x}",
+        frames.len()
+    ));
+    if frames.is_empty() {
+        return Ok(0);
+    }
+
+    let mut code: Vec<u8> = Vec::new();
+    for (frame, handler) in &frames {
+        for value in [0u32, 0, *frame, record] {
+            code.push(0x68);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.push(0xb8);
+        code.extend_from_slice(&handler.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0]); // call eax
+        code.extend_from_slice(&[0x83, 0xc4, 0x10]); // add esp, 16: it is cdecl
+    }
+    code.push(0xc3);
+    let at = ctx.state.heap.alloc(u32::try_from(code.len()).unwrap_or(0));
+    ctx.mem.write(at, &code).map_err(Stop::Fault)?;
+    ctx.call_guest = Some((at, Vec::new()));
+    Ok(0)
+}
+
+/// The string calls Windows has always had, which are the C ones under other
+/// names.
+fn lstrcpy(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let mut bytes = ctx.string(args[1]).map_err(Stop::Fault)?.into_bytes();
+    bytes.push(0);
+    ctx.mem.write(args[0], &bytes).map_err(Stop::Fault)?;
+    Ok(args[0])
+}
+
+fn lstrcat(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let already = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let added = ctx.string(args[1]).map_err(Stop::Fault)?;
+    let mut bytes = format!("{already}{added}").into_bytes();
+    bytes.push(0);
+    ctx.mem.write(args[0], &bytes).map_err(Stop::Fault)?;
+    Ok(args[0])
+}
+
+fn lstrlen(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    let text = ctx.string(args[0]).map_err(Stop::Fault)?;
+    Ok(u32::try_from(text.len()).unwrap_or(0))
+}
+
+fn lstrcmpi(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Less, the same, or greater, as a negative, zero or positive answer.
+    let left = ctx.string(args[0]).map_err(Stop::Fault)?.to_lowercase();
+    let right = ctx.string(args[1]).map_err(Stop::Fault)?.to_lowercase();
+    Ok(match left.cmp(&right) {
+        std::cmp::Ordering::Less => 0xffff_ffff,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
+}
+
 /// Multiply two signed numbers, then divide, rounding to nearest and keeping
 /// the whole product along the way.
 fn mul_div(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -2275,9 +2608,14 @@ fn sleep(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let Some(thread) = ctx.state.threads.get_mut(running) else {
         return Ok(0);
     };
-    if thread.wake_at > ctx.clock_millis {
-        // Still asleep: the machine comes back to this call until its hour.
-        return Err(Stop::Blocked);
+    if thread.wake_at != 0 {
+        if thread.wake_at > ctx.clock_millis {
+            // Still asleep: the machine comes back to this call until its hour.
+            return Err(Stop::Blocked);
+        }
+        // Its hour has come, and the call it was parked on returns.
+        thread.wake_at = 0;
+        return Ok(0);
     }
     if until > ctx.clock_millis {
         thread.wake_at = until;

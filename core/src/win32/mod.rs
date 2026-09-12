@@ -20,6 +20,7 @@ pub mod ole32;
 pub mod pipeline;
 pub mod scene;
 pub mod user32;
+pub mod version;
 pub mod winmm;
 
 use crate::cpu::{Cpu, Stop};
@@ -759,6 +760,10 @@ pub struct Ctx<'a> {
     /// Set by a method whose answer is a floating-point value, which the
     /// caller reads from the top of the floating-point stack, not `eax`.
     pub float_answer: Option<f32>,
+    /// Set alongside `call_guest` by a shim whose answer is the guest call's
+    /// own: what a call this machine only arranges — a COM server the title
+    /// ships, made by its own class factory — comes back with (#60).
+    pub answer_is_the_call_s: bool,
 }
 
 /// Call one of the guest's own callbacks several times over, once per set of
@@ -1027,6 +1032,7 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         d3drm::SHIMS,
         avifile::SHIMS,
         ole32::SHIMS,
+        version::SHIMS,
         winmm::SHIMS,
     ] {
         if let Some(shim) = table

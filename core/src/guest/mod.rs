@@ -32,7 +32,19 @@ impl std::error::Error for Fault {}
 /// The guest's whole address space.
 pub struct Arena {
     mapping: Mapping,
+    /// Which pages the engine has decoded instructions out of, one bit each
+    /// (ADR-0004). A write to one of them means what is cached for it is no
+    /// longer what is there.
+    code: Vec<u64>,
+    /// Whether a write has landed on such a page since the engine last
+    /// looked. Alpha Team loads its own DLLs out of its archives and calls
+    /// them, so what is at an address changes under the cache (#58).
+    pub code_written: bool,
 }
+
+/// How big a page is for the purpose of watching code, which is the size the
+/// engine's own cache is indexed by.
+const CODE_PAGE: u32 = 4096;
 
 impl Arena {
     /// Take `len` bytes from the host as the guest's address space, based at
@@ -42,6 +54,8 @@ impl Arena {
     /// When the host cannot map that much.
     pub fn new(host: &mut dyn Host, len: usize) -> Result<Self, HostError> {
         Ok(Self {
+            code: vec![0; (len / CODE_PAGE as usize).div_ceil(64) + 1],
+            code_written: false,
             mapping: host.map(len)?,
         })
     }
@@ -118,6 +132,9 @@ impl GuestMem for Arena {
                 len: bytes.len(),
             });
         }
+        if self.wrote_over_code(addr, bytes.len()) {
+            self.code_written = true;
+        }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length.
         unsafe {
@@ -148,6 +165,9 @@ impl GuestMem for Arena {
         if !self.in_bounds(addr, len) {
             return Err(Fault { addr, len });
         }
+        if self.wrote_over_code(addr, len) {
+            self.code_written = true;
+        }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length, and the borrow is the arena's only
         // one for as long as it lasts.
@@ -161,6 +181,32 @@ impl GuestMem for Arena {
 }
 
 impl Arena {
+    /// Say that the engine has decoded instructions out of this address, so
+    /// that a write over them is noticed.
+    pub fn mark_code(&mut self, addr: u32) {
+        let page = (addr / CODE_PAGE) as usize;
+        if let Some(word) = self.code.get_mut(page / 64) {
+            *word |= 1 << (page % 64);
+        }
+    }
+
+    /// Whether a write of `len` bytes at `addr` lands on anything decoded.
+    ///
+    /// ponytail: a page at a time, and any write to a page holding code
+    /// throws the whole cache away rather than the runs that were actually
+    /// written over. A title that keeps data on the same page as code it runs
+    /// would want the finer thing.
+    #[inline(always)]
+    fn wrote_over_code(&self, addr: u32, len: usize) -> bool {
+        let first = (addr / CODE_PAGE) as usize;
+        let last = ((addr as usize + len.saturating_sub(1)) / CODE_PAGE as usize).max(first);
+        (first..=last).any(|page| {
+            self.code
+                .get(page / 64)
+                .is_some_and(|word| word & (1 << (page % 64)) != 0)
+        })
+    }
+
     /// Borrow one run of guest bytes to read and another, apart from it, to
     /// change: what drawing from one surface into another needs, without a
     /// copy of the one drawn from.
