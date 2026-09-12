@@ -74,8 +74,20 @@ pub enum Object {
         /// never written to is not one the profile keeps a copy of.
         wrote: bool,
     },
-    /// Something named that only has to be distinct: an event, a mutex.
-    Named { kind: &'static str, name: String },
+    /// Something named a thread can wait on: an event, a mutex, a thread.
+    Named {
+        kind: &'static str,
+        name: String,
+        /// Whether a wait on it is over now: an event that has been set and
+        /// not yet taken, or a mutex nobody holds (#60).
+        signalled: bool,
+        /// An event that stays signalled until it is reset, rather than one
+        /// waiter taking it back down.
+        manual: bool,
+        /// Which thread holds a mutex and how many times over. A thread may
+        /// take one it already holds, and has to release it as often.
+        held: Option<(u32, u32)>,
+    },
     /// A hook a title asked to put on the window system, by which hook it is.
     /// Nothing on this machine calls one (#60).
     Hook(u32),
@@ -132,8 +144,12 @@ pub struct GuestThread {
     /// otherwise be using the last one's (ADR-0005).
     pub tls: Vec<u32>,
     /// The declared millisecond it asked to be woken at, for a thread that is
-    /// sleeping. Until then the machine runs somebody else.
+    /// sleeping or waiting. Until then the machine runs somebody else.
+    /// `u64::MAX` is a wait with no timeout: only a signal lifts it.
     pub wake_at: u64,
+    /// The handle it is parked on, while it waits for one. Signalling that
+    /// object is what wakes it before its timeout runs out (#60).
+    pub waiting_on: u32,
 }
 
 /// Everything the guest holds that is not memory.
@@ -310,6 +326,7 @@ impl State {
                 code: 0,
                 tls: Vec::new(),
                 wake_at: 0,
+                waiting_on: 0,
             }],
             thread: 0,
             next_thread_id: crate::machine::THREAD_ID,

@@ -67,8 +67,18 @@ fn task_mem_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// A declared value: the machine does not go looking through a registry it
 /// does not have. Alpha Team's sound system asks for A3D by this identifier
 /// and `a3dapi.dll`, in its own cabinet, is what answers it (#60).
-/// Empty, and deliberately: see the note on A3D below (#60).
-const SERVERS: &[(&str, &str)] = &[];
+///
+/// #60 offered two ways to sound: run the disc's own `a3dapi.dll` as guest
+/// code, or write `IA3d4` and its source and listener interfaces here. The
+/// first was taken. A3D mixes in software when it finds no Aureal hardware —
+/// and it finds none here — so what it produces is ordinary DirectSound
+/// buffers, which this machine already puts in its mix (#19, #23); the second
+/// would have meant writing a 3D mixer against no specification to replace a
+/// software one the disc already carries. What it cost was a machine whose
+/// waits are real: events that remember being signalled, mutexes that
+/// remember who holds them, timeouts that are honoured, and threads that park
+/// rather than ask again (ADR-0005).
+const SERVERS: &[(&str, &str)] = &[("92fa2c24-253c-11d2-90fb-006008a1f441", "a3dapi.dll")];
 
 /// Make a class through the server the title ships for it.
 ///
@@ -238,25 +248,9 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(S_OK);
     }
 
-    // Classes the declared machine does not have.
-    //
-    // A3D is one of them, for now. `a3dapi.dll` is in this title's own
-    // cabinet, and running it is what ADR-0002 allows and #60 asked to try
-    // first. It now loads, attaches, makes its DirectSound, sets a primary
-    // format and starts two sound threads of its own — and there the machine
-    // stops: its threads wait on events with a timeout this machine answers
-    // at once, and the title's own thread ends up parked on a boundary call
-    // it never comes back from. What it needs is an event that keeps whether
-    // it has been signalled, and a wait that honours its timeout, neither of
-    // which the declared machine has yet. Until then it says it has no A3D,
-    // which is what a PC without it says and what this title's sound system
-    // is written to hear. #60 carries the measurements.
-    //
-    // The second one is another DirectSound class A3D asks for before
-    // settling for the one it made.
-    if class == "92fa2c24-253c-11d2-90fb-006008a1f441"
-        || class == "d8f1eee0-f634-11cf-8700-00a0245d918b"
-    {
+    // A class the declared machine does not have: another DirectSound class
+    // A3D asks for before settling for the one it made.
+    if class == "d8f1eee0-f634-11cf-8700-00a0245d918b" {
         ctx.log.line(&format!(
             "com: {class} is not registered on the declared machine"
         ));

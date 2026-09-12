@@ -647,6 +647,20 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "ResetEvent",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: reset_event,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "WaitForMultipleObjects",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: wait_for_multiple_objects,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "WaitForSingleObject",
         args: 2,
         convention: Convention::Stdcall,
@@ -1619,11 +1633,22 @@ fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
             // A thread already holding one may take it again, and has to
             // leave it as many times as it took it.
             *depth += 1;
+            park(ctx, 0, 0);
             Ok(0)
         }
-        Some(_) => Err(Stop::Blocked),
+        Some(_) => {
+            // Somebody else has it. This thread is put down on it until they
+            // leave, rather than left runnable to ask again: a thread that
+            // asks again retires no instructions, so the declared clock never
+            // moves, so whoever holds the section never reaches its hour
+            // either — the machine spins with every thread alive and nothing
+            // happening (#60).
+            park(ctx, args[0], u64::MAX);
+            Err(Stop::Blocked)
+        }
         None => {
             ctx.state.sections.insert(args[0], (me, 1));
+            park(ctx, 0, 0);
             Ok(0)
         }
     }
@@ -1636,6 +1661,7 @@ fn leave_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
             *depth -= 1;
             if *depth == 0 {
                 ctx.state.sections.remove(&args[0]);
+                wake_waiters(ctx, args[0]);
             }
         }
     }
@@ -1875,53 +1901,251 @@ fn lc_map_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn create_mutex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // A single-instance check: the guest makes a named mutex and asks whether
-    // it already existed. On this machine it never has, because one run is one
-    // machine and nothing else is holding the name.
+    // CreateMutexA(security, take it now, name). A single-instance check makes
+    // a named one and asks whether it already existed; on this machine it
+    // never has, because one run is one machine. What it is *for* here is two
+    // of this machine's own threads keeping each other out of one thing at a
+    // time — A3D's sound threads and the title's own (#60).
     let name = ctx.string(args[2]).map_err(Stop::Fault)?;
+    let me = running_thread(ctx);
     ctx.state.last_error = 0;
+    let mine = args[1] != 0;
     Ok(ctx.state.give(Object::Named {
         kind: "mutex",
         name,
+        signalled: !mine,
+        manual: false,
+        held: mine.then_some((me, 1)),
     }))
 }
 
-fn release_mutex(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(1)
+fn release_mutex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let me = running_thread(ctx);
+    let Some(Object::Named {
+        signalled, held, ..
+    }) = ctx.state.object_mut(args[0])
+    else {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    };
+    // Only whoever holds it may let it go, and only the outermost release
+    // frees it: a thread may take one it already holds.
+    match held {
+        Some((owner, depth)) if *owner == me => {
+            *depth -= 1;
+            if *depth == 0 {
+                *held = None;
+                *signalled = true;
+                wake_waiters(ctx, args[0]);
+            }
+            Ok(1)
+        }
+        _ => {
+            // ERROR_NOT_OWNER.
+            ctx.state.last_error = 288;
+            Ok(0)
+        }
+    }
 }
 
 fn create_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // CreateEventA(security, manual reset, initial state, name). A title
-    // makes one for a device to signal it on; on a machine where nothing else
-    // runs, nothing ever waits on one for long.
+    // CreateEventA(security, manual reset, initial state, name). A manual one
+    // stays up until it is reset; an automatic one wakes one waiter and goes
+    // back down as that waiter takes it.
     let name = ctx.string(args[3]).map_err(Stop::Fault)?;
     ctx.state.last_error = 0;
     Ok(ctx.state.give(Object::Named {
         kind: "event",
         name,
+        signalled: args[2] != 0,
+        manual: args[1] != 0,
+        held: None,
     }))
 }
 
-fn set_event(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // Nothing is waiting to be woken: the only thread there is set it.
+fn set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let Some(Object::Named { signalled, .. }) = ctx.state.object_mut(args[0]) else {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    };
+    *signalled = true;
+    // Whoever is parked on it may run now rather than when its timeout runs
+    // out: an event nobody remembers having set is an event nobody can be
+    // woken by, which is what kept A3D's threads spinning (#60).
+    wake_waiters(ctx, args[0]);
     Ok(1)
 }
 
-fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Nothing else runs on this machine: no other process sets an event, and
-    // a mutex is only ever this machine's own threads, which take their turns
-    // rather than run at once (ADR-0005). So a wait is over as soon as it is
-    // asked for. WAIT_FAILED for a handle nobody was given.
-    if ctx.state.object(args[0]).is_none() {
+fn reset_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let Some(Object::Named { signalled, .. }) = ctx.state.object_mut(args[0]) else {
         ctx.state.last_error = 6;
-        return Ok(0xffff_ffff);
+        return Ok(0);
+    };
+    *signalled = false;
+    Ok(1)
+}
+
+/// Let every thread parked on this object have its turn again.
+///
+/// It does not hand the object to any of them: each makes its wait again when
+/// the machine comes back round to it, and whoever gets there first takes it.
+fn wake_waiters(ctx: &mut Ctx<'_>, handle: u32) {
+    for thread in &mut ctx.state.threads {
+        if thread.waiting_on == handle {
+            thread.wake_at = 0;
+        }
     }
-    // A wait with a timeout on it is also how a thread paces a loop, and
-    // answering that at once turns the loop into a spin. Nothing on the
-    // roster has a second thread that does it — A3D's two do, which is part
-    // of why A3D is not run (#60) — so the timeout is not honoured here and
-    // the wait is over as soon as it is asked for.
-    Ok(0)
+}
+
+/// Take the object if it is there to be taken (#60).
+///
+/// An automatic event goes back down as its waiter takes it; a manual one
+/// stays up. A mutex is taken by the thread that waited, and a thread that
+/// already holds one takes it again.
+fn claim(ctx: &mut Ctx<'_>, handle: u32) -> Option<bool> {
+    let me = running_thread(ctx);
+    let Some(Object::Named {
+        kind,
+        signalled,
+        manual,
+        held,
+        ..
+    }) = ctx.state.object_mut(handle)
+    else {
+        return None;
+    };
+    if *kind == "mutex" {
+        return Some(match held {
+            Some((owner, depth)) if *owner == me => {
+                *depth += 1;
+                true
+            }
+            Some(_) => false,
+            None => {
+                *held = Some((me, 1));
+                *signalled = false;
+                true
+            }
+        });
+    }
+    if !*signalled {
+        return Some(false);
+    }
+    if !*manual {
+        *signalled = false;
+    }
+    Some(true)
+}
+
+/// WAIT_TIMEOUT: the wait ran out before what it waited for happened.
+const WAIT_TIMEOUT: u32 = 0x0000_0102;
+/// WAIT_FAILED: not a handle this machine ever gave out.
+const WAIT_FAILED: u32 = 0xffff_ffff;
+/// INFINITE, the timeout that is not one.
+const INFINITE: u32 = 0xffff_ffff;
+
+fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    wait_for(ctx, &[args[0]], args[1], true)
+}
+
+fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // WaitForMultipleObjects(count, handles, all of them, timeout).
+    let count = args[0] as usize;
+    let mut handles = Vec::with_capacity(count);
+    for i in 0..count {
+        handles.push(
+            ctx.mem
+                .read_u32(args[1] + (i as u32) * 4)
+                .map_err(Stop::Fault)?,
+        );
+    }
+    wait_for(ctx, &handles, args[3], args[2] == 0)
+}
+
+/// Wait for one of these objects, or for all of them, until the timeout.
+///
+/// The thread is parked rather than answered at once: a wait that is over the
+/// moment it is asked for turns a paced loop into a spin, and a machine that
+/// keeps no signalled state has no way to wake anybody (#60). The call itself
+/// is left where it is — `Stop::Blocked` brings this thread back to it when
+/// the machine comes round again, so the wait costs nothing while it waits.
+fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32, any: bool) -> Result<u32, Stop> {
+    if handles.is_empty() || handles.iter().any(|h| ctx.state.object(*h).is_none()) {
+        // ERROR_INVALID_HANDLE.
+        ctx.state.last_error = 6;
+        park(ctx, 0, 0);
+        return Ok(WAIT_FAILED);
+    }
+    if any {
+        for (i, handle) in handles.iter().enumerate() {
+            if claim(ctx, *handle) == Some(true) {
+                park(ctx, 0, 0);
+                return Ok(u32::try_from(i).unwrap_or(0));
+            }
+        }
+    } else if handles.iter().all(|h| signalled(ctx, *h)) {
+        for handle in handles {
+            claim(ctx, *handle);
+        }
+        park(ctx, 0, 0);
+        return Ok(0);
+    }
+    // Not available. Whether this thread can be woken at all decides what a
+    // wait means: with nobody else to run, waiting is only spending time.
+    let now = ctx.clock_millis;
+    let running = ctx.state.thread;
+    let parked = ctx
+        .state
+        .threads
+        .get(running)
+        .is_some_and(|t| t.waiting_on != 0);
+    if ctx.state.threads.len() < 2 {
+        // There is nobody to be waiting for. A title with one thread waits on
+        // an event a device would have signalled, or a mutex nothing else
+        // could be holding; on this machine the device is the machine, so the
+        // wait is over as soon as it is asked for. Hot Wheels' race is paced
+        // by one of these and stops dead if it is told the wait ran out.
+        return Ok(0);
+    }
+    if !parked {
+        if timeout == 0 {
+            return Ok(WAIT_TIMEOUT);
+        }
+        let until = if timeout == INFINITE {
+            u64::MAX
+        } else {
+            now + u64::from(timeout)
+        };
+        park(ctx, handles[0], until);
+        return Err(Stop::Blocked);
+    }
+    // Parked already: back for another look.
+    if ctx.state.threads[running].wake_at > now {
+        return Err(Stop::Blocked);
+    }
+    park(ctx, 0, 0);
+    Ok(WAIT_TIMEOUT)
+}
+
+/// Whether a wait on this object would be over, without taking it.
+fn signalled(ctx: &Ctx<'_>, handle: u32) -> bool {
+    let me = running_thread(ctx);
+    match ctx.state.object(handle) {
+        Some(Object::Named {
+            signalled, held, ..
+        }) => *signalled || matches!(held, Some((owner, _)) if *owner == me),
+        _ => false,
+    }
+}
+
+/// Put the running thread down on an object until an hour, or pick it back up
+/// again with a handle of zero.
+fn park(ctx: &mut Ctx<'_>, handle: u32, until: u64) {
+    let running = ctx.state.thread;
+    if let Some(thread) = ctx.state.threads.get_mut(running) {
+        thread.waiting_on = handle;
+        thread.wake_at = if handle == 0 { 0 } else { until };
+    }
 }
 
 fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -3051,6 +3275,9 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let handle = ctx.state.give(Object::Named {
         kind: "thread",
         name: format!("thread {id}"),
+        signalled: false,
+        manual: true,
+        held: None,
     });
     // CREATE_SUSPENDED: made, and not run until somebody says so.
     let suspended = flags & 4 != 0;
@@ -3063,6 +3290,7 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         code: 0,
         tls: Vec::new(),
         wake_at: 0,
+        waiting_on: 0,
     });
     if args[5] != 0 {
         ctx.mem.write_u32(args[5], id).map_err(Stop::Fault)?;

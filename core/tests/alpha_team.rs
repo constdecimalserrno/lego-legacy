@@ -659,3 +659,61 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     assert_eq!(first.finish.declared_millis, second.finish.declared_millis);
     assert_eq!(first.digest, second.digest);
 }
+
+/// Alpha Team is heard (#60).
+///
+/// Its sound is Aureal A3D, which it reaches through `CoCreateInstance` and
+/// nothing else: the class is served by `a3dapi.dll` out of its own cabinet,
+/// run as guest code, and what that mixes in software reaches this machine as
+/// ordinary DirectSound buffers.
+#[test]
+fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    // How loud each mixed block is, for the blocks mixed between two flips.
+    let blocks = |from: u64, to: u64| -> Vec<f64> {
+        ran.host
+            .audio_blocks
+            .iter()
+            .zip(&ran.host.audio_flips)
+            .filter(|(_, flip)| (from..to).contains(*flip))
+            .map(|(block, _)| {
+                let power: f64 = block.iter().map(|s| f64::from(*s).powi(2)).sum();
+                (power / block.len().max(1) as f64).sqrt()
+            })
+            .collect()
+    };
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    // Silence is zero; the menu and the mission measured in the thousands.
+    const HEARD: f64 = 300.0;
+
+    // The menu has its own music under it, long after the intro movie is over.
+    let menu = blocks(400, 500);
+    assert!(
+        mean(&menu) > HEARD,
+        "the menu is heard: {:.0} over {} blocks",
+        mean(&menu),
+        menu.len()
+    );
+    // And so does the mission, which is a different piece.
+    let mission = blocks(MISSION, MISSION_LATER);
+    assert!(
+        mean(&mission) > HEARD,
+        "the mission is heard: {:.0} over {} blocks",
+        mean(&mission),
+        mission.len()
+    );
+
+    // `DDStreamingAudioManager` streams rather than plays: it writes on into a
+    // buffer that is already playing, and a stream that starves leaves a gap.
+    // Every fifty flips from the menu to the end of the run carries blocks.
+    for at in (400..MISSION_LATER).step_by(50) {
+        let window = blocks(at, at + 50);
+        assert!(
+            !window.is_empty() && mean(&window) > HEARD,
+            "the sound stops between flip {at} and flip {}: {window:?}",
+            at + 50
+        );
+    }
+}

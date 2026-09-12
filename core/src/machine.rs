@@ -369,6 +369,9 @@ impl Machine {
             if let Some(outcome) = self.run_guest(host, log, budget) {
                 break outcome;
             }
+            if let Some(what) = self.deadlocked() {
+                break Outcome::Wall { what };
+            }
             // A burst is the declared quantum: whoever ran it hands over to
             // whoever is next (ADR-0005).
             self.switch_thread(log);
@@ -1196,7 +1199,9 @@ impl Machine {
                 .filter(|t| !t.ended && !t.suspended)
                 .map(|t| t.wake_at)
                 .min();
-            if let Some(due) = due.filter(|d| *d > now) {
+            // A wait with no timeout has no hour: only a signal lifts it, so
+            // there is nothing for the clock to go to (#60).
+            if let Some(due) = due.filter(|d| *d > now && *d != u64::MAX) {
                 self.clock.wait(due - now);
             }
         }
@@ -1222,6 +1227,34 @@ impl Machine {
                 self.clock.cursor()
             )
         });
+    }
+
+    /// Whether every thread left is waiting for another with no hour to be
+    /// woken at, which nothing can move on (ADR-0005, #60).
+    ///
+    /// Without this a deadlock is a machine that looks busy for ever: each
+    /// thread takes its turn, makes its wait again, hands the turn back, and
+    /// the cursor never moves.
+    fn deadlocked(&self) -> Option<String> {
+        let live: Vec<_> = self.state.threads.iter().filter(|t| !t.ended).collect();
+        if live.len() < 2 || !live.iter().all(|t| t.suspended || t.wake_at == u64::MAX) {
+            return None;
+        }
+        Some(format!(
+            "every thread is waiting for another: {}",
+            live.iter()
+                .map(|t| format!(
+                    "thread {} {}",
+                    t.id,
+                    if t.suspended {
+                        "suspended".to_owned()
+                    } else {
+                        format!("on handle {:#x}", t.waiting_on)
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 
     /// Hand the host every block of the mix the declared clock has passed.
