@@ -324,3 +324,120 @@ fn the_title_brings_up_a_directx_7_device_and_presents_through_it() {
     );
     assert!(ran.finish.flips >= 1, "it presents a frame of its own");
 }
+
+/// The archives this title reads everything out of come out of the cabinet
+/// byte for byte. Their own hashes are here because the cabinet carries an
+/// MD5 of each expanded file and those were checked against these (#58).
+#[test]
+fn the_archives_unpack_to_exactly_what_the_cabinet_says_they_are() {
+    if !scratch() {
+        return;
+    }
+    let mut tree = tree();
+    for (name, bytes, digest) in [
+        (
+            "Bhvr.pac",
+            4_532_456,
+            "244725abd7fe5b6b3f7200ccc3bee90174ccad6c1eb0fead1cdd861824d1eddc",
+        ),
+        (
+            "Fin.pac",
+            20_642_530,
+            "1b93b964d12a0114ba25c3712a62b8c8fe5d685d954b07b58b43e6b737c777e1",
+        ),
+        (
+            "Locale_en.pac",
+            82_323_720,
+            "61156b4fd3d4bb269ac8b009d542f192b989deef96bf35a0d280f36162aabaa6",
+        ),
+    ] {
+        let unpacked = tree
+            .read(&format!("{ROOT}\\{name}"))
+            .unwrap_or_else(|| panic!("{name} unpacks"));
+        assert_eq!(unpacked.len(), bytes, "{name} is as long as it says");
+        assert_eq!(
+            lego_legacy_core::hash::sha256_hex(&unpacked),
+            digest,
+            "{name} is what it says it is"
+        );
+    }
+}
+
+/// The flip the title's own picture is first on the screen at: its Loading
+/// panel, drawn through Direct3D 7 (#58).
+const FIRST_LIGHT: u64 = 1;
+
+/// What it costs to get there. Most of it is the title reading four hundred
+/// megabytes of archives and playing its intro movie.
+const FIRST_LIGHT_BUDGET: u64 = 600_000_000;
+
+/// The run that reaches first light, done once for every test that looks at
+/// it.
+fn boot() -> Option<&'static testkit::Ran> {
+    use std::sync::OnceLock;
+    static BOOT: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+    BOOT.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        Some(testkit::run_headless(
+            &ALPHA_TEAM,
+            &Cli::default(),
+            FIRST_LIGHT_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+/// First light: the first frame the title presents under its own control
+/// (#58).
+#[test]
+fn the_title_presents_a_frame_of_its_own() {
+    let Some(ran) = boot() else { return };
+    let lit = ran
+        .host
+        .frames
+        .iter()
+        .find(|f| !f.is_uniform())
+        .expect("the title puts a picture on the screen");
+    assert_eq!(
+        lit.flip, FIRST_LIGHT,
+        "first light moved: it is now flip {}",
+        lit.flip
+    );
+    assert_eq!((lit.width, lit.height), (640, 480));
+}
+
+/// The same run twice over is the same run (#58).
+#[test]
+fn the_boot_replays_to_the_same_machine_every_time() {
+    let Some(first) = boot() else { return };
+    let Some(second) = ({
+        use std::sync::OnceLock;
+        static AGAIN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
+        AGAIN
+            .get_or_init(|| {
+                if !scratch() {
+                    return None;
+                }
+                Some(testkit::run_headless(
+                    &ALPHA_TEAM,
+                    &Cli::default(),
+                    FIRST_LIGHT_BUDGET,
+                ))
+            })
+            .as_ref()
+    }) else {
+        return;
+    };
+    assert_eq!(first.finish.cursor, second.finish.cursor);
+    assert_eq!(first.finish.flips, second.finish.flips);
+    assert_eq!(
+        first.finish.declared_millis, second.finish.declared_millis,
+        "the same declared time"
+    );
+    assert_eq!(
+        first.digest, second.digest,
+        "and the machine ends the same way"
+    );
+}
