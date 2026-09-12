@@ -7,25 +7,25 @@
 # there: the title puts the pointer back in the middle of the window after
 # every frame and steers by how far it went since, a 1280th of the window per
 # pixel, from a cursor that starts in the bottom left corner.
-flip 160 key Space down
-flip 162 key Space up
+flip 1792 key Space down
+flip 1794 key Space up
 # Onto Single Missions, and in.
-flip 600 move 480 37
-flip 602 move 480 37
-flip 604 move 480 37
-flip 606 move 480 37
-flip 620 down
-flip 622 up
+flip 2232 move 480 37
+flip 2234 move 480 37
+flip 2236 move 480 37
+flip 2238 move 480 37
+flip 2252 down
+flip 2254 up
 # Onto the Alpha Team Training Area, the second of the two the list offers.
-flip 700 move 314 117
-flip 720 down
-flip 722 up
+flip 2332 move 314 117
+flip 2352 down
+flip 2354 up
 # And the tick, bottom left, which is the list's own way in.
-flip 760 move 136 484
-flip 762 move 136 484
-flip 780 down
-flip 782 up
+flip 2392 move 136 484
+flip 2394 move 136 484
+flip 2412 down
+flip 2414 up
 # The mission loads with its destination panel up and waits: "Click your
 # mouse button to begin the training exercise."
-flip 1150 down
-flip 1152 up
+flip 2782 down
+flip 2784 up

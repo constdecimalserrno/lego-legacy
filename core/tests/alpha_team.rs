@@ -384,9 +384,14 @@ fn a_second_image_asking_for_a_taken_address_is_refused_and_relocated() {
     );
 }
 
-/// The flip the title's own picture is first on the screen at: its Loading
-/// panel, drawn through Direct3D 7 (#58).
-const FIRST_LIGHT: u64 = 1;
+/// The flip the title's own picture is first on the screen at: the fifth
+/// frame of its intro movie, which is the first one that is not black (#63).
+const FIRST_LIGHT: u64 = 5;
+
+/// The flip its own Loading panel is on the screen at, drawn through
+/// Direct3D 7 — what #58 called first light, before the intro movie in front
+/// of it was being presented at all (#63).
+const LOADING_PANEL: u64 = 1633;
 
 /// What it costs to get there. Most of it is the title reading four hundred
 /// megabytes of archives and playing its intro movie.
@@ -401,7 +406,8 @@ fn boot() -> Option<&'static testkit::Ran> {
         if !scratch() {
             return None;
         }
-        Some(testkit::run_headless(
+        Some(testkit::run_on(
+            Headless::new().keeping(&[FIRST_LIGHT, LOADING_PANEL]),
             &ALPHA_TEAM,
             &Cli::default(),
             FIRST_LIGHT_BUDGET,
@@ -427,6 +433,14 @@ fn the_title_presents_a_frame_of_its_own() {
         lit.flip
     );
     assert_eq!((lit.width, lit.height), (640, 480));
+    // And its own Loading panel, the frame #58 was written about, is still
+    // there behind the movie's sixteen hundred (#63).
+    let panel = ran
+        .host
+        .frame(LOADING_PANEL)
+        .expect("the Loading panel is kept");
+    assert!(!panel.is_uniform(), "the Loading panel drew something");
+    assert_eq!((panel.width, panel.height), (640, 480));
 }
 
 /// The same run twice over is the same run (#58).
@@ -465,11 +479,11 @@ fn the_boot_replays_to_the_same_machine_every_time() {
 
 /// The flip the main menu is up and waiting at, before the route touches the
 /// mouse.
-const MENU: u64 = 480;
+const MENU: u64 = 2112;
 
 /// A few flips after the route has clicked Single Missions, where the mission
 /// list is up.
-const MISSION_LIST: u64 = 700;
+const MISSION_LIST: u64 = 2332;
 
 /// Enough instructions for the committed route to reach the mission list and
 /// wait in it. The front end costs about two and a half million instructions a
@@ -569,11 +583,11 @@ fn the_menu_route_replays_to_the_same_machine_every_time() {
 
 /// The flip the mission is up and playing at, a hundred flips after the route
 /// has begun the training exercise.
-const MISSION: u64 = 1250;
+const MISSION: u64 = 2882;
 
 /// And three hundred and fifty flips of it later, which is where the mission
 /// is asked to have gone on drawing.
-const MISSION_LATER: u64 = 1600;
+const MISSION_LATER: u64 = 3232;
 
 /// Enough instructions for the committed route to load the first mission and
 /// play it. The mission costs about three and a half million instructions a
@@ -689,7 +703,7 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
     const HEARD: f64 = 300.0;
 
     // The menu has its own music under it, long after the intro movie is over.
-    let menu = blocks(400, 500);
+    let menu = blocks(MENU - 80, MENU + 20);
     assert!(
         mean(&menu) > HEARD,
         "the menu is heard: {:.0} over {} blocks",
@@ -708,7 +722,7 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
     // `DDStreamingAudioManager` streams rather than plays: it writes on into a
     // buffer that is already playing, and a stream that starves leaves a gap.
     // Every fifty flips from the menu to the end of the run carries blocks.
-    for at in (400..MISSION_LATER).step_by(50) {
+    for at in (MENU - 80..MISSION_LATER).step_by(50) {
         let window = blocks(at, at + 50);
         assert!(
             !window.is_empty() && mean(&window) > HEARD,

@@ -2,8 +2,8 @@
 # LEGO Alpha Team, from its boot into its front end and through it with the
 # keyboard and the mouse.
 #
-# The attract screen waits for anything a person does, and Space is what this
-# gives it; the main menu is up by flip 480.
+# The intro movie is 1632 flips of its own (#63); the attract screen after it
+# waits for anything a person does, and Space is what this gives it; the main menu is up by flip 2112.
 #
 # The pointer on screen from there is the title's own, not the machine's.
 # DDMouse puts the pointer back in the middle of the window after every frame
@@ -13,11 +13,11 @@
 # amount walk it onto Single Missions: 4 x 160 px right is half the window
 # across, and 4 x 203 px up is 0.634 of it, which is the row the second item
 # is on. The click there opens the mission list.
-flip 160 key Space down
-flip 162 key Space up
-flip 600 move 480 37
-flip 602 move 480 37
-flip 604 move 480 37
-flip 606 move 480 37
-flip 620 down
-flip 622 up
+flip 1792 key Space down
+flip 1794 key Space up
+flip 2232 move 480 37
+flip 2234 move 480 37
+flip 2236 move 480 37
+flip 2238 move 480 37
+flip 2252 down
+flip 2254 up

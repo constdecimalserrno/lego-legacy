@@ -1393,7 +1393,7 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let Some((pixels, width, height, pitch, depth, _, _)) = surface_of(ctx, this) else {
+    let Some((pixels, width, height, pitch, depth, primary, _)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     let to = rect(ctx, args[0], width, height)?;
@@ -1458,6 +1458,22 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         depth,
         key,
     )?;
+    // A copy that covers the whole of the screen is the moment a frame
+    // exists, the same way letting go of the whole of it is (`unlock`): the
+    // title has put a finished picture there and there is nothing else for it
+    // to become. Alpha Team's movies arrive this way and no other — it blits
+    // each decoded frame onto the front buffer of its flipping chain and
+    // never flips, so without this its intro is a hundred and nine seconds of
+    // black (#63). A fill is not a frame: that is how a title *starts* one.
+    if primary && to == (0, 0, i64::from(width), i64::from(height)) {
+        ctx.state.present = Some(super::Present {
+            pixels,
+            width,
+            height,
+            pitch,
+            depth,
+        });
+    }
     Ok(S_OK)
 }
 
