@@ -143,6 +143,34 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "CreateFileMappingA",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: create_file_mapping,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "MapViewOfFile",
+        args: 5,
+        convention: Convention::Stdcall,
+        run: map_view_of_file,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "UnmapViewOfFile",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: unmap_view_of_file,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "MulDiv",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: mul_div,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "GetTimeZoneInformation",
         args: 1,
         convention: Convention::Stdcall,
@@ -398,14 +426,14 @@ pub const SHIMS: &[Shim] = &[
         name: "EnterCriticalSection",
         args: 1,
         convention: Convention::Stdcall,
-        run: critical_section,
+        run: enter_critical_section,
     },
     Shim {
         dll: "KERNEL32",
         name: "LeaveCriticalSection",
         args: 1,
         convention: Convention::Stdcall,
-        run: critical_section,
+        run: leave_critical_section,
     },
     Shim {
         dll: "KERNEL32",
@@ -826,6 +854,34 @@ pub const SHIMS: &[Shim] = &[
         args: 6,
         convention: Convention::Stdcall,
         run: create_thread,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "ResumeThread",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: resume_thread,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "SuspendThread",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: suspend_thread,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "ExitThread",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: exit_thread,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetExitCodeThread",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: get_exit_code_thread,
     },
     Shim {
         dll: "KERNEL32",
@@ -1430,31 +1486,87 @@ fn free_environment_strings(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop
 }
 
 fn critical_section(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // A machine with one flow of control cannot contend for a lock, so
-    // entering one costs nothing and always succeeds. The structure the guest
-    // passes is its own memory and is left exactly as it found it.
+    // Making one and taking it apart again: the structure the guest passes is
+    // its own memory and is left exactly as it found it.
     Ok(0)
 }
 
-fn tls_alloc(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    let index = u32::try_from(ctx.state.scratch.len()).unwrap_or(0);
-    ctx.state.scratch.push(0);
-    Ok(index)
+/// Which thread is asking, as the sections know threads.
+fn running_thread(ctx: &Ctx<'_>) -> u32 {
+    ctx.state
+        .threads
+        .get(ctx.state.thread)
+        .map_or(crate::machine::THREAD_ID, |t| t.id)
 }
 
-fn tls_set(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(slot) = ctx.state.scratch.get_mut(args[0] as usize) {
-        *slot = args[1];
-        return Ok(1);
+/// Take a lock, or wait for whoever has it (ADR-0005).
+///
+/// With one thread this costs nothing, which is what it did when there was
+/// only ever one. With two it is the only thing keeping them out of each
+/// other's C++ runtime: a section that did nothing let Alpha Team's sound
+/// thread and its loader tear the same allocator apart.
+fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let me = running_thread(ctx);
+    match ctx.state.sections.get_mut(&args[0]) {
+        Some((owner, depth)) if *owner == me => {
+            // A thread already holding one may take it again, and has to
+            // leave it as many times as it took it.
+            *depth += 1;
+            Ok(0)
+        }
+        Some(_) => Err(Stop::Blocked),
+        None => {
+            ctx.state.sections.insert(args[0], (me, 1));
+            Ok(0)
+        }
+    }
+}
+
+fn leave_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let me = running_thread(ctx);
+    if let Some((owner, depth)) = ctx.state.sections.get_mut(&args[0]) {
+        if *owner == me {
+            *depth -= 1;
+            if *depth == 0 {
+                ctx.state.sections.remove(&args[0]);
+            }
+        }
     }
     Ok(0)
 }
 
+fn tls_alloc(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    let index = u32::try_from(ctx.state.tls_slots).unwrap_or(0);
+    ctx.state.tls_slots += 1;
+    Ok(index)
+}
+
+fn tls_set(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Per thread, which is the whole point of them: a C runtime keeps its own
+    // per-thread block in one of these, and two threads sharing a slot would
+    // be two threads sharing that block (ADR-0005).
+    let slot = args[0] as usize;
+    if slot >= ctx.state.tls_slots {
+        return Ok(0);
+    }
+    let running = ctx.state.thread;
+    let Some(thread) = ctx.state.threads.get_mut(running) else {
+        return Ok(0);
+    };
+    if thread.tls.len() <= slot {
+        thread.tls.resize(slot + 1, 0);
+    }
+    thread.tls[slot] = args[1];
+    Ok(1)
+}
+
 fn tls_get(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let running = ctx.state.thread;
     Ok(ctx
         .state
-        .scratch
-        .get(args[0] as usize)
+        .threads
+        .get(running)
+        .and_then(|t| t.tls.get(args[0] as usize))
         .copied()
         .unwrap_or(0))
 }
@@ -1482,8 +1594,15 @@ fn current_process_id(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0x0000_1234)
 }
 
-fn current_thread_id(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(0x0000_1000)
+fn current_thread_id(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // Whichever thread is running, which is the only one until a title makes
+    // another (ADR-0005).
+    let running = ctx.state.thread;
+    Ok(ctx
+        .state
+        .threads
+        .get(running)
+        .map_or(crate::machine::THREAD_ID, |t| t.id))
 }
 
 fn get_last_error(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -1966,6 +2085,76 @@ fn get_logical_drives(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok((1 << 2) | (1 << 3))
 }
 
+/// A file the guest would rather read as memory than through a handle.
+///
+/// This title's archives are up to a hundred and twenty megabytes each and it
+/// maps every one of them, so the bytes go into the arena where the guest can
+/// address them, once, and stay there (#57).
+fn create_file_mapping(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // CreateFileMappingA(file, security, protection, high, low, name).
+    let Some(Object::File { bytes, path, .. }) = ctx.state.object(args[0]) else {
+        // ERROR_INVALID_HANDLE.
+        ctx.state.last_error = 6;
+        return Ok(0);
+    };
+    let (bytes, path) = (bytes.clone(), path.clone());
+    let len = u32::try_from(bytes.len()).unwrap_or(0);
+    let at = ctx.state.next_mapping;
+    let end = at
+        .checked_add(len.next_multiple_of(0x1000))
+        .filter(|end| *end as usize <= ctx.mem.len());
+    let Some(end) = end else {
+        // ERROR_NOT_ENOUGH_MEMORY: the arena has no room left for it.
+        ctx.state.last_error = 8;
+        return Ok(0);
+    };
+    ctx.state.next_mapping = end;
+    ctx.mem.write(at, &bytes).map_err(Stop::Fault)?;
+    ctx.log
+        .line(&format!("mapped {path}: {len} bytes at {at:#010x}"));
+    Ok(ctx.state.give(Object::Mapping { at, len }))
+}
+
+fn map_view_of_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // MapViewOfFile(mapping, access, high, low, bytes). The whole file is
+    // already where it is going to be, so a view of it is where it starts.
+    let Some(Object::Mapping { at, len }) = ctx.state.object(args[0]) else {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    };
+    let (at, len) = (*at, *len);
+    let offset = args[3];
+    if offset > len {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    }
+    Ok(at + offset)
+}
+
+fn unmap_view_of_file(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // The bytes stay where they are: nothing else is handed that part of the
+    // arena, and a title that unmaps and maps again finds them again.
+    Ok(1)
+}
+
+/// Multiply two signed numbers, then divide, rounding to nearest and keeping
+/// the whole product along the way.
+fn mul_div(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (a, b, c) = (args[0] as i32, args[1] as i32, args[2] as i32);
+    if c == 0 {
+        // What Windows answers when it cannot: the caller checks for it.
+        return Ok(0xffff_ffff);
+    }
+    let product = i64::from(a) * i64::from(b);
+    let half = i64::from(c) / 2;
+    let rounded = if (product < 0) == (c < 0) {
+        product + half
+    } else {
+        product - half
+    } / i64::from(c);
+    Ok(i32::try_from(rounded).map_or(0xffff_ffff, |n| n as u32))
+}
+
 /// What the declared machine's clock is offset from universal time by.
 ///
 /// None: the declared clock is the machine's own and has no zone behind it
@@ -2072,9 +2261,28 @@ fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn sleep(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The declared clock moves; the host is not asked to wait, because
-    // presentation is what paces a run (ADR-0003).
-    ctx.state.waited_millis += u64::from(args[0]);
+    // A thread that sleeps is not running, and something else may be: the
+    // machine puts it down until the declared clock reaches its hour and runs
+    // whoever else can (ADR-0005). With one thread there is nobody else, and
+    // the clock moves by the whole wait — the host is not asked to wait
+    // either way, because presentation is what paces a run (ADR-0003).
+    let running = ctx.state.thread;
+    if ctx.state.threads.len() < 2 {
+        ctx.state.waited_millis += u64::from(args[0]);
+        return Ok(0);
+    }
+    let until = ctx.clock_millis + u64::from(args[0]);
+    let Some(thread) = ctx.state.threads.get_mut(running) else {
+        return Ok(0);
+    };
+    if thread.wake_at > ctx.clock_millis {
+        // Still asleep: the machine comes back to this call until its hour.
+        return Err(Stop::Blocked);
+    }
+    if until > ctx.clock_millis {
+        thread.wake_at = until;
+        return Err(Stop::Blocked);
+    }
     Ok(0)
 }
 
@@ -2151,6 +2359,16 @@ fn get_proc_address(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if let Some(addr) = ctx.modules.resolve_in(args[0], &name) {
         return Ok(addr);
     }
+    // A library this emulator writes rather than runs has no export table to
+    // look in: what it has is a place on the boundary, which is what a guest
+    // that calls the address will arrive at. A name nothing stands behind is
+    // still nothing, because a title that finds it will then call it.
+    if let Some(Object::Module { name: dll, .. }) = ctx.state.object(args[0]) {
+        let dll = dll.clone();
+        if super::find(&dll, &name).is_some() {
+            return Ok(ctx.boundary.bind_named(&dll, &name));
+        }
+    }
     ctx.state.last_error = 127;
     Ok(0)
 }
@@ -2205,19 +2423,55 @@ fn write_private_profile_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, 
 }
 
 fn find_first_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Nothing matches. A title enumerating the disc is looking for files the
-    // declared tree does not hold yet, and telling it there are none is
-    // honest; telling it there is one it cannot then open would not be.
+    // What a title walking its own install directory asks: everything under
+    // one directory whose name matches a pattern. The declared tree is what it
+    // is walking, so what it finds is what it can then open (#57).
     let pattern = ctx.string(args[0]).map_err(Stop::Fault)?;
-    ctx.log.line(&format!("find first {pattern}"));
-    ctx.state.last_error = ERROR_FILE_NOT_FOUND;
-    Ok(INVALID_HANDLE)
+    let full = ctx.absolute(&pattern);
+    let (dir, glob) = match full.rsplit_once('\\') {
+        Some((dir, glob)) => (dir.to_owned(), glob.to_owned()),
+        None => (ctx.state.current_directory.clone(), full.clone()),
+    };
+    let matches = ctx.tree.matching(&dir, &glob);
+    ctx.log
+        .line(&format!("find first {pattern}: {} match", matches.len()));
+    let Some(first) = matches.first().cloned() else {
+        ctx.state.last_error = ERROR_FILE_NOT_FOUND;
+        return Ok(INVALID_HANDLE);
+    };
+    write_find_data(ctx, args[1], &first)?;
+    Ok(ctx.state.give(Object::Find { matches, at: 1 }))
 }
 
-fn find_next_file(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // ERROR_NO_MORE_FILES.
-    ctx.state.last_error = 18;
-    Ok(0)
+fn find_next_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let found = match ctx.state.object_mut(args[0]) {
+        Some(Object::Find { matches, at }) => {
+            let found = matches.get(*at).cloned();
+            *at += 1;
+            found
+        }
+        _ => None,
+    };
+    let Some(next) = found else {
+        // ERROR_NO_MORE_FILES.
+        ctx.state.last_error = 18;
+        return Ok(0);
+    };
+    write_find_data(ctx, args[1], &next)?;
+    Ok(1)
+}
+
+/// `WIN32_FIND_DATAA`: what one match looks like to the guest.
+fn write_find_data(ctx: &mut Ctx<'_>, at: u32, found: &(String, u32)) -> Result<(), Stop> {
+    ctx.mem.write(at, &[0u8; 0x140]).map_err(Stop::Fault)?;
+    // FILE_ATTRIBUTE_READONLY: everything the pressing holds is.
+    ctx.mem.write_u32(at, 1).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 0x20, found.1).map_err(Stop::Fault)?;
+    let mut name = found.0.clone().into_bytes();
+    name.truncate(259);
+    name.push(0);
+    ctx.mem.write(at + 0x2c, &name).map_err(Stop::Fault)?;
+    Ok(())
 }
 
 fn find_close(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -2316,15 +2570,122 @@ fn get_computer_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
-fn create_thread(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // A second flow of control is scheduled by the machine, not by the host
-    // (ADR-0005), and nothing on this roster has needed one yet. The first
-    // title that does gets the cooperative scheduler; until then this is a
-    // wall rather than a thread that silently never runs.
-    Err(Stop::NotWritten {
-        what: "KERNEL32.dll!CreateThread".to_owned(),
-        caller: ctx.cpu.r[crate::cpu::ESP],
-    })
+/// A second thread, which the machine runs cooperatively (ADR-0005).
+///
+/// One host thread runs them all, switching at a declared quantum of retired
+/// instructions: a schedule that depended on the host's own threads would make
+/// every run of a threaded title a different run.
+fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // CreateThread(security, stack bytes, start, parameter, flags, out id).
+    let (start, parameter, flags) = (args[2], args[3], args[4]);
+
+    // A stack of its own, and a thread block of its own for `fs` to be based
+    // at. Both come off the guest heap, which is where everything the machine
+    // hands a guest comes from.
+    let bytes = if args[1] == 0 { THREAD_STACK } else { args[1] };
+    let stack = ctx.state.heap.alloc(bytes);
+    let block = ctx.state.heap.alloc(0x1000);
+    if stack == 0 || block == 0 {
+        // ERROR_NOT_ENOUGH_MEMORY, which is what a caller checks for.
+        ctx.state.last_error = 8;
+        return Ok(0);
+    }
+    let top = stack + bytes;
+    crate::machine::write_tib(ctx.mem, block, top, stack, ctx.state.next_thread_id)
+        .map_err(Stop::Fault)?;
+
+    // Its first frame: the argument it was made with, and a return address
+    // that ends the thread rather than returning into nothing.
+    let mut esp = top - 16;
+    ctx.mem.write_u32(esp + 4, parameter).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(esp, ctx.boundary.bind_thread_end())
+        .map_err(Stop::Fault)?;
+    let mut cpu = crate::cpu::Cpu {
+        eip: start,
+        ..crate::cpu::Cpu::default()
+    };
+    cpu.r[crate::cpu::ESP] = esp;
+    cpu.seg_base[crate::cpu::FS] = block;
+    esp = 0;
+    let _ = esp;
+
+    let id = ctx.state.next_thread_id + 1;
+    ctx.state.next_thread_id = id;
+    let handle = ctx.state.give(Object::Named {
+        kind: "thread",
+        name: format!("thread {id}"),
+    });
+    // CREATE_SUSPENDED: made, and not run until somebody says so.
+    let suspended = flags & 4 != 0;
+    ctx.state.threads.push(crate::win32::GuestThread {
+        cpu,
+        handle,
+        id,
+        suspended,
+        ended: false,
+        code: 0,
+        tls: Vec::new(),
+        wake_at: 0,
+    });
+    if args[5] != 0 {
+        ctx.mem.write_u32(args[5], id).map_err(Stop::Fault)?;
+    }
+    ctx.log.line(&format!(
+        "thread {id} at {start:#010x}, stack {stack:#010x}+{bytes}{}",
+        if suspended { ", suspended" } else { "" }
+    ));
+    Ok(handle)
+}
+
+/// How much stack a thread gets when it does not ask for a size.
+///
+/// A declared value: what an image's own header would have asked for, and
+/// enough for the one this title makes.
+const THREAD_STACK: u32 = 0x0010_0000;
+
+fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let handle = args[0];
+    let Some(thread) = ctx.state.threads.iter_mut().find(|t| t.handle == handle) else {
+        ctx.state.last_error = 6; // ERROR_INVALID_HANDLE
+        return Ok(0xffff_ffff);
+    };
+    // What the count was before this call, which is one when it was suspended.
+    let was = u32::from(thread.suspended);
+    thread.suspended = false;
+    Ok(was)
+}
+
+fn suspend_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let handle = args[0];
+    let Some(thread) = ctx.state.threads.iter_mut().find(|t| t.handle == handle) else {
+        ctx.state.last_error = 6;
+        return Ok(0xffff_ffff);
+    };
+    let was = u32::from(thread.suspended);
+    thread.suspended = true;
+    Ok(was)
+}
+
+/// The thread that is running says it is done. The machine takes it out of the
+/// rotation at the next switch.
+fn exit_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let running = ctx.state.thread;
+    if let Some(thread) = ctx.state.threads.get_mut(running) {
+        thread.ended = true;
+        thread.code = args[0];
+    }
+    Err(Stop::ThreadEnded)
+}
+
+fn get_exit_code_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let handle = args[0];
+    let found = ctx.state.threads.iter().find(|t| t.handle == handle);
+    let (ended, code) = found.map_or((true, 0), |t| (t.ended, t.code));
+    // STILL_ACTIVE, which is how a caller knows to keep waiting.
+    let answer = if ended { code } else { 259 };
+    ctx.mem.write_u32(args[1], answer).map_err(Stop::Fault)?;
+    Ok(1)
 }
 
 fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

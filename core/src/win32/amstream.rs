@@ -406,13 +406,27 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     // CreateSample(surface, rect, flags, out). With no surface the stream
     // makes one of its own, the movie's size in the screen's format, which
     // the guest then asks the sample for.
-    if args[1] != 0 {
-        return Err(Stop::NotWritten {
-            what: format!("IDirectDrawMediaStream::CreateSample: rect {:#x}", args[1]),
-            caller: 0,
-        });
-    }
     let owner = owner_of(ctx, this);
+    // A rectangle names the part of the surface the frame goes into. One that
+    // starts at the surface's own corner and is at least as big as the movie
+    // is the whole of it, which is what the frame is written as; anything else
+    // would have to be placed, and nothing has asked (#57).
+    if args[1] != 0 {
+        let read = |o: u32| ctx.mem.read_u32(args[1] + o).map_err(Stop::Fault);
+        let (left, top, right, bottom) = (read(0)?, read(4)?, read(8)?, read(12)?);
+        let size = movie(ctx, owner).map(|m| m.avi.streams[m.video].picture_size());
+        let (width, height) = size.unwrap_or((0, 0));
+        if left != 0 || top != 0 || right < width || bottom < height {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "IDirectDrawMediaStream::CreateSample: a {}x{} movie into {left},{top} to \
+                     {right},{bottom}",
+                    width, height
+                ),
+                caller: 0,
+            });
+        }
+    }
     let surface = if args[0] == 0 {
         let Some(movie) = movie(ctx, owner) else {
             return Ok(MS_E_NOSTREAM);

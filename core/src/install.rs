@@ -13,6 +13,33 @@ use crate::disc::Iso;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Whether a name matches a pattern with `*` and `?` in it, as a guest's own
+/// enumeration spells one. Both are already upper-cased by the caller.
+fn matches(name: &str, pattern: &str) -> bool {
+    let (n, p): (Vec<char>, Vec<char>) = (name.chars().collect(), pattern.chars().collect());
+    // The usual two-pointer walk: remember where the last star was, and go
+    // back to it with one more character eaten when the rest stops matching.
+    let (mut i, mut j) = (0, 0);
+    let (mut star, mut back) = (None, 0);
+    while i < n.len() {
+        if j < p.len() && (p[j] == '?' || p[j] == n[i]) {
+            i += 1;
+            j += 1;
+        } else if j < p.len() && p[j] == '*' {
+            star = Some(j);
+            back = i;
+            j += 1;
+        } else if let Some(at) = star {
+            j = at + 1;
+            back += 1;
+            i = back;
+        } else {
+            return false;
+        }
+    }
+    p[j..].iter().all(|c| *c == '*')
+}
+
 /// Where one of the guest's files comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -287,6 +314,42 @@ impl Tree {
                 None
             }
         }
+    }
+
+    /// Every file the tree holds under a directory whose name matches a
+    /// pattern, with how big each one is.
+    ///
+    /// What `FindFirstFileA` enumerates. The sizes come from the header rather
+    /// than from unpacking anything: a title looking for its archives should
+    /// not cost four hundred megabytes of inflating to answer.
+    #[must_use]
+    pub fn matching(&self, dir: &str, pattern: &str) -> Vec<(String, u32)> {
+        let dir = Self::key(dir);
+        let prefix = if dir.ends_with('\\') {
+            dir
+        } else {
+            format!("{dir}\\")
+        };
+        let mut out = Vec::new();
+        for (path, source) in &self.files {
+            let Some(name) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if name.contains('\\') || !matches(name, &Self::key(pattern)) {
+                continue;
+            }
+            let size = match source {
+                Source::Declared(bytes) => u32::try_from(bytes.len()).unwrap_or(0),
+                Source::Packed(index) => self
+                    .cabinet
+                    .as_ref()
+                    .and_then(|(c, _)| c.entries().get(*index))
+                    .map_or(0, |e| e.expanded),
+                Source::Disc(_) => 0,
+            };
+            out.push((name.to_owned(), size));
+        }
+        out
     }
 
     /// How many files the tree holds.

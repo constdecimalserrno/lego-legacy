@@ -5,7 +5,7 @@
 //! because the frame the guest made is already the frame to show.
 
 use super::{ComState, Convention, Ctx, Shim, State};
-use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, wall, Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use crate::raster::PixelFormat;
@@ -17,6 +17,13 @@ pub const SHIMS: &[Shim] = &[
         args: 3,
         convention: Convention::Stdcall,
         run: create,
+    },
+    Shim {
+        dll: "DDRAW",
+        name: "DirectDrawCreateEx",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: create_ex,
     },
     Shim {
         dll: "DDRAW",
@@ -32,6 +39,26 @@ fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let object = State::make_com(ctx, &DIRECT_DRAW, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!("ddraw created at {object:#010x}"));
+    Ok(S_OK)
+}
+
+fn create_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // DirectDrawCreateEx(guid, out, interface, outer). DirectX 7's way in: the
+    // caller names the face it wants rather than asking for it afterwards, and
+    // the only one this call is allowed to hand back is IDirectDraw7 (#57).
+    let interface = crate::com::iid_text(&crate::com::read_iid(ctx, args[2])?);
+    if interface != "15e65ec0-3b9c-11d2-b92f-00609797ea5b" {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "DDRAW.dll!DirectDrawCreateEx: asked for {interface}, and this call only makes \
+                 IDirectDraw7"
+            ),
+            caller: 0,
+        });
+    }
+    let object = State::make_com(ctx, &DIRECT_DRAW7, ComState::None).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!("ddraw7 created at {object:#010x}"));
     Ok(S_OK)
 }
 
@@ -763,7 +790,108 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
     ],
 };
 
+/// `IDirectDraw7`: DirectX 7's DirectDraw, which is what Alpha Team asks its
+/// DirectDraw object for before it will draw anything (#57).
+///
+/// The same machine underneath and the same table as DirectX 6's as far as
+/// that one goes: every slot through `GetDeviceIdentifier` is in the same
+/// place and means the same thing, and DirectX 7 adds two after it.
+pub static DIRECT_DRAW7: Interface = Interface {
+    name: "IDirectDraw7",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("Compact", 0, ok),
+        method("CreateClipper", 3, create_clipper),
+        method("CreatePalette", 4, create_palette),
+        method("CreateSurface", 3, create_surface),
+        method("DuplicateSurface", 2, ok),
+        method("EnumDisplayModes", 4, enum_display_modes4),
+        method("EnumSurfaces", 4, ok),
+        method("FlipToGDISurface", 0, ok),
+        method("GetCaps", 2, caps),
+        method("GetDisplayMode", 1, display_mode),
+        method("GetFourCCCodes", 2, ok),
+        method("GetGDISurface", 1, ok),
+        method("GetMonitorFrequency", 1, monitor_frequency),
+        method("GetScanLine", 1, scan_line),
+        method("GetVerticalBlankStatus", 1, vertical_blank),
+        method("Initialize", 1, ok),
+        method("RestoreDisplayMode", 0, ok),
+        method("SetCooperativeLevel", 2, ok),
+        method("SetDisplayMode", 5, set_display_mode),
+        method("WaitForVerticalBlank", 2, ok),
+        method("GetAvailableVidMem", 3, available_video_memory),
+        method("GetSurfaceFromDC", 2, ok),
+        method("RestoreAllSurfaces", 0, ok),
+        method("TestCooperativeLevel", 0, ok),
+        method("GetDeviceIdentifier", 2, device_identifier),
+        wall("StartModeTest", 3),
+        wall("EvaluateMode", 2),
+    ],
+};
+
+/// `IDirectDrawSurface7`: the same surface again, with the four slots DirectX
+/// 7 added for texture management (#57).
+pub static DIRECT_DRAW_SURFACE7: Interface = Interface {
+    name: "IDirectDrawSurface7",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("AddAttachedSurface", 1, attach),
+        method("AddOverlayDirtyRect", 1, ok),
+        method("Blt", 5, blit),
+        method("BltBatch", 3, ok),
+        method("BltFast", 5, blit_fast),
+        method("DeleteAttachedSurface", 2, ok),
+        method("EnumAttachedSurfaces", 2, ok),
+        method("EnumOverlayZOrders", 3, ok),
+        method("Flip", 2, flip),
+        method("GetAttachedSurface", 2, attached_surface),
+        method("GetBltStatus", 1, ok),
+        method("GetCaps", 1, surface_caps),
+        method("GetClipper", 1, ok),
+        method("GetColorKey", 2, ok),
+        method("GetDC", 1, ok),
+        method("GetFlipStatus", 1, ok),
+        method("GetOverlayPosition", 2, ok),
+        method("GetPalette", 1, ok),
+        method("GetPixelFormat", 1, pixel_format),
+        method("GetSurfaceDesc", 1, surface_desc),
+        method("Initialize", 2, ok),
+        method("IsLost", 0, ok),
+        method("Lock", 4, lock),
+        method("ReleaseDC", 1, ok),
+        method("Restore", 0, ok),
+        method("SetClipper", 1, set_clipper),
+        method("SetColorKey", 2, set_color_key),
+        method("SetOverlayPosition", 2, ok),
+        method("SetPalette", 1, set_palette),
+        method("Unlock", 1, unlock),
+        method("UpdateOverlay", 5, ok),
+        method("UpdateOverlayDisplay", 1, ok),
+        method("UpdateOverlayZOrder", 2, ok),
+        method("GetDDInterface", 1, ok),
+        method("PageLock", 1, ok),
+        method("PageUnlock", 1, ok),
+        method("SetSurfaceDesc", 2, ok),
+        method("SetPrivateData", 4, ok),
+        method("GetPrivateData", 3, ok),
+        method("FreePrivateData", 1, ok),
+        method("GetUniquenessValue", 1, uniqueness),
+        method("ChangeUniquenessValue", 0, ok),
+        wall("SetPriority", 1),
+        wall("GetPriority", 1),
+        wall("SetLOD", 1),
+        wall("GetLOD", 1),
+    ],
+};
+
 pub static INTERFACES: &[&Interface] = &[
+    &DIRECT_DRAW7,
+    &DIRECT_DRAW_SURFACE7,
     &DIRECT_DRAW4,
     &DIRECT_DRAW_SURFACE4,
     &DIRECT_DRAW,
@@ -787,9 +915,12 @@ fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
         for offset in (4..size).step_by(4) {
             ctx.mem.write_u32(at + offset, 0).map_err(Stop::Fault)?;
         }
-        // DDCAPS_BLT | DDCAPS_BLTCOLORFILL | DDCAPS_PALETTE.
+        // DDCAPS_3D | DDCAPS_BLT | DDCAPS_BLTCOLORFILL | DDCAPS_PALETTE.
+        // The three-dimensional bit is this machine's own rasteriser saying it
+        // is there: a title that does not see it here does not go looking for
+        // a device at all (#57).
         ctx.mem
-            .write_u32(at + 4, 0x0000_5040)
+            .write_u32(at + 4, 0x0000_5041)
             .map_err(Stop::Fault)?;
         // Four megabytes of video memory, declared.
         ctx.mem
@@ -982,7 +1113,15 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
         } else {
             0
         };
-        if pf_flags & DDPF_PALETTEINDEXED8 != 0 && bits == 8 {
+        // A depth buffer is a surface like any other as far as DirectDraw is
+        // concerned: so many bits a pixel, and the device writes them rather
+        // than the title (#57).
+        if pf_flags & DDPF_ZBUFFER != 0 {
+            PixelFormat {
+                bits,
+                masks: [0; 4],
+            }
+        } else if pf_flags & DDPF_PALETTEINDEXED8 != 0 && bits == 8 {
             PixelFormat {
                 bits: 8,
                 masks: [0; 4],
@@ -1211,8 +1350,7 @@ fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     let back = surface_of(ctx, this).map_or(0, |s| s.6);
     ctx.mem.write_u32(args[1], back).map_err(Stop::Fault)?;
     if back == 0 {
-        // DDERR_NOTFOUND.
-        return Ok(0x8878_0033);
+        return Ok(DDERR_NOTFOUND);
     }
     Ok(S_OK)
 }
@@ -1324,7 +1462,16 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// `DDERR_INVALIDRECT` and `DDERR_BLTFASTCANTCLIP`.
+/// A surface that holds depth rather than colour.
+const DDPF_ZBUFFER: u32 = 0x0000_0400;
+
 const DDERR_INVALIDRECT: u32 = 0x8876_0096;
+/// What a surface says when it has nothing of the kind that was asked for.
+///
+/// It was written here as `0x8878_0033`, which is neither DirectDraw's own
+/// facility nor any code in it. Alpha Team reads the difference: not found
+/// means make one, and anything else means give up (#57).
+const DDERR_NOTFOUND: u32 = 0x8876_00ff;
 const DDERR_BLTFASTCANTCLIP: u32 = 0x8876_023e;
 
 /// Whether a rectangle is the right way round and inside a surface.

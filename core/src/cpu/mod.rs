@@ -133,6 +133,13 @@ pub enum Stop {
     /// The guest called something across the boundary that nothing stands
     /// behind yet.
     NotWritten { what: String, caller: u32 },
+    /// The thread that was running ended (ADR-0005). Not the run: the machine
+    /// switches to another thread and carries on.
+    ThreadEnded,
+    /// The thread that was running cannot go on until another one does
+    /// something (ADR-0005). The machine switches away and the call it was
+    /// making is made again when it comes back.
+    Blocked,
 }
 
 impl fmt::Display for Stop {
@@ -155,6 +162,8 @@ impl fmt::Display for Stop {
             Self::DivideError => write!(f, "divide error"),
             Self::Halted => write!(f, "halted"),
             Self::Exited { code } => write!(f, "exited {code}"),
+            Self::ThreadEnded => write!(f, "the running thread ended"),
+            Self::Blocked => write!(f, "the running thread is waiting for another"),
             Self::NotWritten { what, caller } => {
                 // A name with a colon in it is already a sentence about
                 // itself; a bare one needs saying what happened to it.

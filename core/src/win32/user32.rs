@@ -68,6 +68,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "TranslateAcceleratorA",
+        args: 3,
+        convention: Convention::Stdcall,
+        run: translate_accelerator,
+    },
+    Shim {
+        dll: "USER32",
         name: "FindWindowA",
         args: 2,
         convention: Convention::Stdcall,
@@ -719,6 +726,15 @@ fn activate(state: &mut super::State, time: u32) {
         time,
         point: state.pointer,
     });
+}
+
+/// Whether a keystroke is one of a window's own accelerators.
+///
+/// The declared machine's titles have no accelerator table — nothing on this
+/// roster loads one — so no message is ever translated and every keystroke
+/// goes on to the title's own window procedure.
+fn translate_accelerator(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(0)
 }
 
 /// A window belonging to somebody else, by class or by name.

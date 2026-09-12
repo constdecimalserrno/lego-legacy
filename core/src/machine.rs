@@ -17,7 +17,7 @@ use std::fmt;
 ///
 /// A gigabyte: the heap alone is half of it, and an anonymous mapping costs
 /// only the pages something writes to, so the rest is free until it is used.
-pub const ARENA_BYTES: usize = 1024 * 1024 * 1024;
+pub const ARENA_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Where the guest's presentable pixels are, and how they are laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,23 +177,13 @@ impl Machine {
     /// # Errors
     /// When the arena will not take it.
     fn declare_tib(&mut self) -> Result<(), crate::guest::Fault> {
-        let w = |arena: &mut crate::guest::Arena, at: u32, v: u32| arena.write_u32(TIB + at, v);
-        // No handler is registered yet: the end of the chain is all ones, and
-        // the guest's own prologue pushes the first frame in front of it.
-        w(&mut self.arena, 0x00, 0xffff_ffff)?;
-        // The stack the machine gave it, which a runtime checks itself
-        // against when it grows one.
-        w(&mut self.arena, 0x04, STACK_TOP)?;
-        w(&mut self.arena, 0x08, STACK_TOP - STACK_BYTES)?;
-        // A thread block points at itself, which is how code that has `fs`
-        // gets an ordinary pointer to it.
-        w(&mut self.arena, 0x18, TIB)?;
-        w(&mut self.arena, 0x20, PROCESS_ID)?;
-        w(&mut self.arena, 0x24, THREAD_ID)?;
-        // The slots `TlsAlloc` hands out sit in the block itself, where
-        // Windows keeps them, and the pointer at 0x2c names them.
-        w(&mut self.arena, 0x2c, TIB + 0x0e10)?;
-        w(&mut self.arena, 0x30, PEB)?;
+        write_tib(
+            &mut self.arena,
+            TIB,
+            STACK_TOP,
+            STACK_TOP - STACK_BYTES,
+            THREAD_ID,
+        )?;
         // The process block, of which one field is read often enough to be
         // worth declaring: where the image was loaded.
         self.arena
@@ -289,6 +279,19 @@ impl Machine {
             return match self.cross(log) {
                 Ok(()) => None,
                 Err(Stop::Exited { code }) => Some(Outcome::Exited { code }),
+                // A thread ending is not the run ending: the machine leaves it
+                // where it is and runs somebody else (ADR-0005).
+                Err(Stop::ThreadEnded) => {
+                    self.switch_thread(log);
+                    None
+                }
+                // Waiting for another thread: the machine leaves the call
+                // where it is, and this thread makes it again when it comes
+                // back round (ADR-0005).
+                Err(Stop::Blocked) => {
+                    self.switch_thread(log);
+                    None
+                }
                 Err(stop) => Some(Outcome::Wall {
                     what: stop.to_string(),
                 }),
@@ -358,6 +361,9 @@ impl Machine {
             if let Some(outcome) = self.run_guest(host, log, budget) {
                 break outcome;
             }
+            // A burst is the declared quantum: whoever ran it hands over to
+            // whoever is next (ADR-0005).
+            self.switch_thread(log);
             // The mix reaches the host between flips as well as at them: a
             // title that goes a long way without flipping — loading a level,
             // or thinking hard about one — would otherwise hand over nothing
@@ -388,6 +394,11 @@ impl Machine {
         ));
         finish
     }
+}
+
+/// Whether a thread can be given the processor at this moment (ADR-0005).
+fn runnable_at(thread: &crate::win32::GuestThread, now: u64) -> bool {
+    !thread.ended && !thread.suspended && thread.wake_at <= now
 }
 
 /// What a boundary slot stands for, once it has been called: the shim or the
@@ -422,6 +433,40 @@ pub const PEB: u32 = 0x0020_1000;
 /// depend on which process happened to host it.
 pub const PROCESS_ID: u32 = 0x0000_1234;
 pub const THREAD_ID: u32 = 0x0000_1000;
+
+/// Write a thread information block, wherever a thread's own one lives.
+///
+/// Each field is a declared value, and the ones this machine has no honest
+/// answer for are left zero rather than invented (#54).
+///
+/// # Errors
+/// When the arena will not take it.
+pub fn write_tib(
+    mem: &mut crate::guest::Arena,
+    at: u32,
+    stack_top: u32,
+    stack_limit: u32,
+    thread_id: u32,
+) -> Result<(), crate::guest::Fault> {
+    mem.write(at, &[0u8; 0x1000])?;
+    // No handler is registered yet: the end of the chain is all ones, and the
+    // guest's own prologue pushes the first frame in front of it.
+    mem.write_u32(at, 0xffff_ffff)?;
+    // The stack this thread was given, which a runtime checks itself against
+    // when it grows one.
+    mem.write_u32(at + 0x04, stack_top)?;
+    mem.write_u32(at + 0x08, stack_limit)?;
+    // A thread block points at itself, which is how code that has `fs` gets an
+    // ordinary pointer to it.
+    mem.write_u32(at + 0x18, at)?;
+    mem.write_u32(at + 0x20, PROCESS_ID)?;
+    mem.write_u32(at + 0x24, thread_id)?;
+    // The slots `TlsAlloc` hands out sit in the block itself, where Windows
+    // keeps them, and the pointer at 0x2c names them.
+    mem.write_u32(at + 0x2c, at + 0x0e10)?;
+    mem.write_u32(at + 0x30, PEB)?;
+    Ok(())
+}
 
 impl Machine {
     /// Load a title's entry image out of its pressing and point the processor
@@ -550,6 +595,17 @@ impl Machine {
             None => {
                 let bound = match self.boundary.at(addr) {
                     Some(Entry::Return) => return self.guest_returned(log),
+                    // A thread's own function returned (ADR-0005). Its exit
+                    // code is what it answered with.
+                    Some(Entry::ThreadEnd) => {
+                        let code = self.cpu.r[EAX];
+                        let running = self.state.thread;
+                        if let Some(thread) = self.state.threads.get_mut(running) {
+                            thread.ended = true;
+                            thread.code = code;
+                        }
+                        return Err(Stop::ThreadEnded);
+                    }
                     // The loader's own program jumped here, which a module
                     // only makes it do by refusing to attach (#55).
                     Some(Entry::Attach { module }) => {
@@ -1077,6 +1133,60 @@ impl Machine {
                 what: stop.to_string(),
             }),
         }
+    }
+
+    /// Give the next runnable guest thread the processor.
+    ///
+    /// One host thread runs them all, so switching is putting the registers
+    /// back where the parked thread left them. It happens at the end of a
+    /// burst — the declared quantum — and when a thread ends, and nowhere
+    /// else: a schedule that depended on the host's own threads would make
+    /// every run of this title a different one (ADR-0005).
+    fn switch_thread(&mut self, log: &mut RunLog) {
+        if self.state.threads.len() < 2 {
+            return;
+        }
+        let running = self.state.thread;
+        self.state.threads[running].cpu = self.cpu;
+        let count = self.state.threads.len();
+        // A thread that asked to be woken later is not run until then, and if
+        // every thread is asleep the clock goes to the earliest of their hours
+        // rather than the machine spinning between them.
+        let now = self.clock.millis();
+        if !self.state.threads.iter().any(|t| runnable_at(t, now)) {
+            let due = self
+                .state
+                .threads
+                .iter()
+                .filter(|t| !t.ended && !t.suspended)
+                .map(|t| t.wake_at)
+                .min();
+            if let Some(due) = due.filter(|d| *d > now) {
+                self.clock.wait(due - now);
+            }
+        }
+        let now = self.clock.millis();
+        let next = (1..=count)
+            .map(|step| (running + step) % count)
+            .find(|i| runnable_at(&self.state.threads[*i], now));
+        let Some(next) = next else {
+            // Nothing else can run; whoever was running carries on, and if it
+            // has ended too the run is over by its own exit.
+            return;
+        };
+        if next == running {
+            return;
+        }
+        self.state.thread = next;
+        self.cpu = self.state.threads[next].cpu;
+        log.at(Trace::Shims, || {
+            format!(
+                "thread {} takes over at {:#010x} cursor {}",
+                self.state.threads[next].id,
+                self.cpu.eip,
+                self.clock.cursor()
+            )
+        });
     }
 
     /// Hand the host every block of the mix the declared clock has passed.

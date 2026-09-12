@@ -18,10 +18,11 @@ use crate::shim::Boundary;
 
 /// Where the modules a title ships are placed.
 ///
-/// A declared value: above the guest heap and clear of every image the
-/// roster's titles ask for, because nine of Alpha Team's twelve ask for the
-/// same address as each other and eight of them have to go somewhere else.
-pub const MODULE_BASE: u32 = 0x2000_0000;
+/// A declared value: above the guest heap's whole range and clear of every
+/// image the roster's titles ask for, because nine of Alpha Team's twelve ask
+/// for the same address as each other and eight of them have to go somewhere
+/// else.
+pub const MODULE_BASE: u32 = crate::guest::heap::HEAP_BASE + crate::guest::heap::HEAP_BYTES;
 
 /// Where the program that attaches them runs.
 ///

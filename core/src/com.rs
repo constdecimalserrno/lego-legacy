@@ -128,6 +128,53 @@ const FACES: &[(&str, &str, &str)] = &[
         "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
         "IDirectDraw4",
     ),
+    // DirectX 7's DirectDraw, which Alpha Team asks its DirectDraw object for
+    // before it will draw at all (#57). The same object underneath; its table
+    // agrees with DirectX 6's slot for slot and adds two at the end.
+    (
+        "IDirectDraw",
+        "15e65ec0-3b9c-11d2-b92f-00609797ea5b",
+        "IDirectDraw7",
+    ),
+    (
+        "IDirectDraw4",
+        "15e65ec0-3b9c-11d2-b92f-00609797ea5b",
+        "IDirectDraw7",
+    ),
+    (
+        "IDirectDraw7",
+        "15e65ec0-3b9c-11d2-b92f-00609797ea5b",
+        "IDirectDraw7",
+    ),
+    // DirectX 7's Direct3D, which comes off the DirectDraw object rather than
+    // being made on its own.
+    (
+        "IDirectDraw7",
+        "f5049e77-4861-11d2-a407-00a0c90629a8",
+        "IDirect3D7",
+    ),
+    (
+        "IDirectDraw4",
+        "f5049e77-4861-11d2-a407-00a0c90629a8",
+        "IDirect3D7",
+    ),
+    // Its surfaces, which agree with DirectX 6's as far as that one goes and
+    // add four for texture management.
+    (
+        "IDirectDrawSurface",
+        "06675a80-3b9b-11d2-b92f-00609797ea5b",
+        "IDirectDrawSurface7",
+    ),
+    (
+        "IDirectDrawSurface4",
+        "06675a80-3b9b-11d2-b92f-00609797ea5b",
+        "IDirectDrawSurface7",
+    ),
+    (
+        "IDirectDrawSurface7",
+        "06675a80-3b9b-11d2-b92f-00609797ea5b",
+        "IDirectDrawSurface7",
+    ),
     // DirectX 3's DirectDraw, which a title's movie player asks for: the same
     // slots as the newer one as far as it goes (#9).
     (

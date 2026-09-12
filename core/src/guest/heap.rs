@@ -9,9 +9,12 @@ use std::collections::BTreeMap;
 
 /// Where allocations come from, and how much there is.
 ///
-/// Declared values: the address is chosen so that it sits above every image
-/// the roster's titles ask to be loaded at and below the boundary's own range.
-pub const HEAP_BASE: u32 = 0x1000_0000;
+/// Declared values. The address sits above every image the roster's titles ask
+/// to be loaded at, and clear of `0x1000_0000`: that is where a DLL asks to be
+/// loaded by default, and Alpha Team's archive reader commits three quarters
+/// of a megabyte there by name. A heap that started at the same place would
+/// hand the same bytes out twice (#57).
+pub const HEAP_BASE: u32 = 0x2000_0000;
 /// Half a gigabyte. Rock Raiders alone reads 79 MB of archives into memory on
 /// the way to its front end, and a heap that runs out hands back zero, which a
 /// guest happily uses as an address.

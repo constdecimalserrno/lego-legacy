@@ -51,6 +51,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "GDI32",
+        name: "GetSystemPaletteEntries",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: system_palette_entries,
+    },
+    Shim {
+        dll: "GDI32",
         name: "GetDeviceCaps",
         args: 2,
         convention: Convention::Stdcall,
@@ -89,6 +96,15 @@ fn succeed(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 fn stock_object(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Distinct per kind, so a title comparing two of them sees two.
     Ok(0x0002_0100 + args[0])
+}
+
+/// The colours the declared screen is showing, which at sixteen bits a pixel
+/// is none: there is no palette to read back (#57).
+fn system_palette_entries(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    // GetSystemPaletteEntries(dc, first, count, entries). Nothing written, and
+    // none copied: a caller asking a non-palette display what its palette is
+    // gets the same answer from Windows.
+    Ok(0)
 }
 
 fn device_caps(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

@@ -294,6 +294,33 @@ fn the_c_runtime_the_disc_ships_gets_what_it_calls() {
     }
     // It reaches the title's own code, which goes looking for its archives.
     ran.assert_logged("find first *.pac");
-    // And gets as far as asking for a renderer.
-    ran.assert_logged("Render create failed");
+}
+
+/// The title asks DirectDraw for DirectX 7's face of itself, takes Direct3D 7
+/// off that, enumerates a device, creates it, and draws (#57).
+#[test]
+fn the_title_brings_up_a_directx_7_device_and_presents_through_it() {
+    if !scratch() {
+        return;
+    }
+    // Far enough to get its renderer up and its first frames out; the run
+    // carries on past this and is #58's.
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 600_000_000);
+    // Its own words for what happened, which is the strongest thing there is
+    // to assert: the title says whether it liked the device.
+    ran.assert_logged("Device open succeeded")
+        .assert_logged("d3d7 enumerate: one device, and it rasterises")
+        .assert_logged("d3d7 z buffers: one, sixteen bits deep")
+        .assert_logged("d3d7 texture formats: 6 of them")
+        .assert_logged("d3d7 viewport 640x480 at 0,0");
+    assert!(
+        !ran.log.contains("Render create failed"),
+        "the renderer comes up: {}",
+        ran.log
+            .lines()
+            .filter(|l| l.contains("Render create"))
+            .collect::<Vec<_>>()
+            .join(" / ")
+    );
+    assert!(ran.finish.flips >= 1, "it presents a frame of its own");
 }

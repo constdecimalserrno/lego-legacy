@@ -75,6 +75,16 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
         return Ok(S_OK);
     }
+    // A3D, which `a3dapi.dll` on this title's own disc implements and this
+    // machine has not installed. Saying so is what a PC without it says, and
+    // it is the answer NiA3dSound is written to handle; whether to run that
+    // DLL as guest code instead is #60's to decide.
+    if class == "92fa2c24-253c-11d2-90fb-006008a1f441" {
+        ctx.log
+            .line("com: A3D is not registered on the declared machine (#60)");
+        // REGDB_E_CLASSNOTREG.
+        return Ok(0x8004_0154);
+    }
     Err(Stop::NotWritten {
         what: format!("ole32.dll!CoCreateInstance: class {class} as {interface} is not a class this machine makes"),
         caller: 0,

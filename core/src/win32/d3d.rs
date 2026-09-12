@@ -44,6 +44,10 @@ struct Device {
     textures: BTreeMap<u32, u32>,
     stages: BTreeMap<(u32, u32), u32>,
     current_viewport: u32,
+    /// DirectX 7 keeps the viewport on the device rather than in an object of
+    /// its own: where on the surface it draws, and the depth range it draws
+    /// into (#57).
+    viewport7: [u32; 6],
     in_scene: bool,
     direct3d: u32,
     /// The depth buffer, a value a pixel, row by row across the surface. The
@@ -170,8 +174,8 @@ pub static D3D3: Interface = Interface {
         method("CreateViewport", 2, create_viewport),
         wall("FindDevice", 2),
         wall("CreateDevice", 4),
-        wall("CreateVertexBuffer", 4),
-        wall("EnumZBufferFormats", 3),
+        method("CreateVertexBuffer", 3, create_vertex_buffer),
+        method("EnumZBufferFormats", 3, enum_z_buffer_formats),
         wall("EvictManagedTextures", 0),
     ],
 };
@@ -243,9 +247,407 @@ pub static TEXTURE2: Interface = Interface {
     ],
 };
 
+/// `IDirect3D7`: DirectX 7's Direct3D, which comes off the DirectDraw object
+/// rather than being created on its own (#57).
+///
+/// Where DirectX 6 made lights, materials and viewports, DirectX 7 keeps all
+/// three on the device: this interface only enumerates devices and makes them.
+pub static D3D7: Interface = Interface {
+    name: "IDirect3D7",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("EnumDevices", 2, enum_devices7),
+        method("CreateDevice", 3, create_device7),
+        method("CreateVertexBuffer", 3, create_vertex_buffer),
+        method("EnumZBufferFormats", 3, enum_z_buffer_formats),
+        wall("EvictManagedTextures", 0),
+    ],
+};
+
+/// `IDirect3DVertexBuffer7`: vertices a title fills once and draws from many
+/// times (#57).
+pub static VERTEX_BUFFER7: Interface = Interface {
+    name: "IDirect3DVertexBuffer7",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("Lock", 3, lock_vertex_buffer),
+        method("Unlock", 0, unlock_vertex_buffer),
+        wall("ProcessVertices", 7),
+        method("GetVertexBufferDesc", 1, vertex_buffer_desc),
+        wall("Optimize", 2),
+        wall("ProcessVerticesStrided", 6),
+    ],
+};
+
+/// How many bytes one vertex of a format takes, as the pipeline reads them.
+fn fvf_stride(fvf: u32) -> u32 {
+    u32::try_from(super::pipeline::vertex_size(fvf).unwrap_or(0)).unwrap_or(0)
+}
+
+fn create_vertex_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateVertexBuffer(description, out, flags).
+    let at = args[0];
+    let fvf = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
+    let count = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
+    let store = ctx.state.heap.alloc(fvf_stride(fvf) * count.max(1));
+    let object = State::make_com(
+        ctx,
+        &VERTEX_BUFFER7,
+        ComState::VertexBuffer { store, fvf, count },
+    )
+    .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "vertex buffer at {object:#010x}: {count} vertices of {} bytes at {store:#010x}",
+        fvf_stride(fvf)
+    ));
+    Ok(S_OK)
+}
+
+/// Where a vertex buffer keeps its vertices, and how they are laid out.
+fn buffer_of(ctx: &mut Ctx<'_>, this: u32) -> Option<(u32, u32, u32)> {
+    match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::VertexBuffer { store, fvf, count }) => Some((*store, *fvf, *count)),
+        _ => None,
+    }
+}
+
+fn lock_vertex_buffer(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Lock(flags, out pointer, out size). The vertices are guest memory, so
+    // locking one hands back where they already are.
+    let Some((store, fvf, count)) = buffer_of(ctx, this) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    ctx.mem.write_u32(args[1], store).map_err(Stop::Fault)?;
+    if args[2] != 0 {
+        ctx.mem
+            .write_u32(args[2], fvf_stride(fvf) * count)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn unlock_vertex_buffer(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // Nothing was moved to lock it, so there is nothing to put back.
+    Ok(S_OK)
+}
+
+/// Draw straight out of a buffer the title filled earlier.
+fn draw_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // DrawPrimitiveVB(type, buffer, first vertex, count, flags).
+    let Some((store, fvf, _)) = buffer_of(ctx, args[1]) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let at = store + args[2] * fvf_stride(fvf);
+    let indices: Vec<u32> = (0..args[3]).collect();
+    draw(ctx, this, args[0], fvf, at, args[3], &indices, args[4])
+}
+
+fn draw_indexed_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // DrawIndexedPrimitiveVB(type, buffer, first vertex, count, indices,
+    // index count, flags): sixteen-bit indices, counted from the first vertex.
+    let Some((store, fvf, _)) = buffer_of(ctx, args[1]) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let at = store + args[2] * fvf_stride(fvf);
+    let bytes = ctx
+        .mem
+        .slice(args[4], args[5] as usize * 2)
+        .map_err(Stop::Fault)?
+        .to_vec();
+    let indices: Vec<u32> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u32::from(u16::from_le_bytes(*c)))
+        .collect();
+    draw(ctx, this, args[0], fvf, at, args[3], &indices, args[6])
+}
+
+fn vertex_buffer_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let Some((_, fvf, count)) = buffer_of(ctx, this) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let at = args[0];
+    ctx.mem.write_u32(at, 16).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 4, 0).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 8, fvf).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 12, count).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// `IDirect3DDevice7`: DirectX 7's device, which this title draws through.
+///
+/// Not DirectX 6's device with slots added: the execute-buffer calls are gone,
+/// viewports and lights belong to the device rather than to objects of their
+/// own, and what is left sits in different places. The whole table is written
+/// out because that is what it is (#57).
+pub static DEVICE7: Interface = Interface {
+    name: "IDirect3DDevice7",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("GetCaps", 1, get_caps7),
+        method("EnumTextureFormats", 2, enum_texture_formats7),
+        method("BeginScene", 0, begin_scene),
+        method("EndScene", 0, end_scene),
+        wall("GetDirect3D", 1),
+        wall("SetRenderTarget", 2),
+        wall("GetRenderTarget", 1),
+        method("Clear", 6, clear7),
+        method("SetTransform", 2, set_transform),
+        method("GetTransform", 2, get_transform),
+        method("SetViewport", 1, set_viewport7),
+        wall("MultiplyTransform", 2),
+        method("GetViewport", 1, get_viewport7),
+        wall("SetMaterial", 1),
+        wall("GetMaterial", 1),
+        wall("SetLight", 2),
+        wall("GetLight", 2),
+        method("SetRenderState", 2, set_render_state),
+        method("GetRenderState", 2, get_render_state),
+        wall("BeginStateBlock", 0),
+        wall("EndStateBlock", 1),
+        wall("PreLoad", 1),
+        wall("DrawPrimitive", 5),
+        wall("DrawIndexedPrimitive", 7),
+        wall("SetClipStatus", 1),
+        wall("GetClipStatus", 1),
+        wall("DrawPrimitiveStrided", 5),
+        wall("DrawIndexedPrimitiveStrided", 7),
+        method("DrawPrimitiveVB", 5, draw_primitive_vb),
+        method("DrawIndexedPrimitiveVB", 7, draw_indexed_primitive_vb),
+        wall("ComputeSphereVisibility", 5),
+        method("GetTexture", 2, get_texture),
+        method("SetTexture", 2, set_texture),
+        method("GetTextureStageState", 3, get_texture_stage_state),
+        method("SetTextureStageState", 3, set_texture_stage_state),
+        method("ValidateDevice", 1, validate_device7),
+        wall("ApplyStateBlock", 1),
+        wall("CaptureStateBlock", 1),
+        wall("DeleteStateBlock", 1),
+        wall("CreateStateBlock", 2),
+        wall("Load", 5),
+        wall("LightEnable", 2),
+        wall("GetLightEnable", 2),
+        wall("SetClipPlane", 2),
+        wall("GetClipPlane", 2),
+        wall("GetInfo", 3),
+    ],
+};
+
 pub static INTERFACES: &[&Interface] = &[
-    &DEVICE2, &DEVICE3, &D3D2, &D3D3, &VIEWPORT3, &MATERIAL3, &LIGHT, &TEXTURE2,
+    &DEVICE2,
+    &DEVICE3,
+    &DEVICE7,
+    &D3D2,
+    &D3D3,
+    &D3D7,
+    &VERTEX_BUFFER7,
+    &VIEWPORT3,
+    &MATERIAL3,
+    &LIGHT,
+    &TEXTURE2,
 ];
+
+/// How big a `D3DDEVICEDESC7` is, and what is where in it.
+///
+/// Measured against `NiDirect3d.dll`, which copies 0x3b words of one and then
+/// reads the device capabilities at zero and the render depth at 0x74 (#57).
+const DEVICE_DESC7_BYTES: u32 = 0x100;
+
+/// The declared machine's one Direct3D device, handed to a title's own
+/// callback.
+///
+/// Every number here is a declared value: what this machine's rasteriser can
+/// actually do, not what a card of the period could. A capability claimed and
+/// then not implemented is a wall in the middle of a frame rather than a
+/// device the title passes over.
+fn enum_devices7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumDevices(callback, context). One device, so one call: the machine
+    // finishes this call when the guest's callback returns.
+    let (callback, context) = (args[0], args[1]);
+    let desc = ctx.state.heap.alloc(DEVICE_DESC7_BYTES);
+    write_device_desc7(ctx, desc)?;
+    let description = ctx.intern("lego-legacy rasteriser").map_err(Stop::Fault)?;
+    let name = ctx.intern("Direct3D HAL").map_err(Stop::Fault)?;
+    ctx.log
+        .line("d3d7 enumerate: one device, and it rasterises");
+    if callback != 0 {
+        ctx.call_guest = Some((callback, vec![description, name, desc, context]));
+    }
+    Ok(S_OK)
+}
+
+/// The same description, asked of the device the title already made.
+fn get_caps7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    write_device_desc7(ctx, args[0])?;
+    Ok(S_OK)
+}
+
+/// Write the declared device's description where the guest asked for it.
+fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
+    ctx.mem
+        .write(desc, &vec![0; DEVICE_DESC7_BYTES as usize])
+        .map_err(Stop::Fault)?;
+    let mut put = |at: u32, value: u32| ctx.mem.write_u32(desc + at, value).map_err(Stop::Fault);
+
+    // A device that rasterises in hardware, which is what a title looks for
+    // before it will use one at all. This machine's rasteriser is the
+    // hardware: there is nothing else underneath it (ADR-0002).
+    const HW_RASTERISATION: u32 = 0x0008_0000;
+    put(0x00, HW_RASTERISATION)?;
+    // Both capability blocks say how big they are, which is how a caller knows
+    // which version of them it is looking at.
+    put(0x04, 0x38)?;
+    put(0x3c, 0x38)?;
+    // The triangle block: what the rasteriser does. Z comparison against a
+    // depth buffer, flat and Gouraud shading, textures with modulation and
+    // alpha, and the blends the pipeline already mixes with.
+    put(0x3c + 0x04, 0x0000_0072)?; // dwMiscCaps: a depth mask, and culling either way round
+    put(0x3c + 0x08, 0x0000_0030)?; // dwRasterCaps: depth testing, at subpixel accuracy
+    put(0x3c + 0x0c, 0x0000_008a)?; // dwZCmpCaps: less, less-or-equal, always
+    put(0x3c + 0x10, 0x0000_0033)?; // dwSrcBlendCaps: zero, one, source alpha and its inverse
+    put(0x3c + 0x14, 0x0000_0033)?; // dwDestBlendCaps: the same
+    put(0x3c + 0x18, 0x0000_0080)?; // dwAlphaCmpCaps: always, which is no alpha test
+    put(0x3c + 0x1c, 0x0000_440a)?; // dwShadeCaps: flat and Gouraud in colour, with alpha
+    put(0x3c + 0x20, 0x0000_0001)?; // dwTextureCaps: perspective correction
+    put(0x3c + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
+    put(0x3c + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate
+    put(0x3c + 0x2c, 0x0000_0001)?; // dwTextureAddressCaps: wrap
+                                    // The screen this machine declares, and a depth buffer to match.
+    const DDBD_16: u32 = 0x0000_0400;
+    put(0x74, DDBD_16)?;
+    put(0x78, DDBD_16)?;
+    // Textures: one pixel up to a thousand a side, which is every texture
+    // this title ships.
+    put(0x7c, 1)?;
+    put(0x80, 1)?;
+    put(0x84, 1024)?;
+    put(0x88, 1024)?;
+    put(0x8c, 1024)?;
+    put(0x94, 1)?; // no anisotropy, which is one sample
+    put(0xb8, 1 | (1 << 16))?; // one blend stage, one texture at a time
+    put(0xbc, 8)?; // lights lit at once
+                   // The device this is: a hardware one, named by the identifier every title
+                   // compares against.
+    for (at, byte) in HAL_DEVICE.iter().enumerate() {
+        ctx.mem
+            .write(desc + 0xc4 + u32::try_from(at).unwrap_or(0), &[*byte])
+            .map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
+/// The depth buffers the declared machine offers, which is one: sixteen bits
+/// deep and no stencil, matching the screen it declares (#57).
+fn enum_z_buffer_formats(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumZBufferFormats(device, callback, context). A DDPIXELFORMAT, which is
+    // the same thirty-two bytes a surface's format is described by.
+    let (callback, context) = (args[1], args[2]);
+    let format = ctx.state.heap.alloc(32);
+    ctx.mem.write(format, &[0u8; 32]).map_err(Stop::Fault)?;
+    let mut put = |at: u32, value: u32| ctx.mem.write_u32(format + at, value).map_err(Stop::Fault);
+    put(0x00, 32)?; // how big it says it is
+    put(0x04, 0x0000_0400)?; // DDPF_ZBUFFER: what kind of format this is
+    put(0x0c, 16)?; // bits of depth
+    put(0x14, 0x0000_ffff)?; // and which of them the depth is in
+    ctx.log.line("d3d7 z buffers: one, sixteen bits deep");
+    if callback != 0 {
+        ctx.call_guest = Some((callback, vec![format, context]));
+    }
+    Ok(S_OK)
+}
+
+/// Whether the device can draw what it has been set up to draw, in one pass.
+///
+/// It can: this machine's rasteriser has one texture stage and no fixed
+/// pipeline underneath it to run out of, so there is never a second pass to
+/// report (#57).
+fn validate_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] != 0 {
+        ctx.mem.write_u32(args[0], 1).map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+/// The texture formats the declared machine's rasteriser can read.
+///
+/// Each is a `DDPIXELFORMAT`, and each is one this machine actually samples:
+/// a title picks the closest to what its own data holds and converts into it,
+/// so claiming one that is not read would come back as a wrong-coloured
+/// texture rather than as a wall (#57).
+fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumTextureFormats(callback, context).
+    const DDPF_ALPHAPIXELS: u32 = 0x1;
+    const DDPF_PALETTEINDEXED8: u32 = 0x20;
+    const DDPF_RGB: u32 = 0x40;
+    let formats: [(u32, u32, [u32; 4]); 6] = [
+        // Sixteen bits: five-six-five, and the two with alpha in them.
+        (DDPF_RGB, 16, [0xf800, 0x07e0, 0x001f, 0]),
+        (
+            DDPF_RGB | DDPF_ALPHAPIXELS,
+            16,
+            [0x7c00, 0x03e0, 0x001f, 0x8000],
+        ),
+        (
+            DDPF_RGB | DDPF_ALPHAPIXELS,
+            16,
+            [0x0f00, 0x00f0, 0x000f, 0xf000],
+        ),
+        // Thirty-two, with and without.
+        (DDPF_RGB, 32, [0x00ff_0000, 0xff00, 0xff, 0]),
+        (
+            DDPF_RGB | DDPF_ALPHAPIXELS,
+            32,
+            [0x00ff_0000, 0xff00, 0xff, 0xff00_0000],
+        ),
+        // And a byte an entry, looked up in the surface's own palette.
+        (DDPF_PALETTEINDEXED8 | DDPF_RGB, 8, [0, 0, 0, 0]),
+    ];
+    let mut calls = Vec::with_capacity(formats.len());
+    for (flags, bits, masks) in formats {
+        let at = ctx.state.heap.alloc(32);
+        ctx.mem.write(at, &[0u8; 32]).map_err(Stop::Fault)?;
+        ctx.mem.write_u32(at, 32).map_err(Stop::Fault)?;
+        ctx.mem.write_u32(at + 4, flags).map_err(Stop::Fault)?;
+        ctx.mem.write_u32(at + 0xc, bits).map_err(Stop::Fault)?;
+        for (i, mask) in masks.iter().enumerate() {
+            ctx.mem
+                .write_u32(at + 0x10 + u32::try_from(i).unwrap_or(0) * 4, *mask)
+                .map_err(Stop::Fault)?;
+        }
+        calls.push(vec![at, args[1]]);
+    }
+    ctx.log
+        .line(&format!("d3d7 texture formats: {} of them", calls.len()));
+    super::call_each(ctx, args[0], &calls)?;
+    Ok(S_OK)
+}
+
+/// `IID_IDirect3DHALDevice`, which is what the declared device is.
+const HAL_DEVICE: [u8; 16] = [
+    0xe0, 0x3d, 0xe6, 0x84, 0xaa, 0x46, 0xcf, 0x11, 0x81, 0x6f, 0x00, 0x00, 0xc0, 0x20, 0x15, 0x6e,
+];
+
+/// The device a title draws through, over a surface of its own.
+fn create_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateDevice(guid, surface, out). The surface is the guest's own, which
+    // is what makes what the device draws guest-visible.
+    let surface = args[1];
+    let object =
+        State::make_com(ctx, &DEVICE7, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3d7 device at {object:#010x} drawing into surface {surface:#010x}"
+    ));
+    Ok(S_OK)
+}
 
 fn device<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> &'a mut Device {
     device_of(ctx.state, this)
@@ -708,6 +1110,34 @@ fn get_viewport2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     fetch_viewport(ctx, this, args[0])
 }
 
+/// `D3DVIEWPORT7`: where on the surface the device draws, and the depth range
+/// it draws into. Six words, and no size field to say which version it is.
+fn set_viewport7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let mut fields = [0u32; 6];
+    for (i, field) in fields.iter_mut().enumerate() {
+        *field = ctx
+            .mem
+            .read_u32(args[0] + u32::try_from(i).unwrap_or(0) * 4)
+            .map_err(Stop::Fault)?;
+    }
+    device(ctx, this).viewport7 = fields;
+    ctx.log.line(&format!(
+        "d3d7 viewport {}x{} at {},{}",
+        fields[2], fields[3], fields[0], fields[1]
+    ));
+    Ok(S_OK)
+}
+
+fn get_viewport7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let fields = device(ctx, this).viewport7;
+    for (i, field) in fields.iter().enumerate() {
+        ctx.mem
+            .write_u32(args[0] + u32::try_from(i).unwrap_or(0) * 4, *field)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
 fn set_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetBackground(material handle): the viewport clears to that material's
     // colour.
@@ -770,6 +1200,19 @@ fn clear_rects(
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
+    clear_on(ctx, device, count, rects, colour, depth_value)
+}
+
+/// Clear a device's own surface, which is what both versions of the call come
+/// down to: DirectX 6 asks a viewport and DirectX 7 asks the device (#57).
+fn clear_on(
+    ctx: &mut Ctx<'_>,
+    device: u32,
+    count: u32,
+    rects: u32,
+    colour: Option<u32>,
+    depth_value: Option<f32>,
+) -> Result<u32, Stop> {
     let surface = match ctx.state.com(device).map(|o| &o.state) {
         Some(ComState::Device3D { surface }) => *surface,
         // D3DERR_VIEWPORTHASNODEVICE: never added to a device.
@@ -794,12 +1237,22 @@ fn clear_rects(
     }
     let bytes = format.bits.div_ceil(8);
     let mut depth = depth_value.map(|_| take_depth(ctx.state, device, width, height));
-    for i in 0..count {
+    // No rectangles at all is the whole of it, which is how DirectX 7's own
+    // call is usually made.
+    for i in 0..count.max(1) {
         // D3DRECT: x1, y1, x2, y2.
         let at = rects + i * 16;
         let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
-        let (x1, y1) = (read(0)?.min(width), read(4)?.min(height));
-        let (x2, y2) = (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1));
+        let (x1, y1) = if count == 0 {
+            (0, 0)
+        } else {
+            (read(0)?.min(width), read(4)?.min(height))
+        };
+        let (x2, y2) = if count == 0 {
+            (width, height)
+        } else {
+            (read(8)?.min(width).max(x1), read(12)?.min(height).max(y1))
+        };
         if let Some(colour) = colour {
             let [b, g, r, a] = colour.to_le_bytes();
             let value = format.encode([r, g, b, a]).to_le_bytes();
@@ -847,6 +1300,22 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let colour = (args[2] & D3DCLEAR_TARGET != 0).then(|| material_colour(ctx, handle));
     let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then_some(1.0);
     clear_rects(ctx, this, args[0], args[1], colour, depth)
+}
+
+/// DirectX 7's clear, which the device answers itself.
+fn clear7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Clear(count, rects, flags, colour, z, stencil). There is no stencil
+    // buffer on the mode this title asks for, and it does not ask to clear
+    // one.
+    if args[2] & !(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER) != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DDevice7::Clear: flags {:#x}", args[2]),
+            caller: 0,
+        });
+    }
+    let colour = (args[2] & D3DCLEAR_TARGET != 0).then_some(args[3]);
+    let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then(|| f32::from_bits(args[4]));
+    clear_on(ctx, this, args[0], args[1], colour, depth)
 }
 
 fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1103,6 +1572,9 @@ fn draw(
         super::scene::multiply(&matrix_of(device, VIEW), &matrix_of(device, PROJECTION));
     let clip_from_model = super::scene::multiply(&world, &clip_from_world);
     let viewport = device.current_viewport;
+    // DirectX 7 keeps the viewport on the device itself, so there is no object
+    // to ask (#57).
+    let viewport7 = device.viewport7;
     let texture = device.textures.get(&0).copied().unwrap_or(0);
     let material_handle = device.light.get(&LIGHT_MATERIAL).copied().unwrap_or(0);
     let ambient = pipeline::colour(device.light.get(&LIGHT_AMBIENT).copied().unwrap_or(0));
@@ -1212,25 +1684,30 @@ fn draw(
     states.alpha = alpha_combine;
 
     // Where the viewport puts the view volume.
-    let place = match ctx.state.com(viewport).map(|o| o.state.clone()) {
-        Some(ComState::Viewport {
-            x,
-            y,
-            width: w,
-            height: h,
-            ..
-        }) if !ctx
-            .state
-            .immediate
-            .viewports
-            .contains_key(&ctx.state.identity(viewport)) =>
-        {
-            pipeline::Viewport::whole(x, y, w, h)
-        }
-        _ => {
-            return Err(unwritten(
-                "IDirect3DDevice3::DrawPrimitive: a viewport the title described itself".to_owned(),
-            ))
+    let place = if viewport7[2] != 0 {
+        pipeline::Viewport::whole(viewport7[0], viewport7[1], viewport7[2], viewport7[3])
+    } else {
+        match ctx.state.com(viewport).map(|o| o.state.clone()) {
+            Some(ComState::Viewport {
+                x,
+                y,
+                width: w,
+                height: h,
+                ..
+            }) if !ctx
+                .state
+                .immediate
+                .viewports
+                .contains_key(&ctx.state.identity(viewport)) =>
+            {
+                pipeline::Viewport::whole(x, y, w, h)
+            }
+            _ => {
+                return Err(unwritten(
+                    "IDirect3DDevice3::DrawPrimitive: a viewport the title described itself"
+                        .to_owned(),
+                ))
+            }
         }
     };
 

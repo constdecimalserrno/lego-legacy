@@ -75,6 +75,15 @@ pub enum Object {
     },
     /// Something named that only has to be distinct: an event, a mutex.
     Named { kind: &'static str, name: String },
+    /// An enumeration of the declared tree the guest is walking: what matched,
+    /// and how far through it the guest has read.
+    Find {
+        matches: Vec<(String, u32)>,
+        at: usize,
+    },
+    /// A file the guest asked to see as memory rather than read: where its
+    /// bytes are in the arena, and how many of them there are (#57).
+    Mapping { at: u32, len: u32 },
     /// A registry key the guest has open.
     Key { path: String },
     /// A COM object the guest holds a pointer to.
@@ -87,6 +96,40 @@ pub enum Object {
         at: u32,
         owned: bool,
     },
+}
+
+/// Where files mapped into the arena start.
+///
+/// A declared value: above the modules the loader places, which are above the
+/// heap, so that a title that maps its whole install directory does not land
+/// on anything else.
+pub const MAPPING_BASE: u32 = 0x4400_0000;
+
+/// A guest thread the machine has not got to yet (ADR-0005).
+///
+/// One host thread runs them all, so a thread that is not running has its
+/// registers parked here. What the machine switches is which of these is
+/// `Machine::cpu`.
+pub struct GuestThread {
+    /// Where it was up to, while another thread runs.
+    pub cpu: crate::cpu::Cpu,
+    /// The handle the guest was given for it.
+    pub handle: u32,
+    /// What `GetCurrentThreadId` answers while it runs.
+    pub id: u32,
+    /// Made suspended, or suspended since: it is not run until it is resumed.
+    pub suspended: bool,
+    /// It returned, or called `ExitThread`. Its registers are not run again.
+    pub ended: bool,
+    /// What it answered when it ended.
+    pub code: u32,
+    /// Its own thread-local slots, which is what makes them thread-local: a
+    /// C runtime keeps one of these per thread and every thread of it would
+    /// otherwise be using the last one's (ADR-0005).
+    pub tls: Vec<u32>,
+    /// The declared millisecond it asked to be woken at, for a thread that is
+    /// sleeping. Until then the machine runs somebody else.
+    pub wake_at: u64,
 }
 
 /// Everything the guest holds that is not memory.
@@ -103,6 +146,24 @@ pub struct State {
     pub last_call: Option<String>,
     /// What the guest will read from `GetLastError`.
     pub last_error: u32,
+    /// Every guest thread but the one running, parked (ADR-0005). Empty until
+    /// a title makes a second one, which Alpha Team does for its sound.
+    pub threads: Vec<GuestThread>,
+    /// Which thread of `threads` is the one running, once there is more than
+    /// one. The main thread is always the first.
+    pub thread: usize,
+    /// What the next thread this machine makes will be called.
+    pub next_thread_id: u32,
+    /// How many thread-local slots `TlsAlloc` has handed out. Which thread's
+    /// they are is the thread's own business.
+    pub tls_slots: usize,
+    /// Which thread holds each critical section the guest has entered, and how
+    /// many times over (ADR-0005). A section nobody holds is not in here.
+    pub sections: BTreeMap<u32, (u32, u32)>,
+    /// Where the next file mapped into the arena will go. Mappings sit above
+    /// everything else the machine hands out, because this title maps four
+    /// hundred megabytes of archives and never lets go (#57).
+    pub next_mapping: u32,
     /// Which failures the guest asked to be shown rather than handed back.
     /// Kept so that `SetErrorMode` can answer with what it was, and read by
     /// nothing: this machine puts no dialog up.
@@ -220,6 +281,24 @@ impl State {
             last_call: None,
             last_error: 0,
             error_mode: 0,
+            // The thread a title starts on is in the list from the start, so
+            // that what belongs to a thread has somewhere to live before a
+            // second one is made.
+            threads: vec![GuestThread {
+                cpu: crate::cpu::Cpu::default(),
+                handle: 0,
+                id: crate::machine::THREAD_ID,
+                suspended: false,
+                ended: false,
+                code: 0,
+                tls: Vec::new(),
+                wake_at: 0,
+            }],
+            thread: 0,
+            next_thread_id: crate::machine::THREAD_ID,
+            next_mapping: MAPPING_BASE,
+            sections: BTreeMap::new(),
+            tls_slots: 0,
             current_directory: String::new(),
             volume_label: String::new(),
             waited_millis: 0,
@@ -626,6 +705,9 @@ pub enum ComState {
     StreamSample { owner: u32, surface: u32 },
     /// A three-dimensional device, and the surface it draws into.
     Device3D { surface: u32 },
+    /// A buffer of vertices the title fills and then draws from (#57): where
+    /// they are, how they are laid out, and how many fit.
+    VertexBuffer { store: u32, fvf: u32, count: u32 },
     /// A frame's children, as they were when a title asked for them.
     FrameArray { frames: Vec<u32> },
     /// Something a title draws itself: its callback, and what to pass it.
@@ -677,6 +759,55 @@ pub struct Ctx<'a> {
     /// Set by a method whose answer is a floating-point value, which the
     /// caller reads from the top of the floating-point stack, not `eax`.
     pub float_answer: Option<f32>,
+}
+
+/// Call one of the guest's own callbacks several times over, once per set of
+/// arguments, stopping early if it says to.
+///
+/// A shim can park one call into guest code and no more (`call_guest`), which
+/// is enough for an enumeration with one answer in it and not for one with
+/// six. What goes into guest memory here is a short program that makes the
+/// calls itself and returns to the machine at the end — the same thing the
+/// module loader does to run a DllMain (#55, #57).
+///
+/// The callback is stdcall, so each call clears its own arguments; a callback
+/// that answers zero has asked to stop, which Direct3D spells
+/// `D3DENUMRET_CANCEL`.
+///
+/// # Errors
+/// When the program will not fit in guest memory.
+pub fn call_each(ctx: &mut Ctx<'_>, callback: u32, calls: &[Vec<u32>]) -> Result<(), Stop> {
+    let mut program: Vec<u8> = Vec::new();
+    // Every call ends up jumping to the same `ret`, whose place is only known
+    // once they are all written, so the jumps are filled in afterwards.
+    let mut holes = Vec::new();
+    for args in calls {
+        for value in args.iter().rev() {
+            program.push(0x68); // push <argument>
+            program.extend_from_slice(&value.to_le_bytes());
+        }
+        program.push(0xb8); // mov eax, <the callback>
+        program.extend_from_slice(&callback.to_le_bytes());
+        program.extend_from_slice(&[0xff, 0xd0]); // call eax
+        program.extend_from_slice(&[0x85, 0xc0]); // test eax, eax
+        program.extend_from_slice(&[0x0f, 0x84]); // je <the end>
+        holes.push(program.len());
+        program.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    let end = program.len();
+    for hole in holes {
+        let rel = u32::try_from(end - (hole + 4)).unwrap_or(0);
+        program[hole..hole + 4].copy_from_slice(&rel.to_le_bytes());
+    }
+    program.push(0xc3); // ret, which is back into the machine
+
+    let at = ctx
+        .state
+        .heap
+        .alloc(u32::try_from(program.len()).unwrap_or(0));
+    ctx.mem.write(at, &program).map_err(Stop::Fault)?;
+    ctx.call_guest = Some((at, Vec::new()));
+    Ok(())
 }
 
 impl Ctx<'_> {

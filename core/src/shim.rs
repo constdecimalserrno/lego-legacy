@@ -49,6 +49,9 @@ pub enum Entry {
     /// Where the loader's own program jumps when a module answers that it did
     /// not attach (#55). Reaching it is a wall naming the module.
     Attach { module: String },
+    /// Where a guest thread returns to when its own function is done
+    /// (ADR-0005): reaching it ends that thread rather than the run.
+    ThreadEnd,
 }
 
 /// The addresses a title's imports were bound to, and what stands behind each.
@@ -121,6 +124,39 @@ impl Boundary {
         addr
     }
 
+    /// A place for one name of a library this emulator writes, asked for by
+    /// name rather than bound from an import table: what `GetProcAddress`
+    /// hands back (#57).
+    pub fn bind_named(&mut self, dll: &str, name: &str) -> u32 {
+        let matches = |e: &Entry| match e {
+            Entry::Import(import) => import.dll.eq_ignore_ascii_case(dll) && import.name == name,
+            _ => false,
+        };
+        if let Some(slot) = self.slots.iter().position(matches) {
+            return THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE;
+        }
+        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
+        self.slots.push(Entry::Import(Import {
+            dll: dll.to_owned(),
+            name: name.to_owned(),
+            // Nothing wrote this address into an import table: the guest was
+            // handed it and will call it directly.
+            iat: 0,
+        }));
+        addr
+    }
+
+    /// Where a thread returns to when it is done. One address serves every
+    /// thread: which one ended is whichever was running.
+    pub fn bind_thread_end(&mut self) -> u32 {
+        if let Some(slot) = self.slots.iter().position(|e| *e == Entry::ThreadEnd) {
+            return THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE;
+        }
+        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
+        self.slots.push(Entry::ThreadEnd);
+        addr
+    }
+
     /// Give an interface's slots addresses of their own, and hand back the
     /// address of each in slot order. What a vtable is filled with.
     pub fn bind_interface(&mut self, interface: &'static str, slots: usize) -> Vec<u32> {
@@ -155,7 +191,7 @@ impl Boundary {
     pub fn imports(&self) -> impl Iterator<Item = &Import> {
         self.slots.iter().filter_map(|e| match e {
             Entry::Import(import) => Some(import),
-            Entry::Method { .. } | Entry::Return | Entry::Attach { .. } => None,
+            Entry::Method { .. } | Entry::Return | Entry::Attach { .. } | Entry::ThreadEnd => None,
         })
     }
 }
