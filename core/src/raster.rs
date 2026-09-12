@@ -303,6 +303,9 @@ pub struct Vertex {
     pub diffuse: [f32; 4],
     pub specular: [f32; 3],
     pub uv: [f32; 2],
+    /// How much of this vertex's own colour survives the fog: one is clear
+    /// air, zero is the fog's colour alone. Read only when there is fog.
+    pub fog: f32,
 }
 
 /// `D3DCMPFUNC`.
@@ -431,6 +434,9 @@ pub struct States {
     /// Source and destination factors, when blending is on.
     pub blend: Option<(Blend, Blend)>,
     pub specular: bool,
+    /// The fog's colour, when there is fog. How much of it each pixel gets is
+    /// the vertices' own fog factor, interpolated.
+    pub fog: Option<[f32; 3]>,
 }
 
 impl Default for States {
@@ -446,6 +452,7 @@ impl Default for States {
             alpha_test: None,
             blend: None,
             specular: false,
+            fog: None,
         }
     }
 }
@@ -526,13 +533,14 @@ pub fn triangle(
         over_w(|v| v.specular[0]),
         over_w(|v| v.specular[1]),
         over_w(|v| v.specular[2]),
+        over_w(|v| v.fog),
     ];
-    const PLANES: usize = 11;
+    const PLANES: usize = 12;
     let step: [f32; PLANES] = planes.map(|p| p.0);
     // Only the planes this draw reads are carried along a row: depth and
     // distance always; texture coordinates when there is a texture; colour
     // when it is not flat; and specular when it is added.
-    let carried = if states.specular {
+    let carried = if states.specular || states.fog.is_some() {
         PLANES
     } else if !states.flat {
         8
@@ -645,6 +653,14 @@ pub fn triangle(
             if states.specular {
                 for (c, s) in colour.iter_mut().zip(specular) {
                     *c = (*c + s).min(1.0);
+                }
+            }
+            // Fog, over the colour the texture and the lights made and under
+            // the alpha test, which is where Direct3D puts it.
+            if let Some(fog) = states.fog {
+                let f = (here[11] * near).clamp(0.0, 1.0);
+                for (c, air) in colour.iter_mut().zip(fog) {
+                    *c = *c * f + air * (1.0 - f);
                 }
             }
             if let Some((test, reference)) = states.alpha_test {
@@ -965,6 +981,44 @@ mod tests {
         for row in pixels.chunks(8) {
             assert_eq!(row, [0xff, 0xff, 0xff, 0xff, 0x55, 0x55, 0x55, 0x55]);
         }
+    }
+
+    /// Fog takes a pixel towards the fog's colour by as much as the vertices'
+    /// own factor says, and leaves it alone where the factor is one (#61).
+    #[test]
+    fn a_pixel_is_mixed_with_the_fog_by_the_factor_its_vertices_carry() {
+        let mut pixels = [0u8; 4 * 2];
+        let mut depth = [1.0f32; 4];
+        let drawn_with = |fog: f32, pixels: &mut [u8], depth: &mut [f32]| {
+            let mut target = Target {
+                pixels,
+                width: 4,
+                height: 1,
+                pitch: 8,
+                format: PixelFormat::RGB565,
+                depth,
+                clip: [0, 0, 4, 1],
+                first_row: 0,
+            };
+            // Red vertices under white fog.
+            let v = |x: f32, y: f32| Vertex { fog, ..at(x, y) };
+            triangle(
+                &mut target,
+                [v(0.0, 0.0), v(4.0, 0.0), v(4.0, 4.0)],
+                None,
+                &States {
+                    fog: Some([1.0, 1.0, 1.0]),
+                    ..States::default()
+                },
+            );
+        };
+        drawn_with(1.0, &mut pixels, &mut depth);
+        assert_eq!(pixels[0..2], [0x00, 0xf8], "clear air leaves the red alone");
+
+        let mut pixels = [0u8; 4 * 2];
+        let mut depth = [1.0f32; 4];
+        drawn_with(0.0, &mut pixels, &mut depth);
+        assert_eq!(pixels[0..2], [0xff, 0xff], "no factor at all is the fog");
     }
 
     #[test]

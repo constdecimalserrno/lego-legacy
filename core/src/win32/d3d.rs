@@ -808,6 +808,9 @@ fn render_state_at_start(state: u32) -> Option<u32> {
         58 | 59 => u32::MAX,
         // D3DRENDERSTATE_WRAP0 to WRAP7: off.
         128..=135 => 0,
+        // D3DRENDERSTATE_FOGVERTEXMODE: none, which leaves the factor to the
+        // vertices themselves (#61).
+        140 => 0,
         _ => return None,
     })
 }
@@ -1383,10 +1386,13 @@ mod rs {
     pub const ALPHABLENDENABLE: u32 = 27;
     pub const FOGENABLE: u32 = 28;
     pub const SPECULARENABLE: u32 = 29;
+    pub const FOGCOLOR: u32 = 34;
+    pub const FOGTABLEMODE: u32 = 35;
     pub const COLORKEYENABLE: u32 = 41;
     pub const TEXTUREADDRESSU: u32 = 44;
     pub const TEXTUREADDRESSV: u32 = 45;
     pub const WRAP0: u32 = 128;
+    pub const FOGVERTEXMODE: u32 = 140;
 }
 
 /// The first texture stage's states a draw reads.
@@ -1549,7 +1555,6 @@ fn draw(
     let state = |s: u32| render_state(device, s);
     let stage = |s: u32| stage_state(device, s);
     for (what, on) in [
-        ("fog", state(rs::FOGENABLE)? != 0),
         ("a texture by handle", state(rs::TEXTUREHANDLE)? != 0),
         (
             "wrapping across texture edges",
@@ -1591,6 +1596,21 @@ fn draw(
                 "IDirect3DDevice3::DrawPrimitive: blend factor {value}"
             ))
         })
+    };
+    // Fog. With neither mode a curve of its own, Direct3D takes each
+    // vertex's factor from the alpha its title wrote in the specular colour,
+    // which is how NetImmerse fogs Alpha Team's levels (#61).
+    let fog = if state(rs::FOGENABLE)? != 0 {
+        let (table, vertex) = (state(rs::FOGTABLEMODE)?, state(rs::FOGVERTEXMODE)?);
+        if table != 0 || vertex != 0 || format & fvf::SPECULAR == 0 {
+            return Err(unwritten(format!(
+                "IDirect3DDevice3::DrawPrimitive: fog, table mode {table}, vertex mode {vertex},                  vertex format {format:#x}"
+            )));
+        }
+        let [r, g, b, _] = pipeline::colour(state(rs::FOGCOLOR)?);
+        Some([r, g, b])
+    } else {
+        None
     };
     let depth_on = state(rs::ZENABLE)? != 0;
     // The magnification filter: the legacy render state when a title set it,
@@ -1662,6 +1682,7 @@ fn draw(
             None
         },
         specular: state(rs::SPECULARENABLE)? != 0,
+        fog,
     };
     let cull = state(rs::CULLMODE)?;
     let (op, a1, a2) = (
@@ -1758,8 +1779,9 @@ fn draw(
                 }
                 _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
             };
-            let [sr, sg, sb, _] = v.specular.map_or([0.0; 4], pipeline::colour);
+            let [sr, sg, sb, sa] = v.specular.map_or([0.0; 4], pipeline::colour);
             Clipped {
+                fog: if fog.is_some() { sa } else { 1.0 },
                 clip: if untransformed {
                     pipeline::project(&clip_from_model, v.position)
                 } else {

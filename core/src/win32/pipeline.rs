@@ -280,6 +280,9 @@ pub struct Clipped {
     pub diffuse: [f32; 4],
     pub specular: [f32; 3],
     pub uv: [f32; 2],
+    /// How much of this vertex's own colour the fog leaves, from the title's
+    /// own per-vertex factor. One where there is no fog.
+    pub fog: f32,
 }
 
 impl Clipped {
@@ -295,6 +298,7 @@ impl Clipped {
             diffuse: self.diffuse,
             specular: self.specular,
             uv: self.uv,
+            fog: self.fog,
         }
     }
 }
@@ -306,6 +310,7 @@ fn lerp(a: &Clipped, b: &Clipped, t: f32) -> Clipped {
         diffuse: std::array::from_fn(|i| mix(a.diffuse[i], b.diffuse[i])),
         specular: std::array::from_fn(|i| mix(a.specular[i], b.specular[i])),
         uv: std::array::from_fn(|i| mix(a.uv[i], b.uv[i])),
+        fog: mix(a.fog, b.fog),
     }
 }
 
@@ -396,6 +401,7 @@ impl Viewport {
             diffuse: v.diffuse,
             specular: v.specular,
             uv: v.uv,
+            fog: v.fog,
         }
     }
 }
