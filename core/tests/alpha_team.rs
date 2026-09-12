@@ -566,3 +566,96 @@ fn the_menu_route_replays_to_the_same_machine_every_time() {
     );
     assert_eq!(first.digest, second.digest);
 }
+
+/// The flip the mission is up and playing at, a hundred flips after the route
+/// has begun the training exercise.
+const MISSION: u64 = 1250;
+
+/// And three hundred and fifty flips of it later, which is where the mission
+/// is asked to have gone on drawing.
+const MISSION_LATER: u64 = 1600;
+
+/// Enough instructions for the committed route to load the first mission and
+/// play it. The mission costs about three and a half million instructions a
+/// flip: the title's own director, its actors and the rasteriser under them.
+const MISSION_BUDGET: u64 = 8_600_000_000;
+
+/// The committed route into the first mission, replayed once into its slot.
+fn into_the_mission(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../titles/lego-alpha-team/routes/first-mission.route"),
+            ),
+            ..Cli::default()
+        };
+        Some(testkit::run_on(
+            Headless::new().keeping(&[MISSION, MISSION_LATER]),
+            &ALPHA_TEAM,
+            &cli,
+            MISSION_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+static MISSION_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static MISSION_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// The route chooses the Alpha Team Training Area out of Single Missions,
+/// loads it and plays it: the mission's own space, drawn by its own director,
+/// and still drawing three hundred and fifty flips later (#61).
+#[test]
+fn the_route_loads_the_first_mission_and_plays_it() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing in the mission stops the run"
+    );
+    let mission = ran.host.frame(MISSION).expect("the mission is kept");
+    let later = ran
+        .host
+        .frame(MISSION_LATER)
+        .expect("the mission, later, is kept");
+    assert_eq!((mission.width, mission.height), (640, 480));
+    assert!(!mission.is_uniform(), "the mission drew something");
+    // It is a moving picture: the director turns the camera around the space
+    // and the actors in it are animated.
+    let pixels = 640 * 480;
+    let moved = differing(mission, later);
+    assert!(
+        moved > pixels / 200,
+        "the mission stopped moving between flip {MISSION} and flip {MISSION_LATER}: \
+         {moved} pixels of {pixels} differ"
+    );
+    // And it has been going for well over a declared minute by then.
+    assert!(
+        ran.finish.declared_millis > 60_000,
+        "only {} declared milliseconds",
+        ran.finish.declared_millis
+    );
+}
+
+/// The same route twice over is the same run (#61).
+#[test]
+fn the_first_mission_route_replays_to_the_same_machine_every_time() {
+    let Some(first) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    let Some(second) = into_the_mission(&MISSION_SECOND) else {
+        return;
+    };
+    assert_eq!(first.finish.cursor, second.finish.cursor);
+    assert_eq!(first.finish.flips, second.finish.flips);
+    assert_eq!(first.finish.declared_millis, second.finish.declared_millis);
+    assert_eq!(first.digest, second.digest);
+}

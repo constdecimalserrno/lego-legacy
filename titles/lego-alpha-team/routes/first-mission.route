@@ -1,0 +1,31 @@
+#lego-legacy-route 1
+# LEGO Alpha Team, from its boot into its first mission: the Alpha Team
+# Training Area, which is the first thing Single Missions offers that is
+# played rather than watched.
+#
+# The front end is menu.route's, and the pointer arithmetic is explained
+# there: the title puts the pointer back in the middle of the window after
+# every frame and steers by how far it went since, a 1280th of the window per
+# pixel, from a cursor that starts in the bottom left corner.
+flip 160 key Space down
+flip 162 key Space up
+# Onto Single Missions, and in.
+flip 600 move 480 37
+flip 602 move 480 37
+flip 604 move 480 37
+flip 606 move 480 37
+flip 620 down
+flip 622 up
+# Onto the Alpha Team Training Area, the second of the two the list offers.
+flip 700 move 314 117
+flip 720 down
+flip 722 up
+# And the tick, bottom left, which is the list's own way in.
+flip 760 move 136 484
+flip 762 move 136 484
+flip 780 down
+flip 782 up
+# The mission loads with its destination panel up and waits: "Click your
+# mouse button to begin the training exercise."
+flip 1150 down
+flip 1152 up
