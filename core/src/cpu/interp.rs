@@ -34,12 +34,19 @@ pub struct Interp {
     directory: Box<[u32; 1024]>,
     regions: Vec<Box<[u32; 1024]>>,
     pages: Vec<Box<[u32; PAGE]>>,
+    /// Which runs were decoded out of each of `pages`, so that a write over
+    /// one page kills those runs and leaves every other run standing (#65).
+    /// A run spanning two pages is in both their lists.
+    page_runs: Vec<Vec<u32>>,
 }
 
 const PAGE: usize = 1 << 12;
 
 /// The most instructions one run is decoded to.
 const MOST_IN_A_RUN: u32 = 64;
+
+/// The most decoded instructions kept before the cache is thrown away whole.
+const MOST_KEPT: usize = 1 << 20;
 
 impl Interp {
     #[must_use]
@@ -51,6 +58,7 @@ impl Interp {
             directory: Box::new([0; 1024]),
             regions: Vec::new(),
             pages: Vec::new(),
+            page_runs: Vec::new(),
         }
     }
 
@@ -71,16 +79,85 @@ impl Interp {
         self.insns.clear();
         self.runs.clear();
         self.pages.clear();
+        self.page_runs.clear();
         self.regions.clear();
         self.directory.fill(0);
+    }
+
+    /// Forget only what was decoded out of one page, which is what a write
+    /// over it actually invalidated (#65).
+    ///
+    /// A run is killed by giving it no instructions: whatever still points at
+    /// it falls through and decodes again. The page stops being watched, so
+    /// the next write over it costs nothing until code is decoded there
+    /// again — a title that keeps its data on the same page as its code, as
+    /// Alpha Team's own loader does, writes over that page thousands of times
+    /// a second.
+    fn forget_page(&mut self, page: u32, mem: &mut Arena) {
+        mem.unmark_code(page.saturating_mul(PAGE as u32));
+        let lin = page.saturating_mul(PAGE as u32);
+        let (region, within) = ((lin >> 22) as usize, (lin >> 12) as usize & 0x3ff);
+        let Some(r) = self.directory.get(region).copied().filter(|r| *r != 0) else {
+            return;
+        };
+        let Some(p) = self.regions[r as usize - 1]
+            .get(within)
+            .copied()
+            .filter(|p| *p != 0)
+        else {
+            return;
+        };
+        for run in std::mem::take(&mut self.page_runs[p as usize - 1]) {
+            if let Some(entry) = self.runs.get_mut(run as usize) {
+                entry.1 = 0;
+            }
+        }
+    }
+
+    /// The table for the page an address is on, made if it is not there yet.
+    fn table_for(&mut self, lin: u32) -> usize {
+        let (region, within) = ((lin >> 22) as usize, (lin >> 12) as usize & 0x3ff);
+        let place = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
+        if self.directory[region] == 0 {
+            self.regions.push(Box::new([0; 1024]));
+            self.directory[region] = place(self.regions.len());
+        }
+        let r = self.directory[region] as usize - 1;
+        if self.regions[r][within] == 0 {
+            self.pages.push(Box::new([0; PAGE]));
+            self.page_runs.push(Vec::new());
+            self.regions[r][within] = place(self.pages.len());
+        }
+        self.regions[r][within] as usize - 1
     }
 
     /// The run of instructions starting at a linear address, decoding it if
     /// this is the first time the engine has stood there.
     fn run_at(&mut self, lin: u32, mem: &mut Arena) -> Result<(u32, u32), Stop> {
         // Bytes have been written over something this decoded: what is cached
-        // is no longer what is there (#58).
+        // is no longer what is there (#58). Only the pages actually written
+        // over are dropped (#65) — Alpha Team's own loader puts a level's code
+        // and its data on the same pages, and forgetting everything each time
+        // it wrote to one of them threw the whole cache away twenty-six
+        // thousand times a second.
         if std::mem::take(&mut mem.code_written) {
+            if std::mem::take(&mut mem.written_all) {
+                mem.written_code.clear();
+                self.forget();
+            } else {
+                for page in std::mem::take(&mut mem.written_code) {
+                    self.forget_page(page, mem);
+                }
+            }
+        }
+        // A title that writes over its code as often as it runs it decodes
+        // the same addresses again and again, and nothing here is ever
+        // reclaimed until everything is. This is the ceiling.
+        //
+        // ponytail: a million instructions, thrown away whole when it is
+        // reached; a free list per run would keep it flat if a title ever
+        // makes this the cost that shows.
+        if self.insns.len() > MOST_KEPT {
             self.forget();
         }
         let (region, page, slot) = (
@@ -96,7 +173,12 @@ impl Interp {
             },
         };
         if hit != 0 {
-            return Ok(self.runs[hit as usize - 1]);
+            // A run with no instructions is one a write killed: whatever
+            // still points at it decodes again (#65).
+            let run = self.runs[hit as usize - 1];
+            if run.1 != 0 {
+                return Ok(run);
+            }
         }
         let first = u32::try_from(self.insns.len()).unwrap_or(u32::MAX);
         let mut at = lin;
@@ -120,22 +202,16 @@ impl Interp {
             u32::try_from(self.insns.len()).unwrap_or(u32::MAX) - first,
         );
         self.runs.push(run);
-        let place = |len: usize| u32::try_from(len).unwrap_or(u32::MAX);
-        if self.directory[region] == 0 {
-            self.regions.push(Box::new([0; 1024]));
-            self.directory[region] = place(self.regions.len());
-        }
-        let r = self.directory[region] as usize - 1;
-        if self.regions[r][page] == 0 {
-            self.pages.push(Box::new([0; PAGE]));
-            self.regions[r][page] = place(self.pages.len());
-        }
-        let p = self.regions[r][page] as usize - 1;
-        self.pages[p][slot] = place(self.runs.len());
-        // Every page this run was decoded out of is now watched.
+        let index = u32::try_from(self.runs.len() - 1).unwrap_or(u32::MAX);
+        let here = self.table_for(lin);
+        self.pages[here][slot] = index + 1;
+        // Every page this run was decoded out of is now watched, and knows
+        // this run came out of it.
         let mut watched = lin;
         loop {
             mem.mark_code(watched);
+            let table = self.table_for(watched);
+            self.page_runs[table].push(index);
             if watched / 4096 >= at.wrapping_sub(1) / 4096 {
                 break;
             }

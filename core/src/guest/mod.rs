@@ -40,6 +40,13 @@ pub struct Arena {
     /// looked. Alpha Team loads its own DLLs out of its archives and calls
     /// them, so what is at an address changes under the cache (#58).
     pub code_written: bool,
+    /// Which pages have been written over since the engine last looked, so
+    /// that it can drop the runs decoded out of those rather than everything
+    /// it has (#65).
+    pub written_code: Vec<u32>,
+    /// More pages were written than the list above keeps, so the engine has
+    /// to forget everything rather than work out what changed.
+    pub written_all: bool,
 }
 
 /// How big a page is for the purpose of watching code, which is the size the
@@ -56,6 +63,8 @@ impl Arena {
         Ok(Self {
             code: vec![0; (len / CODE_PAGE as usize).div_ceil(64) + 1],
             code_written: false,
+            written_code: Vec::new(),
+            written_all: false,
             mapping: host.map(len)?,
         })
     }
@@ -133,7 +142,7 @@ impl GuestMem for Arena {
             });
         }
         if self.wrote_over_code(addr, bytes.len()) {
-            self.code_written = true;
+            self.note_written(addr, bytes.len());
         }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length.
@@ -166,7 +175,7 @@ impl GuestMem for Arena {
             return Err(Fault { addr, len });
         }
         if self.wrote_over_code(addr, len) {
-            self.code_written = true;
+            self.note_written(addr, len);
         }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length, and the borrow is the arena's only
@@ -190,12 +199,45 @@ impl Arena {
         }
     }
 
-    /// Whether a write of `len` bytes at `addr` lands on anything decoded.
+    /// Say that the engine has no instructions decoded out of this page any
+    /// more, so writing over it costs nothing until it decodes there again.
+    pub fn unmark_code(&mut self, addr: u32) {
+        let page = (addr / CODE_PAGE) as usize;
+        if let Some(word) = self.code.get_mut(page / 64) {
+            *word &= !(1 << (page % 64));
+        }
+    }
+
+    /// Remember which pages a write landed on. A write spanning more pages
+    /// than this keeps, or one page too many before the engine next looks, is
+    /// answered by forgetting everything: that is rare, and correct.
     ///
-    /// ponytail: a page at a time, and any write to a page holding code
-    /// throws the whole cache away rather than the runs that were actually
-    /// written over. A title that keeps data on the same page as code it runs
-    /// would want the finer thing.
+    /// ponytail: eight pages, which is more than any write this roster makes;
+    /// a title that writes over its own code in wider strides would want a
+    /// range rather than a list.
+    #[inline(always)]
+    fn note_written(&mut self, addr: u32, len: usize) {
+        self.code_written = true;
+        if self.written_all {
+            return;
+        }
+        if self.written_code.len() >= 8 {
+            self.written_code.clear();
+            self.written_all = true;
+            return;
+        }
+        let first = addr / CODE_PAGE;
+        let last = u32::try_from((addr as usize + len.saturating_sub(1)) / CODE_PAGE as usize)
+            .unwrap_or(first)
+            .max(first);
+        for page in first..=last {
+            if !self.written_code.contains(&page) {
+                self.written_code.push(page);
+            }
+        }
+    }
+
+    /// Whether a write of `len` bytes at `addr` lands on anything decoded.
     #[inline(always)]
     fn wrote_over_code(&self, addr: u32, len: usize) -> bool {
         let first = (addr / CODE_PAGE) as usize;

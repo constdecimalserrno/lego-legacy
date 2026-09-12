@@ -356,6 +356,10 @@ pub struct MacWindow {
     /// wants it gone *and* the person is over this window with this
     /// application in front.
     pointer_taken: bool,
+    /// Whether this application is the one in front, as of the last time the
+    /// window system was asked. What decides whether a title that steers by
+    /// how far the mouse moved may keep putting the pointer back (#59).
+    in_front: bool,
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
     cg_warp: unsafe extern "C" fn(Point) -> i32,
@@ -493,6 +497,7 @@ impl MacWindow {
                 pointer_hidden: false,
                 pointer_over_us: true,
                 pointer_taken: false,
+                in_front: true,
                 lag_nanos: 0,
                 frame_size: (width, height),
             })
@@ -538,6 +543,7 @@ impl MacWindow {
             let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
             v & 0xff != 0
         };
+        self.in_front = active;
         let take = self.pointer_hidden && self.pointer_over_us && active;
         if take == self.pointer_taken {
             return;
@@ -807,10 +813,21 @@ impl Host for MacWindow {
     }
 
     fn put_pointer(&mut self, x: i32, y: i32) {
-        // Only while the pointer is ours to move: the person is over this
-        // window, this application is in front, and the title has taken the
-        // pointer to draw its own (#46).
-        if !self.pointer_taken {
+        // Only while the pointer is ours to move: this application is in
+        // front and the title has taken the pointer to draw its own (#46).
+        //
+        // Not also "and the person is still over the window", which is what
+        // this asked before. A title that steers by how far the mouse moved
+        // puts the pointer back in the middle after every frame and measures
+        // the next move from there, so the moment a hand outruns the window
+        // the putting-back is the only thing that brings it home: refusing
+        // then leaves the title's own pointer where it was and it never moves
+        // again, which is a hand that "does not follow" (#64). A window this
+        // size on a desk this size is easy to outrun. The pointer is still
+        // the person's to take back — this application stops being the one in
+        // front the moment they ask for another, and `arm_the_way_back` gives
+        // it back even if the run is killed.
+        if !(self.pointer_hidden && self.in_front) {
             return;
         }
         // Safety: AppKit's own accessors on this window and its content view,
