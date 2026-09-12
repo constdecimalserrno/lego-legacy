@@ -49,6 +49,11 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
     // Where this title's installer puts it: the shell folder its own script
     // names, under Program Files.
     install_dir: "C:\\Program Files\\LEGO Media\\LEGO Alpha Team",
+    // Escape is the one key this title's intro takes, measured (#66): a
+    // click and Space are ignored outright, Escape lets go of the movie from
+    // about flip 440 on. A person who clicks to get past the intro meant
+    // that key, so the machine hands it over.
+    click_in_a_movie: Some(0x01),
 };
 
 fn main() -> ExitCode {

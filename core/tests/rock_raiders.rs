@@ -35,6 +35,7 @@ const ROCK_RAIDERS: Title = Title {
     installed: Installed::Cabinet,
     registry: &[],
     install_dir: "C:\\LEGORR",
+    click_in_a_movie: None,
 };
 
 /// The same title pointed at the pressing whose executable is wrapped.
@@ -62,6 +63,7 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
     installed: Installed::Cabinet,
     registry: &[],
     install_dir: "C:\\LEGORR",
+    click_in_a_movie: None,
 };
 
 /// The boot path, run once and looked at by several tests.

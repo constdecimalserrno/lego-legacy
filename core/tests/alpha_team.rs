@@ -38,6 +38,7 @@ const ALPHA_TEAM: Title = Title {
         "1.0",
     )],
     install_dir: ROOT,
+    click_in_a_movie: Some(0x01),
 };
 
 /// Point the run at the checkout's rips and keep run directories out of it.
@@ -441,6 +442,52 @@ fn the_title_presents_a_frame_of_its_own() {
         .expect("the Loading panel is kept");
     assert!(!panel.is_uniform(), "the Loading panel drew something");
     assert_eq!((panel.width, panel.height), (640, 480));
+}
+
+/// A click gets past the intro, because the machine hands the title the key
+/// the title listens for there (#66).
+#[test]
+fn a_click_during_the_intro_is_the_key_the_title_takes() {
+    if !scratch() {
+        return;
+    }
+    // Measured before this landed: a click at flip 600 was ignored outright
+    // and the movie ran to its own end at flip 1631. Escape is the one key
+    // this intro takes, and only from about flip 440 on.
+    let clicked = |at: u64| {
+        let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("click-the-intro-{at}.route"));
+        std::fs::write(
+            &route,
+            format!("#lego-legacy-route 1\nflip {at} down\nflip {} up\n", at + 2),
+        )
+        .expect("the route writes");
+        let cli = Cli {
+            route: Some(route),
+            ..Cli::default()
+        };
+        let ran = testkit::run_on(Headless::new(), &ALPHA_TEAM, &cli, FIRST_LIGHT_BUDGET);
+        let before = ran
+            .log
+            .split_once("lmiintro.avi let go of")
+            .expect("the movie is let go of, on the click or on its own end")
+            .0;
+        before
+            .lines()
+            .filter_map(|l| l.strip_prefix("flip "))
+            .filter_map(|l| l.split_whitespace().next())
+            .filter_map(|n| n.parse::<u64>().ok())
+            .next_back()
+            .unwrap_or(0)
+    };
+    assert_eq!(clicked(600), 600, "a click past the logo ends the movie");
+    // And the title's own rule is untouched: it refuses every key while its
+    // developer's logo is up, so a click there is refused too. The machine
+    // translates what a person did; it does not end the movie (ADR-0002).
+    assert!(
+        clicked(300) > 1600,
+        "a click under the logo is still the title's to refuse"
+    );
 }
 
 /// The same run twice over is the same run (#58).

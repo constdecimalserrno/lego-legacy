@@ -604,6 +604,16 @@ fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     Ok(S_OK)
 }
 
+impl State {
+    /// Whether one of this title's own movies is playing right now.
+    #[must_use]
+    pub fn movie_running(&self) -> bool {
+        self.players
+            .values()
+            .any(|p| p.movie.as_ref().is_some_and(|m| m.running_since.is_some()))
+    }
+}
+
 fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // How far the running stream has got, on the declared clock.
     let now = ctx.declared_millis();

@@ -125,6 +125,19 @@ pub struct Title {
     /// resolves its own files against it, so it has to be the same on every
     /// run and on every host.
     pub install_dir: &'static str,
+    /// The key a click is also handed to this title as, while one of its own
+    /// movies is playing.
+    ///
+    /// A declared value, and a translation rather than a decision: a title
+    /// that listens for a key to get past its intro and not for the mouse
+    /// leaves a person who clicks there with nothing happening, so the
+    /// machine hands it the key the person's click meant (#66). The machine
+    /// never ends the movie itself — what the title does with the key is
+    /// still the title's own rule, including refusing it.
+    ///
+    /// `None` for a title that takes the click itself, which Rock Raiders
+    /// does (#67).
+    pub click_in_a_movie: Option<u32>,
 }
 
 impl Title {
@@ -158,5 +171,6 @@ impl Title {
         installed: Installed::Cabinet,
         registry: &[],
         install_dir: "C:\\STUB",
+        click_in_a_movie: None,
     };
 }

@@ -266,6 +266,31 @@ impl Machine {
             }
             self.input.push((self.flips, event));
             crate::win32::user32::deliver(&mut self.state, event, millis);
+            // A title that listens for a key to get past its own intro, and
+            // not for the mouse, is handed that key when a person clicks
+            // through the movie: the click is what the person did, and this
+            // is its translation, not the machine deciding the movie is over
+            // (#66). What the title does with the key stays the title's rule.
+            if let (Some(code), Some(down)) = (
+                self.title.click_in_a_movie,
+                match event {
+                    crate::host::Input::Down => Some(true),
+                    crate::host::Input::Up => Some(false),
+                    _ => None,
+                },
+            ) {
+                if self.state.movie_running() {
+                    log.line(&format!(
+                        "input flip {} click as key {code:#04x}",
+                        self.flips
+                    ));
+                    crate::win32::user32::deliver(
+                        &mut self.state,
+                        crate::host::Input::Key { code, down },
+                        millis,
+                    );
+                }
+            }
         }
     }
 

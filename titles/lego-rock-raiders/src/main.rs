@@ -52,6 +52,9 @@ pub const ROCK_RAIDERS: Title = Title {
     // Where this title's installer puts it, spelled the way the guest will
     // read it back from the machine.
     install_dir: "C:\\LEGORR",
+    // This title takes a click during a movie itself, measured (#67): it
+    // lets go of the movie on the flip the click lands. Nothing to translate.
+    click_in_a_movie: None,
 };
 
 fn main() -> ExitCode {

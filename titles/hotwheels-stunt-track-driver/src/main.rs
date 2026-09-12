@@ -60,6 +60,9 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     // `SOFTWARE\MATTEL\STUNT TRACK DRIVER\1.0`, so it has to be the same on
     // every run and on every host.
     install_dir: "C:\\Program Files\\Mattel\\Stunt Track Driver",
+    // This title plays no movie at all (#68), so there is nothing here to
+    // translate a click into.
+    click_in_a_movie: None,
 };
 
 fn main() -> ExitCode {
