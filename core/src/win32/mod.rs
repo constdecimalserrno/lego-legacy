@@ -233,6 +233,14 @@ pub struct State {
     pub input_sequence: u32,
     /// Whether the pointer's button is down.
     pub mouse_down: bool,
+    /// When the button last went down and where, so that a second click near
+    /// it and soon after it is a double click rather than two clicks (#59).
+    pub last_click: (u32, (i32, i32)),
+    /// Whether the class the title registered asked for double clicks.
+    pub double_clicks: bool,
+    /// Where the title last asked that the pointer be put, until the machine
+    /// has told the host about it (#59).
+    pub pointer_put: Option<(i32, i32)>,
     /// Windows' own show count for the pointer: it is drawn while this is
     /// zero or more, and a title that draws its own takes it below zero.
     pub cursor_shown: i32,
@@ -338,6 +346,9 @@ impl State {
             keyboard_data: VecDeque::new(),
             input_sequence: 0,
             mouse_down: false,
+            last_click: (0, (0, 0)),
+            pointer_put: None,
+            double_clicks: false,
             cursor_shown: 0,
             messages: VecDeque::new(),
             dialog: None,

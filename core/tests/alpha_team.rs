@@ -7,6 +7,7 @@
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::disc;
+use lego_legacy_core::host::headless::{Headless, Presented};
 use lego_legacy_core::install::Tree;
 use lego_legacy_core::roster::ALPHA_TEAM as ENTRY;
 use lego_legacy_core::testkit;
@@ -460,4 +461,108 @@ fn the_boot_replays_to_the_same_machine_every_time() {
         first.digest, second.digest,
         "and the machine ends the same way"
     );
+}
+
+/// The flip the main menu is up and waiting at, before the route touches the
+/// mouse.
+const MENU: u64 = 480;
+
+/// A few flips after the route has clicked Single Missions, where the mission
+/// list is up.
+const MISSION_LIST: u64 = 700;
+
+/// Enough instructions for the committed route to reach the mission list and
+/// wait in it. The front end costs about two and a half million instructions a
+/// flip, all of it the title's own engine running as guest code.
+const MENU_BUDGET: u64 = 5_400_000_000;
+
+/// The committed route through the front end, replayed once into its slot.
+fn through_the_menu(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../titles/lego-alpha-team/routes/menu.route"),
+            ),
+            ..Cli::default()
+        };
+        Some(testkit::run_on(
+            Headless::new().keeping(&[MENU, MISSION_LIST]),
+            &ALPHA_TEAM,
+            &cli,
+            MENU_BUDGET,
+        ))
+    })
+    .as_ref()
+}
+
+static MENU_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static MENU_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// How many pixels two frames of the same size disagree on.
+fn differing(a: &Presented, b: &Presented) -> usize {
+    a.pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.pixels.as_chunks::<4>().0)
+        .filter(|(p, q)| p[..3] != q[..3])
+        .count()
+}
+
+/// The route leaves the attract screen with a keystroke and picks Single
+/// Missions with the pointer, and both reach the title's own window procedure
+/// (#59).
+#[test]
+fn the_route_drives_the_front_end_from_the_keyboard_and_the_mouse() {
+    let Some(ran) = through_the_menu(&MENU_FIRST) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing in the front end stops the run"
+    );
+    // This title reads its keyboard from its window and its pointer from
+    // DirectInput's, and both arrive: `WM_KEYDOWN` and `WM_LBUTTONDOWN`, at
+    // the procedure the title registered.
+    ran.assert_logged("window procedure given message 0x0100")
+        .assert_logged("window procedure given message 0x0201");
+
+    let menu = ran.host.frame(MENU).expect("the menu is kept");
+    let list = ran
+        .host
+        .frame(MISSION_LIST)
+        .expect("the mission list is kept");
+    assert_eq!((menu.width, menu.height), (640, 480));
+    // Choosing an item put a different screen up: the mission list covers most
+    // of the window the menu was in.
+    let pixels = 640 * 480;
+    assert!(
+        differing(menu, list) > pixels / 4,
+        "flip {MISSION_LIST} should be the mission list, not the menu"
+    );
+}
+
+/// The same route twice over is the same run (#59).
+#[test]
+fn the_menu_route_replays_to_the_same_machine_every_time() {
+    let Some(first) = through_the_menu(&MENU_FIRST) else {
+        return;
+    };
+    let Some(second) = through_the_menu(&MENU_SECOND) else {
+        return;
+    };
+    assert_eq!(first.finish.cursor, second.finish.cursor);
+    assert_eq!(first.finish.flips, second.finish.flips);
+    assert_eq!(
+        first.finish.declared_millis, second.finish.declared_millis,
+        "the same declared time"
+    );
+    assert_eq!(first.digest, second.digest);
 }

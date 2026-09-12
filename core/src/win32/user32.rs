@@ -677,6 +677,11 @@ fn register_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // WNDCLASSA: the window procedure is its second field, and the machine
     // keeps it because a message it delivers has to reach the guest's own code.
     let procedure = ctx.mem.read_u32(args[0] + 4).map_err(Stop::Fault)?;
+    // CS_DBLCLKS: a class that does not ask for double clicks is sent two
+    // clicks instead, which is what Windows does.
+    const CS_DBLCLKS: u32 = 0x0008;
+    let style = ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?;
+    ctx.state.double_clicks = style & CS_DBLCLKS != 0;
     let name = {
         let at = ctx.mem.read_u32(args[0] + 36).map_err(Stop::Fault)?;
         ctx.string(at).map_err(Stop::Fault)?
@@ -761,7 +766,112 @@ const DOWN: u32 = 0x80;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
 const MK_LBUTTON: u32 = 0x0001;
+
+/// How long after a click a second one beside it is a double click, and how
+/// far beside it is still beside it.
+///
+/// Declared: Windows' own defaults, `GetDoubleClickTime` and
+/// `SM_CXDOUBLECLK`, neither of which this machine lets a person change.
+const DOUBLE_CLICK_MILLIS: u32 = 500;
+const DOUBLE_CLICK_SLOP: i32 = 4;
+
+/// The virtual key a `DIK_` number stands for, on the keyboard the declared
+/// machine has.
+///
+/// DirectInput numbers a key by where it sits — a PC's set-1 scan codes, with
+/// the ones after the grey prefix carrying `0x80`. A title reading its
+/// keyboard from its window sees the virtual key instead, and this is the map
+/// between them. Every number [`crate::host::mac::direct_input_key`] can
+/// produce is here; anything else reaches the window as nothing (#59).
+fn virtual_key(code: u32) -> Option<u32> {
+    Some(match code {
+        0x01 => 0x1b,                      // Escape
+        0x02..=0x0a => 0x30 + code - 0x01, // 1 to 9
+        0x0b => 0x30,                      // 0
+        0x0c => 0xbd,                      // Minus
+        0x0d => 0xbb,                      // Equals
+        0x0e => 0x08,                      // Backspace
+        0x0f => 0x09,                      // Tab
+        0x10 => 0x51,                      // Q
+        0x11 => 0x57,                      // W
+        0x12 => 0x45,                      // E
+        0x13 => 0x52,                      // R
+        0x14 => 0x54,                      // T
+        0x15 => 0x59,                      // Y
+        0x16 => 0x55,                      // U
+        0x17 => 0x49,                      // I
+        0x18 => 0x4f,                      // O
+        0x19 => 0x50,                      // P
+        0x1a => 0xdb,                      // Left bracket
+        0x1b => 0xdd,                      // Right bracket
+        0x1c | 0x9c => 0x0d,               // Return, and the keypad's
+        0x1d | 0x9d => 0x11,               // Control, either of them
+        0x1e => 0x41,                      // A
+        0x1f => 0x53,                      // S
+        0x20 => 0x44,                      // D
+        0x21 => 0x46,                      // F
+        0x22 => 0x47,                      // G
+        0x23 => 0x48,                      // H
+        0x24 => 0x4a,                      // J
+        0x25 => 0x4b,                      // K
+        0x26 => 0x4c,                      // L
+        0x27 => 0xba,                      // Semicolon
+        0x28 => 0xde,                      // Apostrophe
+        0x29 => 0xc0,                      // Grave
+        0x2a | 0x36 => 0x10,               // Shift, either of them
+        0x2b => 0xdc,                      // Backslash
+        0x2c => 0x5a,                      // Z
+        0x2d => 0x58,                      // X
+        0x2e => 0x43,                      // C
+        0x2f => 0x56,                      // V
+        0x30 => 0x42,                      // B
+        0x31 => 0x4e,                      // N
+        0x32 => 0x4d,                      // M
+        0x33 => 0xbc,                      // Comma
+        0x34 => 0xbe,                      // Period
+        0x35 | 0xb5 => 0xbf,               // Slash, and the keypad's divide
+        0x37 => 0x6a,                      // Keypad multiply
+        0x38 | 0xb8 => 0x12,               // Alt, either of them
+        0x39 => 0x20,                      // Space
+        0x3a => 0x14,                      // Caps lock
+        0x3b..=0x44 => 0x70 + code - 0x3b, // F1 to F10
+        0x45 => 0x90,                      // Num lock
+        0x46 => 0x91,                      // Scroll lock
+        0x47 => 0x67,                      // Keypad 7
+        0x48 => 0x68,                      // Keypad 8
+        0x49 => 0x69,                      // Keypad 9
+        0x4a => 0x6d,                      // Keypad minus
+        0x4b => 0x64,                      // Keypad 4
+        0x4c => 0x65,                      // Keypad 5
+        0x4d => 0x66,                      // Keypad 6
+        0x4e => 0x6b,                      // Keypad plus
+        0x4f => 0x61,                      // Keypad 1
+        0x50 => 0x62,                      // Keypad 2
+        0x51 => 0x63,                      // Keypad 3
+        0x52 => 0x60,                      // Keypad 0
+        0x53 => 0x6e,                      // Keypad decimal
+        0x56 => 0xe2,                      // The extra key on an ISO keyboard
+        0x57 => 0x7a,                      // F11
+        0x58 => 0x7b,                      // F12
+        0x64..=0x66 => 0x7c + code - 0x64, // F13 to F15
+        0x8d => 0x92,                      // Keypad equals
+        0xc7 => 0x24,                      // Home
+        0xc8 => 0x26,                      // Up
+        0xc9 => 0x21,                      // Page up
+        0xcb => 0x25,                      // Left
+        0xcd => 0x27,                      // Right
+        0xcf => 0x23,                      // End
+        0xd0 => 0x28,                      // Down
+        0xd1 => 0x22,                      // Page down
+        0xd2 => 0x2d,                      // Insert
+        0xd3 => 0x2e,                      // Delete
+        _ => return None,
+    })
+}
 
 /// What a person did, as the declared machine's devices and its message queue
 /// see it: the pointer, the button and the keys change, and the title's window
@@ -789,7 +899,27 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
         Input::Down => {
             state.mouse_down = true;
             state.buffer_input(false, DIMOUSE_BUTTON0, DOWN);
-            post(state, WM_LBUTTONDOWN, MK_LBUTTON, time);
+            // The second of two clicks near each other and soon after each
+            // other is a double click, which is a message of its own.
+            let (when, (was_x, was_y)) = state.last_click;
+            let (x, y) = state.pointer;
+            let quick = time.wrapping_sub(when) < DOUBLE_CLICK_MILLIS;
+            let near =
+                (x - was_x).abs() <= DOUBLE_CLICK_SLOP && (y - was_y).abs() <= DOUBLE_CLICK_SLOP;
+            let again = state.double_clicks && when != 0 && quick && near;
+            post(
+                state,
+                if again {
+                    WM_LBUTTONDBLCLK
+                } else {
+                    WM_LBUTTONDOWN
+                },
+                MK_LBUTTON,
+                time,
+            );
+            // A double click does not start a third: the next click is a
+            // first one again, as Windows counts them.
+            state.last_click = if again { (0, (x, y)) } else { (time, (x, y)) };
         }
         Input::Up => {
             state.mouse_down = false;
@@ -805,8 +935,37 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
                 state.keys_down.push(code);
             }
             state.buffer_input(true, code, if down { DOWN } else { 0 });
+            // And through the window, for a title that reads its keyboard
+            // from its message queue rather than from DirectInput: Alpha
+            // Team's `DDKeyboard::processKey` is handed a virtual key and the
+            // parameter Windows sent with it (#59).
+            if let Some(key) = virtual_key(code) {
+                let repeat_and_scan = 1 | ((code & 0x7f) << 16) | ((code & 0x80) << 17);
+                let (message, transition) = if down {
+                    (WM_KEYDOWN, 0)
+                } else {
+                    (WM_KEYUP, 0xc000_0000)
+                };
+                queue(state, message, key, repeat_and_scan | transition, time);
+            }
         }
     }
+}
+
+/// Queue a message for the title's window with a parameter of its own, rather
+/// than the pointer's position.
+fn queue(state: &mut super::State, message: u32, wparam: u32, lparam: u32, time: u32) {
+    if !state.window_made {
+        return;
+    }
+    state.messages.push_back(super::Message {
+        window: WINDOW,
+        message,
+        wparam,
+        lparam,
+        time,
+        point: state.pointer,
+    });
 }
 
 /// Queue a mouse message for the title's window, where the pointer is.
@@ -931,8 +1090,11 @@ fn show_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The title puts the pointer somewhere, and that is where it is until a
-    // person moves it.
-    ctx.state.pointer = (args[0] as i32, args[1] as i32);
+    // person moves it. The host is told at the flip, so that the person's own
+    // pointer is where the title measures their next move from (#59).
+    let (x, y) = (args[0] as i32, args[1] as i32);
+    ctx.state.pointer = (x, y);
+    ctx.state.pointer_put = Some((x, y));
     Ok(1)
 }
 
@@ -1249,7 +1411,10 @@ fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 #[cfg(test)]
 mod tests {
     use super::WM_ACTIVATEAPP;
-    use super::{activate, deliver, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW};
+    use super::{
+        activate, deliver, virtual_key, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW,
+        WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    };
     use crate::host::Input;
     use crate::win32::State;
 
@@ -1262,6 +1427,127 @@ mod tests {
         assert_eq!((first.window, first.message), (WINDOW, WM_ACTIVATEAPP));
         assert_eq!(first.wparam, 1, "active, not deactivated");
         assert_eq!(first.time, 7);
+    }
+
+    /// A title that reads its keyboard from its window, as Alpha Team's
+    /// `DDKeyboard` does, is sent the virtual key and the parameter Windows
+    /// sends with it: the repeat count, the key's own number where the
+    /// keyboard reported it, and the bits that say it is being let go (#59).
+    #[test]
+    fn a_key_reaches_the_window_as_windows_would_send_it() {
+        let mut state = State::new();
+        state.window_made = true;
+        // Space, and then Left, which the keyboard reports after its prefix.
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0x39,
+                down: true,
+            },
+            3,
+        );
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0xcb,
+                down: false,
+            },
+            4,
+        );
+
+        let sent: Vec<(u32, u32, u32)> = state
+            .messages
+            .iter()
+            .map(|m| (m.message, m.wparam, m.lparam))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (WM_KEYDOWN, 0x20, 0x0039_0001),
+                (WM_KEYUP, 0x25, 0xc14b_0001),
+            ]
+        );
+        // And DirectInput's own lane still has both, by the key's number.
+        assert_eq!(
+            state.keyboard_data.iter().copied().collect::<Vec<_>>(),
+            [(0x39, DOWN), (0xcb, 0)]
+        );
+    }
+
+    /// Every key this host can produce has a virtual key to be sent as, and
+    /// nothing else does (#59).
+    #[test]
+    fn every_key_the_host_can_send_has_a_virtual_key() {
+        for code in 0..=0xffu64 {
+            if let Some(key) = crate::host::mac::direct_input_key(code) {
+                assert!(
+                    virtual_key(key).is_some(),
+                    "key {key:#04x}, which mac key {code:#04x} is, has no virtual key"
+                );
+            }
+        }
+        assert_eq!(virtual_key(0x00), None, "and nothing is not a key");
+    }
+
+    /// A second click beside the first and soon after it is one double click,
+    /// for a window whose class asked for them (#59).
+    #[test]
+    fn two_quick_clicks_in_the_same_place_are_a_double_click() {
+        let click = |state: &mut State, at: u32| {
+            deliver(state, Input::Down, at);
+            deliver(state, Input::Up, at);
+        };
+        let messages =
+            |state: &State| -> Vec<u32> { state.messages.iter().map(|m| m.message).collect() };
+
+        let mut wants = State::new();
+        wants.window_made = true;
+        wants.double_clicks = true;
+        click(&mut wants, 1_000);
+        click(&mut wants, 1_100);
+        // A third click is a first one again, not a triple.
+        click(&mut wants, 1_200);
+        assert_eq!(
+            messages(&wants)[0..5],
+            [
+                WM_LBUTTONDOWN,
+                super::WM_LBUTTONUP,
+                WM_LBUTTONDBLCLK,
+                super::WM_LBUTTONUP,
+                WM_LBUTTONDOWN,
+            ]
+        );
+
+        // Too slow, and it is two clicks.
+        let mut slow = State::new();
+        slow.window_made = true;
+        slow.double_clicks = true;
+        click(&mut slow, 1_000);
+        click(&mut slow, 1_600);
+        assert_eq!(messages(&slow)[2], WM_LBUTTONDOWN);
+
+        // Too far, and it is two clicks.
+        let mut apart = State::new();
+        apart.window_made = true;
+        apart.double_clicks = true;
+        click(&mut apart, 1_000);
+        deliver(&mut apart, Input::Move { x: 400, y: 240 }, 1_050);
+        click(&mut apart, 1_100);
+        assert_eq!(
+            *messages(&apart).last().expect("a click was sent"),
+            super::WM_LBUTTONUP
+        );
+        assert!(
+            !messages(&apart).contains(&WM_LBUTTONDBLCLK),
+            "a click somewhere else is not a double click"
+        );
+
+        // A class that did not ask for double clicks is sent two clicks.
+        let mut plain = State::new();
+        plain.window_made = true;
+        click(&mut plain, 1_000);
+        click(&mut plain, 1_100);
+        assert!(!messages(&plain).contains(&WM_LBUTTONDBLCLK));
     }
 
     #[test]

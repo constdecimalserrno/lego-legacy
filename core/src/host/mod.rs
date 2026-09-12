@@ -146,6 +146,15 @@ pub trait Host {
     /// window has nothing to do here.
     fn show_pointer(&mut self, _show: bool) {}
 
+    /// Put the person's own pointer at a place on the guest's screen.
+    ///
+    /// What `SetCursorPos` does. A title that steers by how far the mouse
+    /// moved puts the pointer back where it measures from after every frame,
+    /// and the person's has to go with it or their hand runs out of window and
+    /// the title stops hearing them (#59). A host with no pointer of its own
+    /// has nothing to do.
+    fn put_pointer(&mut self, _x: i32, _y: i32) {}
+
     /// Whether the person has ended the run from outside it, by closing the
     /// window. A host with no window never has.
     fn closed(&self) -> bool {

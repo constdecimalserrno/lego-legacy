@@ -1471,6 +1471,14 @@ impl Machine {
             self.pointer_shown = shown;
             host.show_pointer(shown);
         }
+        // And where the title put it, while the title is the one drawing a
+        // pointer: everywhere else the pointer is the person's and moving it
+        // under their hand is not this machine's to do (#46, #59).
+        if let Some((x, y)) = self.state.pointer_put.take() {
+            if !shown {
+                host.put_pointer(x, y);
+            }
+        }
         self.mix(host);
         self.deliver_input(host, log);
         self.flips += 1;

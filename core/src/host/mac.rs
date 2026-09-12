@@ -155,6 +155,19 @@ pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i
     (gx as i32, gy as i32)
 }
 
+/// Where a point on the guest's screen is in the window's content: the
+/// inverse of [`guest_point`], landing on the middle of the guest's pixel.
+#[must_use]
+pub fn content_point(content: (f64, f64), frame: (u32, u32), gx: i32, gy: i32) -> (f64, f64) {
+    let (cw, ch) = content;
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let scale = (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE);
+    let (left, bottom) = ((cw - fw * scale) / 2.0, (ch - fh * scale) / 2.0);
+    let x = left + (f64::from(gx) + 0.5) * scale;
+    let y = ch - bottom - (f64::from(gy) + 0.5) * scale;
+    (x, y)
+}
+
 /// The DirectInput key number for a Mac key, by where the key sits on the
 /// keyboard rather than what it types; the keypad's operators by what they
 /// are, as a game binds them.
@@ -345,7 +358,11 @@ pub struct MacWindow {
     pointer_taken: bool,
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
+    cg_warp: unsafe extern "C" fn(Point) -> i32,
     cg_main_display: u32,
+    /// How tall the display Core Graphics measures from is, so that a point in
+    /// the window can be turned over into the space a warp is asked in.
+    cg_display_height: f64,
     /// How far behind the declared clock the host has fallen and will not
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
@@ -451,10 +468,14 @@ impl MacWindow {
                 rt.graphics("CGDisplayShowCursor")?;
             let main_display: unsafe extern "C" fn() -> u32 = rt.graphics("CGMainDisplayID")?;
             let cg_main_display = main_display();
+            let pixels_high: unsafe extern "C" fn(u32) -> usize =
+                rt.graphics("CGDisplayPixelsHigh")?;
             Ok(Self {
                 cg_associate,
                 cg_show_cursor,
+                cg_warp: rt.graphics("CGWarpMouseCursorPosition")?,
                 cg_main_display,
+                cg_display_height: pixels_high(cg_main_display) as f64,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
                 cg_provider_release: rt.graphics("CGDataProviderRelease")?,
@@ -785,6 +806,40 @@ impl Host for MacWindow {
         self.draw_pointer_where_it_belongs();
     }
 
+    fn put_pointer(&mut self, x: i32, y: i32) {
+        // Only while the pointer is ours to move: the person is over this
+        // window, this application is in front, and the title has taken the
+        // pointer to draw its own (#46).
+        if !self.pointer_taken {
+            return;
+        }
+        // Safety: AppKit's own accessors on this window and its content view,
+        // then Core Graphics' warp, which takes a point by value.
+        unsafe {
+            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+            let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
+            let (vx, vy) = content_point((frame.width, frame.height), self.frame_size, x, y);
+            let in_window = Point {
+                x: frame.x + vx,
+                y: frame.y + vy,
+            };
+            let convert: unsafe extern "C" fn(Id, Sel, Point) -> Point =
+                self.rt
+                    .send::<unsafe extern "C" fn(Id, Sel, Point) -> Point>();
+            let on_screen = convert(self.window, self.rt.sel("convertPointToScreen:"), in_window);
+            // Core Graphics measures down from the top of the display and
+            // AppKit up from the bottom of it.
+            (self.cg_warp)(Point {
+                x: on_screen.x,
+                y: self.cg_display_height - on_screen.y,
+            });
+            // A warp stops the pointer following the mouse for a quarter of a
+            // second unless it is put back together with it, and a title that
+            // warps every frame would never hear the person again.
+            (self.cg_associate)(true);
+        }
+    }
+
     fn closed(&self) -> bool {
         self.closed
     }
@@ -817,9 +872,29 @@ impl Host for MacWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, direct_input_modifier, guest_point, Rect, PRESENT_BITMAP_INFO};
+    use super::{
+        content_point, direct_input_key, direct_input_modifier, guest_point, Rect,
+        PRESENT_BITMAP_INFO,
+    };
     use crate::host::{sys, Input};
     use std::ffi::{c_char, c_void};
+
+    /// Putting the pointer where the guest says and reading it back finds the
+    /// same pixel, whatever the window has been stretched to (#59).
+    #[test]
+    fn a_pointer_put_on_a_guest_pixel_reads_back_as_that_pixel() {
+        let frame = (640, 480);
+        for content in [(640.0, 480.0), (1281.0, 963.0), (900.0, 480.0)] {
+            for point in [(0, 0), (319, 239), (639, 479), (12, 400)] {
+                let (x, y) = content_point(content, frame, point.0, point.1);
+                assert_eq!(
+                    guest_point(content, frame, x, y),
+                    point,
+                    "content {content:?}, point {point:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_presented_pixel_reaches_core_graphics_as_the_colour_it_is() {

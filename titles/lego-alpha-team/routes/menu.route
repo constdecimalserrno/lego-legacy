@@ -1,0 +1,23 @@
+#lego-legacy-route 1
+# LEGO Alpha Team, from its boot into its front end and through it with the
+# keyboard and the mouse.
+#
+# The attract screen waits for anything a person does, and Space is what this
+# gives it; the main menu is up by flip 480.
+#
+# The pointer on screen from there is the title's own, not the machine's.
+# DDMouse puts the pointer back in the middle of the window after every frame
+# and steers by how far it went since, a 1280th of the window per pixel, so a
+# move here says how far the hand moved rather than where it ended up, and the
+# title's pointer starts in the bottom left corner. Four moves of the same
+# amount walk it onto Single Missions: 4 x 160 px right is half the window
+# across, and 4 x 203 px up is 0.634 of it, which is the row the second item
+# is on. The click there opens the mission list.
+flip 160 key Space down
+flip 162 key Space up
+flip 600 move 480 37
+flip 602 move 480 37
+flip 604 move 480 37
+flip 606 move 480 37
+flip 620 down
+flip 622 up
