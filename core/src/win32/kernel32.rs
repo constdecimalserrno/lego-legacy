@@ -927,6 +927,13 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "SetThreadPriority",
+        args: 2,
+        convention: Convention::Stdcall,
+        run: set_thread_priority,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "ExitThread",
         args: 1,
         convention: Convention::Stdcall,
@@ -947,6 +954,18 @@ pub const SHIMS: &[Shim] = &[
         run: output_debug_string,
     },
 ];
+
+fn set_thread_priority(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // The declared machine's threads are cooperative (ADR-0005): one runs
+    // until it gives way, so what a title says it would rather have run first
+    // is nothing to honour. Saying so is the answer — a title that is refused
+    // here decides it is on a machine it cannot use.
+    ctx.log.line(&format!(
+        "thread {:#x} would rather run at priority {}",
+        args[0], args[1] as i32
+    ));
+    Ok(1)
+}
 
 fn get_version(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(ctx.title.declared.windows)
@@ -1889,13 +1908,19 @@ fn set_event(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Nothing else runs on this machine: no other thread holds a mutex, and
-    // no other process sets an event. A wait is over as soon as it is asked
-    // for. WAIT_OBJECT_0, and WAIT_FAILED for a handle nobody was given.
+    // Nothing else runs on this machine: no other process sets an event, and
+    // a mutex is only ever this machine's own threads, which take their turns
+    // rather than run at once (ADR-0005). So a wait is over as soon as it is
+    // asked for. WAIT_FAILED for a handle nobody was given.
     if ctx.state.object(args[0]).is_none() {
         ctx.state.last_error = 6;
         return Ok(0xffff_ffff);
     }
+    // A wait with a timeout on it is also how a thread paces a loop, and
+    // answering that at once turns the loop into a spin. Nothing on the
+    // roster has a second thread that does it — A3D's two do, which is part
+    // of why A3D is not run (#60) — so the timeout is not honoured here and
+    // the wait is over as soon as it is asked for.
     Ok(0)
 }
 
@@ -2259,6 +2284,54 @@ fn get_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// The handler this machine puts on the chain while it is running one of the
+/// guest's: `mov eax, 1` — ExceptionContinueSearch — and back.
+///
+/// Windows' `RtlpExceptionHandler` answers the same while it is being unwound
+/// past, which is the case every C++ catch here goes through.
+///
+// ponytail: Windows answers ExceptionNestedException instead when an
+// exception is raised *inside* a handler, which stops the outer dispatcher
+// resuming into a frame that is already going away. This keeps searching
+// outward instead, which finds a catch rather than a wall; write the real
+// answer if a title is ever seen to throw from inside a handler.
+const KEEP_LOOKING: [u8; 6] = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+
+/// The bytes that call one frame's handler the way Windows' own dispatcher
+/// calls it: `handler(record, frame, context, dispatcher)`, cdecl.
+///
+/// `RtlpExecuteHandler` puts a registration record of its own on the stack and
+/// points `fs:[0]` at it before calling a handler, and puts the chain back
+/// afterwards. That matters because a handler may save `fs:[0]`, unwind, and
+/// then relink what it saved — which is exactly what MSVC's
+/// `_UnwindNestedFrames` does around its own `RtlUnwind`. With the frame's own
+/// record still at the head, that save and restore writes the record's `next`
+/// field with the record's own address, the chain becomes a one-element loop,
+/// and the next throw lands on stack it has already given away (#60).
+///
+/// Where [`KEEP_LOOKING`] will be is not known until the program has been
+/// written somewhere, so each place its address goes is noted in `holes`.
+fn call_handler(code: &mut Vec<u8>, holes: &mut Vec<usize>, handler: u32, args: [u32; 4]) {
+    code.extend_from_slice(&[0x64, 0xa1, 0, 0, 0, 0]); // mov eax, fs:[0]
+    code.push(0x68); // push <this machine's own handler>
+    holes.push(code.len());
+    code.extend_from_slice(&[0; 4]);
+    code.push(0x50); // push eax: the chain as it was
+    code.extend_from_slice(&[0x64, 0x89, 0x25, 0, 0, 0, 0]); // mov fs:[0], esp
+                                                             // Last argument first, as cdecl puts them on the stack.
+    for value in args.iter().rev() {
+        code.push(0x68);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    code.push(0xb8);
+    code.extend_from_slice(&handler.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]); // call eax
+    code.extend_from_slice(&[0x83, 0xc4, 0x10]); // add esp, 16: it is cdecl
+    code.push(0x59); // pop ecx: the chain as it was
+    code.extend_from_slice(&[0x64, 0x89, 0x0d, 0, 0, 0, 0]); // mov fs:[0], ecx
+    code.extend_from_slice(&[0x83, 0xc4, 0x04]); // and this record is gone
+}
+
 /// Raise an exception and offer it to the guest's own handlers (#54).
 ///
 /// The chain is the guest's, at `fs:[0]`, and the handlers on it are guest
@@ -2334,17 +2407,18 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The program: each handler in turn, stopping at the first that does not
     // say to keep looking. ExceptionContinueSearch is one; anything else has
     // taken it, and a handler that goes to a catch never comes back at all.
-    let mut code_bytes: Vec<u8> = Vec::new();
+    // The program the machine's own handler sits at the front of, so that its
+    // address is the program's own.
+    let mut code_bytes: Vec<u8> = KEEP_LOOKING.to_vec();
     let mut holes = Vec::new();
+    let mut mine = Vec::new();
     for (frame, handler) in &frames {
-        for value in [0u32, context, *frame, record] {
-            code_bytes.push(0x68);
-            code_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        code_bytes.push(0xb8);
-        code_bytes.extend_from_slice(&handler.to_le_bytes());
-        code_bytes.extend_from_slice(&[0xff, 0xd0]); // call eax
-        code_bytes.extend_from_slice(&[0x83, 0xc4, 0x10]); // add esp, 16
+        call_handler(
+            &mut code_bytes,
+            &mut mine,
+            *handler,
+            [record, *frame, context, 0],
+        );
         code_bytes.extend_from_slice(&[0x83, 0xf8, 0x01]); // cmp eax, 1
         code_bytes.extend_from_slice(&[0x0f, 0x85]); // jne <done>
         holes.push(code_bytes.len());
@@ -2366,8 +2440,11 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .state
         .heap
         .alloc(u32::try_from(code_bytes.len()).unwrap_or(0));
+    for hole in mine {
+        code_bytes[hole..hole + 4].copy_from_slice(&at.to_le_bytes());
+    }
     ctx.mem.write(at, &code_bytes).map_err(Stop::Fault)?;
-    ctx.call_guest = Some((at, Vec::new()));
+    ctx.call_guest = Some((at + KEEP_LOOKING.len() as u32, Vec::new()));
     Ok(0)
 }
 
@@ -2439,21 +2516,18 @@ fn rtl_unwind(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(0);
     }
 
-    let mut code: Vec<u8> = Vec::new();
+    let mut code: Vec<u8> = KEEP_LOOKING.to_vec();
+    let mut mine = Vec::new();
     for (frame, handler) in &frames {
-        for value in [0u32, 0, *frame, record] {
-            code.push(0x68);
-            code.extend_from_slice(&value.to_le_bytes());
-        }
-        code.push(0xb8);
-        code.extend_from_slice(&handler.to_le_bytes());
-        code.extend_from_slice(&[0xff, 0xd0]); // call eax
-        code.extend_from_slice(&[0x83, 0xc4, 0x10]); // add esp, 16: it is cdecl
+        call_handler(&mut code, &mut mine, *handler, [record, *frame, 0, 0]);
     }
     code.push(0xc3);
     let at = ctx.state.heap.alloc(u32::try_from(code.len()).unwrap_or(0));
+    for hole in mine {
+        code[hole..hole + 4].copy_from_slice(&at.to_le_bytes());
+    }
     ctx.mem.write(at, &code).map_err(Stop::Fault)?;
-    ctx.call_guest = Some((at, Vec::new()));
+    ctx.call_guest = Some((at + KEEP_LOOKING.len() as u32, Vec::new()));
     Ok(0)
 }
 

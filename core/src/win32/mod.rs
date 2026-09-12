@@ -76,6 +76,9 @@ pub enum Object {
     },
     /// Something named that only has to be distinct: an event, a mutex.
     Named { kind: &'static str, name: String },
+    /// A hook a title asked to put on the window system, by which hook it is.
+    /// Nothing on this machine calls one (#60).
+    Hook(u32),
     /// An enumeration of the declared tree the guest is walking: what matched,
     /// and how far through it the guest has read.
     Find {

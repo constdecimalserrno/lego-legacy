@@ -66,7 +66,7 @@ fn task_mem_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 ///
 /// A declared value: the machine does not go looking through a registry it
 /// does not have. Alpha Team's sound system asks for A3D by this identifier
-/// and `a3dapi.dll` is what answers it.
+/// and `a3dapi.dll`, in its own cabinet, is what answers it (#60).
 /// Empty, and deliberately: see the note on A3D below (#60).
 const SERVERS: &[(&str, &str)] = &[];
 
@@ -241,14 +241,16 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Classes the declared machine does not have.
     //
     // A3D is one of them, for now. `a3dapi.dll` is in this title's own
-    // cabinet and running it is what ADR-0002 allows and #60 asked to try
-    // first: it loads, attaches, makes DirectSound through the factory below
-    // and gets as far as throwing a C++ exception — at which point the
-    // guest's own handler chain turns out to be stale, and the throw goes to
-    // an address that is not code. That is a bug in this machine and it is
-    // named in #60; until it is found, the declared machine says it has no
-    // A3D, which is what a PC without it says and what this title's sound
-    // system is written to hear.
+    // cabinet, and running it is what ADR-0002 allows and #60 asked to try
+    // first. It now loads, attaches, makes its DirectSound, sets a primary
+    // format and starts two sound threads of its own — and there the machine
+    // stops: its threads wait on events with a timeout this machine answers
+    // at once, and the title's own thread ends up parked on a boundary call
+    // it never comes back from. What it needs is an event that keeps whether
+    // it has been signalled, and a wait that honours its timeout, neither of
+    // which the declared machine has yet. Until then it says it has no A3D,
+    // which is what a PC without it says and what this title's sound system
+    // is written to hear. #60 carries the measurements.
     //
     // The second one is another DirectSound class A3D asks for before
     // settling for the one it made.

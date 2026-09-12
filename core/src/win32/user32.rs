@@ -159,6 +159,27 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
+        name: "SetWindowsHookExA",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: set_windows_hook,
+    },
+    Shim {
+        dll: "USER32",
+        name: "UnhookWindowsHookEx",
+        args: 1,
+        convention: Convention::Stdcall,
+        run: succeed,
+    },
+    Shim {
+        dll: "USER32",
+        name: "CallNextHookEx",
+        args: 4,
+        convention: Convention::Stdcall,
+        run: succeed_zero,
+    },
+    Shim {
+        dll: "USER32",
         name: "SetCursor",
         args: 1,
         convention: Convention::Stdcall,
@@ -1086,6 +1107,24 @@ fn show_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.log
         .at(crate::cli::Trace::Shims, || format!("cursor count {count}"));
     Ok(count as u32)
+}
+
+fn set_windows_hook(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetWindowsHookExA(which, procedure, module, thread).
+    //
+    // A hook watches what the window system does on the way to a window. On
+    // the declared machine the window system is this machine: one window, made
+    // once, in front from the moment it exists, and every message delivered
+    // straight to the procedure the title registered. There is nothing on the
+    // way for a hook to sit in, so the handle answered here is one that is
+    // never called. A3D asks for a `WH_CBT` hook of its own thread to hear
+    // about windows being activated, which on this machine happens once,
+    // before A3D is loaded (#60).
+    let (which, procedure) = (args[0], args[1]);
+    ctx.log.line(&format!(
+        "hook {which} at {procedure:#010x}, which nothing on this machine calls"
+    ));
+    Ok(ctx.state.give(Object::Hook(which)))
 }
 
 fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
