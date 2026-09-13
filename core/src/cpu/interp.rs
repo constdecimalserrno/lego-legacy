@@ -10,6 +10,23 @@ use super::{exec, Cpu, CpuEngine, Mode, Stop, CS};
 use crate::guest::{Arena, GuestMem};
 
 /// A decode-cached interpreter.
+///
+/// **Runs are not linked to one another, and that was measured (#71).** A
+/// taken branch leaves the loop and comes back through [`Interp::run_at`], and
+/// recording a direct branch's target run so the loop steps straight to it
+/// would save exactly that lookup. Measured by making the loop pay for the
+/// lookup twice — the same run, the same results — over Alpha Team's menu
+/// route: 42.8 s against 44.2 s, so **the whole lookup is 3.3% of the run**.
+/// Linking only removes it for direct transfers whose target is already
+/// decoded: `ret` and every indirect jump and call still look up, and those
+/// are about six instructions in every hundred against nine or ten direct
+/// ones. So the realistic saving is nearer 2%.
+///
+/// Against that, a link must never reach a run a write has killed, and Alpha
+/// Team — the title this is for — writes over its own code pages thousands of
+/// times a second. Two percent is not worth a new way for that to go wrong.
+/// The burst boundary and the `outside` check stay whatever happens; they are
+/// most of what the loop costs, and a link does not remove them.
 pub struct Interp {
     mode: Mode,
     /// Decoded instructions, in runs of straight-line code: each run is the
