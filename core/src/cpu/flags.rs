@@ -4,6 +4,32 @@
 //! flag, and carries every other bit of `EFLAGS` untouched. Carrying them is
 //! what makes a round trip exact: a guest that pushes its flags, changes one,
 //! and pops them back must get its own bits returned, not ours.
+//!
+//! **They are computed eagerly, and that was measured rather than assumed
+//! (#69).** Computing a flag only when something reads it is the well-known
+//! way round this, and the question is what it is worth here. Measured by
+//! building the engine so that it pays for every flag twice — the same run,
+//! the same results, the extra wall time being exactly what one flag
+//! computation costs — over Alpha Team's menu route, launch to flip 2247:
+//!
+//! | | wall, median of three | instructions a second |
+//! |---|---|---|
+//! | as it is | 47.8 s | 106 M |
+//! | paying twice for all six | 50.2 s | 101 M |
+//! | paying twice for parity and auxiliary alone | 48.5 s | 104 M |
+//!
+//! So **every flag on every arithmetic instruction costs about 5% of the
+//! run**, and parity and auxiliary — the two almost nothing ever reads — are
+//! about 2.3% of it. That 5% is the whole ceiling for a lazy scheme, and a
+//! lazy scheme does not reach it: it has to store the kind, the width and the
+//! operands on every flag-writing instruction, and compute on demand for the
+//! ones that are read. Against that, 74 places outside this file touch
+//! `flags` — `adc`, `sbb`, `inc`, `dec`, every shift and rotate, `bt`, the
+//! decimal adjusts, x87's `fnstsw` — and each has to compose correctly with
+//! whatever was left lazy before it.
+//!
+//! #65 needs two and a half times, not five percent. The time at that menu is
+//! not here.
 
 use super::insn::Width;
 
