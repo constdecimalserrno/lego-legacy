@@ -308,6 +308,15 @@ impl Machine {
         // A call that lands on the boundary is a call into something Microsoft
         // wrote. Either it is implemented here, or the run stops and names
         // what was asked for, who asked, and where.
+        // A crossing costs about thirty nanoseconds of machinery, measured
+        // (#74): at Alpha Team's menu the guest crosses 3,951 times a flip
+        // and the whole of it is 6.9 ms, of which 6.6 ms is one method —
+        // `IDirect3DDevice7::DrawIndexedPrimitiveVB` rasterising, 171 calls a
+        // flip at 38.7 us each. The 3,182 `EnterCriticalSection` and
+        // `LeaveCriticalSection` calls a flip that ticket was written about
+        // come to 0.10 ms a flip against a 36 ms frame, under a third of one
+        // percent, and that figure still carries the two `Instant::now()`
+        // calls that measured it. There is nothing here to make faster.
         if self.boundary.holds(self.cpu.eip) {
             return match self.cross(log) {
                 Ok(()) => None,
