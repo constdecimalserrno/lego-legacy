@@ -191,6 +191,26 @@ pub fn steered(
     )
 }
 
+/// Where the pointer starts again from when the title puts it somewhere.
+///
+/// The whole pixel is the title's: it has just said that is where the pointer
+/// is, and the guest's own pointer is there. The fraction is the person's —
+/// how far into the next pixel their hand had got and has not been told about
+/// yet — so it carries over (#64).
+///
+/// It matters here more than it looks. Alpha Team puts the pointer back in
+/// the middle of the window **every flip** and steers by how far it went
+/// since, so a reset that dropped the fraction dropped up to a whole pixel of
+/// movement twenty-five times a second: a hand moving less than a pixel a
+/// flip moved the pointer not at all, and a faster one lost a quarter of
+/// itself, differently in each direction. A person playing it said the
+/// pointer "never really lines up".
+#[must_use]
+pub fn put_back(steer: (f64, f64), to: (i32, i32)) -> (f64, f64) {
+    let keep = |had: f64, whole: i32| f64::from(whole) + (had - had.floor());
+    (keep(steer.0, to.0), keep(steer.1, to.1))
+}
+
 /// Where a point on the guest's screen is in the window's content: the
 /// inverse of [`guest_point`], landing on the middle of the guest's pixel.
 #[must_use]
@@ -905,7 +925,7 @@ impl Host for MacWindow {
         // all `SetCursorPos` needs on this machine: the person's own pointer
         // is never moved under their hand (#46), and while it is taken it does
         // not move at all.
-        self.steer = (f64::from(x), f64::from(y));
+        self.steer = put_back(self.steer, (x, y));
         self.told = (x, y);
     }
 
@@ -960,8 +980,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, direct_input_key, direct_input_modifier, guest_point, steered, Rect,
-        PRESENT_BITMAP_INFO,
+        content_point, direct_input_key, direct_input_modifier, guest_point, put_back, steered,
+        Rect, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
     use std::ffi::{c_char, c_void};
@@ -1013,6 +1033,37 @@ mod tests {
             steered((5.0, 5.0), (-500.0, -500.0), same, frame),
             (0.0, 0.0)
         );
+    }
+
+    /// The loop this title actually runs: put the pointer back in the middle,
+    /// move the mouse, read where it got to, put it back again (#64).
+    #[test]
+    fn the_fraction_of_a_pixel_survives_the_title_putting_the_pointer_back() {
+        let (frame, same) = ((640, 480), (640.0, 480.0));
+        // A hand moving half a pixel a flip has moved five pixels in ten, and
+        // the guest has to be told all five.
+        let mut steer = (320.0, 240.0);
+        let mut delivered = 0;
+        for _ in 0..10 {
+            steer = steered(steer, (0.5, 0.0), same, frame);
+            // The guest is told the whole pixel the pointer reached, and the
+            // title puts it back in the middle straight after, so the next
+            // flip measures from the middle again.
+            delivered += steer.0 as i32 - 320;
+            steer = put_back(steer, (320, 240));
+        }
+        assert_eq!(delivered, 5, "half a pixel a flip is five pixels in ten");
+
+        // Dropping the fraction instead — which is what this did — delivers
+        // nothing at all, because the pointer never reaches the next pixel.
+        let mut steer = (320.0, 240.0);
+        let mut dropped = 0;
+        for _ in 0..10 {
+            steer = steered(steer, (0.5, 0.0), same, frame);
+            dropped += steer.0 as i32 - 320;
+            steer = (320.0, 240.0);
+        }
+        assert_eq!(dropped, 0, "and this is the pointer that never lined up");
     }
 
     #[test]
