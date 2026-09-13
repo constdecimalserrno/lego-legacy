@@ -100,6 +100,10 @@ impl Shared {
 struct Waiting {
     samples: VecDeque<i16>,
     playing: bool,
+    /// How many times the device has asked for a frame and found nothing
+    /// waiting, having been playing. Each one is a gap a person hears, and
+    /// counting them is how a run says whether the mix is keeping up (#75).
+    underruns: u64,
 }
 
 /// The Mac's default output, playing the mix.
@@ -201,6 +205,16 @@ impl MacAudio {
         let shared = unsafe { &*self.shared };
         add_waiting(&mut shared.waiting(), samples);
     }
+
+    /// How many times the device has run dry mid-sound. Zero is a mix that
+    /// kept up (#75).
+    #[must_use]
+    pub fn underruns(&self) -> u64 {
+        // Safety: the shared state lives as long as `self`.
+        let shared = unsafe { &*self.shared };
+        let underruns = shared.waiting().underruns;
+        underruns
+    }
 }
 
 impl Drop for MacAudio {
@@ -266,6 +280,9 @@ fn fill_frames(waiting: &mut Waiting, bytes: &mut [u8]) {
                 (left, right)
             }
             _ => {
+                if waiting.playing {
+                    waiting.underruns += 1;
+                }
                 waiting.playing = false;
                 (0, 0)
             }
@@ -278,6 +295,63 @@ fn fill_frames(waiting: &mut Waiting, bytes: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::{add_waiting, fill_frames, MacAudio, Waiting, ENOUGH_TO_PLAY, MOST_WAITING};
+    use crate::host::stretch::Stretch;
+    use crate::sound::{BLOCK_FRAMES, RATE};
+
+    /// The device against the mix, with no device: one wall minute of a host
+    /// holding `pace`, the mix handing over blocks on the declared clock and
+    /// the queue pulling buffers in real time. Answers how many times the
+    /// device ran dry (#75).
+    fn a_minute_at(pace: f64, stretching: bool) -> u64 {
+        let mut waiting = Waiting::default();
+        let mut stretch = Stretch::default();
+        let mut bytes = vec![0u8; super::BUFFER_FRAMES as usize * 4];
+        // The device pulls one buffer at a time; a wall minute is this many.
+        let pulls = 60 * RATE as usize / super::BUFFER_FRAMES as usize;
+        // Declared frames owed per device buffer pulled, at this pace.
+        let per_pull = f64::from(super::BUFFER_FRAMES) * pace;
+        let mut owed = 0.0;
+        let block: Vec<i16> = (0..BLOCK_FRAMES as i16 * 2).map(|i| i % 1000).collect();
+        for _ in 0..pulls {
+            owed += per_pull;
+            while owed >= BLOCK_FRAMES as f64 {
+                owed -= BLOCK_FRAMES as f64;
+                let handed = if stretching {
+                    stretch.block(&block, pace)
+                } else {
+                    block.clone()
+                };
+                add_waiting(&mut waiting, &handed);
+            }
+            fill_frames(&mut waiting, &mut bytes);
+        }
+        waiting.underruns
+    }
+
+    /// A host that cannot keep pace starves the device, and stretching the
+    /// mix by the same ratio stops it (#75).
+    #[test]
+    fn a_slow_host_stops_starving_the_device_once_the_mix_is_stretched() {
+        for pace in [0.45, 0.6, 0.8] {
+            let torn = a_minute_at(pace, false);
+            let stretched = a_minute_at(pace, true);
+            assert!(
+                torn > 50,
+                "pace {pace}: the device should be starving today, and ran dry {torn} times"
+            );
+            assert_eq!(
+                stretched, 0,
+                "pace {pace}: a stretched mix never leaves the device short"
+            );
+        }
+    }
+
+    /// And a host that does keep pace is handed exactly what it is today.
+    #[test]
+    fn a_host_at_full_pace_is_unchanged() {
+        assert_eq!(a_minute_at(1.0, false), a_minute_at(1.0, true));
+        assert_eq!(a_minute_at(1.0, true), 0);
+    }
 
     #[test]
     fn the_device_waits_for_enough_to_play_and_again_after_running_dry() {
@@ -299,10 +373,11 @@ mod tests {
             [1, 0, 0xff, 0xff, 2, 0, 0xfe, 0xff],
             "whole frames, in order"
         );
-        // Played dry, it falls silent and waits again.
+        // Played dry, it falls silent and waits again, and says it ran dry.
         let mut rest = vec![0u8; ENOUGH_TO_PLAY * 2 + 8];
         fill_frames(&mut waiting, &mut rest);
         assert!(!waiting.playing);
+        assert_eq!(waiting.underruns, 1, "running dry is counted once");
         add_waiting(&mut waiting, &[5, 5]);
         fill_frames(&mut waiting, &mut bytes);
         assert_eq!(bytes, [0; 8], "a dry device waits for enough again");

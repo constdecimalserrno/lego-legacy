@@ -72,6 +72,9 @@ pub struct Machine {
     surface: Option<Surface>,
     stub: bool,
     flips: u64,
+    /// The pace the host last said it was holding, so a change is said once
+    /// rather than every flip (#75).
+    paced: f64,
     /// What the title's imports were bound to.
     pub boundary: Boundary,
     /// The image this machine is running, once one is loaded.
@@ -137,6 +140,7 @@ impl Machine {
             surface: None,
             stub: false,
             flips: 0,
+            paced: 1.0,
             boundary: Boundary::new(),
             image: None,
             modules: crate::loader::Modules::new(),
@@ -238,7 +242,13 @@ impl Machine {
             self.flips,
             self.clock.cursor()
         ));
-        host.pace(self.clock.nanos());
+        // What pace the host settled on, said out loud when it changes: a
+        // run in slow motion says so rather than looking broken (#75).
+        let pace = host.pace(self.clock.nanos());
+        if (pace - self.paced).abs() >= 0.05 {
+            self.paced = pace;
+            log.line(&format!("pace {pace:.2}x"));
+        }
 
         self.deliver_input(host, log);
         self.flips += 1;

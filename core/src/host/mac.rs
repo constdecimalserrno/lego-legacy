@@ -137,6 +137,11 @@ impl Runtime {
 /// as alpha: `kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst`.
 const PRESENT_BITMAP_INFO: u32 = (2 << 12) | 6;
 
+/// How much wall time the pace is worked out over: long enough that one slow
+/// flip is not a pace change, short enough that the mix follows the picture
+/// (#75). Half a second is about fifteen flips on a host that is struggling.
+const PACE_NANOS: u64 = 500_000_000;
+
 /// Where a point in the window's content is on the guest's screen.
 ///
 /// The window shows the guest's frame scaled to fit and centred, its aspect
@@ -402,6 +407,13 @@ pub struct MacWindow {
     /// make up: a run the host could not keep pace with carries on in real
     /// time from where it got to, rather than racing to catch up.
     lag_nanos: u64,
+    /// Where the wall and the declared clock were when the pace was last
+    /// worked out, and the pace it came to: declared seconds a wall second
+    /// (#75).
+    paced_from: (u64, u64),
+    pace: f64,
+    /// Carries the mix's own tail from one stretched block to the next.
+    stretch: crate::host::stretch::Stretch,
     /// The size of the last frame presented, which the window scales.
     frame_size: (u32, u32),
     colour_space: *mut c_void,
@@ -527,6 +539,9 @@ impl MacWindow {
                 steer: (f64::from(width) / 2.0, f64::from(height) / 2.0),
                 told: (i32::MAX, i32::MAX),
                 lag_nanos: 0,
+                paced_from: (0, 0),
+                pace: 1.0,
+                stretch: crate::host::stretch::Stretch::default(),
                 frame_size: (width, height),
             })
         }
@@ -869,8 +884,13 @@ impl Host for MacWindow {
     }
 
     fn audio(&mut self, samples: &[i16]) {
+        // The mix is made on the declared clock and the device eats it in
+        // real time, so a host running slower than real time has to stretch
+        // it or the device runs dry between blocks (#75). At a pace of 1.0
+        // this hands the device the block byte for byte.
+        let stretched = self.stretch.block(samples, self.pace);
         if let Some(device) = &self.audio {
-            device.play(samples);
+            device.play(&stretched);
         }
     }
 
@@ -907,7 +927,7 @@ impl Host for MacWindow {
         sys::Library::open(name)
     }
 
-    fn pace(&mut self, declared_nanos: u64) {
+    fn pace(&mut self, declared_nanos: u64) -> f64 {
         // A game-second takes a wall-second (ADR-0003): if the machine is
         // ahead of its own clock, it waits.
         let wall = self.wall_nanos();
@@ -916,6 +936,24 @@ impl Host for MacWindow {
         if due > wall {
             std::thread::sleep(std::time::Duration::from_nanos(due - wall));
         }
+        // How much declared time the last window of wall time was worth. Over
+        // a window rather than a flip, because one flip's worth is noise, and
+        // the mix is stretched by this (#75).
+        let now = self.wall_nanos();
+        let (was_wall, was_declared) = self.paced_from;
+        let (gone, made) = (
+            now.saturating_sub(was_wall),
+            declared_nanos.saturating_sub(was_declared),
+        );
+        if gone >= PACE_NANOS {
+            self.pace = if gone == 0 {
+                1.0
+            } else {
+                (made as f64 / gone as f64).clamp(0.0, 1.0)
+            };
+            self.paced_from = (now, declared_nanos);
+        }
+        self.pace
     }
 }
 

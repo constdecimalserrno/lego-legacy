@@ -10,6 +10,7 @@ pub mod headless;
 pub mod mac;
 #[cfg(target_os = "macos")]
 pub mod mac_audio;
+pub mod stretch;
 pub mod sys;
 
 use std::fmt;
@@ -162,6 +163,13 @@ pub trait Host {
     }
 
     /// Hold presentation back so that a game-second takes a wall-second
-    /// (ADR-0003). A headless host does nothing here and runs uncapped.
-    fn pace(&mut self, _declared_nanos: u64) {}
+    /// (ADR-0003), and answer with the pace the host settled on: declared
+    /// seconds a wall second, 1.0 being real time.
+    ///
+    /// A host that cannot keep up with a title answers below 1.0, which is
+    /// what lets the mix be stretched to match rather than torn (#75). A
+    /// headless host does nothing here, runs uncapped, and has no pace.
+    fn pace(&mut self, _declared_nanos: u64) -> f64 {
+        1.0
+    }
 }
