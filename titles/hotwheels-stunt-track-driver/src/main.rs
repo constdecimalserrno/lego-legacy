@@ -60,8 +60,11 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     // `SOFTWARE\MATTEL\STUNT TRACK DRIVER\1.0`, so it has to be the same on
     // every run and on every host.
     install_dir: "C:\\Program Files\\Mattel\\Stunt Track Driver",
-    // This title plays no movie at all (#68), so there is nothing here to
-    // translate a click into.
+    // This title plays no movie at all, so there is nothing here for a click
+    // to be translated inside of (#68). What gets past its splashes is Space,
+    // measured — Escape quits the game outright and a click does nothing —
+    // but its splashes and its menu are the same thing at the boundary, so
+    // there is no window to scope a translation to and it is not made.
     click_in_a_movie: None,
 };
 

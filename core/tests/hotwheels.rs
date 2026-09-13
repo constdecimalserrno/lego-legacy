@@ -208,6 +208,37 @@ fn the_boot_replays_to_the_same_machine_every_time() {
     );
 }
 
+/// Escape is this title's quit, not its skip (#68).
+///
+/// Measured while answering whether a click should get past the splashes:
+/// Space skips them and Escape ends the game outright. Anyone tempted to
+/// translate a click into Escape here — which is what the sibling title takes
+/// (#66) — would be handing a player a quit for a click, so this holds the
+/// measurement down.
+#[test]
+fn escape_is_this_titles_quit() {
+    if !scratch() {
+        return;
+    }
+    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hot-wheels-escape.route");
+    std::fs::write(
+        &route,
+        "#lego-legacy-route 1\nflip 150 key Escape down\nflip 155 key Escape up\n",
+    )
+    .expect("the route writes");
+    let cli = Cli {
+        route: Some(route),
+        ..Cli::default()
+    };
+    let ran = testkit::run_headless(&HOT_WHEELS, &cli, FIRST_LIGHT_BUDGET);
+    ran.assert_exited(1);
+    assert!(
+        ran.finish.flips < 200,
+        "the title quits on Escape, at flip {} here",
+        ran.finish.flips
+    );
+}
+
 /// The flip the starting line is on the screen at, its lights still red.
 const RACE_STARTS: u64 = 7200;
 
