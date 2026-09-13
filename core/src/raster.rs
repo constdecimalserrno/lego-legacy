@@ -468,6 +468,21 @@ impl Default for States {
 /// is interpolated steps along the row: depth, the reciprocal of distance,
 /// and the colours and texture coordinates weighted by it, so that they are
 /// straight in the scene rather than on the screen.
+///
+/// **#73 asked for that shape and this already had it**, and the measurements
+/// say the rest is not worth changing. The three edge functions are evaluated
+/// only at the three pixels either end of a span, not per pixel; the
+/// texture's channels are worked out once per draw, and a sixteen-bit
+/// bilinear sample has a path of its own. What is left per pixel is the
+/// perspective divide, the attribute stepping, the texel fetch and the blend.
+///
+/// Measured over Alpha Team's menu, an eight-second `sample`, main thread:
+/// this function and everything inlined into it is **10.4%**, `texel_at`
+/// another **1.6%**, and the banded path 4.9% on top. Of that, the attribute
+/// stepping — the one thing left that a different shape could remove — is
+/// **1.8% of the whole run**, measured by making the loop step twice. A
+/// rewrite that has to leave every golden hash unchanged is not worth two
+/// percent.
 pub fn triangle(
     target: &mut Target<'_>,
     v: [Vertex; 3],
