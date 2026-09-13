@@ -432,14 +432,14 @@ pub const SHIMS: &[Shim] = &[
         name: "GetKeyState",
         args: 1,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: key_state,
     },
     Shim {
         dll: "USER32",
         name: "GetAsyncKeyState",
         args: 1,
         convention: Convention::Stdcall,
-        run: succeed_zero,
+        run: key_state,
     },
     Shim {
         dll: "USER32",
@@ -694,6 +694,43 @@ fn succeed_zero(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
 }
 
+/// Whether a key or a mouse button is down right now, as `GetKeyState` and
+/// `GetAsyncKeyState` answer it: a `SHORT` with its top bit set while it is.
+///
+/// Both of these answered zero for every key, which is the machine telling
+/// the guest that nobody is holding anything down (#61). Alpha Team's front
+/// end never noticed, because it takes its clicks as window messages; its
+/// missions ask here, so every click in a mission went nowhere while the
+/// pointer over the same pixel picked correctly.
+///
+/// The low bit these two carry — the toggle state for `GetKeyState`, pressed
+/// since the last call for `GetAsyncKeyState` — is not answered: nothing on
+/// the roster has been seen to read it, and guessing at it would be a
+/// declared value nobody measured.
+fn key_state(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(key_state_of(ctx.state, args[0] & 0xff))
+}
+
+fn key_state_of(state: &super::State, key: u32) -> u32 {
+    /// A `SHORT` with its top bit set, which is how Windows says "held".
+    const HELD: u32 = 0x8000;
+    let down = match key {
+        // The declared machine's pointer has one button (#59), so the right
+        // and middle ones are never down.
+        VK_LBUTTON => state.mouse_down,
+        VK_RBUTTON | VK_MBUTTON => false,
+        _ => state
+            .keys_down
+            .iter()
+            .any(|code| virtual_key(*code) == Some(key)),
+    };
+    if down {
+        HELD
+    } else {
+        0
+    }
+}
+
 fn register_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // WNDCLASSA: the window procedure is its second field, and the machine
     // keeps it because a message it delivers has to reach the guest's own code.
@@ -897,6 +934,11 @@ fn virtual_key(code: u32) -> Option<u32> {
 /// What a person did, as the declared machine's devices and its message queue
 /// see it: the pointer, the button and the keys change, and the title's window
 /// is sent what Windows would send it.
+/// The pointer's buttons, as Windows numbers virtual keys.
+const VK_LBUTTON: u32 = 0x01;
+const VK_RBUTTON: u32 = 0x02;
+const VK_MBUTTON: u32 = 0x04;
+
 pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
     use crate::host::Input;
     match event {
@@ -1456,6 +1498,45 @@ mod tests {
     };
     use crate::host::Input;
     use crate::win32::State;
+
+    /// `GetKeyState` and `GetAsyncKeyState` answered zero for everything,
+    /// which told every title that nobody was holding anything down (#61).
+    #[test]
+    fn what_is_held_down_is_what_the_key_state_answers() {
+        let mut state = State::new();
+        state.window_made = true;
+        let held = |state: &mut State, key: u32| super::key_state_of(state, key) & 0x8000 != 0;
+        assert!(!held(&mut state, super::VK_LBUTTON), "nothing is held yet");
+        deliver(&mut state, Input::Down, 0);
+        assert!(held(&mut state, super::VK_LBUTTON), "the button is down");
+        assert!(
+            !held(&mut state, super::VK_RBUTTON),
+            "this machine's pointer has one button"
+        );
+        deliver(&mut state, Input::Up, 4);
+        assert!(!held(&mut state, super::VK_LBUTTON), "and up again");
+
+        // A key, by the virtual key Windows numbers it: Escape is 0x1b.
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0x01,
+                down: true,
+            },
+            8,
+        );
+        assert!(held(&mut state, 0x1b), "Escape is down");
+        assert!(!held(&mut state, 0x20), "and Space is not");
+        deliver(
+            &mut state,
+            Input::Key {
+                code: 0x01,
+                down: false,
+            },
+            12,
+        );
+        assert!(!held(&mut state, 0x1b), "Escape is up");
+    }
 
     #[test]
     fn a_window_made_here_is_the_active_application() {
