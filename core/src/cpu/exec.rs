@@ -223,6 +223,127 @@ fn branch(cpu: &mut Cpu, target: u32, w: Width) {
 /// # Errors
 /// When the instruction stops the run: an interrupt, or an address outside the
 /// arena.
+/// The handful of instruction shapes that are most of every run, named once
+/// at decode time so that running one reads no description (#70).
+///
+/// Measured over Alpha Team's menu route: 324 distinct `(kind, operand
+/// shapes, width)` triples are executed in four hundred million instructions,
+/// and these five are **46%** of them — `mov r32, [mem]` alone is 16.6% and
+/// `push r32` 12.3%. Running one through [`execute`] costs a match on the
+/// kind, a match on each operand's shape, a match on the width inside
+/// `read_reg`/`write_reg`, and a match on the width again inside the memory
+/// access. A shape named here does none of them, and that is worth **11%** of
+/// the whole run: 106 to 118 million instructions a second, same cursor, same
+/// flips.
+///
+/// Naming more shapes was measured and is not worth it: the next seven, a
+/// further 23% of instructions, gave 117 — the wider dispatch costs what the
+/// narrower bodies save. The list stops where it stops paying.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fast {
+    /// Anything not named here, which [`execute`] runs as it always has.
+    #[default]
+    Slow,
+    MovRegMem32,
+    MovMemReg32,
+    MovRegReg32,
+    PushReg32,
+    PopReg32,
+}
+
+/// Which shape an instruction is, worked out once when it is decoded.
+///
+/// The stack shapes are only named when the stack is thirty-two bits wide, so
+/// that the fast path never has to ask.
+#[must_use]
+pub fn shape_of(insn: &Insn, mode: Mode) -> Fast {
+    if insn.width != Width::B32 || insn.rep.is_some() {
+        return Fast::Slow;
+    }
+    match (insn.kind, insn.dst, insn.src) {
+        (Kind::Mov, Some(Op::Reg(_)), Some(Op::Mem(_))) => Fast::MovRegMem32,
+        (Kind::Mov, Some(Op::Mem(_)), Some(Op::Reg(_))) => Fast::MovMemReg32,
+        (Kind::Mov, Some(Op::Reg(_)), Some(Op::Reg(_))) => Fast::MovRegReg32,
+        (Kind::Push, _, Some(Op::Reg(_))) if stack32(mode) => Fast::PushReg32,
+        (Kind::Pop, Some(Op::Reg(_)), _) if stack32(mode) => Fast::PopReg32,
+        _ => Fast::Slow,
+    }
+}
+
+#[inline(always)]
+fn read32(mem: &Arena, addr: u32) -> Result<u32, Stop> {
+    let s = mem.slice(addr, 4).map_err(Stop::Fault)?;
+    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+#[inline(always)]
+fn write32(mem: &mut Arena, addr: u32, value: u32) -> Result<(), Stop> {
+    let s = mem.slice_mut(addr, 4).map_err(Stop::Fault)?;
+    // Byte by byte rather than as a copy of a run, which the compiler calls
+    // out to memmove for, as [`write_mem`] does for the same reason.
+    for (to, byte) in s.iter_mut().zip(value.to_le_bytes()) {
+        *to = byte;
+    }
+    Ok(())
+}
+
+/// Run one instruction of a named shape, or hand it to [`execute`].
+///
+/// Every arm falls back to [`execute`] when the instruction is not the shape
+/// it was named as, so a shape worked out wrongly is slow rather than wrong.
+#[inline(always)]
+pub fn execute_fast(
+    fast: Fast,
+    cpu: &mut Cpu,
+    mem: &mut Arena,
+    insn: &Insn,
+    mode: Mode,
+) -> Result<(), Stop> {
+    match fast {
+        Fast::MovRegMem32 => {
+            let (Some(Op::Reg(d)), Some(Op::Mem(m))) = (insn.dst, insn.src) else {
+                return execute(cpu, mem, insn, mode);
+            };
+            cpu.r[d as usize] = read32(mem, effective(cpu, &m))?;
+            Ok(())
+        }
+        Fast::MovMemReg32 => {
+            let (Some(Op::Mem(m)), Some(Op::Reg(sr))) = (insn.dst, insn.src) else {
+                return execute(cpu, mem, insn, mode);
+            };
+            let value = cpu.r[sr as usize];
+            write32(mem, effective(cpu, &m), value)
+        }
+        Fast::MovRegReg32 => {
+            let (Some(Op::Reg(d)), Some(Op::Reg(sr))) = (insn.dst, insn.src) else {
+                return execute(cpu, mem, insn, mode);
+            };
+            cpu.r[d as usize] = cpu.r[sr as usize];
+            Ok(())
+        }
+        Fast::PushReg32 => {
+            let Some(Op::Reg(sr)) = insn.src else {
+                return execute(cpu, mem, insn, mode);
+            };
+            let value = cpu.r[sr as usize];
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, cpu.seg_base[super::SS].wrapping_add(sp), value)
+        }
+        Fast::PopReg32 => {
+            let Some(Op::Reg(d)) = insn.dst else {
+                return execute(cpu, mem, insn, mode);
+            };
+            let sp = cpu.r[ESP];
+            let value = read32(mem, cpu.seg_base[super::SS].wrapping_add(sp))?;
+            cpu.r[ESP] = sp.wrapping_add(4);
+            cpu.r[d as usize] = value;
+            Ok(())
+        }
+        Fast::Slow => execute(cpu, mem, insn, mode),
+    }
+}
+
 pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Result<(), Stop> {
     let w = insn.width;
     match insn.kind {

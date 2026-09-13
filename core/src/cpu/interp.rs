@@ -21,6 +21,9 @@ pub struct Interp {
     // which is what a title that loads its own code needs: Alpha Team unpacks
     // DLLs out of its archives into memory it has run before (#58).
     insns: Vec<Insn>,
+    /// The shape of each of `insns`, worked out when it was decoded, so that
+    /// running one does not work it out again (#70).
+    shapes: Vec<exec::Fast>,
     /// Each run, as where its first instruction is in `insns` and how many
     /// there are.
     runs: Vec<(u32, u32)>,
@@ -54,6 +57,7 @@ impl Interp {
         Self {
             mode,
             insns: Vec::new(),
+            shapes: Vec::new(),
             runs: Vec::new(),
             directory: Box::new([0; 1024]),
             regions: Vec::new(),
@@ -77,6 +81,7 @@ impl Interp {
     /// placed new bytes where old ones were.
     pub fn forget(&mut self) {
         self.insns.clear();
+        self.shapes.clear();
         self.runs.clear();
         self.pages.clear();
         self.page_runs.clear();
@@ -190,6 +195,7 @@ impl Interp {
                 Err(stop) if at == lin => return Err(stop),
                 Err(_) => break,
             };
+            self.shapes.push(exec::shape_of(&insn, self.mode));
             self.insns.push(insn);
             at = at.wrapping_add(u32::from(insn.len));
             let count = u32::try_from(self.insns.len()).unwrap_or(u32::MAX) - first;
@@ -231,7 +237,7 @@ impl Interp {
         // instruction, even in real mode: a 386 lets eip run past 64K and only
         // a branch with a sixteen-bit operand size brings it back.
         cpu.eip = cpu.eip.wrapping_add(u32::from(insn.len));
-        match exec::execute(cpu, mem, insn, self.mode) {
+        match exec::execute_fast(self.shapes[index as usize], cpu, mem, insn, self.mode) {
             Ok(()) => Ok(()),
             // A halt or an interrupt retires and then stops the run: the
             // instruction pointer belongs after it, which is where a return
