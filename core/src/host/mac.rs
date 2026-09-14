@@ -9,7 +9,7 @@
 //! What the guest draws is already a finished frame in its own memory; a layer
 //! scales it, keeps its aspect, and asks nothing of us per pixel.
 
-use super::{sys, Frame, Host, HostError, Input, Mapping};
+use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_void, CString};
 use std::time::Instant;
 
@@ -455,6 +455,16 @@ pub struct MacWindow {
     cf_release: unsafe extern "C" fn(*mut c_void),
 }
 
+/// Which button an AppKit event is about: 3 and 4 are the right one's down
+/// and up, 1 and 2 the left one's.
+fn button(kind: u64) -> Button {
+    if matches!(kind, 3 | 4) {
+        Button::Right
+    } else {
+        Button::Left
+    }
+}
+
 impl MacWindow {
     /// Open a window of this size, titled after the title being run.
     ///
@@ -736,21 +746,21 @@ impl MacWindow {
                     // was inside the window; what the machine learns from the
                     // move is only that the person's own pointer has left, so
                     // that it can give it back to them.
-                    5 | 6 if !self.event_is_ours(event) => {
+                    5..=7 if !self.event_is_ours(event) => {
                         self.pointer_over_us = false;
                     }
-                    // Mouse down, mouse up, mouse moved, dragged. A press on
-                    // the window's own frame — its title bar, its edges — is
-                    // the person taking hold of the window, not a click on the
-                    // title (#49). A release is never dropped: a press the
-                    // guest saw is a button it has to see let go of.
-                    1 => {
+                    // Either button down, either button up, moved, dragged. A
+                    // press on the window's own frame — its title bar, its
+                    // edges — is the person taking hold of the window, not a
+                    // click on the title (#49). A release is never dropped: a
+                    // press the guest saw is a button it has to see let go of.
+                    1 | 3 => {
                         if self.on_the_picture(event).is_some() {
-                            self.pending.push(Input::Down);
+                            self.pending.push(Input::Down(button(kind)));
                         }
                     }
-                    2 => self.pending.push(Input::Up),
-                    5 | 6 if self.pointer_taken => {
+                    2 | 4 => self.pending.push(Input::Up(button(kind))),
+                    5..=7 if self.pointer_taken => {
                         // The person's pointer is frozen over the picture, so
                         // where the event is says nothing; how far the mouse
                         // moved is the whole message.
@@ -767,7 +777,7 @@ impl MacWindow {
                         );
                         self.tell_where_the_pointer_is();
                     }
-                    5 | 6 => match self.on_the_picture(event) {
+                    5..=7 => match self.on_the_picture(event) {
                         Some((x, y)) => {
                             self.pointer_over_us = true;
                             self.steer = (f64::from(x), f64::from(y));

@@ -253,11 +253,14 @@ pub struct State {
     /// The number the next buffered event carries. DirectInput's own sequence
     /// numbers only have to rise.
     pub input_sequence: u32,
-    /// Whether the pointer's button is down.
+    /// Whether the pointer's left button is down, and its right one.
     pub mouse_down: bool,
-    /// When the button last went down and where, so that a second click near
+    pub right_down: bool,
+    /// When each button last went down and where, so that a second click near
     /// it and soon after it is a double click rather than two clicks (#59).
+    /// A button counts only its own clicks.
     pub last_click: (u32, (i32, i32)),
+    pub last_right_click: (u32, (i32, i32)),
     /// Whether the class the title registered asked for double clicks.
     pub double_clicks: bool,
     /// Where the title last asked that the pointer be put, until the machine
@@ -370,7 +373,9 @@ impl State {
             keyboard_data: VecDeque::new(),
             input_sequence: 0,
             mouse_down: false,
+            right_down: false,
             last_click: (0, (0, 0)),
+            last_right_click: (0, (0, 0)),
             pointer_put: None,
             double_clicks: false,
             cursor_shown: 0,
@@ -454,6 +459,7 @@ impl State {
         state[..4].copy_from_slice(&dx.to_le_bytes());
         state[4..8].copy_from_slice(&dy.to_le_bytes());
         state[12] = if self.mouse_down { 0x80 } else { 0 };
+        state[13] = if self.right_down { 0x80 } else { 0 };
         state
     }
 

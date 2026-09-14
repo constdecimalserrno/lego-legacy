@@ -715,10 +715,12 @@ fn key_state_of(state: &super::State, key: u32) -> u32 {
     /// A `SHORT` with its top bit set, which is how Windows says "held".
     const HELD: u32 = 0x8000;
     let down = match key {
-        // The declared machine's pointer has one button (#59), so the right
-        // and middle ones are never down.
+        // The declared machine's pointer has two buttons (#61): this title
+        // registers a route for each. It has no middle one, so that is never
+        // down.
         VK_LBUTTON => state.mouse_down,
-        VK_RBUTTON | VK_MBUTTON => false,
+        VK_RBUTTON => state.right_down,
+        VK_MBUTTON => false,
         _ => state
             .keys_down
             .iter()
@@ -817,6 +819,7 @@ fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 const DIMOUSE_X: u32 = 0;
 const DIMOUSE_Y: u32 = 4;
 const DIMOUSE_BUTTON0: u32 = 12;
+const DIMOUSE_BUTTON1: u32 = 13;
 
 /// What a device says about a button or a key that is down.
 const DOWN: u32 = 0x80;
@@ -825,9 +828,13 @@ const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_RBUTTONDBLCLK: u32 = 0x0206;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const MK_LBUTTON: u32 = 0x0001;
+const MK_RBUTTON: u32 = 0x0002;
 
 /// How long after a click a second one beside it is a double click, and how
 /// far beside it is still beside it.
@@ -939,8 +946,37 @@ const VK_LBUTTON: u32 = 0x01;
 const VK_RBUTTON: u32 = 0x02;
 const VK_MBUTTON: u32 = 0x04;
 
+/// Where a button's state lives.
+fn button_of(state: &mut super::State, button: crate::host::Button) -> &mut bool {
+    match button {
+        crate::host::Button::Left => &mut state.mouse_down,
+        crate::host::Button::Right => &mut state.right_down,
+    }
+}
+
+/// When a button last went down and where. Each button counts its own clicks.
+fn last_click_of(state: &mut super::State, button: crate::host::Button) -> &mut (u32, (i32, i32)) {
+    match button {
+        crate::host::Button::Left => &mut state.last_click,
+        crate::host::Button::Right => &mut state.last_right_click,
+    }
+}
+
+/// Where the mouse's own data format keeps a button.
+fn lane(button: crate::host::Button) -> u32 {
+    match button {
+        crate::host::Button::Left => DIMOUSE_BUTTON0,
+        crate::host::Button::Right => DIMOUSE_BUTTON1,
+    }
+}
+
+/// The buttons a mouse message carries as held, in `wParam`.
+fn held_buttons(state: &super::State) -> u32 {
+    u32::from(state.mouse_down) * MK_LBUTTON + u32::from(state.right_down) * MK_RBUTTON
+}
+
 pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
-    use crate::host::Input;
+    use crate::host::{Button, Input};
     match event {
         Input::Move { x, y } => {
             let (dx, dy) = (x - state.last_move.0, y - state.last_move.1);
@@ -956,38 +992,40 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
             }
             state.last_move = (x, y);
             state.pointer = (x, y);
-            let buttons = if state.mouse_down { MK_LBUTTON } else { 0 };
-            post(state, WM_MOUSEMOVE, buttons, time);
+            post(state, WM_MOUSEMOVE, held_buttons(state), time);
         }
-        Input::Down => {
-            state.mouse_down = true;
-            state.buffer_input(false, DIMOUSE_BUTTON0, DOWN);
+        Input::Down(button) => {
+            *button_of(state, button) = true;
+            state.buffer_input(false, lane(button), DOWN);
             // The second of two clicks near each other and soon after each
-            // other is a double click, which is a message of its own.
-            let (when, (was_x, was_y)) = state.last_click;
+            // other is a double click, which is a message of its own. Each
+            // button counts its own: a right click after a left one is not
+            // the second of anything.
+            let (when, (was_x, was_y)) = *last_click_of(state, button);
             let (x, y) = state.pointer;
             let quick = time.wrapping_sub(when) < DOUBLE_CLICK_MILLIS;
             let near =
                 (x - was_x).abs() <= DOUBLE_CLICK_SLOP && (y - was_y).abs() <= DOUBLE_CLICK_SLOP;
             let again = state.double_clicks && when != 0 && quick && near;
-            post(
-                state,
-                if again {
-                    WM_LBUTTONDBLCLK
-                } else {
-                    WM_LBUTTONDOWN
-                },
-                MK_LBUTTON,
-                time,
-            );
+            let message = match (button, again) {
+                (Button::Left, false) => WM_LBUTTONDOWN,
+                (Button::Left, true) => WM_LBUTTONDBLCLK,
+                (Button::Right, false) => WM_RBUTTONDOWN,
+                (Button::Right, true) => WM_RBUTTONDBLCLK,
+            };
+            post(state, message, held_buttons(state), time);
             // A double click does not start a third: the next click is a
             // first one again, as Windows counts them.
-            state.last_click = if again { (0, (x, y)) } else { (time, (x, y)) };
+            *last_click_of(state, button) = if again { (0, (x, y)) } else { (time, (x, y)) };
         }
-        Input::Up => {
-            state.mouse_down = false;
-            state.buffer_input(false, DIMOUSE_BUTTON0, 0);
-            post(state, WM_LBUTTONUP, 0, time);
+        Input::Up(button) => {
+            *button_of(state, button) = false;
+            state.buffer_input(false, lane(button), 0);
+            let message = match button {
+                Button::Left => WM_LBUTTONUP,
+                Button::Right => WM_RBUTTONUP,
+            };
+            post(state, message, held_buttons(state), time);
         }
         Input::Key { code, down } => {
             // Keys reach a title through DirectInput's keyboard, numbered as
@@ -1496,7 +1534,7 @@ mod tests {
         activate, deliver, virtual_key, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW,
         WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
     };
-    use crate::host::Input;
+    use crate::host::{Button, Input};
     use crate::win32::State;
 
     /// `GetKeyState` and `GetAsyncKeyState` answered zero for everything,
@@ -1507,14 +1545,26 @@ mod tests {
         state.window_made = true;
         let held = |state: &mut State, key: u32| super::key_state_of(state, key) & 0x8000 != 0;
         assert!(!held(&mut state, super::VK_LBUTTON), "nothing is held yet");
-        deliver(&mut state, Input::Down, 0);
+        deliver(&mut state, Input::Down(Button::Left), 0);
         assert!(held(&mut state, super::VK_LBUTTON), "the button is down");
         assert!(
             !held(&mut state, super::VK_RBUTTON),
-            "this machine's pointer has one button"
+            "the right one is its own button"
         );
-        deliver(&mut state, Input::Up, 4);
+        deliver(&mut state, Input::Up(Button::Left), 4);
         assert!(!held(&mut state, super::VK_LBUTTON), "and up again");
+
+        // And the right button, which this machine used to answer for by
+        // saying nobody was holding it (#61).
+        deliver(&mut state, Input::Down(Button::Right), 8);
+        assert!(held(&mut state, super::VK_RBUTTON), "the right one is down");
+        assert!(!held(&mut state, super::VK_LBUTTON), "and only that one");
+        assert!(
+            !held(&mut state, super::VK_MBUTTON),
+            "this machine's pointer has no middle button"
+        );
+        deliver(&mut state, Input::Up(Button::Right), 12);
+        assert!(!held(&mut state, super::VK_RBUTTON), "and up again");
 
         // A key, by the virtual key Windows numbers it: Escape is 0x1b.
         deliver(
@@ -1614,8 +1664,8 @@ mod tests {
     #[test]
     fn two_quick_clicks_in_the_same_place_are_a_double_click() {
         let click = |state: &mut State, at: u32| {
-            deliver(state, Input::Down, at);
-            deliver(state, Input::Up, at);
+            deliver(state, Input::Down(Button::Left), at);
+            deliver(state, Input::Up(Button::Left), at);
         };
         let messages =
             |state: &State| -> Vec<u32> { state.messages.iter().map(|m| m.message).collect() };
@@ -1668,6 +1718,33 @@ mod tests {
         click(&mut plain, 1_000);
         click(&mut plain, 1_100);
         assert!(!messages(&plain).contains(&WM_LBUTTONDBLCLK));
+
+        // Each button counts its own clicks: a right click after a left one
+        // is a first click, and it is the right button's messages that go
+        // out. Alpha Team registers a double-click route for each (#61).
+        let mut both = State::new();
+        both.window_made = true;
+        both.double_clicks = true;
+        click(&mut both, 1_000);
+        deliver(&mut both, Input::Down(Button::Right), 1_050);
+        deliver(&mut both, Input::Up(Button::Right), 1_050);
+        deliver(&mut both, Input::Down(Button::Right), 1_100);
+        assert_eq!(
+            messages(&both),
+            [
+                WM_LBUTTONDOWN,
+                super::WM_LBUTTONUP,
+                super::WM_RBUTTONDOWN,
+                super::WM_RBUTTONUP,
+                super::WM_RBUTTONDBLCLK,
+            ]
+        );
+        // And what a message says is held is what is held: the right button
+        // is down, the left one is not.
+        assert_eq!(
+            both.messages.back().expect("a click was sent").wparam,
+            super::MK_RBUTTON
+        );
     }
 
     #[test]
@@ -1711,9 +1788,9 @@ mod tests {
         assert_eq!(moved.lparam, (222 << 16) | 320);
         assert_eq!((moved.time, moved.point), (3, (320, 222)));
 
-        deliver(&mut state, Input::Down, 4);
+        deliver(&mut state, Input::Down(Button::Left), 4);
         deliver(&mut state, Input::Move { x: 321, y: 222 }, 5);
-        deliver(&mut state, Input::Up, 6);
+        deliver(&mut state, Input::Up(Button::Left), 6);
         let kinds: Vec<(u32, u32)> = state
             .messages
             .iter()
@@ -1731,7 +1808,7 @@ mod tests {
         let mut state = State::new();
         // Ten right and twenty down from the middle, where the mouse starts.
         deliver(&mut state, Input::Move { x: 330, y: 260 }, 0);
-        deliver(&mut state, Input::Down, 0);
+        deliver(&mut state, Input::Down(Button::Left), 0);
         let first = state.take_mouse_state();
         assert_eq!(first[..8], [10, 0, 0, 0, 20, 0, 0, 0]);
         assert_eq!(first[12], 0x80, "a button held reads as its top bit");
@@ -1748,9 +1825,9 @@ mod tests {
     fn directinput_buffers_what_a_person_did_for_a_title_that_reads_a_queue() {
         let mut state = State::new();
         deliver(&mut state, Input::Move { x: 330, y: 260 }, 0);
-        deliver(&mut state, Input::Down, 0);
+        deliver(&mut state, Input::Down(Button::Left), 0);
         deliver(&mut state, Input::Move { x: 330, y: 258 }, 0);
-        deliver(&mut state, Input::Up, 0);
+        deliver(&mut state, Input::Up(Button::Left), 0);
         deliver(
             &mut state,
             Input::Key {

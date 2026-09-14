@@ -5,7 +5,7 @@
 //! recorded input a run has (ADR-0003): the clock is not recorded, because it
 //! follows from the instructions retired.
 
-use crate::host::Input;
+use crate::host::{Button, Input};
 use std::fmt;
 
 /// The first line of every route, so a file's format is knowable from its
@@ -122,6 +122,29 @@ const KEYS: &[(u32, &str)] = &[
     (0xdc, "RightWindows"),
 ];
 
+/// Which button a `down` or `up` names: the left one when it names none, so
+/// that every route written before this machine had two reads the same.
+fn button<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<Button> {
+    match words.next() {
+        None | Some("left") => Some(Button::Left),
+        Some("right") => Some(Button::Right),
+        Some(_) => None,
+    }
+}
+
+/// What a route writes after `down` or `up`; nothing for the left button, so
+/// that a route this writes out reads as the one that came in.
+fn named(button: Button) -> &'static str {
+    match button {
+        Button::Left => "",
+        Button::Right => " right",
+    }
+}
+
+/// What to say when a `down` or `up` ends in something that is not a button
+/// this machine's pointer has.
+const BUTTON: &str = "`down` and `up` end with `left`, `right`, or nothing";
+
 /// The name a route writes a key under.
 #[must_use]
 pub fn key_name(code: u32) -> Option<&'static str> {
@@ -232,8 +255,8 @@ impl Route {
                         .ok_or_else(|| fail("`move` needs two coordinates"))?;
                     Input::Move { x, y }
                 }
-                "down" => Input::Down,
-                "up" => Input::Up,
+                "down" => Input::Down(button(&mut words).ok_or_else(|| fail(BUTTON))?),
+                "up" => Input::Up(button(&mut words).ok_or_else(|| fail(BUTTON))?),
                 "key" => {
                     let code = words
                         .next()
@@ -270,8 +293,8 @@ impl Route {
         for (flip, event) in &self.events {
             let line = match event {
                 Input::Move { x, y } => format!("flip {flip} move {x} {y}"),
-                Input::Down => format!("flip {flip} down"),
-                Input::Up => format!("flip {flip} up"),
+                Input::Down(b) => format!("flip {flip} down{}", named(*b)),
+                Input::Up(b) => format!("flip {flip} up{}", named(*b)),
                 Input::Key { code, down } => {
                     let key = key_name(*code).map_or_else(|| code.to_string(), str::to_owned);
                     format!(
@@ -290,12 +313,12 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::{ParseError, Route};
-    use crate::host::Input;
+    use crate::host::{Button, Input};
 
     #[test]
     fn a_route_survives_being_written_and_read_back() {
         let mut route = Route::new();
-        route.push(0, Input::Down);
+        route.push(0, Input::Down(Button::Left));
         route.push(9000, Input::Move { x: 320, y: 213 });
         route.push(
             9012,
@@ -311,7 +334,7 @@ mod tests {
                 down: false,
             },
         );
-        route.push(9013, Input::Up);
+        route.push(9013, Input::Up(Button::Left));
 
         let text = route.to_text();
         assert_eq!(
@@ -350,7 +373,7 @@ mod tests {
     fn comments_and_blank_lines_are_not_events() {
         let route = Route::parse("# a comment\n\n   \nflip 3 up\n").expect("this reads");
         assert_eq!(route.len(), 1);
-        assert_eq!(route.at(3), [Input::Up]);
+        assert_eq!(route.at(3), [Input::Up(Button::Left)]);
     }
 
     #[test]
@@ -364,7 +387,14 @@ mod tests {
                 "`key` ends with `down` or `up`",
             ),
             ("flip 3 key Hyper down\n", "`key` needs a key's name"),
-            ("flip 3 up now\n", "an event ends where its own words end"),
+            (
+                "flip 3 up now\n",
+                "`down` and `up` end with `left`, `right`, or nothing",
+            ),
+            (
+                "flip 3 move 4 5 6\n",
+                "an event ends where its own words end",
+            ),
             ("press 3 up\n", "an event starts with `flip`"),
         ] {
             let err = Route::parse(text).expect_err("this line is not an event");
@@ -379,11 +409,32 @@ mod tests {
         }
     }
 
+    /// The pointer has two buttons, and a route says which (#61). A `down`
+    /// that names none is the left one, so every route written before the
+    /// second button reads as the one it was.
+    #[test]
+    fn a_route_says_which_button_and_the_left_one_needs_no_saying() {
+        let route =
+            Route::parse("flip 1 down\nflip 2 down right\nflip 3 up right\nflip 4 up left\n")
+                .expect("this reads");
+        assert_eq!(route.at(1), [Input::Down(Button::Left)]);
+        assert_eq!(route.at(2), [Input::Down(Button::Right)]);
+        assert_eq!(route.at(3), [Input::Up(Button::Right)]);
+        assert_eq!(route.at(4), [Input::Up(Button::Left)]);
+        // And what it writes back is what a person would have written.
+        assert!(route.to_text().contains("flip 1 down\n"));
+        assert!(route.to_text().contains("flip 2 down right\n"));
+        assert!(route.to_text().contains("flip 4 up\n"));
+    }
+
     #[test]
     fn events_come_out_by_the_flip_they_belong_to() {
         let route = Route::parse("flip 5 down\nflip 1 up\nflip 5 up\n").expect("this reads");
-        assert_eq!(route.at(1), [Input::Up]);
-        assert_eq!(route.at(5), [Input::Down, Input::Up]);
+        assert_eq!(route.at(1), [Input::Up(Button::Left)]);
+        assert_eq!(
+            route.at(5),
+            [Input::Down(Button::Left), Input::Up(Button::Left)]
+        );
         assert_eq!(route.at(2), []);
         assert_eq!(
             route.after(1).len(),

@@ -35,14 +35,26 @@ pub enum Input {
         x: i32,
         y: i32,
     },
-    Down,
-    Up,
+    Down(Button),
+    Up(Button),
     /// A key, numbered as DirectInput numbers the keyboard's keys; a route
     /// names it ([`crate::route::key_name`]).
     Key {
         code: u32,
         down: bool,
     },
+}
+
+/// Which of the pointer's buttons a person pressed.
+///
+/// Two, because this title asks about two: Alpha Team registers a route for
+/// the left button and another for the right, and a double-click route for
+/// each (#61). A machine with one button answers every question about the
+/// second with "not held", which is an answer, and the wrong one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Right,
 }
 
 /// A region of host memory the guest's arena lives in.

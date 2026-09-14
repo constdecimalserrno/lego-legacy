@@ -5,7 +5,7 @@
 //! it logged, and how it ended.
 
 use lego_legacy_core::cli::{Cli, Trace};
-use lego_legacy_core::host::Input;
+use lego_legacy_core::host::{Button, Input};
 use lego_legacy_core::{stub, testkit, Title};
 
 const TEST_TITLE: Title = Title::STUB;
@@ -114,9 +114,9 @@ fn input_is_delivered_at_the_flip_it_names_and_always_recorded() {
     scratch();
     let mut host = lego_legacy_core::host::headless::Headless::new();
     host.queue(vec![
-        (0, Input::Down),
+        (0, Input::Down(Button::Left)),
         (0, Input::Move { x: 320, y: 213 }),
-        (99, Input::Up),
+        (99, Input::Up(Button::Left)),
     ]);
 
     let cli = Cli {
@@ -130,7 +130,7 @@ fn input_is_delivered_at_the_flip_it_names_and_always_recorded() {
         .assert_logged("input flip 0 Move { x: 320, y: 213 }");
     assert_eq!(
         ran.host.undelivered(),
-        [(99, Input::Up)],
+        [(99, Input::Up(Button::Left))],
         "an event naming a flip the run never reached is kept, not lost"
     );
 }

@@ -281,11 +281,13 @@ impl Machine {
             // through the movie: the click is what the person did, and this
             // is its translation, not the machine deciding the movie is over
             // (#66). What the title does with the key stays the title's rule.
+            // Either button: a person hitting the mouse to get past a movie
+            // has not chosen which one (#61).
             if let (Some(code), Some(down)) = (
                 self.title.click_in_a_movie,
                 match event {
-                    crate::host::Input::Down => Some(true),
-                    crate::host::Input::Up => Some(false),
+                    crate::host::Input::Down(_) => Some(true),
+                    crate::host::Input::Up(_) => Some(false),
                     _ => None,
                 },
             ) {
@@ -842,7 +844,10 @@ impl Machine {
             input.last_move.1,
             input.mouse_delta.0,
             input.mouse_delta.1,
-            i32::from(input.mouse_down),
+            // Both buttons in one number, the left one where it has always
+            // been: a run that never touches the right button hashes to what
+            // it hashed to before this machine had one (#61).
+            i32::from(input.mouse_down) | i32::from(input.right_down) << 1,
         ] {
             hash.update(&value.to_le_bytes());
         }

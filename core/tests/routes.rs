@@ -1,7 +1,7 @@
 //! Routes, replayed and recorded, and the gate that says a run reproduces.
 
 use lego_legacy_core::cli::Cli;
-use lego_legacy_core::host::{headless::Headless, Input};
+use lego_legacy_core::host::{headless::Headless, Button, Input};
 use lego_legacy_core::{stub, testkit, Title};
 use std::path::PathBuf;
 
@@ -64,7 +64,7 @@ fn a_recorded_run_writes_a_route_that_replays_as_itself() {
     // A run that took input writes down what it took.
     let mut host = Headless::new();
     host.queue(vec![
-        (0, Input::Down),
+        (0, Input::Down(Button::Left)),
         (
             0,
             Input::Key {
@@ -130,7 +130,10 @@ fn a_run_that_replays_takes_no_input_from_the_person_at_the_keyboard() {
 
     // Someone leaning on the keyboard while a route replays changes nothing.
     let mut host = Headless::new();
-    host.queue(vec![(0, Input::Down), (0, Input::Move { x: 999, y: 999 })]);
+    host.queue(vec![
+        (0, Input::Down(Button::Left)),
+        (0, Input::Move { x: 999, y: 999 }),
+    ]);
     let cli = Cli {
         stub: true,
         route: Some(path),
