@@ -38,11 +38,27 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
     red_book: ENTRY.red_book,
     declared: Declared {
         windows: WINDOWS_98_SE,
-        // The roster's baseline Pentium II 450, and it matters here: this
-        // title measures the machine itself, in `DDCaps::CalcProcSpeed`, and
-        // `DDCaps::MakeRecs` picks what it will draw from the number it gets.
-        // A machine declared slower than the one the title shipped against
-        // would have it choose a quality nobody asked it to.
+        // The roster's baseline Pentium II 450. This title does measure the
+        // machine itself, in `DDCaps::CalcProcSpeed`, and `DDCaps::MakeRecs`
+        // does pick what it would draw from the number it gets — shadows and
+        // space animation above 350 MHz, texture animation above 250 — but
+        // **nothing reads what it picks** (#81). The six recommendations land
+        // in `DDCaps`' own fields, `GetRecShadows` and its five siblings hand
+        // them out, and those getters have no call site in the only binary
+        // that has them and are imported by nothing else the disc ships.
+        //
+        // Measured rather than argued: the menu route at 450, 350, 300 and
+        // 233 MHz, and the first-mission route at 450 and 233, put the same
+        // picture on the screen at the same flip — the same lighting, the
+        // same textures, the same models. Only the animation's phase differs,
+        // because a slower declared processor means more declared time passes
+        // in a frame. The pace does not move either: 0.87x at 233 MHz against
+        // 0.86x at 450, because the declared display's refresh is what a flip
+        // costs the clock (#82) and the instructions are the small part of it.
+        //
+        // So this value is the roster's baseline because it is the roster's
+        // baseline, and for no reason of this title's own. There is no quality
+        // to be bought by declaring less, and none to be lost.
         hz: lego_legacy_core::clock::DECLARED_HZ,
         megabytes: 128,
         modes: &[(640, 480, 16)],
