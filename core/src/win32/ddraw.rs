@@ -950,8 +950,16 @@ fn set_display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
     let middle = (args[0] as i32 / 2, args[1] as i32 / 2);
     ctx.state.pointer = middle;
     ctx.state.last_move = middle;
-    ctx.log
-        .line(&format!("display mode {}x{}x{}", args[0], args[1], args[2]));
+    // The refresh rate the title asked for is recorded because whether it asks
+    // at all is what settles the declared display's own rate (#82): a zero is
+    // "whatever the machine runs at", which is a declared value.
+    ctx.log.line(&format!(
+        "display mode {}x{}x{} refresh {}",
+        args[0],
+        args[1],
+        args[2],
+        args.get(3).copied().unwrap_or(0)
+    ));
     Ok(S_OK)
 }
 

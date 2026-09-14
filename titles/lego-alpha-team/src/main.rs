@@ -13,9 +13,27 @@ use std::process::ExitCode;
 pub const LEGO_ALPHA_TEAM: Title = Title {
     key: ENTRY.key,
     // A flip waits for the declared display's next refresh, as DirectDraw's
-    // Flip does unless a title asks otherwise. Sixty a second is the roster's
-    // baseline; this title has not yet been seen to ask for anything else.
-    flip_cost: FlipCost::Refresh(60),
+    // Flip does unless a title asks otherwise — and this title does not ask:
+    // it calls `SetDisplayMode(640, 480, 16, 0, 0)`, a zero refresh being
+    // "whatever the machine runs at", and over a whole run into its first
+    // mission it never calls `GetMonitorFrequency`, `GetScanLine`,
+    // `WaitForVerticalBlank` or `GetVerticalBlankStatus`, and flips with no
+    // flags at all (#82).
+    //
+    // So the rate is a declared value like the processor and the memory, and
+    // the title's own code names it: `DDCaps::MakeRecs` in LoadComp writes
+    // 0x3d088889 — a thirtieth of a second — into the field
+    // `DDCaps::GetRecFrameRate` hands out, on every run and under every
+    // branch. That is CONTEXT.md's **intended rate**: the rate this title
+    // authored as its target. Thirty, not the roster's baseline sixty.
+    //
+    // Measured in a window, over the same forty seconds of the committed menu
+    // route on the same host: at sixty the pace is 0.52x and the picture is
+    // 31 frames a second; at thirty the pace is **0.86x** and the picture is
+    // 26. The second is a thirty-frame game dropping a few frames; the first
+    // is a sixty-frame game running at half speed, which is what #65's
+    // reporter heard and saw.
+    flip_cost: FlipCost::Refresh(30),
     image: ENTRY.image,
     red_book: ENTRY.red_book,
     declared: Declared {
