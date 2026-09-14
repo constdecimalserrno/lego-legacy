@@ -444,6 +444,12 @@ impl Machine {
                 .join(" ")
         ));
         log.line(&format!(
+            "heap {} handed out, {} live, {} freed that it never handed out",
+            self.state.heap.extent(),
+            self.state.heap.live_bytes(),
+            self.state.foreign_frees
+        ));
+        log.line(&format!(
             "end {} cursor {} flips {} declared-ms {}",
             finish.outcome, finish.cursor, finish.flips, finish.declared_millis
         ));

@@ -195,7 +195,14 @@ impl Modules {
         mem: &mut Arena,
     ) -> Result<(), crate::guest::Fault> {
         for import in imports {
-            match self.resolve(&import.dll, &import.name) {
+            // An entry point this machine writes is written even when the
+            // binary that exports it is one the title ships and the machine
+            // runs (#80). Run-versus-write is priced per binary (ADR-0002) and
+            // nothing says it has to be per whole binary: what is written is
+            // exactly what is implemented here, and a name with no shim goes
+            // on running as the disc's own code.
+            let written = crate::win32::find(&import.dll, &import.name).is_some();
+            match self.resolve(&import.dll, &import.name).filter(|_| !written) {
                 Some(addr) => mem.write_u32(import.iat, addr)?,
                 // Including a name one of the title's own binaries exports and
                 // this one asks for and it has not: that is a wall when it is

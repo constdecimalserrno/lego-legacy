@@ -31,6 +31,44 @@ bytes the player's own pressing carries, hashed like any other.
 whether it runs or is shimmed at its COM interfaces is decided by the ticket that reaches sound
 (#60), which records which was taken and why.
 
+## Priced per binary, and not per whole binary (#80)
+
+The amendment above priced `MSVCRT.DLL` as a whole and ran it. The price is per binary, and
+nothing said it had to be per *whole* binary. Six of its entry points are written:
+
+| written | why |
+|---|---|
+| `malloc` | |
+| `??2@YAPAXI@Z` (`operator new`) | how this title reaches the heap: 396,976 calls over its menu route against 2,211 to `malloc` |
+| `calloc` | |
+| `realloc` | |
+| `free` | |
+| `_strdup` | the one other entry point of that runtime the title imports that hands a caller a block to free |
+
+**Why those and nothing else.** The heap was **4.1% of every instruction the guest retired** at
+this title's front end (#76) — almost all of it the runtime's own small-block allocator, walked as
+interpreted x86, 397,000 times over one route. And it is the one part of that runtime whose
+behaviour a title can observe only through the pointers it gets back: the title imports no
+`_msize`, no `_expand`, no `_heapwalk`, and never asks the runtime what shape a block is.
+
+**Where the boundary is drawn is unchanged: at the export table.** A name with a shim is bound to
+the boundary even when the binary that exports it is one the title ships and the machine runs; a
+name without one goes on running as the disc's own code. So what is written is exactly what is
+implemented, and the rule needs no list of its own.
+
+**The two heaps are kept apart by the pointer, not by an audit.** The machine's heap answers for
+blocks it handed out and for nothing else. The runtime's own code calls its own `malloc` directly
+rather than through an import table, so its blocks stay in its own small-block heap; one of the
+machine's blocks reaching the runtime's own `free` falls out of its small-block check and into
+`HeapFree`, which is this machine's heap again. A block of the runtime's own reaching the written
+`free` cannot be answered for and is counted in the run log instead: twelve over a whole menu
+route, and not growing with it.
+
+What it bought: **3.1% fewer instructions retired to reach the same flip**, and 52.9 flips a
+second against 52.2. What it cost, and is worth saying: the machine's own heap had to stop
+scanning its free list linearly first — with the scan in place the written heap was *slower* than
+the interpreted one it replaced.
+
 ## What a person did, and what the machine may not decide (#66)
 
 A person asked to click past what plays before a game does. Alpha Team's intro takes Escape and

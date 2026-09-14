@@ -20,19 +20,30 @@ pub const HEAP_BASE: u32 = 0x2000_0000;
 /// guest happily uses as an address.
 pub const HEAP_BYTES: u32 = 0x2000_0000;
 
-/// A bump allocator with a free list.
+/// A bump allocator with a free list, kept by size.
 ///
-// ponytail: first fit over a map of freed blocks, and freed memory is only
-// reused whole. A title that thrashes small allocations will fragment it;
-// measure before writing anything cleverer.
+/// Freed memory is still only reused whole — a block handed back is handed out
+/// again at its own size or not at all — but the block chosen is the smallest
+/// one that will do, found by a lookup rather than a walk.
+//
+// It was a linear scan of every free block until a title made that the cost
+// that showed (#80): Alpha Team's front end allocates 397,000 times over its
+// menu route, and with the C runtime's heap written against this one the scan
+// cost more than the interpreted allocator it replaced. Measured: 51.8 flips a
+// second with the scan, 52.9 with this, against 52.2 with the runtime's own.
+//
+// ponytail: a freed block is never split and neighbours are never joined, so a
+// run that asks for one size and then a larger one for ever still grows. The
+// splitting is the next thing to write if a title makes that show.
 #[derive(Debug)]
 pub struct Heap {
     next: u32,
     end: u32,
     /// What is live, by address, with its size.
     live: BTreeMap<u32, u32>,
-    /// What has been handed back, by size, newest first.
-    free: Vec<(u32, u32)>,
+    /// What has been handed back, by size: for each size, the addresses of
+    /// the blocks of it that are free.
+    free: BTreeMap<u32, Vec<u32>>,
 }
 
 impl Default for Heap {
@@ -48,7 +59,7 @@ impl Heap {
             next: HEAP_BASE,
             end: HEAP_BASE + HEAP_BYTES,
             live: BTreeMap::new(),
-            free: Vec::new(),
+            free: BTreeMap::new(),
         }
     }
 
@@ -70,12 +81,22 @@ impl Heap {
         let Some(size) = size.max(1).checked_next_multiple_of(align) else {
             return 0;
         };
-        if let Some(i) = self
-            .free
-            .iter()
-            .position(|(addr, s)| *s >= size && addr % align == 0)
-        {
-            let (addr, whole) = self.free.remove(i);
+        // The smallest free block that is big enough and starts where the
+        // caller needs it to. Every address this hands out is a multiple of
+        // eight, so anything asking for no more than that takes the first
+        // candidate; a wider alignment is rare and looks past the ones that do
+        // not suit it.
+        let mut found = None;
+        for (whole, addrs) in self.free.range_mut(size..) {
+            if let Some(i) = addrs.iter().position(|addr| addr % align == 0) {
+                found = Some((*whole, addrs.remove(i), addrs.is_empty()));
+                break;
+            }
+        }
+        if let Some((whole, addr, emptied)) = found {
+            if emptied {
+                self.free.remove(&whole);
+            }
             self.live.insert(addr, whole);
             return addr;
         }
@@ -105,7 +126,7 @@ impl Heap {
     pub fn free(&mut self, addr: u32) -> bool {
         match self.live.remove(&addr) {
             Some(size) => {
-                self.free.push((addr, size));
+                self.free.entry(size).or_default().push(addr);
                 true
             }
             None => false,
