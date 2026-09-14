@@ -178,7 +178,15 @@ impl Interp {
         //
         // ponytail: a million instructions, thrown away whole when it is
         // reached; a free list per run would keep it flat if a title ever
-        // makes this the cost that shows.
+        // makes this the cost that shows. **Checked against the title that
+        // ought to make it show (#83).** Alpha Team rewrites its own code
+        // pages thousands of times a second, and over both its committed
+        // routes this is reached exactly zero times: the menu route ends
+        // holding 292,904 instructions and the first-mission route 311,647,
+        // against the 1,048,576 here — under a third of it. Per-page
+        // forgetting (#65) kills a run's slot without reclaiming its
+        // instructions, so `insns` only grows, and it still does not grow
+        // this far. The free list stays unwritten.
         if self.insns.len() > MOST_KEPT {
             self.forget();
         }
