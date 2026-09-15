@@ -94,6 +94,12 @@ pub struct Machine {
     pub input: Vec<(u64, crate::host::Input)>,
     /// Where a guest frame is turned into something the host can show.
     present_buffer: Vec<u8>,
+    /// How many times the title put the pointer, and how many of those the
+    /// host was told about. The two differ by every frame the title moved the
+    /// pointer while the person was still looking at their own — a title
+    /// steering by a measurement the host never restarted (#40, #64).
+    pointer_puts: u64,
+    pointer_puts_told: u64,
     /// Whether the host is drawing the pointer, so that it is told only when
     /// that changes: hiding is counted, and telling it twice would take two
     /// showings to undo.
@@ -149,6 +155,8 @@ impl Machine {
             tree: crate::install::Tree::new(),
             title,
             present_buffer: Vec::new(),
+            pointer_puts: 0,
+            pointer_puts_told: 0,
             pointer_shown: true,
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
@@ -391,6 +399,12 @@ impl Machine {
                 what: stop.to_string(),
             }),
         }
+    }
+
+    /// How often the title put the pointer, and how often the host was told.
+    #[must_use]
+    pub fn pointer_puts(&self) -> (u64, u64) {
+        (self.pointer_puts, self.pointer_puts_told)
     }
 
     /// What the machine has spent so far.
@@ -1558,6 +1572,21 @@ impl Machine {
         if shown != self.pointer_shown {
             self.pointer_shown = shown;
             host.show_pointer(shown);
+            // Which pointer a person is looking at, and so which of the two
+            // ways of moving one is in force: where the title draws its own,
+            // the host freezes the person's and steers by how far the mouse
+            // went; where it does not, the pointer is the person's and its
+            // position is its own. A run that feels wrong under the hand is
+            // first of all a question of which of those it was in (#40, #64).
+            log.line(&format!(
+                "pointer flip {} {}",
+                self.flips,
+                if shown {
+                    "the person's own"
+                } else {
+                    "the title draws it, so the host steers by the mouse"
+                }
+            ));
         }
         // And where the title put it, while the title is the one drawing a
         // pointer: the host measures the person's next move from there, and
@@ -1566,7 +1595,9 @@ impl Machine {
         // else the pointer is the person's and the host was not told, so
         // neither of them restarts (#46, #59).
         if let Some((x, y)) = self.state.pointer_put.take() {
+            self.pointer_puts += 1;
             if !shown {
+                self.pointer_puts_told += 1;
                 host.put_pointer(x, y);
                 crate::win32::user32::set_pointer_back(&mut self.state, (x, y));
             }

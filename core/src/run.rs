@@ -47,6 +47,10 @@ pub fn run_digested(
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
     let mut log = RunLog::create(title.key, cli.trace)?;
     log.line(&format!("headless {}", cli.headless));
+    // Whether a device was listening. Mixing runs either way, so without this
+    // a log cannot be told apart from one of a run nobody could hear — and
+    // "the sound is wrong" is unanswerable against a run that had none.
+    log.line(&format!("audio {}", cli.audio));
     let mut machine = Machine::new(title, host)?;
     if cli.stub {
         machine.load_stub()?;
@@ -106,6 +110,17 @@ pub fn run_digested(
     // mix is made on the declared clock and hashed as it was mixed, and what
     // reaches a device is the host's own business (#75). A run that crackles
     // now says so instead of being reported from a chair.
+    // How the pointer was driven, said in one line: a title that puts the
+    // pointer somewhere every frame is steering by how far the mouse went
+    // since, and that only works where the host was told and froze the
+    // person's own pointer to match (#40, #64).
+    let (puts, told) = machine.pointer_puts();
+    if puts > 0 {
+        log.line(&format!(
+            "pointer: the title put it {puts} times, and the host was told {told} of them"
+        ));
+    }
+
     let underruns = host.audio_underruns();
     if underruns > 0 {
         log.line(&format!(

@@ -191,6 +191,36 @@ pub fn steered(
     )
 }
 
+/// What a mouse-moved event is for, once the window system has said whose
+/// window it is and the run has said whether it has taken the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moved {
+    /// The pointer is frozen and the mouse's distance is the whole message.
+    Steered,
+    /// The pointer is the person's and where it is is where it is.
+    Placed,
+    /// The person's pointer is somewhere else entirely.
+    Elsewhere,
+}
+
+/// **A taken pointer is frozen, so it is nowhere and cannot have left.**
+///
+/// While it is taken the event's own window says nothing — the pointer is not
+/// over anything, by construction — and reading it as "the person has gone"
+/// gives the pointer back, which puts the very next move down the placing path
+/// and teleports the guest's pointer to wherever the person's frozen one
+/// happens to sit. A title that puts its pointer back every frame then has it
+/// dragged between that place and this one, frame after frame, which is what a
+/// person feels as a mouse that will not follow theirs (#40, #64).
+#[must_use]
+pub fn moved(taken: bool, ours: bool) -> Moved {
+    match (taken, ours) {
+        (true, _) => Moved::Steered,
+        (false, true) => Moved::Placed,
+        (false, false) => Moved::Elsewhere,
+    }
+}
+
 /// Where the pointer starts again from when the title puts it somewhere.
 ///
 /// The whole pixel is the title's: it has just said that is where the pointer
@@ -739,55 +769,57 @@ impl MacWindow {
                     // scrolling its camera from a pointer held at an edge
                     // needs. A button is not ignored: a press that is dropped
                     // is a button the guest never sees let go of.
-                    // A move of nobody's window is the pointer outside ours,
-                    // and its location is in screen coordinates rather than
-                    // the window's, so taking one would throw the guest's
-                    // pointer somewhere else. The pointer stays where it last
-                    // was inside the window; what the machine learns from the
-                    // move is only that the person's own pointer has left, so
-                    // that it can give it back to them.
-                    5..=7 if !self.event_is_ours(event) => {
-                        self.pointer_over_us = false;
-                    }
-                    // Either button down, either button up, moved, dragged. A
-                    // press on the window's own frame — its title bar, its
-                    // edges — is the person taking hold of the window, not a
-                    // click on the title (#49). A release is never dropped: a
-                    // press the guest saw is a button it has to see let go of.
+                    // Either button down, either button up. A press on the
+                    // window's own frame — its title bar, its edges — is the
+                    // person taking hold of the window, not a click on the
+                    // title (#49). A release is never dropped: a press the
+                    // guest saw is a button it has to see let go of.
                     1 | 3 => {
                         if self.on_the_picture(event).is_some() {
                             self.pending.push(Input::Down(button(kind)));
                         }
                     }
                     2 | 4 => self.pending.push(Input::Up(button(kind))),
-                    5..=7 if self.pointer_taken => {
-                        // The person's pointer is frozen over the picture, so
-                        // where the event is says nothing; how far the mouse
-                        // moved is the whole message.
-                        let dx: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
-                        let dy: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
-                        let view: Id =
-                            self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-                        let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
-                        self.steer = steered(
-                            self.steer,
-                            (dx, dy),
-                            (frame.width, frame.height),
-                            self.frame_size,
-                        );
-                        self.tell_where_the_pointer_is();
-                    }
-                    5..=7 => match self.on_the_picture(event) {
-                        Some((x, y)) => {
-                            self.pointer_over_us = true;
-                            self.steer = (f64::from(x), f64::from(y));
-                            self.told = (x, y);
-                            self.pending.push(Input::Move { x, y });
+                    // Moved and dragged, which is one of three things
+                    // ([`moved`]).
+                    5..=7 => match moved(self.pointer_taken, self.event_is_ours(event)) {
+                        Moved::Steered => {
+                            // The person's pointer is frozen over the picture,
+                            // so where the event is says nothing; how far the
+                            // mouse moved is the whole message.
+                            let dx: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
+                            let dy: f64 = self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
+                            let view: Id =
+                                self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+                            let frame: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
+                            self.steer = steered(
+                                self.steer,
+                                (dx, dy),
+                                (frame.width, frame.height),
+                                self.frame_size,
+                            );
+                            self.tell_where_the_pointer_is();
                         }
-                        // On the frame the pointer is the person's, to resize
-                        // or move the window by, and the title's stays where it
-                        // last was on the picture.
-                        None => self.pointer_over_us = false,
+                        Moved::Placed => match self.on_the_picture(event) {
+                            Some((x, y)) => {
+                                self.pointer_over_us = true;
+                                self.steer = (f64::from(x), f64::from(y));
+                                self.told = (x, y);
+                                self.pending.push(Input::Move { x, y });
+                            }
+                            // On the frame the pointer is the person's, to
+                            // resize or move the window by, and the title's
+                            // stays where it last was on the picture.
+                            None => self.pointer_over_us = false,
+                        },
+                        // A move of nobody's window is the person's pointer
+                        // outside ours, and its location is in screen
+                        // coordinates rather than the window's, so taking one
+                        // would throw the guest's pointer somewhere else. The
+                        // pointer stays where it last was inside the window;
+                        // what the machine learns is only that the person's
+                        // own pointer has left, so that it can be given back.
+                        Moved::Elsewhere => self.pointer_over_us = false,
                     },
                     // Key down, key up, and a modifier pressed or let go. A
                     // key held down repeating is still the one press.
@@ -996,10 +1028,31 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, direct_input_key, direct_input_modifier, guest_point, put_back, steered,
-        Rect, PRESENT_BITMAP_INFO,
+        content_point, direct_input_key, direct_input_modifier, guest_point, moved, put_back,
+        steered, Moved, Rect, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
+
+    /// A taken pointer is frozen, so it is nowhere and cannot have left (#40,
+    /// #64).
+    ///
+    /// Reading a frozen pointer's event as "the person has gone" gives the
+    /// pointer back, and the very next move is then taken as a place rather
+    /// than a distance — which drags the guest's pointer to wherever the
+    /// person's frozen one happens to sit, every frame, for a title that puts
+    /// its own back every frame.
+    #[test]
+    fn a_frozen_pointer_is_steered_whatever_the_event_says_it_is_over() {
+        assert_eq!(moved(true, true), Moved::Steered);
+        assert_eq!(
+            moved(true, false),
+            Moved::Steered,
+            "a frozen pointer is over nothing, and that is not it leaving"
+        );
+        // And with the pointer the person's own, where it is is what counts.
+        assert_eq!(moved(false, true), Moved::Placed);
+        assert_eq!(moved(false, false), Moved::Elsewhere);
+    }
     use std::ffi::{c_char, c_void};
 
     /// Putting the pointer where the guest says and reading it back finds the
