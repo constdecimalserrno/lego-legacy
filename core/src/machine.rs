@@ -1560,11 +1560,15 @@ impl Machine {
             host.show_pointer(shown);
         }
         // And where the title put it, while the title is the one drawing a
-        // pointer: the host measures the person's next move from there.
-        // Everywhere else the pointer is the person's (#46, #59, #64).
+        // pointer: the host measures the person's next move from there, and
+        // the machine has to measure from there with it or the person's
+        // movement is the difference between the two (#40, #64). Everywhere
+        // else the pointer is the person's and the host was not told, so
+        // neither of them restarts (#46, #59).
         if let Some((x, y)) = self.state.pointer_put.take() {
             if !shown {
                 host.put_pointer(x, y);
+                crate::win32::user32::set_pointer_back(&mut self.state, (x, y));
             }
         }
         self.mix(host);

@@ -1217,6 +1217,22 @@ fn set_cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// The pointer starts again from where the title put it, for the machine as
+/// well as for the host.
+///
+/// Only the two together are right. The host, once it is told, reports the
+/// person's next move as so far past **where the title put the pointer**; the
+/// machine reads a move as so far past **where it last was told the pointer
+/// was**. A title that puts the pointer back every frame and steers by how far
+/// the mouse went since — which is what Alpha Team does, and Hot Wheels — makes
+/// those two different numbers, and the difference is the whole of the
+/// person's movement: at a steady speed every report is the same number, and
+/// the machine reads each one as no movement at all (#40, #64).
+pub fn set_pointer_back(state: &mut super::State, (x, y): (i32, i32)) {
+    state.pointer = (x, y);
+    state.last_move = (x, y);
+}
+
 fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Waiting for a message would wait forever: this machine delivers input at
     // a flip, and a title that is inside a call is not flipping. It comes back
@@ -1769,6 +1785,34 @@ mod tests {
         deliver(&mut state, Input::Move { x: 401, y: 300 }, 0);
         let moved: Vec<(u32, u32)> = state.mouse_data.iter().copied().collect();
         assert_eq!(moved, [(DIMOUSE_X, 1)]);
+    }
+
+    /// A title that puts the pointer back every frame and steers by how far
+    /// the mouse went since (#40, #64).
+    ///
+    /// The host restarts its own reporting at wherever the title put the
+    /// pointer, so the machine has to restart with it, or a hand moving at a
+    /// steady speed reads as a hand standing still.
+    #[test]
+    fn a_hand_moving_the_same_amount_every_frame_keeps_moving_the_pointer() {
+        let mut state = State::new();
+        state.window_made = true;
+        state.pointer = (320, 240);
+        state.last_move = (320, 240);
+        let moved = |state: &mut State| -> i32 {
+            // The title puts the pointer back in the middle, and the machine
+            // tells the host, which restarts there.
+            super::set_pointer_back(state, (320, 240));
+            // Then the hand goes three pixels right, which the host reports
+            // as three past where it was put.
+            deliver(state, Input::Move { x: 323, y: 240 }, 0);
+            let dx = state.mouse_delta.0;
+            state.mouse_delta = (0, 0);
+            dx
+        };
+        assert_eq!(moved(&mut state), 3, "the first frame");
+        assert_eq!(moved(&mut state), 3, "and every frame after it");
+        assert_eq!(moved(&mut state), 3, "for as long as the hand moves");
     }
 
     #[test]
