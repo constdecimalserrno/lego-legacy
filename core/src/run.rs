@@ -235,7 +235,7 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
 
     // The window opens at the declared machine's own screen size; the guest's
     // frame is scaled into it, its aspect kept, and the guest is never told.
-    let mut host = match MacWindow::open(title.key, 640, 480) {
+    let mut host = match MacWindow::open(title.key, 640, 480, title.pointer_speed) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("lego-legacy: no window: {e}");

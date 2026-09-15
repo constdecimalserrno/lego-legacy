@@ -42,6 +42,7 @@ const HOT_WHEELS: Title = Title {
     ],
     install_dir: "C:\\Program Files\\Mattel\\Stunt Track Driver",
     click_in_a_movie: None,
+    pointer_speed: (1.0, 1.0),
 };
 
 /// Point the run at the checkout's rips and keep run directories out of it.

@@ -55,6 +55,10 @@ pub const ROCK_RAIDERS: Title = Title {
     // This title takes a click during a movie itself, measured (#67): it
     // lets go of the movie on the flip the click lands. Nothing to translate.
     click_in_a_movie: None,
+    // One for one, and never used: this title's pointer is a place rather
+    // than a distance, so the host hands it where the person's own pointer is
+    // and there is nothing to steer (#31, #46).
+    pointer_speed: (1.0, 1.0),
 };
 
 fn main() -> ExitCode {

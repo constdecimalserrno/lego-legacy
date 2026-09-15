@@ -39,6 +39,9 @@ const ALPHA_TEAM: Title = Title {
     )],
     install_dir: ROOT,
     click_in_a_movie: Some(0x01),
+    // As the title crate declares it (#86): this title's own pointer moves a
+    // 1280th of the screen per pixel it is handed, on both axes.
+    pointer_speed: (1280.0 / 640.0, 1280.0 / 480.0),
 };
 
 /// Point the run at the checkout's rips and keep run directories out of it.

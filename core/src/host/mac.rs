@@ -176,18 +176,33 @@ pub fn content_scale(content: (f64, f64), frame: (u32, u32)) -> f64 {
 /// The move is in points of the window's content, so it is scaled to guest
 /// pixels; the pointer keeps its fraction of a pixel between moves, and stays
 /// on the guest's screen as Windows keeps the cursor on the display.
+///
+/// `speed` is the declared machine's own pointer speed
+/// ([`crate::title::Title::pointer_speed`]): how much pointer there is in a
+/// push of the mouse, which on a real machine is a setting of the machine and
+/// here is a declared value. A title that only moves its own pointer by a
+/// fraction of what it is handed has that fraction put back here, so that the
+/// pointer a person watches goes where their hand goes (#86).
+///
+/// ponytail: the pointer stops at the guest's screen edge, so a title that
+/// puts it back in the middle every frame can be told about half a screen of
+/// movement in one frame and no more — at 30 frames a second and twice speed,
+/// a hand crossing 160 guest pixels in a frame. Faster than that is lost, as
+/// it is on a real machine, where the cursor is against the edge of the
+/// display.
 #[must_use]
 pub fn steered(
     pointer: (f64, f64),
     moved: (f64, f64),
     content: (f64, f64),
     frame: (u32, u32),
+    speed: (f64, f64),
 ) -> (f64, f64) {
     let scale = content_scale(content, frame);
     let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
     (
-        (pointer.0 + moved.0 / scale).clamp(0.0, fw - 1.0),
-        (pointer.1 + moved.1 / scale).clamp(0.0, fh - 1.0),
+        (pointer.0 + moved.0 * speed.0 / scale).clamp(0.0, fw - 1.0),
+        (pointer.1 + moved.1 * speed.1 / scale).clamp(0.0, fh - 1.0),
     )
 }
 
@@ -450,6 +465,9 @@ pub struct MacWindow {
     /// The last place the guest was told the pointer was, so that a move too
     /// small to reach the next pixel is not a move.
     told: (i32, i32),
+    /// The declared machine's pointer speed, across and down: how far its
+    /// pointer goes for how far the mouse went ([`steered`], #86).
+    pointer_speed: (f64, f64),
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
     cg_main_display: u32,
@@ -496,11 +514,17 @@ fn button(kind: u64) -> Button {
 }
 
 impl MacWindow {
-    /// Open a window of this size, titled after the title being run.
+    /// Open a window of this size, titled after the title being run, with the
+    /// declared machine's own pointer speed ([`steered`]).
     ///
     /// # Errors
     /// When the frameworks cannot be opened, or the window cannot be made.
-    pub fn open(name: &str, width: u32, height: u32) -> Result<Self, HostError> {
+    pub fn open(
+        name: &str,
+        width: u32,
+        height: u32,
+        pointer_speed: (f64, f64),
+    ) -> Result<Self, HostError> {
         let rt = Runtime::open()?;
 
         // Safety: each call below is made through the signature its own
@@ -598,6 +622,7 @@ impl MacWindow {
                 pointer_taken: false,
                 steer: (f64::from(width) / 2.0, f64::from(height) / 2.0),
                 told: (i32::MAX, i32::MAX),
+                pointer_speed,
                 lag_nanos: 0,
                 paced_from: (0, 0),
                 pace: 1.0,
@@ -797,6 +822,7 @@ impl MacWindow {
                                 (dx, dy),
                                 (frame.width, frame.height),
                                 self.frame_size,
+                                self.pointer_speed,
                             );
                             self.tell_where_the_pointer_is();
                         }
@@ -1072,6 +1098,46 @@ mod tests {
         }
     }
 
+    /// A machine whose pointer goes exactly as far as the mouse did.
+    const ONE: (f64, f64) = (1.0, 1.0);
+
+    /// The declared pointer speed is what a title takes back out again.
+    ///
+    /// Alpha Team moves its own pointer a 1280th of the screen for every
+    /// pixel it is handed, on both axes, which is half a pixel across and
+    /// three eighths of one down; its machine declares 1280/640 and 1280/480
+    /// so that the pointer a person watches goes exactly where their hand
+    /// went (#86). The arithmetic the title does is written out here, because
+    /// the whole point of the declared value is the number that comes out of
+    /// the far end of it.
+    #[test]
+    fn the_declared_speed_puts_back_what_the_title_takes_off() {
+        let (frame, same) = ((640, 480), (640.0, 480.0));
+        let speed = (1280.0 / 640.0, 1280.0 / 480.0);
+        // What Alpha Team does with a pointer it is handed: a 1280th of the
+        // screen for each pixel past the middle, then drawn on a 640x480
+        // screen.
+        let drawn = |delivered: (f64, f64)| {
+            (
+                (delivered.0 - 320.0) / 1280.0 * 640.0,
+                (delivered.1 - 240.0) / 1280.0 * 480.0,
+            )
+        };
+        for hand in [(10.0, 10.0), (-7.0, 3.0), (100.0, -60.0), (1.0, 1.0)] {
+            let steer = steered((320.0, 240.0), hand, same, frame, speed);
+            let moved = drawn(steer);
+            assert!(
+                (moved.0 - hand.0).abs() < 0.001 && (moved.1 - hand.1).abs() < 0.001,
+                "a hand moving {hand:?} moved the title's pointer {moved:?}"
+            );
+            // And at one for one — which is what it was — the title's pointer
+            // covers half the ground across and three eighths of it down.
+            let flat = drawn(steered((320.0, 240.0), hand, same, frame, ONE));
+            assert!((flat.0 - hand.0 / 2.0).abs() < 0.001);
+            assert!((flat.1 - hand.1 * 0.375).abs() < 0.001);
+        }
+    }
+
     /// A taken pointer moves by how far the mouse moved, in guest pixels
     /// whatever the window is stretched to, keeps the fraction of a pixel it
     /// has, and stops at the guest's screen edge as Windows stops the cursor
@@ -1081,25 +1147,25 @@ mod tests {
         let frame = (640, 480);
         let same = (640.0, 480.0);
         assert_eq!(
-            steered((320.0, 240.0), (6.0, -4.0), same, frame),
+            steered((320.0, 240.0), (6.0, -4.0), same, frame, ONE),
             (326.0, 236.0)
         );
         // Twice the window is twice the points for the same guest pixel.
         let twice = (1280.0, 960.0);
         assert_eq!(
-            steered((320.0, 240.0), (6.0, 0.0), twice, frame),
+            steered((320.0, 240.0), (6.0, 0.0), twice, frame, ONE),
             (323.0, 240.0)
         );
         // Half a pixel is kept, not lost.
-        let (x, _) = steered((320.0, 240.0), (0.5, 0.0), same, frame);
-        let (x, _) = steered((x, 240.0), (0.5, 0.0), same, frame);
+        let (x, _) = steered((320.0, 240.0), (0.5, 0.0), same, frame, ONE);
+        let (x, _) = steered((x, 240.0), (0.5, 0.0), same, frame, ONE);
         assert_eq!(x, 321.0);
         assert_eq!(
-            steered((630.0, 470.0), (500.0, 500.0), same, frame),
+            steered((630.0, 470.0), (500.0, 500.0), same, frame, ONE),
             (639.0, 479.0)
         );
         assert_eq!(
-            steered((5.0, 5.0), (-500.0, -500.0), same, frame),
+            steered((5.0, 5.0), (-500.0, -500.0), same, frame, ONE),
             (0.0, 0.0)
         );
     }
@@ -1114,7 +1180,7 @@ mod tests {
         let mut steer = (320.0, 240.0);
         let mut delivered = 0;
         for _ in 0..10 {
-            steer = steered(steer, (0.5, 0.0), same, frame);
+            steer = steered(steer, (0.5, 0.0), same, frame, ONE);
             // The guest is told the whole pixel the pointer reached, and the
             // title puts it back in the middle straight after, so the next
             // flip measures from the middle again.
@@ -1128,7 +1194,7 @@ mod tests {
         let mut steer = (320.0, 240.0);
         let mut dropped = 0;
         for _ in 0..10 {
-            steer = steered(steer, (0.5, 0.0), same, frame);
+            steer = steered(steer, (0.5, 0.0), same, frame, ONE);
             dropped += steer.0 as i32 - 320;
             steer = (320.0, 240.0);
         }

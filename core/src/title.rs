@@ -138,6 +138,22 @@ pub struct Title {
     /// `None` for a title that takes the click itself, which Rock Raiders
     /// does (#67).
     pub click_in_a_movie: Option<u32>,
+    /// How far this machine's pointer goes for how far the mouse went, across
+    /// and down. One for one is the pointer a person's own hand is used to.
+    ///
+    /// A declared value, and the machine's own rather than the title's: on the
+    /// machine a title shipped for, how much pointer there is in a push of the
+    /// mouse is a setting of the machine, which is why Windows has one. What
+    /// the title chooses is what it does with the pointer once it has it, and
+    /// a title that takes a fraction of the movement needs the fraction put
+    /// back here or a person's hand and the pointer they are watching never
+    /// line up (#86).
+    ///
+    /// It is only ever used where the title draws its own pointer and the host
+    /// is steering by how far the mouse went ([`crate::host::mac::steered`]);
+    /// where the pointer is the person's own, its place is its own and there
+    /// is nothing to scale.
+    pub pointer_speed: (f64, f64),
 }
 
 impl Title {
@@ -172,5 +188,7 @@ impl Title {
         registry: &[],
         install_dir: "C:\\STUB",
         click_in_a_movie: None,
+        // The stub guest has no pointer of its own to draw.
+        pointer_speed: (1.0, 1.0),
     };
 }

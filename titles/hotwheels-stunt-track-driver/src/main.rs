@@ -66,6 +66,10 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     // but its splashes and its menu are the same thing at the boundary, so
     // there is no window to scope a translation to and it is not made.
     click_in_a_movie: None,
+    // One for one: this title steers its own pointer by what it is handed and
+    // keeps none of it back, and a person played it at a window and said the
+    // pointer and the mouse move as one (#37).
+    pointer_speed: (1.0, 1.0),
 };
 
 fn main() -> ExitCode {

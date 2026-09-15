@@ -88,6 +88,36 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
     // about flip 440 on. A person who clicks to get past the intro meant
     // that key, so the machine hands it over.
     click_in_a_movie: Some(0x01),
+    // Twice across and eight thirds down, because this title's own pointer
+    // moves by a **1280th of the screen per pixel it is handed, on both
+    // axes**, and a 1280th of the screen is half a pixel across and three
+    // eighths of one down. Left at one for one, a person's hand and the
+    // pointer they are watching part company immediately: the pointer covers
+    // half the ground across, less than that down, so a straight diagonal
+    // comes out at 37 degrees rather than 45, and every push into the edge of
+    // the screen throws away a different amount of the correspondence. That
+    // is what a person means by the cursor not matching the mouse (#86).
+    //
+    // Measured twice, two ways, on the first mission's own screen rather than
+    // argued from the disassembly — which reads a 640th and is wrong by two:
+    //
+    //   - the drawn pointer, out of screenshots: 100 delivered pixels across
+    //     move it 50, 20 move 10, 280 move 140; 100 down move it 37 (37.5,
+    //     floored), 200 down move 75. Twenty deliveries of 1 pixel move it 10
+    //     across and 7 down, so the title carries the fraction and loses
+    //     nothing;
+    //   - the title's own pointer, read out of guest memory at
+    //     `DDMouse::xPositionNDC`: a delivered 100 across moves it 0.078125,
+    //     which is 100/1280 exactly, and a delivered 100 down moves it the
+    //     same. `DDUIManager::m_MouseX` is that same number, so what is drawn
+    //     and what is hit-tested share it and there is nothing else to scale.
+    //
+    // 1280/640 and 1280/480. Its `DDMouse::sensitivity` is never called by
+    // anything the disc ships (`SetSensitivity` has no call site in any of the
+    // twelve binaries), and this title reads no Windows mouse setting at all —
+    // no `SystemParametersInfo`, no mouse key in the registry — so there is
+    // nothing to answer differently and what is handed over is the only lever.
+    pointer_speed: (1280.0 / 640.0, 1280.0 / 480.0),
 };
 
 fn main() -> ExitCode {
