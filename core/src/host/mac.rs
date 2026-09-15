@@ -943,6 +943,12 @@ impl Host for MacWindow {
         self.closed
     }
 
+    fn audio_underruns(&self) -> u64 {
+        self.audio
+            .as_ref()
+            .map_or(0, super::mac_audio::MacAudio::underruns)
+    }
+
     fn wall_nanos(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }

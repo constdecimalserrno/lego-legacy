@@ -101,6 +101,18 @@ pub fn run_digested(
         machine.run(host, &mut log, budget)
     };
 
+    // Whether the device taking this run's audio ever ran dry. Said out loud
+    // because it is the one thing a person hears that no golden can catch: the
+    // mix is made on the declared clock and hashed as it was mixed, and what
+    // reaches a device is the host's own business (#75). A run that crackles
+    // now says so instead of being reported from a chair.
+    let underruns = host.audio_underruns();
+    if underruns > 0 {
+        log.line(&format!(
+            "audio: the device ran dry {underruns} times; the mix did not keep up"
+        ));
+    }
+
     // A run that stopped at a wall leaves behind everything needed to reach it
     // again: what was done, where it stopped, and the last snapshot before it.
     if let crate::machine::Outcome::Wall { what } = &finish.outcome {
