@@ -270,11 +270,17 @@ impl Machine {
     /// what it says and nothing else.
     fn deliver_input(&mut self, host: &mut dyn Host, log: &mut RunLog) {
         let events = match &self.route {
-            Some(route) => {
+            // A route that has run out hands the machine to the person: what
+            // it was for was getting here, and from here on the mouse and the
+            // keyboard are theirs. Headless, the host has nothing to say and
+            // the run reads as it always did (#86).
+            Some(route)
+                if !route.at(self.flips).is_empty() || !route.after(self.flips).is_empty() =>
+            {
                 let _ = host.poll_input(self.flips);
                 route.at(self.flips)
             }
-            None => host.poll_input(self.flips),
+            _ => host.poll_input(self.flips),
         };
         let millis = u32::try_from(self.clock.millis() & 0xffff_ffff).unwrap_or(0);
         for event in events {
