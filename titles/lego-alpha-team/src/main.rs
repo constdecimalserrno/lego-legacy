@@ -63,7 +63,6 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
-        user: "LEGO-LEGACY",
         why: "Windows 98 SE is what this pressing shipped against, and the rest is the \
               roster's baseline; the processor is the one value this title reads back as a \
               measurement of its own rather than asking for it",

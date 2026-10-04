@@ -19,13 +19,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "UnregisterClassA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "USER32",
         name: "CreateWindowExA",
         args: 12,
         convention: Convention::Stdcall,
@@ -83,13 +76,6 @@ pub const SHIMS: &[Shim] = &[
     Shim {
         dll: "USER32",
         name: "GetActiveWindow",
-        args: 0,
-        convention: Convention::Stdcall,
-        run: active_window,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetForegroundWindow",
         args: 0,
         convention: Convention::Stdcall,
         run: active_window,
@@ -236,13 +222,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "GetWindowLongA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
         name: "MessageBoxA",
         args: 4,
         convention: Convention::Stdcall,
@@ -285,20 +264,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "ScreenToClient",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "USER32",
-        name: "SetRect",
-        args: 5,
-        convention: Convention::Stdcall,
-        run: set_rect,
-    },
-    Shim {
-        dll: "USER32",
         name: "DialogBoxParamA",
         args: 5,
         convention: Convention::Stdcall,
@@ -317,13 +282,6 @@ pub const SHIMS: &[Shim] = &[
         args: 2,
         convention: Convention::Stdcall,
         run: dialog_item,
-    },
-    Shim {
-        dll: "USER32",
-        name: "SendDlgItemMessageA",
-        args: 5,
-        convention: Convention::Stdcall,
-        run: send_dialog_item_message,
     },
     Shim {
         dll: "USER32",
@@ -350,20 +308,6 @@ pub const SHIMS: &[Shim] = &[
         dll: "USER32",
         name: "SetActiveWindow",
         args: 1,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "IsIconic",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetWindowThreadProcessId",
-        args: 2,
         convention: Convention::Stdcall,
         run: succeed_zero,
     },
@@ -408,13 +352,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "InvalidateRect",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "USER32",
         name: "BeginPaint",
         args: 2,
         convention: Convention::Stdcall,
@@ -429,38 +366,10 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "GetKeyState",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: key_state,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetAsyncKeyState",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: key_state,
-    },
-    Shim {
-        dll: "USER32",
-        name: "MapVirtualKeyA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
         name: "SetWindowTextA",
         args: 2,
         convention: Convention::Stdcall,
         run: succeed,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetWindowTextA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
     },
     Shim {
         dll: "USER32",
@@ -492,52 +401,10 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "GetSystemMenu",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "LoadStringA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "CharUpperA",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: identity,
-    },
-    Shim {
-        dll: "USER32",
-        name: "CharLowerA",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: identity,
-    },
-    Shim {
-        dll: "USER32",
         name: "wsprintfA",
         args: 2,
         convention: Convention::Cdecl,
         run: wsprintf,
-    },
-    Shim {
-        dll: "USER32",
-        name: "wvsprintfA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetMenu",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
     },
 ];
 
@@ -692,45 +559,6 @@ fn succeed(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 
 fn succeed_zero(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
-}
-
-/// Whether a key or a mouse button is down right now, as `GetKeyState` and
-/// `GetAsyncKeyState` answer it: a `SHORT` with its top bit set while it is.
-///
-/// Both of these answered zero for every key, which is the machine telling
-/// the guest that nobody is holding anything down (#61). Alpha Team's front
-/// end never noticed, because it takes its clicks as window messages; its
-/// missions ask here, so every click in a mission went nowhere while the
-/// pointer over the same pixel picked correctly.
-///
-/// The low bit these two carry — the toggle state for `GetKeyState`, pressed
-/// since the last call for `GetAsyncKeyState` — is not answered: nothing on
-/// the roster has been seen to read it, and guessing at it would be a
-/// declared value nobody measured.
-fn key_state(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    Ok(key_state_of(ctx.state, args[0] & 0xff))
-}
-
-fn key_state_of(state: &super::State, key: u32) -> u32 {
-    /// A `SHORT` with its top bit set, which is how Windows says "held".
-    const HELD: u32 = 0x8000;
-    let down = match key {
-        // The declared machine's pointer has two buttons (#61): this title
-        // registers a route for each. It has no middle one, so that is never
-        // down.
-        VK_LBUTTON => state.mouse_down,
-        VK_RBUTTON => state.right_down,
-        VK_MBUTTON => false,
-        _ => state
-            .keys_down
-            .iter()
-            .any(|code| virtual_key(*code) == Some(key)),
-    };
-    if down {
-        HELD
-    } else {
-        0
-    }
 }
 
 fn register_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -937,14 +765,6 @@ fn virtual_key(code: u32) -> Option<u32> {
         _ => return None,
     })
 }
-
-/// What a person did, as the declared machine's devices and its message queue
-/// see it: the pointer, the button and the keys change, and the title's window
-/// is sent what Windows would send it.
-/// The pointer's buttons, as Windows numbers virtual keys.
-const VK_LBUTTON: u32 = 0x01;
-const VK_RBUTTON: u32 = 0x02;
-const VK_MBUTTON: u32 = 0x04;
 
 /// Where a button's state lives.
 fn button_of(state: &mut super::State, button: crate::host::Button) -> &mut bool {
@@ -1302,15 +1122,6 @@ fn client_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
-fn set_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    for (i, offset) in (0..4).zip([0, 4, 8, 12]) {
-        ctx.mem
-            .write_u32(args[0] + offset, args[i + 1])
-            .map_err(Stop::Fault)?;
-    }
-    Ok(1)
-}
-
 fn cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (x, y) = ctx.state.pointer;
     ctx.mem.write_u32(args[0], x as u32).map_err(Stop::Fault)?;
@@ -1438,11 +1249,6 @@ fn dialog_item(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     })
 }
 
-fn send_dialog_item_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let window = dialog_item(ctx, &args[..2])?;
-    send_message(ctx, &[window, args[2], args[3], args[4]])
-}
-
 /// A message sent to a window and answered before the call returns.
 ///
 /// A dialog's controls are answered here, as the control classes would: list
@@ -1537,12 +1343,6 @@ fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0x0001_0001)
 }
 
-fn identity(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The character functions hand back what they were given; case folding is
-    // the C runtime's, and this machine's strings are already in one case.
-    Ok(args[0])
-}
-
 #[cfg(test)]
 mod tests {
     use super::WM_ACTIVATEAPP;
@@ -1552,57 +1352,6 @@ mod tests {
     };
     use crate::host::{Button, Input};
     use crate::win32::State;
-
-    /// `GetKeyState` and `GetAsyncKeyState` answered zero for everything,
-    /// which told every title that nobody was holding anything down (#61).
-    #[test]
-    fn what_is_held_down_is_what_the_key_state_answers() {
-        let mut state = State::new();
-        state.window_made = true;
-        let held = |state: &mut State, key: u32| super::key_state_of(state, key) & 0x8000 != 0;
-        assert!(!held(&mut state, super::VK_LBUTTON), "nothing is held yet");
-        deliver(&mut state, Input::Down(Button::Left), 0);
-        assert!(held(&mut state, super::VK_LBUTTON), "the button is down");
-        assert!(
-            !held(&mut state, super::VK_RBUTTON),
-            "the right one is its own button"
-        );
-        deliver(&mut state, Input::Up(Button::Left), 4);
-        assert!(!held(&mut state, super::VK_LBUTTON), "and up again");
-
-        // And the right button, which this machine used to answer for by
-        // saying nobody was holding it (#61).
-        deliver(&mut state, Input::Down(Button::Right), 8);
-        assert!(held(&mut state, super::VK_RBUTTON), "the right one is down");
-        assert!(!held(&mut state, super::VK_LBUTTON), "and only that one");
-        assert!(
-            !held(&mut state, super::VK_MBUTTON),
-            "this machine's pointer has no middle button"
-        );
-        deliver(&mut state, Input::Up(Button::Right), 12);
-        assert!(!held(&mut state, super::VK_RBUTTON), "and up again");
-
-        // A key, by the virtual key Windows numbers it: Escape is 0x1b.
-        deliver(
-            &mut state,
-            Input::Key {
-                code: 0x01,
-                down: true,
-            },
-            8,
-        );
-        assert!(held(&mut state, 0x1b), "Escape is down");
-        assert!(!held(&mut state, 0x20), "and Space is not");
-        deliver(
-            &mut state,
-            Input::Key {
-                code: 0x01,
-                down: false,
-            },
-            12,
-        );
-        assert!(!held(&mut state, 0x1b), "Escape is up");
-    }
 
     #[test]
     fn a_window_made_here_is_the_active_application() {

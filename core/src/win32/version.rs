@@ -12,13 +12,6 @@ use crate::guest::GuestMem;
 pub const SHIMS: &[Shim] = &[
     Shim {
         dll: "VERSION",
-        name: "GetFileVersionInfoSizeA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: info_size,
-    },
-    Shim {
-        dll: "VERSION",
         name: "GetFileVersionInfoA",
         args: 4,
         convention: Convention::Stdcall,
@@ -42,17 +35,6 @@ const BLOCK: u32 = 52;
 /// title's disc carries and what its renderer asks for (#57).
 const VERSION_MS: u32 = 0x0004_0007;
 const VERSION_LS: u32 = 0x0000_02bc;
-
-fn info_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GetFileVersionInfoSizeA(name, handle). The handle is always zero, which
-    // is what Windows does too.
-    let name = ctx.string(args[0]).map_err(Stop::Fault)?;
-    ctx.log.line(&format!("version asked of {name}"));
-    if args[1] != 0 {
-        ctx.mem.write_u32(args[1], 0).map_err(Stop::Fault)?;
-    }
-    Ok(BLOCK)
-}
 
 fn info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetFileVersionInfoA(name, handle, length, data).

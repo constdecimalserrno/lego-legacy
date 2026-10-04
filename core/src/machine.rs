@@ -217,11 +217,6 @@ impl Machine {
         self.flips
     }
 
-    #[must_use]
-    pub fn engine_name(&self) -> &'static str {
-        self.engine.name()
-    }
-
     /// Present the declared surface, charge the clock for it, and take
     /// whatever a person did while it was on screen.
     fn present(&mut self, host: &mut dyn Host, log: &mut RunLog) {

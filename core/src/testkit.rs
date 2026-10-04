@@ -52,22 +52,6 @@ impl Ran {
         self
     }
 
-    /// Fail unless the run stopped at a wall whose description contains
-    /// `needle`.
-    ///
-    /// # Panics
-    /// When the run ended any other way, or at a different wall.
-    pub fn assert_wall(&self, needle: &str) -> &Self {
-        match &self.finish.outcome {
-            Outcome::Wall { what } => assert!(
-                what.contains(needle),
-                "wall was `{what}`, which does not name `{needle}`"
-            ),
-            other => panic!("run ended {other} instead of a wall naming `{needle}`"),
-        }
-        self
-    }
-
     /// Fail unless the run presented this many frames.
     ///
     /// # Panics

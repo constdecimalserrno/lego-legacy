@@ -78,7 +78,6 @@ pub unsafe fn unmap(ptr: *mut u8, len: usize) {
 /// A host library opened by name, and the symbols read out of it.
 pub struct Library {
     handle: *mut core::ffi::c_void,
-    name: String,
 }
 
 impl Library {
@@ -97,15 +96,7 @@ impl Library {
                 errno: errno(),
             });
         }
-        Ok(Self {
-            handle,
-            name: name.to_owned(),
-        })
-    }
-
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
+        Ok(Self { handle })
     }
 
     /// A function out of the library, by name.

@@ -23,7 +23,6 @@ const HOT_WHEELS: Title = Title {
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
-        user: "LEGO-LEGACY",
         why: "the title crate's own, repeated here because a test crate cannot depend on a \
               binary",
     },

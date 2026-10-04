@@ -30,7 +30,6 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
-        user: "LEGO-LEGACY",
         why: "Windows 98 SE is what this pressing shipped against; the rest is the roster's \
               baseline, unmeasured against this title because it has not asked for any of it \
               yet",

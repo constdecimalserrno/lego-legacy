@@ -93,12 +93,6 @@ impl Modules {
         Some(module.base.wrapping_add(rva))
     }
 
-    /// What a module exports, for a test that wants to look.
-    #[must_use]
-    pub fn exports_of(&self, name: &str) -> Option<&Exports> {
-        self.find(name).map(|m| &m.exports)
-    }
-
     /// Load a binary the title ships, and everything it needs, deepest first.
     ///
     /// A name the declared tree does not hold is not an error: it is one of

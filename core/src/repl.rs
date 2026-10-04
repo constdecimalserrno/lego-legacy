@@ -30,7 +30,6 @@ enum Command {
     /// image: the first instruction of a run that has gone wild.
     UntilWild,
     Continue,
-    Snapshot,
     Help,
     Quit,
     Unknown(String),
@@ -73,7 +72,6 @@ fn parse(line: &str) -> Option<Command> {
             _ => Command::Unknown(line.trim().to_owned()),
         },
         "continue" | "c" => Command::Continue,
-        "snapshot" => Command::Snapshot,
         "help" | "?" => Command::Help,
         "quit" | "q" | "exit" => Command::Quit,
         other => Command::Unknown(other.to_owned()),
@@ -89,7 +87,6 @@ until flip <n>     stop when the guest has presented n frames
 until cursor <n>   stop when n instructions have retired
 until wild         stop where the guest first runs outside its own image
 continue           run until the guest stops, or a break is reached
-snapshot           write the machine's state
 quit               end the run";
 
 /// Where the machine stands, in one line.
@@ -193,9 +190,6 @@ pub fn drive(
             Command::Break(addr) => {
                 breaks.push(addr);
                 let _ = writeln!(output, "break at {addr:#010x}");
-            }
-            Command::Snapshot => {
-                let _ = writeln!(output, "snapshots are not built yet (#13)");
             }
             Command::Unknown(what) => {
                 let _ = writeln!(output, "no such command: {what}");

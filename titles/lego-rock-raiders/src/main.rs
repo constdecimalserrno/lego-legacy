@@ -39,7 +39,6 @@ pub const ROCK_RAIDERS: Title = Title {
         // everything else here: a recorded run must not depend on the machine
         // it was recorded on.
         computer: "LEGO-LEGACY",
-        user: "LEGO-LEGACY",
         why: "Windows 98 SE is what this pressing shipped against and what its own installer \
               checks for; the rest is the roster's baseline, unmeasured against this title \
               because it has not asked for any of it yet",

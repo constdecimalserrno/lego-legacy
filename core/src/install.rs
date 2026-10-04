@@ -236,12 +236,6 @@ impl Tree {
         Ok(declared)
     }
 
-    /// Declare that a guest path holds one of the pressing's files.
-    pub fn map(&mut self, guest_path: &str, disc_path: &str) {
-        self.files
-            .insert(Self::key(guest_path), Source::Disc(disc_path.to_owned()));
-    }
-
     /// Declare a file the installer would have written rather than copied.
     pub fn declare(&mut self, guest_path: &str, bytes: Vec<u8>) {
         self.files
@@ -350,16 +344,5 @@ impl Tree {
             out.push((name.to_owned(), size));
         }
         out
-    }
-
-    /// How many files the tree holds.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.files.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
     }
 }

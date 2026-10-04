@@ -147,13 +147,6 @@ pub trait Host {
     /// When the operating system refuses the mapping.
     fn map(&mut self, len: usize) -> Result<Mapping, HostError>;
 
-    /// Load a host library by name, for a backend that reaches its operating
-    /// system through `dlopen` rather than through a link.
-    ///
-    /// # Errors
-    /// When the backend has no dynamic loader, or the library is absent.
-    fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError>;
-
     /// Draw the pointer a person is really moving, or stop: a title that
     /// draws its own wants one pointer on the screen, not two. A host with no
     /// window has nothing to do here.

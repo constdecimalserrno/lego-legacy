@@ -355,19 +355,6 @@ pub fn moved(taken: bool, ours: bool) -> Moved {
     }
 }
 
-/// Where a point on the guest's screen is in the window's content: the
-/// inverse of [`guest_point`], landing on the middle of the guest's pixel.
-#[must_use]
-pub fn content_point(content: (f64, f64), frame: (u32, u32), gx: i32, gy: i32) -> (f64, f64) {
-    let (cw, ch) = content;
-    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
-    let scale = content_scale(content, frame);
-    let (left, bottom) = ((cw - fw * scale) / 2.0, (ch - fh * scale) / 2.0);
-    let x = left + (f64::from(gx) + 0.5) * scale;
-    let y = ch - bottom - (f64::from(gy) + 0.5) * scale;
-    (x, y)
-}
-
 /// The DirectInput key number for a Mac key, by where the key sits on the
 /// keyboard rather than what it types; the keypad's operators by what they
 /// are, as a game binds them.
@@ -1124,10 +1111,6 @@ impl Host for MacWindow {
         Ok(unsafe { Mapping::from_raw(ptr, len) })
     }
 
-    fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError> {
-        sys::Library::open(name)
-    }
-
     fn pace(&mut self, declared_nanos: u64) -> f64 {
         // A game-second takes a wall-second (ADR-0003): if the machine is
         // ahead of its own clock, it waits.
@@ -1161,8 +1144,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, direct_input_key, direct_input_modifier, guest_point, moved, Moved, Rect,
-        Steer, PRESENT_BITMAP_INFO,
+        direct_input_key, direct_input_modifier, guest_point, moved, Moved, Rect, Steer,
+        PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
 
@@ -1187,23 +1170,6 @@ mod tests {
         assert_eq!(moved(false, false), Moved::Elsewhere);
     }
     use std::ffi::{c_char, c_void};
-
-    /// Putting the pointer where the guest says and reading it back finds the
-    /// same pixel, whatever the window has been stretched to (#59).
-    #[test]
-    fn a_pointer_put_on_a_guest_pixel_reads_back_as_that_pixel() {
-        let frame = (640, 480);
-        for content in [(640.0, 480.0), (1281.0, 963.0), (900.0, 480.0)] {
-            for point in [(0, 0), (319, 239), (639, 479), (12, 400)] {
-                let (x, y) = content_point(content, frame, point.0, point.1);
-                assert_eq!(
-                    guest_point(content, frame, x, y),
-                    point,
-                    "content {content:?}, point {point:?}"
-                );
-            }
-        }
-    }
 
     /// A machine whose pointer goes exactly as far as the mouse did.
     const ONE: (f64, f64) = (1.0, 1.0);

@@ -35,8 +35,6 @@ pub struct Frame {
     /// The scene's background colour, when this frame is a scene's root.
     pub background: u32,
     pub fog: Fog,
-    pub texture: u32,
-    pub material: u32,
 }
 
 /// A scene's fog: whether it is on, its colour, how it thickens (linear,
@@ -73,8 +71,6 @@ impl Default for Frame {
             // native retained mode to.
             background: 0xff00_0000,
             fog: Fog::default(),
-            texture: 0,
-            material: 0,
         }
     }
 }

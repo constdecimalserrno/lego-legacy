@@ -285,39 +285,3 @@ impl Arena {
         }
     }
 }
-
-/// The engine's path into guest memory (ADR-0004).
-///
-/// These skip the bounds check the trait above makes. The engine takes them
-/// only after [`Arena::has_window`] has bounded the address once for a whole
-/// instruction, which is cheaper than checking every byte of it separately.
-impl Arena {
-    /// Whether a whole instruction's worth of bytes at `addr` is inside the
-    /// arena, so that fetching them needs no further check.
-    #[must_use]
-    pub fn has_window(&self, addr: u32, len: usize) -> bool {
-        self.in_bounds(addr, len)
-    }
-
-    /// # Safety
-    /// `addr + 1` must be within the arena, which [`Arena::has_window`] is how
-    /// the engine knows.
-    #[must_use]
-    pub unsafe fn read_u8_unchecked(&self, addr: u32) -> u8 {
-        self.mapping.as_ptr().add(addr as usize).read()
-    }
-
-    /// # Safety
-    /// `addr + 4` must be within the arena, which [`Arena::has_window`] is how
-    /// the engine knows.
-    #[must_use]
-    pub unsafe fn read_u32_unchecked(&self, addr: u32) -> u32 {
-        u32::from_le(
-            self.mapping
-                .as_ptr()
-                .add(addr as usize)
-                .cast::<u32>()
-                .read_unaligned(),
-        )
-    }
-}

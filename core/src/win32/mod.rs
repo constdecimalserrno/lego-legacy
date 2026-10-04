@@ -102,8 +102,6 @@ pub enum Object {
     Mapping { at: u32, len: u32 },
     /// A registry key the guest has open.
     Key { path: String },
-    /// A COM object the guest holds a pointer to.
-    Com { interface: &'static str, refs: i32 },
     /// A multimedia file over guest memory, and where it is reading; `owned`
     /// when the machine put the file there and frees it on close.
     Mmio {
@@ -161,12 +159,8 @@ pub struct State {
     /// Handles the guest has been given.
     handles: BTreeMap<u32, Object>,
     next_handle: u32,
-    /// Where strings the machine hands the guest are kept.
-    pub scratch: Vec<u32>,
     /// The command line the guest reads, once it has asked for it.
     pub command_line: Option<u32>,
-    /// What the guest last called, for the run log and for a wall's message.
-    pub last_call: Option<String>,
     /// What the guest will read from `GetLastError`.
     pub last_error: u32,
     /// Every guest thread but the one running, parked (ADR-0005). Empty until
@@ -290,8 +284,6 @@ pub struct State {
     faces: BTreeMap<(u32, &'static str), u32>,
     /// Which vtable an interface's methods live behind, once one is made.
     vtables: BTreeMap<&'static str, u32>,
-    /// Settings files, by path, section and key.
-    profiles: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
     /// The registry, as a flat map from a key's whole path to its values.
     ///
     /// Seeded with what a title's installer would have written, and added to
@@ -316,9 +308,7 @@ impl State {
             // guest that uses one as a pointer faults instead of reading
             // something plausible.
             next_handle: 0x0000_0100,
-            scratch: Vec::new(),
             command_line: None,
-            last_call: None,
             last_error: 0,
             error_mode: 0,
             // The thread a title starts on is in the list from the start, so
@@ -389,7 +379,6 @@ impl State {
             com: BTreeMap::new(),
             faces: BTreeMap::new(),
             vtables: BTreeMap::new(),
-            profiles: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
     }
@@ -592,22 +581,6 @@ impl State {
     /// Remember where an interface's vtable was put.
     pub fn set_vtable(&mut self, interface: &'static str, at: u32) {
         self.vtables.insert(interface, at);
-    }
-
-    /// One setting out of a file the guest reads.
-    #[must_use]
-    pub fn profile_value(&self, path: &str, section: &str, key: &str) -> Option<String> {
-        self.profiles.get(path)?.get(section)?.get(key).cloned()
-    }
-
-    /// Write a setting the guest gave us.
-    pub fn set_profile_value(&mut self, path: &str, section: &str, key: &str, value: String) {
-        self.profiles
-            .entry(path.to_owned())
-            .or_default()
-            .entry(section.to_owned())
-            .or_default()
-            .insert(key.to_owned(), value);
     }
 
     /// Give the guest a handle to a registry key, making the key if the guest
@@ -1024,12 +997,6 @@ pub fn fill(
     }
     ctx.state.cleared += 1;
     Ok(())
-}
-
-/// Every entry point that is written rather than only named.
-#[must_use]
-pub fn shims() -> &'static [Shim] {
-    kernel32::SHIMS
 }
 
 /// The interfaces this machine can hand the guest.

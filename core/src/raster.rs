@@ -25,26 +25,6 @@ impl PixelFormat {
         self.bits.div_ceil(8) as usize
     }
 
-    /// A pixel's channels, each widened to eight bits.
-    #[must_use]
-    pub fn decode(self, value: u32) -> [u8; 4] {
-        let channel = |mask: u32, absent: u8| {
-            if mask == 0 {
-                return absent;
-            }
-            let v = u64::from((value & mask) >> mask.trailing_zeros());
-            let full = (1u64 << mask.count_ones()) - 1;
-            // Full scale in the format is full scale in eight bits.
-            ((v * 255 + full / 2) / full) as u8
-        };
-        [
-            channel(self.masks[0], 0),
-            channel(self.masks[1], 0),
-            channel(self.masks[2], 0),
-            channel(self.masks[3], 0xff),
-        ]
-    }
-
     /// Channels narrowed to this format's own widths.
     #[must_use]
     pub fn encode(self, rgba: [u8; 4]) -> u32 {
@@ -849,17 +829,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pixel_format_widens_and_narrows_its_channels() {
+    fn a_pixel_format_narrows_its_channels() {
         let rgb565 = PixelFormat::RGB565;
-        assert_eq!(rgb565.decode(0xffff), [255, 255, 255, 255]);
-        assert_eq!(rgb565.decode(0xf800), [255, 0, 0, 255]);
         assert_eq!(rgb565.encode([255, 255, 255, 255]), 0xffff);
         assert_eq!(rgb565.encode([0, 128, 0, 255]), 0x0400);
-        let argb1555 = PixelFormat {
-            bits: 16,
-            masks: [0x7c00, 0x03e0, 0x001f, 0x8000],
-        };
-        assert_eq!(argb1555.decode(0x7fff), [255, 255, 255, 0]);
     }
 
     #[test]

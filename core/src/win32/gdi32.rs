@@ -16,27 +16,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "GDI32",
-        name: "CreateRectRgnIndirect",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: region,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "CombineRgn",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: combine,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "GetRgnBox",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: nothing,
-    },
-    Shim {
-        dll: "GDI32",
         name: "DeleteObject",
         args: 1,
         convention: Convention::Stdcall,
@@ -78,15 +57,6 @@ const REGION: u32 = 0x0002_0010;
 
 fn region(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(REGION)
-}
-
-fn combine(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // SIMPLEREGION.
-    Ok(2)
-}
-
-fn nothing(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(0)
 }
 
 fn succeed(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

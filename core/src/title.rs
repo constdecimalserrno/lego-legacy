@@ -71,8 +71,6 @@ pub struct Declared {
     pub modes: &'static [(u32, u32, u32)],
     /// What the machine calls itself.
     pub computer: &'static str,
-    /// Who it says is using it.
-    pub user: &'static str,
     /// Why these values and no others.
     pub why: &'static str,
 }
@@ -180,7 +178,6 @@ impl Title {
             megabytes: 128,
             modes: &[(640, 480, 16)],
             computer: "LEGO-LEGACY",
-            user: "LEGO-LEGACY",
             why: "the stub guest asks the machine nothing, and these are the roster's own \
                   baseline values rather than anything measured for it",
         },

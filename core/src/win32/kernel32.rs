@@ -325,13 +325,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
-        name: "GetProcessHeap",
-        args: 0,
-        convention: Convention::Stdcall,
-        run: get_process_heap,
-    },
-    Shim {
-        dll: "KERNEL32",
         name: "HeapCreate",
         args: 3,
         convention: Convention::Stdcall,
@@ -801,13 +794,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
-        name: "GetWindowsDirectoryA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: get_windows_directory,
-    },
-    Shim {
-        dll: "KERNEL32",
         name: "LoadLibraryA",
         args: 1,
         convention: Convention::Stdcall,
@@ -826,27 +812,6 @@ pub const SHIMS: &[Shim] = &[
         args: 2,
         convention: Convention::Stdcall,
         run: get_proc_address,
-    },
-    Shim {
-        dll: "KERNEL32",
-        name: "GetPrivateProfileStringA",
-        args: 6,
-        convention: Convention::Stdcall,
-        run: get_private_profile_string,
-    },
-    Shim {
-        dll: "KERNEL32",
-        name: "GetPrivateProfileIntA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: get_private_profile_int,
-    },
-    Shim {
-        dll: "KERNEL32",
-        name: "WritePrivateProfileStringA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: write_private_profile_string,
     },
     Shim {
         dll: "KERNEL32",
@@ -899,13 +864,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
-        name: "GetShortPathNameA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: get_short_path_name,
-    },
-    Shim {
-        dll: "KERNEL32",
         name: "GlobalMemoryStatus",
         args: 1,
         convention: Convention::Stdcall,
@@ -934,13 +892,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
-        name: "SuspendThread",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: suspend_thread,
-    },
-    Shim {
-        dll: "KERNEL32",
         name: "SetThreadPriority",
         args: 2,
         convention: Convention::Stdcall,
@@ -952,13 +903,6 @@ pub const SHIMS: &[Shim] = &[
         args: 1,
         convention: Convention::Stdcall,
         run: exit_thread,
-    },
-    Shim {
-        dll: "KERNEL32",
-        name: "GetExitCodeThread",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: get_exit_code_thread,
     },
     Shim {
         dll: "KERNEL32",
@@ -1063,10 +1007,6 @@ fn get_startup_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     ctx.mem.write_u32(at, 68).map_err(Stop::Fault)?;
     Ok(0)
-}
-
-fn get_process_heap(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.give(Object::Heap))
 }
 
 fn heap_create(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -2953,13 +2893,6 @@ fn get_system_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(written)
 }
 
-fn get_windows_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let written = ctx
-        .write_string(args[0], args[1], "C:\\WINDOWS")
-        .map_err(Stop::Fault)?;
-    Ok(written)
-}
-
 fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // A library the title ships is a guest binary and is loaded and run as
     // one (ADR-0002, #55); one Microsoft wrote that the disc does not carry is
@@ -3031,55 +2964,6 @@ fn get_proc_address(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     ctx.state.last_error = 127;
     Ok(0)
-}
-
-/// Where a title's settings file lives on the declared machine.
-fn profile_path(file: &str) -> String {
-    if file.contains('\\') {
-        file.to_owned()
-    } else {
-        format!("C:\\WINDOWS\\{file}")
-    }
-}
-
-fn get_private_profile_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Settings files: what is not there is what the guest passed as its own
-    // default, which is how a first run behaves.
-    let file = ctx.string(args[4]).map_err(Stop::Fault)?;
-    let section = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let key = ctx.string(args[1]).map_err(Stop::Fault)?;
-    let fallback = ctx.string(args[2]).map_err(Stop::Fault)?;
-    let path = profile_path(&file);
-    let value = ctx
-        .state
-        .profile_value(&path, &section, &key)
-        .unwrap_or(fallback);
-    let written = ctx
-        .write_string(args[3], args[5], &value)
-        .map_err(Stop::Fault)?;
-    Ok(written)
-}
-
-fn get_private_profile_int(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let file = ctx.string(args[3]).map_err(Stop::Fault)?;
-    let section = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let key = ctx.string(args[1]).map_err(Stop::Fault)?;
-    let path = profile_path(&file);
-    Ok(ctx
-        .state
-        .profile_value(&path, &section, &key)
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(args[2]))
-}
-
-fn write_private_profile_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let file = ctx.string(args[3]).map_err(Stop::Fault)?;
-    let section = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let key = ctx.string(args[1]).map_err(Stop::Fault)?;
-    let value = ctx.string(args[2]).map_err(Stop::Fault)?;
-    let path = profile_path(&file);
-    ctx.state.set_profile_value(&path, &section, &key, value);
-    Ok(1)
 }
 
 fn find_first_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -3187,15 +3071,6 @@ fn get_full_path_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .write_u32(args[3], args[2] + at)
             .map_err(Stop::Fault)?;
     }
-    Ok(written)
-}
-
-fn get_short_path_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The declared machine's paths are already short.
-    let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let written = ctx
-        .write_string(args[1], args[2], &path)
-        .map_err(Stop::Fault)?;
     Ok(written)
 }
 
@@ -3320,17 +3195,6 @@ fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(was)
 }
 
-fn suspend_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let handle = args[0];
-    let Some(thread) = ctx.state.threads.iter_mut().find(|t| t.handle == handle) else {
-        ctx.state.last_error = 6;
-        return Ok(0xffff_ffff);
-    };
-    let was = u32::from(thread.suspended);
-    thread.suspended = true;
-    Ok(was)
-}
-
 /// The thread that is running says it is done. The machine takes it out of the
 /// rotation at the next switch.
 fn exit_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -3340,16 +3204,6 @@ fn exit_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         thread.code = args[0];
     }
     Err(Stop::ThreadEnded)
-}
-
-fn get_exit_code_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let handle = args[0];
-    let found = ctx.state.threads.iter().find(|t| t.handle == handle);
-    let (ended, code) = found.map_or((true, 0), |t| (t.ended, t.code));
-    // STILL_ACTIVE, which is how a caller knows to keep waiting.
-    let answer = if ended { code } else { 259 };
-    ctx.mem.write_u32(args[1], answer).map_err(Stop::Fault)?;
-    Ok(1)
 }
 
 fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

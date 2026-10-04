@@ -20,19 +20,6 @@ pub const THUNK_BASE: u32 = 0x0f00_0000;
 /// of the previous entry.
 pub const THUNK_STRIDE: u32 = 16;
 
-/// One entry point the emulator implements.
-pub struct Shim {
-    pub dll: &'static str,
-    pub name: &'static str,
-}
-
-/// Every entry point that is written rather than run.
-///
-/// Empty on purpose: nothing has been measured as needed yet, and a shim that
-/// exists before a guest has asked for it is a guess. Rock Raiders' boot path
-/// fills this in #8.
-pub const SHIMS: &[Shim] = &[];
-
 /// What one address on the boundary stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
@@ -184,35 +171,5 @@ impl Boundary {
             out.push(addr);
         }
         out
-    }
-
-    /// Whether an entry point is written rather than only named.
-    #[must_use]
-    pub fn implemented(dll: &str, name: &str) -> bool {
-        SHIMS
-            .iter()
-            .any(|s| s.dll.eq_ignore_ascii_case(dll) && s.name == name)
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
-    /// Every import, in the order the image named them.
-    pub fn imports(&self) -> impl Iterator<Item = &Import> {
-        self.slots.iter().filter_map(|e| match e {
-            Entry::Import(import) => Some(import),
-            Entry::Method { .. }
-            | Entry::Return
-            | Entry::Attach { .. }
-            | Entry::Unhandled { .. }
-            | Entry::ThreadEnd => None,
-        })
     }
 }

@@ -54,12 +54,6 @@ impl Stream {
             .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    fn format_u16(&self, at: usize) -> u16 {
-        self.format
-            .get(at..at + 2)
-            .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
-    }
-
     /// A video stream's picture size, from its `BITMAPINFOHEADER`.
     #[must_use]
     pub fn picture_size(&self) -> (u32, u32) {
@@ -70,19 +64,6 @@ impl Stream {
     #[must_use]
     pub fn compression(&self) -> [u8; 4] {
         self.format_u32(16).to_le_bytes()
-    }
-
-    /// An audio stream's `WAVEFORMATEX`: tag, channels, rate, block align and
-    /// bits per sample.
-    #[must_use]
-    pub fn wave_format(&self) -> (u16, u16, u32, u16, u16) {
-        (
-            self.format_u16(0),
-            self.format_u16(2),
-            self.format_u32(4),
-            self.format_u16(12),
-            self.format_u16(14),
-        )
     }
 }
 

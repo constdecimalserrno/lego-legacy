@@ -27,13 +27,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "ADVAPI32",
-        name: "RegOpenKeyA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: reg_open_key,
-    },
-    Shim {
-        dll: "ADVAPI32",
         name: "RegOpenKeyExA",
         args: 5,
         convention: Convention::Stdcall,
@@ -68,7 +61,6 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 /// The value kinds a title on this roster stores.
 pub const REG_SZ: u32 = 1;
-pub const REG_DWORD: u32 = 4;
 
 /// Where a key sits, spelled the way the guest asked for it.
 fn key_path(root: u32, name: &str) -> String {
@@ -102,17 +94,6 @@ fn reg_create_key_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .write_u32(args[8], if existed { 2 } else { 1 })
             .map_err(Stop::Fault)?;
     }
-    Ok(ERROR_SUCCESS)
-}
-
-fn reg_open_key(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let name = ctx.string(args[1]).map_err(Stop::Fault)?;
-    let path = key_path(args[0], &name);
-    if !ctx.state.registry_has(&path) {
-        return Ok(ERROR_FILE_NOT_FOUND);
-    }
-    let handle = ctx.state.open_key(&path);
-    ctx.mem.write_u32(args[2], handle).map_err(Stop::Fault)?;
     Ok(ERROR_SUCCESS)
 }
 

@@ -5,7 +5,7 @@
 //! executed from that record every time after.
 
 use super::decode::{self, MAX_INSN};
-use super::insn::{Insn, Kind, Width};
+use super::insn::{Insn, Kind};
 use super::{exec, Cpu, CpuEngine, Mode, Stop, CS};
 use crate::guest::{Arena, GuestMem};
 
@@ -81,11 +81,6 @@ impl Interp {
             pages: Vec::new(),
             page_runs: Vec::new(),
         }
-    }
-
-    #[must_use]
-    pub fn mode(&self) -> Mode {
-        self.mode
     }
 
     /// How many instructions this engine has decoded and kept.
@@ -374,10 +369,4 @@ impl CpuEngine for Interp {
 /// When the bytes are not an instruction this engine has been taught.
 pub fn decode_one(bytes: &[u8], mode: Mode) -> Result<Insn, decode::Undecoded> {
     decode::decode(bytes, mode)
-}
-
-/// The width an instruction pointer is truncated to in a mode.
-#[must_use]
-pub fn ip_width(mode: Mode) -> Width {
-    mode.default_width()
 }

@@ -94,11 +94,6 @@ impl Headless {
     pub fn undelivered(&self) -> &[(u64, Input)] {
         &self.pending
     }
-
-    #[must_use]
-    pub fn flips(&self) -> u64 {
-        self.flips
-    }
 }
 
 impl Default for Headless {
@@ -156,9 +151,5 @@ impl Host for Headless {
         let (ptr, len) = sys::map_anon(len)?;
         // Safety: the mapping is live and this is its only owner.
         Ok(unsafe { Mapping::from_raw(ptr, len) })
-    }
-
-    fn load_library(&mut self, name: &str) -> Result<sys::Library, HostError> {
-        sys::Library::open(name)
     }
 }
