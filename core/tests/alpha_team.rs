@@ -18,7 +18,12 @@ const ROOT: &str = "C:\\Program Files\\LEGO Media\\LEGO Alpha Team";
 /// The title as its own crate declares it.
 const ALPHA_TEAM: Title = Title {
     key: ENTRY.key,
-    flip_cost: FlipCost::Refresh(60),
+    // As the title crate declares it (#82). This said sixty after the crate
+    // had gone to thirty, and nothing noticed while every route stayed in the
+    // front end, whose flips are paced by the title's own event loop. The
+    // training is paced by its coach's voice, which plays in declared time, so
+    // a route through it only replays on the machine it was taken on (#85).
+    flip_cost: FlipCost::Refresh(30),
     image: ENTRY.image,
     red_book: ENTRY.red_book,
     declared: Declared {
@@ -638,10 +643,19 @@ const MISSION: u64 = 2882;
 /// is asked to have gone on drawing.
 const MISSION_LATER: u64 = 3232;
 
+/// The flip the route clicks the movable Direction Tile at, which is when the
+/// training's step 230a asks for it (#85).
+const TILE_CLICKED: u64 = 5497;
+
+/// Just before that click, and once the Unit Menu it opens is up.
+const BEFORE_UNIT_MENU: u64 = 5490;
+const UNIT_MENU: u64 = 5520;
+
 /// Enough instructions for the committed route to load the first mission and
-/// play it. The mission costs about three and a half million instructions a
-/// flip: the title's own director, its actors and the rasteriser under them.
-const MISSION_BUDGET: u64 = 8_600_000_000;
+/// play its training as far as the Unit Menu. The mission costs about three
+/// and a half million instructions a flip: the title's own director, its
+/// actors and the rasteriser under them.
+const MISSION_BUDGET: u64 = 15_500_000_000;
 
 /// The committed route into the first mission, replayed once into its slot.
 fn into_the_mission(
@@ -659,7 +673,7 @@ fn into_the_mission(
             ..Cli::default()
         };
         Some(testkit::run_on(
-            Headless::new().keeping(&[MISSION, MISSION_LATER]),
+            Headless::new().keeping(&[MISSION, MISSION_LATER, BEFORE_UNIT_MENU, UNIT_MENU]),
             &ALPHA_TEAM,
             &cli,
             MISSION_BUDGET,
@@ -721,6 +735,57 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     assert_eq!(first.finish.flips, second.finish.flips);
     assert_eq!(first.finish.declared_millis, second.finish.declared_millis);
     assert_eq!(first.digest, second.digest);
+}
+
+/// A click on the movable Direction Tile opens its Unit Menu, once the
+/// training has let the tile be picked (#85).
+///
+/// The training is a script in `Pe0300.dll`, the title's behaviour library.
+/// Its coach, a figure in the teleporter of actor type `T0001`, says each step
+/// and flashes what to use, and until step 220a it is the only thing in the
+/// space that can be picked: the click handler at `0x10057c60` looks the
+/// picked actor's type up in the training's set at `0x1009f418`, which holds
+/// `T0001` alone, and drops anything else at `0x10057d7f`. Step 220a puts
+/// `U0179`, the movable tile, into that set and asks for it to be carried
+/// onto the blue pad; 230a asks for it to be clicked. The click selects it
+/// (`0x100674f0`), and letting go builds the Unit Menu (`0x10031cd0`, called
+/// from `0x1005823e`). The route takes every step the way the coach asks.
+#[test]
+fn a_click_on_the_movable_tile_opens_its_unit_menu() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    // The menu's buttons are made the first time it opens: the title asks for
+    // their textures then, and at no point before.
+    let (before, after) = ran
+        .log
+        .split_once(&format!("input flip {TILE_CLICKED} Down(Left)"))
+        .expect("the route clicks the tile");
+    assert!(
+        !before.contains("RotateCW.tga"),
+        "nothing builds the Unit Menu before the tile is clicked"
+    );
+    assert!(
+        after.contains("RotateCW.tga") && after.contains("Hint.tga"),
+        "the click on the tile builds its Unit Menu"
+    );
+    // And it is drawn, above the tile: its panel covers 329..489 across and
+    // 118..179 down, where from one frame to the next about one pixel in forty
+    // changes by itself.
+    let shut = ran
+        .host
+        .frame(BEFORE_UNIT_MENU)
+        .expect("the frame before is kept");
+    let open = ran.host.frame(UNIT_MENU).expect("the frame after is kept");
+    let changed = (118..179)
+        .flat_map(|y| (329..489).map(move |x| (y * 640 + x) * 4))
+        .filter(|&at| shut.pixels[at..at + 3] != open.pixels[at..at + 3])
+        .count();
+    let panel = (179 - 118) * (489 - 329);
+    assert!(
+        changed > panel * 3 / 4,
+        "the Unit Menu is not on the screen: {changed} of its {panel} pixels changed"
+    );
 }
 
 /// Alpha Team is heard (#60).

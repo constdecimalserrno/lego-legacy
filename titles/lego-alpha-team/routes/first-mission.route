@@ -29,3 +29,138 @@ flip 2414 up
 # mouse button to begin the training exercise."
 flip 2782 down
 flip 2784 up
+#
+# The training itself (#85). It is a script in Pe0300.dll, the title's own
+# behaviour library, and it is spoken: the coach, actor type T0001, a figure in
+# the teleporter, says each step (m0010_020a, 030a, ...) and flashes the thing
+# to use, and the step after waits for the event that thing sends. Until step
+# 220a nothing in the space but the coach can be picked at all: a click on a
+# tile is refused at Pe0300 0x10057d7f, because the training's set of
+# pickable types (0x1009f418) holds only T0001. Each step below is taken thirty
+# flips after the title asked for it, at the pointer place it flashed.
+#
+# The bar, at 640x480: the book (Menu) 66,428; PrevCam 215; Nav_InOut 283;
+# Nav_Pivot 348; NextCam 412; GO/Stop 573. Once Dash is running the four
+# camera glyphs give way to six faces and ICam, Dash (T0011) the sixth at 419,
+# ICam at 470, and the SmartCam toggle at 534,433.
+# 020a: the coach flashes. Click it, at 200,102.
+flip 2987 move 454 10
+flip 2989 move 320 10
+flip 2991 move 320 139
+flip 2993 down
+flip 2995 up
+# 030a, asked at flip 3256: the book flashes. It opens the mission menu.
+flip 3286 move 52 470
+flip 3288 move 320 470
+flip 3290 move 320 470
+flip 3292 move 320 419
+flip 3294 down
+flip 3296 up
+# 040a, asked at flip 3424: Keep Playing flashes, at 320,90 in that menu.
+flip 3454 move 620 10
+flip 3456 move 528 10
+flip 3458 move 320 10
+flip 3460 move 320 29
+flip 3462 down
+flip 3464 up
+# 050a, asked at flip 3532: NextCam.
+flip 3562 move 504 470
+flip 3564 move 320 470
+flip 3566 move 320 470
+flip 3568 move 320 451
+flip 3570 down
+flip 3572 up
+# 060a, asked at flip 3592: NextCam again.
+flip 3622 down
+flip 3624 up
+# 070a, asked at flip 3644: PrevCam.
+flip 3674 move 20 240
+flip 3676 move 226 240
+flip 3678 down
+flip 3680 up
+# 080a, asked at flip 3760: Nav_Pivot.
+flip 3790 move 586 240
+flip 3792 down
+flip 3794 up
+# 090a, asked at flip 3876: Nav_InOut.
+flip 3906 move 190 240
+flip 3908 down
+flip 3910 up
+# 100a, asked at flip 3932: Nav_InOut again.
+flip 3962 down
+flip 3964 up
+# 110a to 140a scroll the view by putting the pointer within a fortieth of
+# the window of an edge (Pe0300 0x10026d20): left, right, top, bottom.
+# 110a, asked at flip 4138: the left edge.
+flip 4168 move 20 10
+flip 4170 move 56 10
+flip 4172 move 320 92
+# 120a, asked at flip 4196: the right edge.
+flip 4226 move 620 240
+flip 4228 move 620 240
+flip 4230 move 620 240
+flip 4232 move 620 240
+flip 4234 move 396 240
+# 130a, asked at flip 4264: the top edge.
+flip 4294 move 20 10
+flip 4296 move 20 10
+flip 4298 move 282 170
+# 140a, asked at flip 4328: the bottom edge, and back to the middle once 150
+# and 160, which ask for nothing, have begun.
+flip 4358 move 320 470
+flip 4360 move 320 470
+flip 4362 move 320 470
+flip 4364 move 320 470
+flip 4366 move 320 470
+flip 4368 move 320 364
+flip 4411 move 320 10
+flip 4413 move 320 10
+flip 4415 move 320 10
+flip 4417 move 320 186
+# 170a, asked at flip 4630: GO. Dash runs.
+flip 4660 move 620 470
+flip 4662 move 526 470
+flip 4664 move 320 388
+flip 4666 down
+flip 4668 up
+# 180a, asked at flip 4748: Dash's own camera, T0011.
+flip 4778 move 20 240
+flip 4780 move 312 240
+flip 4782 down
+flip 4784 up
+# 190a, asked at flip 4896: ICam.
+flip 4926 move 422 240
+flip 4928 down
+flip 4930 up
+# 195a, asked at flip 4950: SmartCam.
+flip 4980 move 448 254
+flip 4982 down
+flip 4984 up
+# 200a, asked at flip 5064: Stop. The view goes back to where it began.
+flip 5094 move 398 226
+flip 5096 down
+flip 5098 up
+# 210 asks for nothing. 220a, asked at flip 5322, adds U0179, the movable
+# Direction Tile, to what can be picked, and flashes the blue pad it is meant
+# to go onto: press on the tile's middle, 487,262, carry it eight pixels a
+# flip to the pad's, 408,214, and let go there.
+flip 5352 move 148 10
+flip 5354 move 320 28
+flip 5356 down
+flip 5360 move 304 219
+flip 5362 move 304 219
+flip 5364 move 304 219
+flip 5366 move 304 219
+flip 5368 move 304 219
+flip 5370 move 304 219
+flip 5372 move 304 238
+flip 5374 move 304 240
+flip 5376 move 304 240
+flip 5378 move 306 240
+flip 5382 up
+# 230a, asked at flip 5465: click the tile, now on the pad. Letting go opens
+# its Unit Menu: rotate either way, Info, Hint, and "Hints left: 0", which is
+# the training's own `option HintCount;0`.
+flip 5495 move 324 269
+flip 5497 down
+flip 5499 up
