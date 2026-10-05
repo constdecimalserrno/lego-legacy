@@ -780,3 +780,68 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
         );
     }
 }
+
+/// The Select Adventure screen as the route first opens it, every slot New.
+const SLOTS_NEW: u64 = 2340;
+
+/// The same screen opened again once an adventure is saved, a few flips after
+/// the first slot was labelled with its date at flip 4113.
+const SLOT_SAVED: u64 = 4140;
+
+/// Enough instructions for the committed route to start an adventure, skip
+/// its training mission, go back to HQ and open Select Adventure again: flip
+/// 4140 is at 12.26 billion.
+const SELECT_ADVENTURE_BUDGET: u64 = 12_300_000_000;
+
+/// A saved adventure is labelled on Select Adventure with the date it was
+/// saved on, and the machine writes that date as Windows 98 writes one for
+/// US English (#87).
+///
+/// This was a wall a person could reach: `KERNEL32!GetDateFormatA` was not
+/// written, and the first time the screen had a saved adventure to show, the
+/// run stopped there.
+#[test]
+fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
+    if !scratch() {
+        return;
+    }
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../titles/lego-alpha-team/routes/select-adventure.route"),
+        ),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(
+        Headless::new().keeping(&[SLOTS_NEW, SLOT_SAVED]),
+        &ALPHA_TEAM,
+        &cli,
+        SELECT_ADVENTURE_BUDGET,
+    );
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way stops the run"
+    );
+    // The title asks for the short date and the time without its seconds, in
+    // the locale the machine declares, for the moment it saved at: the
+    // declared clock's 1999-10-29, two minutes in.
+    ran.assert_logged(r#"date written "10/29/99" for locale 0x409 flags 0x1"#)
+        .assert_logged(r#"time written "12:02 AM" for locale 0x409 flags 0x2"#);
+
+    // And the screen shows it. The first slot was New and is now the saved
+    // adventure; the third was New and still is.
+    let before = ran.host.frame(SLOTS_NEW).expect("the empty slots are kept");
+    let after = ran.host.frame(SLOT_SAVED).expect("the saved slot is kept");
+    let differing_in = |left: u32, top: u32| {
+        (top..top + 90)
+            .flat_map(|y| (left..left + 120).map(move |x| ((y * 640 + x) * 4) as usize))
+            .filter(|&at| before.pixels[at..at + 3] != after.pixels[at..at + 3])
+            .count()
+    };
+    // Measured: 10,694 of the first slot's 10,800 pixels, and none of the
+    // third's.
+    let (first, third) = (differing_in(122, 84), differing_in(399, 84));
+    assert!(first > 10_800 / 2, "the first slot is still New: {first}");
+    assert!(third < 10_800 / 50, "the third slot changed: {third}");
+}

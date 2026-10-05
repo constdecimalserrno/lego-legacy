@@ -1,0 +1,73 @@
+#lego-legacy-route 1
+# LEGO Alpha Team, from its boot to its Select Adventure screen with an
+# adventure saved in the first of its six slots, which the screen labels with
+# the mission it is at and the date it was saved on (#87). That date is
+# `KERNEL32!GetDateFormatA`'s, and the time the title asks for beside it
+# `GetTimeFormatA`'s.
+#
+# The pointer arithmetic is menu.route's: every move is where the hand got to
+# in a window the title puts the pointer back in the middle of, and the title
+# takes a 1280th of the window for each pixel of that, half a pixel across and
+# three eighths of one down. The pointer starts in the bottom left corner.
+#
+# The machine starts with nothing saved, so this saves something first: a new
+# adventure, its training mission skipped, and back to HQ. Every click waits
+# for the slower of the two declared refresh rates this title is run at, the
+# test suite's sixty and the title's own thirty, and every screen it clicks on
+# waits for it.
+flip 1792 key Space down
+flip 1794 key Space up
+# Onto Adventure, the main menu's first item, and in.
+flip 2232 move 480 9
+flip 2234 move 480 9
+flip 2236 move 480 9
+flip 2238 move 480 9
+flip 2252 down
+flip 2254 up
+# Select Adventure, all six slots New: the first one.
+flip 2332 move 46 219
+flip 2352 down
+flip 2354 up
+# The Adventure Briefing pages itself; its X, bottom right, starts the
+# adventure at the Alpha Team Training Area.
+flip 2432 move 523 433
+flip 2434 move 523 433
+flip 2436 move 523 433
+flip 2452 down
+flip 2454 up
+# A click begins the training exercise, and the round button at the bottom
+# left opens the menu inside a mission.
+flip 2760 down
+flip 2762 up
+flip 2800 move 36 320
+flip 2802 move 36 320
+flip 2804 move 36 320
+flip 2842 down
+flip 2844 up
+# Skip Training Mission. This is what writes the slot into Game.txt, at
+# Mission One, which then loads.
+flip 2920 move 492 20
+flip 2922 move 492 20
+flip 2924 move 492 20
+flip 2942 down
+flip 2944 up
+# Back to the bottom left button: the first click begins Mission One, the
+# second opens its menu.
+flip 3540 move 148 460
+flip 3542 move 148 460
+flip 3544 move 148 460
+flip 3562 down
+flip 3564 up
+flip 3642 down
+flip 3644 up
+# Return to HQ, which is the main menu again.
+flip 3720 move 578 17
+flip 3722 move 578 17
+flip 3740 down
+flip 3742 up
+# And Adventure once more. The first slot now reads Mission One, and under it
+# the date: 10/29/99.
+flip 4060 move 320 64
+flip 4062 move 320 64
+flip 4080 down
+flip 4082 up

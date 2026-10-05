@@ -290,6 +290,20 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
+        name: "GetDateFormatA",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: get_date_format_a,
+    },
+    Shim {
+        dll: "KERNEL32",
+        name: "GetTimeFormatA",
+        args: 6,
+        convention: Convention::Stdcall,
+        run: get_time_format_a,
+    },
+    Shim {
+        dll: "KERNEL32",
         name: "EnumSystemLocalesA",
         args: 2,
         convention: Convention::Stdcall,
@@ -1231,14 +1245,26 @@ fn is_valid_code_page(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(u32::from(matches!(args[0], 0 | 1 | 2 | 3 | 437 | 1252)))
 }
 
-/// Whether the machine has a locale. It has the one it declares.
-fn is_valid_locale(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The system and user defaults name the declared locale too.
-    Ok(u32::from(matches!(
-        args[0],
-        LCID | 0x0400 | 0x0800 | 0x1000
-    )))
+/// Whether the machine has a locale. It has the one it declares, and the
+/// system and user defaults name it too.
+fn declared_locale(lcid: u32) -> bool {
+    matches!(lcid, LCID | 0x0400 | 0x0800 | 0x1000)
 }
+
+fn is_valid_locale(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(u32::from(declared_locale(args[0])))
+}
+
+/// The pictures the declared locale writes a date and a time by, which
+/// `GetLocaleInfoA` hands out and `GetDateFormatA` and `GetTimeFormatA` write
+/// by (#87).
+///
+/// Windows 98's own for US English, which is what a player who never opened
+/// Regional Settings had; that version still wrote its short date with two
+/// digits of year.
+const SHORT_DATE: &str = "M/d/yy";
+const LONG_DATE: &str = "dddd, MMMM dd, yyyy";
+const TIME: &str = "h:mm:ss tt";
 
 /// What a locale is called and how it writes numbers, dates and money.
 ///
@@ -1259,8 +1285,12 @@ fn locale_field(what: u32) -> Option<&'static str> {
         0x0014 => "$",
         0x001d => "/", // how a date is written
         0x001e => ":", // and a time
-        0x0011 => "M/d/yyyy",
-        0x0012 => "h:mm:ss tt",
+        // The short date, the long one and the time (#87). The two pictures
+        // were once filed under 0x11 and 0x12, which are how many decimal
+        // digits a number has and whether a fraction has a leading zero.
+        0x001f => SHORT_DATE,
+        0x0020 => LONG_DATE,
+        0x1003 => TIME,
         0x1004 => "1252", // the code page it is written in
         _ => return None,
     })
@@ -1320,6 +1350,246 @@ fn enum_system_locales(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.mem.write(addr, name.as_bytes()).map_err(Stop::Fault)?;
     ctx.call_guest = Some((args[0], vec![addr]));
     Ok(1)
+}
+
+/// The days of the week and the months, as US English names them.
+const DAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// What `GetTimeFormat`'s flags ask it to leave out, or to write otherwise.
+const TIME_NOMINUTESORSECONDS: u32 = 0x1;
+const TIME_NOSECONDS: u32 = 0x2;
+const TIME_NOTIMEMARKER: u32 = 0x4;
+const TIME_FORCE24HOURFORMAT: u32 = 0x8;
+
+/// Which day of the week a SYSTEMTIME's date falls on, Sunday first, or
+/// nothing when the calendar has no such day.
+///
+/// Worked out from the date rather than read from the structure, because
+/// that is what Windows does: a caller filling in a date by hand rarely
+/// fills in its weekday too.
+fn weekday(time: &[u16; 8]) -> Option<usize> {
+    // Sakamoto's: the year counted from March, so the leap day falls last.
+    const SHIFT: [usize; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let [year, month, _, day, ..] = *time;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let lengths = [
+        31,
+        28 + u16::from(leap),
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let month = usize::from(month).checked_sub(1)?;
+    // A FILETIME reaches from 1601 to 30827, and so does a date Windows will
+    // write.
+    if !(1601..=30827).contains(&year) || !(1..=*lengths.get(month)?).contains(&day) {
+        return None;
+    }
+    let y = usize::from(year) - usize::from(month < 2);
+    Some((y + y / 4 - y / 100 + y / 400 + SHIFT[month] + usize::from(day)) % 7)
+}
+
+/// A date or a time written out by a picture, as `GetDateFormat` and
+/// `GetTimeFormat` write one in US English (#87).
+///
+/// A date's fields are `d`, `M` and `y`, a time's `h`, `H`, `m`, `s` and `t`;
+/// anything else, and anything between single quotes, is written as it
+/// stands. A field the time flags leave out takes the separators before it
+/// with it, and a time marker left out takes the ones after it too, which is
+/// how Windows makes `h:mm tt` out of `h:mm:ss tt`.
+///
+/// ponytail: no era (`g`), which no US English picture has.
+fn write_picture(time: &[u16; 8], picture: &str, date: bool, flags: u32) -> String {
+    let [year, month, _, day, hour, minute, second, _] = *time;
+    let weekday = weekday(time).unwrap_or(0);
+    let month_name = MONTHS[usize::from(month.clamp(1, 12)) - 1];
+    let mut out = String::new();
+    // Where the last field written ends, which a field left out cuts back to.
+    let mut kept = 0;
+    let mut dropping = false;
+    let mut rest = picture.chars().peekable();
+    while let Some(c) = rest.next() {
+        if c == '\'' {
+            while let Some(q) = rest.next() {
+                if q != '\'' {
+                    out.push(q);
+                } else if rest.next_if_eq(&'\'').is_some() {
+                    out.push('\'');
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        let field = if date {
+            matches!(c, 'd' | 'M' | 'y')
+        } else {
+            matches!(c, 'h' | 'H' | 'm' | 's' | 't')
+        };
+        if !field {
+            if !dropping {
+                out.push(c);
+            }
+            continue;
+        }
+        dropping = false;
+        let mut count = 1;
+        while rest.next_if_eq(&c).is_some() {
+            count += 1;
+        }
+        let left_out = match c {
+            'm' => flags & TIME_NOMINUTESORSECONDS != 0,
+            's' => flags & (TIME_NOMINUTESORSECONDS | TIME_NOSECONDS) != 0,
+            't' => flags & TIME_NOTIMEMARKER != 0,
+            _ => false,
+        };
+        if left_out {
+            out.truncate(kept);
+            dropping = c == 't';
+            continue;
+        }
+        let number = |n: u16| {
+            if count == 1 {
+                n.to_string()
+            } else {
+                format!("{n:02}")
+            }
+        };
+        let text = match (c, count) {
+            ('d', 1 | 2) => number(day),
+            ('d', 3) => DAYS[weekday][..3].to_owned(),
+            ('d', _) => DAYS[weekday].to_owned(),
+            ('M', 1 | 2) => number(month),
+            ('M', 3) => month_name[..3].to_owned(),
+            ('M', _) => month_name.to_owned(),
+            ('y', 1 | 2) => number(year % 100),
+            ('y', _) => year.to_string(),
+            ('h', _) if flags & TIME_FORCE24HOURFORMAT == 0 => number((hour + 11) % 12 + 1),
+            ('h' | 'H', _) => number(hour),
+            ('m', _) => number(minute),
+            ('s', _) => number(second),
+            (_, 1) => (if hour < 12 { "A" } else { "P" }).to_owned(),
+            _ => (if hour < 12 { "AM" } else { "PM" }).to_owned(),
+        };
+        out.push_str(&text);
+        kept = out.len();
+    }
+    out
+}
+
+/// What `GetDateFormatA` and `GetTimeFormatA` share once each has its
+/// picture: the locale, the moment, and the caller's buffer.
+fn write_formatted(
+    ctx: &mut Ctx<'_>,
+    args: &[u32],
+    picture: &str,
+    date: bool,
+) -> Result<u32, Stop> {
+    // (locale, flags, moment, picture, buffer, size). No moment is now, read
+    // off the declared clock like `GetLocalTime`, so a replay writes the same.
+    let time: [u16; 8] = if args[2] == 0 {
+        declared_now(ctx)
+    } else {
+        let bytes = ctx.mem.slice(args[2], 16).map_err(Stop::Fault)?;
+        std::array::from_fn(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
+    };
+    let [_, _, _, _, hour, minute, second, _] = time;
+    let valid = if date {
+        weekday(&time).is_some()
+    } else {
+        hour < 24 && minute < 60 && second < 60
+    };
+    if !declared_locale(args[0]) || !valid {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let text = write_picture(&time, picture, date, args[1]);
+    ctx.log.line(&format!(
+        "{} written {text:?} for locale {:#x} flags {:#x}",
+        if date { "date" } else { "time" },
+        args[0],
+        args[1]
+    ));
+    let mut bytes = text.into_bytes();
+    bytes.push(0);
+    let needed = u32::try_from(bytes.len()).unwrap_or(0);
+    if args[5] == 0 {
+        // A size of nothing asks how much room it would take, and writes
+        // nowhere.
+        return Ok(needed);
+    }
+    if args[5] < needed {
+        ctx.state.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
+        return Ok(0);
+    }
+    ctx.mem.write(args[4], &bytes).map_err(Stop::Fault)?;
+    Ok(needed)
+}
+
+/// A date, written the way the declared locale writes one (#87).
+///
+/// Alpha Team's `Localize::SecondsToDateTime` asks with `DATE_SHORTDATE` and
+/// no picture of its own, to label a saved adventure on its Select Adventure
+/// screen.
+fn get_date_format_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetDateFormatA(locale, flags, date, picture, buffer, size). With no
+    // picture the locale's own is used, the short one unless the long is
+    // asked for; a caller with a picture of its own may ask for neither.
+    const DATE_SHORTDATE: u32 = 0x1;
+    const DATE_LONGDATE: u32 = 0x2;
+    let picture = match (args[3], args[1] & (DATE_SHORTDATE | DATE_LONGDATE)) {
+        (0, DATE_LONGDATE) => LONG_DATE.to_owned(),
+        (0, 0 | DATE_SHORTDATE) => SHORT_DATE.to_owned(),
+        (at, 0) => ctx.string(at).map_err(Stop::Fault)?,
+        _ => {
+            ctx.state.last_error = 1004; // ERROR_INVALID_FLAGS
+            return Ok(0);
+        }
+    };
+    write_formatted(ctx, args, &picture, true)
+}
+
+/// A time of day, written the way the declared locale writes one (#87).
+///
+/// Alpha Team asks with `TIME_NOSECONDS` and no picture of its own, beside the
+/// date `GetDateFormatA` wrote.
+fn get_time_format_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetTimeFormatA(locale, flags, time, picture, buffer, size).
+    let picture = if args[3] == 0 {
+        TIME.to_owned()
+    } else {
+        ctx.string(args[3]).map_err(Stop::Fault)?
+    };
+    write_formatted(ctx, args, &picture, false)
 }
 
 /// How two strings sort against each other. One is less, two is equal, three
@@ -2832,12 +3102,15 @@ fn query_performance_frequency(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, S
     Ok(1)
 }
 
-fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // A declared date: a run that read the host's calendar would replay
-    // differently tomorrow. SYSTEMTIME is eight sixteen-bit fields.
-    let at = args[0];
+/// The declared moment as a SYSTEMTIME's eight sixteen-bit fields: year,
+/// month, day of the week, day, hour, minute, second, millisecond.
+///
+/// A declared date: a run that read the host's calendar would replay
+/// differently tomorrow. `GetSystemTime`, `GetLocalTime` and a date or time
+/// formatted for "now" (#87) all read it here, so they cannot disagree.
+fn declared_now(ctx: &Ctx<'_>) -> [u16; 8] {
     let millis = ctx.declared_millis();
-    let fields: [u16; 8] = [
+    [
         1999,
         10,
         4,
@@ -2846,7 +3119,12 @@ fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         u16::try_from(millis / 60_000 % 60).unwrap_or(0),
         u16::try_from(millis / 1000 % 60).unwrap_or(0),
         u16::try_from(millis % 1000).unwrap_or(0),
-    ];
+    ]
+}
+
+fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let at = args[0];
+    let fields = declared_now(ctx);
     for (i, value) in fields.iter().enumerate() {
         ctx.mem
             .write(at + (i as u32) * 2, &value.to_le_bytes())
@@ -3216,7 +3494,59 @@ fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 #[cfg(test)]
 mod tests {
-    use super::seek_to;
+    use super::{seek_to, weekday, write_picture, LONG_DATE, SHORT_DATE, TIME};
+
+    /// 1999-10-29, three minutes and fourteen seconds past midnight, with the
+    /// weekday the declared clock gives it (#87).
+    const SAVED: [u16; 8] = [1999, 10, 4, 29, 0, 3, 14, 0];
+
+    #[test]
+    fn a_date_and_a_time_are_written_as_us_english_writes_them() {
+        // What Alpha Team's Select Adventure asks for: the short date, and the
+        // time without its seconds (#87).
+        assert_eq!(write_picture(&SAVED, SHORT_DATE, true, 0x1), "10/29/99");
+        assert_eq!(write_picture(&SAVED, TIME, false, 0x2), "12:03 AM");
+
+        assert_eq!(
+            write_picture(&SAVED, LONG_DATE, true, 0),
+            "Friday, October 29, 1999",
+            "the weekday is the date's own, not the one the caller passed"
+        );
+        assert_eq!(write_picture(&SAVED, TIME, false, 0), "12:03:14 AM");
+        let afternoon = [2005, 3, 0, 7, 13, 5, 9, 0];
+        assert_eq!(write_picture(&afternoon, TIME, false, 0), "1:05:09 PM");
+        assert_eq!(
+            write_picture(&afternoon, "y yy yyyy, M MM MMM, d dd ddd", true, 0),
+            "5 05 2005, 3 03 Mar, 7 07 Mon"
+        );
+        // Quoted text stands as it is, two quotes in it are one, and a date
+        // picture writes a time's letters as letters.
+        assert_eq!(
+            write_picture(&afternoon, "'day' d, 'o''clock' h", true, 0),
+            "day 7, o'clock h"
+        );
+    }
+
+    #[test]
+    fn a_field_the_flags_leave_out_takes_its_separators_with_it() {
+        let at = [1999, 10, 5, 29, 13, 5, 9, 0];
+        assert_eq!(write_picture(&at, TIME, false, 0x1), "1 PM");
+        assert_eq!(write_picture(&at, TIME, false, 0x4), "1:05:09");
+        assert_eq!(write_picture(&at, "tt h:mm", false, 0x4), "1:05");
+        assert_eq!(write_picture(&at, "hh:mm tt", false, 0x8), "13:05 PM");
+        assert_eq!(write_picture(&at, "H:mm t", false, 0), "13:05 P");
+    }
+
+    #[test]
+    fn only_a_day_the_calendar_has_is_written() {
+        assert_eq!(weekday(&SAVED), Some(5), "a Friday");
+        assert_eq!(weekday(&[2000, 2, 0, 29, 0, 0, 0, 0]), Some(2));
+        assert_eq!(weekday(&[1999, 2, 0, 29, 0, 0, 0, 0]), None);
+        assert_eq!(weekday(&[1999, 13, 0, 1, 0, 0, 0, 0]), None);
+        assert_eq!(weekday(&[1999, 0, 0, 1, 0, 0, 0, 0]), None);
+        assert_eq!(weekday(&[1999, 1, 0, 0, 0, 0, 0, 0]), None);
+        assert_eq!(weekday(&[1600, 1, 0, 1, 0, 0, 0, 0]), None);
+    }
 
     #[test]
     fn a_seek_lands_where_it_is_asked_for_unless_that_is_off_the_file() {
