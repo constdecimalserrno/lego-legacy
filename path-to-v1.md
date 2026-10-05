@@ -15,17 +15,14 @@ Out of v1: `lego-racers`, the *complete* and *credits* milestones, goldens.
 
 Every open ticket is on this path. Anything else was closed on 2026-10-04 (#40, #50, #68).
 
-### Alpha Team to playable — in order
+### Alpha Team by route — done 2026-10-04
 
-1. **#85** A click on a unit does not open its Unit Menu. The click reaches
-   `DDMouse::ProcessMouseClick` and is never asked what was clicked; this is #61's wall.
-2. **#61** The first mission is played to its end by a committed route, inside a budget,
-   with the determinism gate over it.
-
-### Alpha Team, alongside
-
-- **#87** `KERNEL32!GetDateFormatA` is a wall a click in the front end reaches (a screen
-  showing a date, under *Single Missions*). A player can hit it, so it ships fixed.
+- **#85** (`0d118d2`) The Unit Menu was never a machine bug: the training lets only its
+  coach be picked until step 220a, and no route had taken its first step.
+- **#61** (`858f687`) `routes/first-mission.route` plays the Training Area to its end and
+  back to the main menu (18.42 G instructions), with the determinism gate over all of it.
+- **#87** (`1f2dddf`, `399d2fb`) `GetDateFormatA`/`GetTimeFormatA`: the wall was Select
+  Adventure (main menu → *Adventure*) labelling a saved slot with its date.
 
 ### The sign-off play — needs the maintainer at a window
 
@@ -42,7 +39,7 @@ Play with `cargo run --release -p lego-alpha-team -- --audio --record`. Never ru
 
 ## Cutting the release
 
-1. #85, #61, #87 closed; `LEGO_LEGACY_REQUIRE_DISC=1 ./scripts/ci.sh` green.
+1. ~~#85, #61, #87 closed; `LEGO_LEGACY_REQUIRE_DISC=1 ./scripts/ci.sh` green.~~ Done 2026-10-04.
 2. The conformance corpus is fetched (`scripts/fetch-corpus.sh`) and
    `LEGO_LEGACY_REQUIRE_CORPUS=1` passes: without it those tests skip silently.
 3. On that build, the maintainer plays all three — #62 for Alpha Team; a first mission for
