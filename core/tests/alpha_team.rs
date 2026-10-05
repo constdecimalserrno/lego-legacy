@@ -849,14 +849,14 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
 /// The Select Adventure screen as the route first opens it, every slot New.
 const SLOTS_NEW: u64 = 2340;
 
-/// The same screen opened again once an adventure is saved, a few flips after
-/// the first slot was labelled with its date at flip 4113.
+/// The same screen opened again once an adventure is saved, with the first
+/// slot labelled with its date.
 const SLOT_SAVED: u64 = 4140;
 
 /// Enough instructions for the committed route to start an adventure, skip
-/// its training mission, go back to HQ and open Select Adventure again: flip
-/// 4140 is at 12.26 billion.
-const SELECT_ADVENTURE_BUDGET: u64 = 12_300_000_000;
+/// its training mission, go back to HQ and open Select Adventure again: at the
+/// title's thirty, 14 billion reaches flip 4262.
+const SELECT_ADVENTURE_BUDGET: u64 = 14_000_000_000;
 
 /// A saved adventure is labelled on Select Adventure with the date it was
 /// saved on, and the machine writes that date as Windows 98 writes one for
@@ -890,9 +890,9 @@ fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
     );
     // The title asks for the short date and the time without its seconds, in
     // the locale the machine declares, for the moment it saved at: the
-    // declared clock's 1999-10-29, two minutes in.
+    // declared clock's 1999-10-29, three minutes in.
     ran.assert_logged(r#"date written "10/29/99" for locale 0x409 flags 0x1"#)
-        .assert_logged(r#"time written "12:02 AM" for locale 0x409 flags 0x2"#);
+        .assert_logged(r#"time written "12:03 AM" for locale 0x409 flags 0x2"#);
 
     // And the screen shows it. The first slot was New and is now the saved
     // adventure; the third was New and still is.
