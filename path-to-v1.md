@@ -7,7 +7,7 @@ route, and a person drove it and said so), signed off by the maintainer on the r
 |---|---|---|
 | `lego-rock-raiders` | yes — first mission by `routes/first-mission.route` | 2026-09-10, on an older build |
 | `hotwheels-stunt-track-driver` | yes — first race by `routes/first-race.route` | 2026-09-11, on an older build |
-| `lego-alpha-team` | **no** — the training mission cannot be finished | — |
+| `lego-alpha-team` | by route — the training mission by `routes/first-mission.route`; awaiting #62 | — |
 
 Out of v1: `lego-racers`, the *complete* and *credits* milestones, goldens.
 

@@ -651,11 +651,25 @@ const TILE_CLICKED: u64 = 5497;
 const BEFORE_UNIT_MENU: u64 = 5490;
 const UNIT_MENU: u64 = 5520;
 
-/// Enough instructions for the committed route to load the first mission and
-/// play its training as far as the Unit Menu. The mission costs about three
-/// and a half million instructions a flip: the title's own director, its
-/// actors and the rasteriser under them.
-const MISSION_BUDGET: u64 = 15_500_000_000;
+/// The flip the route presses GO at, which is the training's last step: Dash
+/// runs for the console (#61).
+const GO: u64 = 5973;
+
+/// Dash running across the blue floor for the tile, and the same floor once
+/// the tile has turned him and he has gone up the steps to the console. The
+/// camera does not move between the two.
+const DASH_RUNNING: u64 = 6010;
+const DASH_GONE: u64 = 6200;
+
+/// The flip the title is back at its main menu, the training over (#61).
+const MENU_AGAIN: u64 = 6300;
+
+/// Enough instructions for the committed route to load the first mission,
+/// play its training to its end and be back at the main menu: 18.42 billion
+/// reaches flip 6300. The mission costs about three and a half million
+/// instructions a flip: the title's own director, its actors and the
+/// rasteriser under them.
+const MISSION_BUDGET: u64 = 18_600_000_000;
 
 /// The committed route into the first mission, replayed once into its slot.
 fn into_the_mission(
@@ -673,7 +687,16 @@ fn into_the_mission(
             ..Cli::default()
         };
         Some(testkit::run_on(
-            Headless::new().keeping(&[MISSION, MISSION_LATER, BEFORE_UNIT_MENU, UNIT_MENU]),
+            Headless::new().keeping(&[
+                MENU,
+                MISSION,
+                MISSION_LATER,
+                BEFORE_UNIT_MENU,
+                UNIT_MENU,
+                DASH_RUNNING,
+                DASH_GONE,
+                MENU_AGAIN,
+            ]),
             &ALPHA_TEAM,
             &cli,
             MISSION_BUDGET,
@@ -722,7 +745,8 @@ fn the_route_loads_the_first_mission_and_plays_it() {
     );
 }
 
-/// The same route twice over is the same run (#61).
+/// The same route twice over is the same run, from the boot through the
+/// whole training and back to the main menu (#61).
 #[test]
 fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     let Some(first) = into_the_mission(&MISSION_FIRST) else {
@@ -735,6 +759,129 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     assert_eq!(first.finish.flips, second.finish.flips);
     assert_eq!(first.finish.declared_millis, second.finish.declared_millis);
     assert_eq!(first.digest, second.digest);
+}
+
+/// Every line the training's coach says, in order: a line ending in `a` asks
+/// for something, and the `b` after it is said once it has been done.
+const COACH: &[&str] = &[
+    "010", "020a", "020b", "030a", "030b", "040a", "040b", "050a", "050b", "060a", "060b", "070a",
+    "070b", "080a", "080b", "090a", "090b", "100a", "100b", "110a", "110b", "120a", "120b", "130a",
+    "130b", "140a", "150", "160", "170a", "170b", "180a", "180b", "190a", "190b", "195a", "195b",
+    "200a", "200b", "210", "220a", "220b", "230a", "230b", "240a", "240b", "250a", "250b", "260a",
+    "260b", "270a", "275", "280a", "280b",
+];
+
+/// The first mission is played to its end (#61).
+///
+/// The title shows each of the coach's lines as a subtitle, which it looks
+/// for as a loose file before reading it out of `Locale_en.pac`, and the
+/// machine logs each look. So the log carries the training, line by line, as
+/// the title itself steps through it. The last, 280b, is said when Dash
+/// reaches the console; the title then asks for Dash's victory line
+/// (`T0011_VICTORY`), puts up "Destination: Alpha Team Headquarters", and
+/// loads the main menu's own space (`MM.PUZ`).
+#[test]
+fn the_route_plays_the_training_to_its_end_and_the_title_goes_back_to_its_menu() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing in the training stops the run"
+    );
+    let said: Vec<&str> = ran
+        .log
+        .lines()
+        .filter_map(|l| l.split("\\m0010_").nth(1))
+        .filter_map(|l| l.strip_suffix("_EN.dds, asked from 0x400c8646"))
+        .collect();
+    assert_eq!(said, COACH, "the coach says every line, in order");
+
+    // The last step is GO, and what comes of it is the title's own ending.
+    let after_go = ran
+        .log
+        .split_once(&format!("input flip {GO} Down(Left)"))
+        .expect("the route presses GO")
+        .1;
+    let at = |what: &str| {
+        after_go
+            .find(what)
+            .unwrap_or_else(|| panic!("after GO, the title never asks for {what}"))
+    };
+    assert!(
+        at("m0010_280b") < at("T0011_VICTORY") && at("T0011_VICTORY") < at("MM.PUZ"),
+        "the training ends, Dash says his victory line, and then the main menu loads"
+    );
+
+    // And the screen is the main menu the route left: the same picture, but
+    // for the characters' idle animation.
+    let pixels = 640 * 480;
+    let menu = ran.host.frame(MENU).expect("the menu is kept");
+    let again = ran
+        .host
+        .frame(MENU_AGAIN)
+        .expect("the menu, again, is kept");
+    let mission = ran.host.frame(MISSION).expect("the mission is kept");
+    // Measured: 23,571 pixels apart, where the mission is most of the screen
+    // away from either.
+    assert!(
+        differing(menu, again) < pixels / 10,
+        "flip {MENU_AGAIN} should be the main menu: {} pixels differ from flip {MENU}",
+        differing(menu, again)
+    );
+    assert!(differing(mission, again) > pixels / 2);
+}
+
+/// Dash runs, and his shadow runs with him (#61).
+///
+/// `DDSpace::FormShadow` lays a shadow under each actor that makes one, on
+/// whatever is beneath it, textured with `ShadowMap.tga` and blended
+/// `D3DBLEND_ZERO`, `D3DBLEND_INVSRCCOLOR`: it darkens what it covers. Under
+/// a throwaway probe at flip 6010 Dash's shadow darkened 570 pixels of the
+/// blue floor, the rectangle here among them and clear of his legs. By flip
+/// 6200 he is at the console, and with the camera exactly where it was, that
+/// floor is lighter again.
+#[test]
+fn dash_runs_for_the_console_and_his_shadow_goes_with_him() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    let running = ran.host.frame(DASH_RUNNING).expect("Dash running is kept");
+    let gone = ran.host.frame(DASH_GONE).expect("Dash gone is kept");
+    let at = |x: usize, y: usize| (y * 640 + x) * 4;
+    let light = |f: &Presented, i: usize| {
+        f.pixels[i..i + 3]
+            .iter()
+            .map(|&c| u32::from(c))
+            .sum::<u32>()
+    };
+
+    // The camera has not moved: the floor at the bottom left is the same to
+    // the pixel.
+    let still = (200..388)
+        .flat_map(|y| (0..300).map(move |x| at(x, y)))
+        .filter(|&i| running.pixels[i..i + 3] != gone.pixels[i..i + 3])
+        .count();
+    assert_eq!(still, 0, "the camera moved");
+
+    // Dash moved, and where he was the picture is not what it is now.
+    let moved = (60..150)
+        .flat_map(|y| (380..460).map(move |x| at(x, y)))
+        .filter(|&i| running.pixels[i..i + 3] != gone.pixels[i..i + 3])
+        .count();
+    assert!(moved > 80 * 90 / 10, "Dash is not where he was: {moved}");
+
+    // And the floor under him is in his shadow. Measured: 318 of these 320
+    // pixels darker, and the other two, in a corner past its edge, the same.
+    let shadowed = (130..140)
+        .flat_map(|y| (400..432).map(move |x| at(x, y)))
+        .filter(|&i| light(running, i) < light(gone, i))
+        .count();
+    assert!(
+        shadowed > 320 * 9 / 10,
+        "the floor under Dash is not in shadow: {shadowed} of 320 pixels darker"
+    );
 }
 
 /// A click on the movable Direction Tile opens its Unit Menu, once the

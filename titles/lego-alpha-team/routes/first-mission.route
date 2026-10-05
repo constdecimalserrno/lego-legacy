@@ -1,7 +1,7 @@
 #lego-legacy-route 1
-# LEGO Alpha Team, from its boot into its first mission: the Alpha Team
-# Training Area, which is the first thing Single Missions offers that is
-# played rather than watched.
+# LEGO Alpha Team, from its boot through its first mission and back to its
+# main menu: the Alpha Team Training Area, which is the first thing Single
+# Missions offers that is played rather than watched, played to its end (#61).
 #
 # The front end is menu.route's, and the pointer arithmetic is explained
 # there: the title puts the pointer back in the middle of the window after
@@ -164,3 +164,41 @@ flip 5382 up
 flip 5495 move 324 269
 flip 5497 down
 flip 5499 up
+# 240a, asked at flip 5518: RotateCW flashes in the Unit Menu, at 404,140.
+# The tile turns a quarter clockwise.
+flip 5548 move 308 13
+flip 5550 down
+flip 5552 up
+# 250a, asked at flip 5648: RotateCW again. The step goes on only once the
+# tile's arrows face the way the training wants, which from here is two turns
+# more: one alone was measured not to be enough.
+flip 5678 down
+flip 5680 up
+flip 5708 down
+flip 5710 up
+# 260a, asked at flip 5746: Info, the magnifier, at 428,140. The camera goes
+# down onto the tile.
+flip 5776 move 368 240
+flip 5778 down
+flip 5780 up
+# 270a, asked at flip 5858: click the tile, close up at 310,220. The camera
+# comes back and its Unit Menu opens again, now centred at 340,110.
+flip 5890 move 84 453
+flip 5892 down
+flip 5894 up
+# 275, asked at flip 5895: Hint, at 405,100 in that menu.
+flip 5927 move 415 80
+flip 5929 move 415 80
+flip 5931 down
+flip 5933 up
+# 280a, asked at flip 5933: GO, at 573,428. Dash comes down off the walkway
+# onto the blue floor, runs onto the tile, which turns him to the steps, and
+# runs up them to the console: 280b and his victory line at flip 6109. The
+# title then puts up "Destination: Alpha Team Headquarters" and is back at its
+# main menu by flip 6300.
+flip 5965 move 404 459
+flip 5967 move 404 458
+flip 5969 move 404 459
+flip 5971 move 404 459
+flip 5973 down
+flip 5975 up
