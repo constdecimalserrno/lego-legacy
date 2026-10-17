@@ -1019,9 +1019,14 @@ impl Host for MacWindow {
         //
         // ponytail: one copy per presented frame. Measure before replacing it
         // with a pool of surfaces the layer can cycle through.
-        self.frame_size = (frame.width, frame.height);
+        // A frame shorter than it says it is would have Core Graphics read
+        // past the copy, so it is not shown at all (#94).
         let len = (frame.pitch * frame.height) as usize;
-        let copy: Box<Vec<u8>> = Box::new(frame.pixels[..len.min(frame.pixels.len())].to_vec());
+        let Some(bytes) = frame.pixels.get(..len) else {
+            return;
+        };
+        self.frame_size = (frame.width, frame.height);
+        let copy: Box<Vec<u8>> = Box::new(bytes.to_vec());
         let pixels = copy.as_ptr();
         let owned = Box::into_raw(copy).cast::<c_void>();
 
