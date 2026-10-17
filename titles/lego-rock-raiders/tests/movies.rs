@@ -8,44 +8,35 @@
 //!
 //! These need the rips under `game-data/`, and skip loudly without them.
 
-use lego_legacy_core::{avi, disc, hash, install, iv50, sound};
+use lego_legacy_core::{avi, disc, hash, iv50, sound, testkit};
+use lego_rock_raiders::ROCK_RAIDERS;
 
 fn pressing() -> Option<disc::Iso> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
-    if disc::pressing_path("rock-raiders", "masterpiece-rock-raiders").is_file() {
-        return disc::open_pressing("rock-raiders", "masterpiece-rock-raiders").ok();
-    }
-    let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
-    assert!(
-        !required,
-        "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
-    );
-    eprintln!(
-        "skipping: no rips under {} (rip your own discs there)",
-        root.display()
-    );
-    None
+    testkit::rips(&ROCK_RAIDERS.image).then(|| {
+        disc::open_pressing(ROCK_RAIDERS.image.disc_dir, ROCK_RAIDERS.image.pressing)
+            .expect("the pressing opens")
+    })
 }
 
-/// A file as the installed title sees it.
+/// A file of the installed title's, by its path under the install directory,
+/// as the installed title sees it.
 fn installed(path: &str) -> Option<Vec<u8>> {
-    let mut iso = pressing()?;
-    let header = iso
-        .read("DATA1.HDR")
-        .expect("the pressing's cabinet header");
-    let mut tree = install::Tree::new();
-    tree.set_cabinet(&header, "DATA", "C:\\LEGORR")
-        .expect("the cabinet reads");
-    tree.set_disc(iso);
-    Some(tree.read(path).expect("the file is installed"))
+    if !testkit::rips(&ROCK_RAIDERS.image) {
+        return None;
+    }
+    let path = format!("{}\\{path}", ROCK_RAIDERS.install_dir);
+    Some(
+        testkit::tree(&ROCK_RAIDERS)
+            .read(&path)
+            .expect("the file is installed"),
+    )
 }
 
 #[test]
 fn the_logo_movie_decodes_to_the_pictures_the_reference_decoder_makes() {
     // The logo is the one movie with inter pictures and null pictures in it,
     // and the one at 640x480.
-    let Some(bytes) = installed("C:\\LEGORR\\Data\\avi\\lmi640.avi") else {
+    let Some(bytes) = installed("Data\\avi\\lmi640.avi") else {
         return;
     };
     let movie = avi::parse(&bytes).expect("an AVI file");
@@ -111,7 +102,7 @@ fn a_cutscene_sound_track_decodes_to_what_the_reference_decoder_makes() {
 #[test]
 fn the_logo_sound_track_decodes_to_what_the_reference_decoder_makes() {
     // The logo's sound is plain PCM.
-    let Some(bytes) = installed("C:\\LEGORR\\Data\\avi\\lmi640.avi") else {
+    let Some(bytes) = installed("Data\\avi\\lmi640.avi") else {
         return;
     };
     // ffmpeg -i lmi640.avi -map 0:a:0 -f s16le -ac 2 - | shasum -a 256

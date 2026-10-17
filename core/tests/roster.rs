@@ -1,22 +1,11 @@
 //! What the launcher finds when it goes looking.
 
 use lego_legacy_core::roster::{self, Entry, Found};
+use lego_legacy_core::testkit;
 use lego_legacy_core::title::EntryImage;
 
 fn scratch() -> bool {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
-    let present =
-        lego_legacy_core::disc::pressing_path("rock-raiders", "masterpiece-rock-raiders").is_file();
-    if !present {
-        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
-        assert!(
-            !required,
-            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
-        );
-        eprintln!("skipping: no rips under {}", root.display());
-    }
-    present
+    testkit::rips(&roster::ROCK_RAIDERS.image)
 }
 
 #[test]

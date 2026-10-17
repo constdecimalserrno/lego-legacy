@@ -4,79 +4,28 @@
 //! ships nothing of itself loose on its disc, so what it is made of only
 //! exists once the cabinet has been read.
 
+use lego_alpha_team::LEGO_ALPHA_TEAM as ALPHA_TEAM;
 use lego_legacy_core::cli::Cli;
-use lego_legacy_core::clock::FlipCost;
-use lego_legacy_core::disc;
 use lego_legacy_core::host::headless::{Headless, Presented};
 use lego_legacy_core::install::Tree;
 use lego_legacy_core::machine::Machine;
-use lego_legacy_core::roster::ALPHA_TEAM as ENTRY;
 use lego_legacy_core::testkit;
-use lego_legacy_core::title::{Declared, Installed, Title, WINDOWS_98_SE};
+use lego_legacy_core::testkit::differing;
 
-const ROOT: &str = "C:\\Program Files\\LEGO Media\\LEGO Alpha Team";
+const ROOT: &str = ALPHA_TEAM.install_dir;
 
-/// The title as its own crate declares it.
-const ALPHA_TEAM: Title = Title {
-    key: ENTRY.key,
-    // As the title crate declares it (#82). This said sixty after the crate
-    // had gone to thirty, and nothing noticed while every route stayed in the
-    // front end, whose flips are paced by the title's own event loop. The
-    // training is paced by its coach's voice, which plays in declared time, so
-    // a route through it only replays on the machine it was taken on (#85).
-    flip_cost: FlipCost::Refresh(30),
-    image: ENTRY.image,
-    red_book: ENTRY.red_book,
-    declared: Declared {
-        windows: WINDOWS_98_SE,
-        hz: lego_legacy_core::clock::DECLARED_HZ,
-        megabytes: 128,
-        modes: &[(640, 480, 16)],
-        computer: "LEGO-LEGACY",
-        why: "the title crate's own, repeated here because a test crate cannot depend on a \
-              binary",
-    },
-    installed: Installed::Cabinet,
-    registry: &[(
-        "HKLM\\SOFTWARE\\LEGO Media\\LEGO Alpha Team",
-        "Version",
-        "1.0",
-    )],
-    install_dir: ROOT,
-    click_in_a_movie: Some(0x01),
-    // As the title crate declares it (#86): this title's own pointer moves a
-    // 1280th of the screen per pixel it is handed, on both axes.
-    pointer_speed: (1280.0 / 640.0, 1280.0 / 480.0),
-};
+/// The whole of a 640x480 screen.
+const SCREEN: (usize, usize, usize, usize) = (0, 0, 640, 480);
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
     std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
-
-    let present = disc::pressing_path(ENTRY.image.disc_dir, ENTRY.image.pressing).is_file();
-    if !present {
-        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
-        assert!(
-            !required,
-            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
-        );
-        eprintln!("skipping: no rips under {}", root.display());
-    }
-    present
+    testkit::rips(&ALPHA_TEAM.image)
 }
 
 /// The declared tree over this title's cabinet, as the machine builds it.
 fn tree() -> Tree {
-    let mut iso = disc::open_pressing(ENTRY.image.disc_dir, ENTRY.image.pressing)
-        .expect("the pressing is there");
-    let header = iso.read("DATA1.HDR").expect("the header reads");
-    let mut tree = Tree::new();
-    tree.set_cabinet(&header, "DATA", ROOT)
-        .expect("the cabinet reads");
-    tree.set_disc(iso);
-    tree
+    testkit::tree(&ALPHA_TEAM)
 }
 
 /// The title's executable, its engine and its archives all come out of the
@@ -456,20 +405,15 @@ const FIRST_LIGHT_BUDGET: u64 = 600_000_000;
 /// The run that reaches first light, done once for every test that looks at
 /// it.
 fn boot() -> Option<&'static testkit::Ran> {
-    use std::sync::OnceLock;
-    static BOOT: OnceLock<Option<testkit::Ran>> = OnceLock::new();
-    BOOT.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        Some(testkit::run_on(
-            Headless::new().keeping(&[FIRST_LIGHT, LOADING_PANEL]),
-            &ALPHA_TEAM,
-            &Cli::default(),
-            FIRST_LIGHT_BUDGET,
-        ))
-    })
-    .as_ref()
+    static BOOT: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    testkit::replay(
+        &BOOT,
+        scratch,
+        &ALPHA_TEAM,
+        &Cli::default(),
+        &[FIRST_LIGHT, LOADING_PANEL],
+        FIRST_LIGHT_BUDGET,
+    )
 }
 
 /// First light: the first frame the title presents under its own control
@@ -550,20 +494,15 @@ fn a_click_during_the_intro_is_the_key_the_title_takes() {
 fn the_boot_replays_to_the_same_machine_every_time() {
     let Some(first) = boot() else { return };
     let Some(second) = ({
-        use std::sync::OnceLock;
-        static AGAIN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
-        AGAIN
-            .get_or_init(|| {
-                if !scratch() {
-                    return None;
-                }
-                Some(testkit::run_headless(
-                    &ALPHA_TEAM,
-                    &Cli::default(),
-                    FIRST_LIGHT_BUDGET,
-                ))
-            })
-            .as_ref()
+        static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+        testkit::replay(
+            &AGAIN,
+            scratch,
+            &ALPHA_TEAM,
+            &Cli::default(),
+            &[],
+            FIRST_LIGHT_BUDGET,
+        )
     }) else {
         return;
     };
@@ -596,40 +535,30 @@ const MENU_BUDGET: u64 = 5_400_000_000;
 fn through_the_menu(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
 ) -> Option<&'static testkit::Ran> {
-    slot.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        let cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../titles/lego-alpha-team/routes/menu.route"),
-            ),
-            ..Cli::default()
-        };
-        Some(testkit::run_on(
-            Headless::new().keeping(&[MENU, MISSION_LIST]),
-            &ALPHA_TEAM,
-            &cli,
-            MENU_BUDGET,
-        ))
-    })
-    .as_ref()
+    testkit::replay(
+        slot,
+        scratch,
+        &ALPHA_TEAM,
+        &route("menu.route"),
+        &[MENU, MISSION_LIST],
+        MENU_BUDGET,
+    )
+}
+
+/// A committed route of this title's, to replay.
+fn route(name: &str) -> Cli {
+    Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("routes")
+                .join(name),
+        ),
+        ..Cli::default()
+    }
 }
 
 static MENU_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 static MENU_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
-
-/// How many pixels two frames of the same size disagree on.
-fn differing(a: &Presented, b: &Presented) -> usize {
-    a.pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(b.pixels.as_chunks::<4>().0)
-        .filter(|(p, q)| p[..3] != q[..3])
-        .count()
-}
 
 /// The route leaves the attract screen with a keystroke and picks Single
 /// Missions with the pointer, and both reach the title's own window procedure
@@ -660,7 +589,7 @@ fn the_route_drives_the_front_end_from_the_keyboard_and_the_mouse() {
     // of the window the menu was in.
     let pixels = 640 * 480;
     assert!(
-        differing(menu, list) > pixels / 4,
+        differing(menu, list, SCREEN) > pixels / 4,
         "flip {MISSION_LIST} should be the mission list, not the menu"
     );
 }
@@ -723,34 +652,23 @@ const MISSION_BUDGET: u64 = 18_600_000_000;
 fn into_the_mission(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
 ) -> Option<&'static testkit::Ran> {
-    slot.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        let cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../titles/lego-alpha-team/routes/first-mission.route"),
-            ),
-            ..Cli::default()
-        };
-        Some(testkit::run_on(
-            Headless::new().keeping(&[
-                MENU,
-                MISSION,
-                MISSION_LATER,
-                BEFORE_UNIT_MENU,
-                UNIT_MENU,
-                DASH_RUNNING,
-                DASH_GONE,
-                MENU_AGAIN,
-            ]),
-            &ALPHA_TEAM,
-            &cli,
-            MISSION_BUDGET,
-        ))
-    })
-    .as_ref()
+    testkit::replay(
+        slot,
+        scratch,
+        &ALPHA_TEAM,
+        &route("first-mission.route"),
+        &[
+            MENU,
+            MISSION,
+            MISSION_LATER,
+            BEFORE_UNIT_MENU,
+            UNIT_MENU,
+            DASH_RUNNING,
+            DASH_GONE,
+            MENU_AGAIN,
+        ],
+        MISSION_BUDGET,
+    )
 }
 
 static MISSION_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
@@ -779,7 +697,7 @@ fn the_route_loads_the_first_mission_and_plays_it() {
     // It is a moving picture: the director turns the camera around the space
     // and the actors in it are animated.
     let pixels = 640 * 480;
-    let moved = differing(mission, later);
+    let moved = differing(mission, later, SCREEN);
     assert!(
         moved > pixels / 200,
         "the mission stopped moving between flip {MISSION} and flip {MISSION_LATER}: \
@@ -874,11 +792,11 @@ fn the_route_plays_the_training_to_its_end_and_the_title_goes_back_to_its_menu()
     // Measured: 23,571 pixels apart, where the mission is most of the screen
     // away from either.
     assert!(
-        differing(menu, again) < pixels / 10,
+        differing(menu, again, SCREEN) < pixels / 10,
         "flip {MENU_AGAIN} should be the main menu: {} pixels differ from flip {MENU}",
-        differing(menu, again)
+        differing(menu, again, SCREEN)
     );
-    assert!(differing(mission, again) > pixels / 2);
+    assert!(differing(mission, again, SCREEN) > pixels / 2);
 }
 
 /// Dash runs, and his shadow runs with him (#61).
@@ -907,17 +825,11 @@ fn dash_runs_for_the_console_and_his_shadow_goes_with_him() {
 
     // The camera has not moved: the floor at the bottom left is the same to
     // the pixel.
-    let still = (200..388)
-        .flat_map(|y| (0..300).map(move |x| at(x, y)))
-        .filter(|&i| running.pixels[i..i + 3] != gone.pixels[i..i + 3])
-        .count();
+    let still = differing(running, gone, (0, 200, 300, 388));
     assert_eq!(still, 0, "the camera moved");
 
     // Dash moved, and where he was the picture is not what it is now.
-    let moved = (60..150)
-        .flat_map(|y| (380..460).map(move |x| at(x, y)))
-        .filter(|&i| running.pixels[i..i + 3] != gone.pixels[i..i + 3])
-        .count();
+    let moved = differing(running, gone, (380, 60, 460, 150));
     assert!(moved > 80 * 90 / 10, "Dash is not where he was: {moved}");
 
     // And the floor under him is in his shadow. Measured: 318 of these 320
@@ -972,10 +884,7 @@ fn a_click_on_the_movable_tile_opens_its_unit_menu() {
         .frame(BEFORE_UNIT_MENU)
         .expect("the frame before is kept");
     let open = ran.host.frame(UNIT_MENU).expect("the frame after is kept");
-    let changed = (118..179)
-        .flat_map(|y| (329..489).map(move |x| (y * 640 + x) * 4))
-        .filter(|&at| shut.pixels[at..at + 3] != open.pixels[at..at + 3])
-        .count();
+    let changed = differing(shut, open, (329, 118, 489, 179));
     let panel = (179 - 118) * (489 - 329);
     assert!(
         changed > panel * 3 / 4,
@@ -1065,17 +974,10 @@ fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
     if !scratch() {
         return;
     }
-    let cli = Cli {
-        route: Some(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../titles/lego-alpha-team/routes/select-adventure.route"),
-        ),
-        ..Cli::default()
-    };
     let ran = testkit::run_on(
         Headless::new().keeping(&[SLOTS_NEW, SLOT_SAVED]),
         &ALPHA_TEAM,
-        &cli,
+        &route("select-adventure.route"),
         SELECT_ADVENTURE_BUDGET,
     );
     assert_eq!(
@@ -1093,12 +995,8 @@ fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
     // adventure; the third was New and still is.
     let before = ran.host.frame(SLOTS_NEW).expect("the empty slots are kept");
     let after = ran.host.frame(SLOT_SAVED).expect("the saved slot is kept");
-    let differing_in = |left: u32, top: u32| {
-        (top..top + 90)
-            .flat_map(|y| (left..left + 120).map(move |x| ((y * 640 + x) * 4) as usize))
-            .filter(|&at| before.pixels[at..at + 3] != after.pixels[at..at + 3])
-            .count()
-    };
+    let differing_in =
+        |left: usize, top: usize| differing(before, after, (left, top, left + 120, top + 90));
     // Measured: 10,694 of the first slot's 10,800 pixels, and none of the
     // third's.
     let (first, third) = (differing_in(122, 84), differing_in(399, 84));

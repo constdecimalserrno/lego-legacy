@@ -1,32 +1,21 @@
 //! The pressing's archive, read out of the disc.
 
 use lego_legacy_core::cabinet::Cabinet;
-use lego_legacy_core::{disc, hash};
+use lego_legacy_core::title::EntryImage;
+use lego_legacy_core::{disc, hash, roster, testkit};
 
 fn pressing() -> Option<disc::Iso> {
-    open("rock-raiders", "masterpiece-rock-raiders")
+    open(&roster::ROCK_RAIDERS.image)
 }
 
 /// Alpha Team's pressing, whose cabinet is version 6 (#52).
 fn alpha() -> Option<disc::Iso> {
-    open("alpha-team", "alpha-team")
+    open(&roster::ALPHA_TEAM.image)
 }
 
-fn open(title: &str, pressing: &str) -> Option<disc::Iso> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
-    match disc::open_pressing(title, pressing) {
-        Ok(iso) => Some(iso),
-        Err(_) => {
-            let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
-            assert!(
-                !required,
-                "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
-            );
-            eprintln!("skipping: no rips under {}", root.display());
-            None
-        }
-    }
+fn open(image: &EntryImage) -> Option<disc::Iso> {
+    testkit::rips(image)
+        .then(|| disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens"))
 }
 
 #[test]

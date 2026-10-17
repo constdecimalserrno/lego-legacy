@@ -5,65 +5,21 @@
 //! that held: `LEGO_LEGACY_REQUIRE_DISC=1` turns the skip into a failure.
 
 use lego_legacy_core::cli::{Cli, Trace};
-use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::host::headless::{Headless, Presented};
-use lego_legacy_core::title::{Declared, EntryImage, Installed, WINDOWS_98_SE};
+use lego_legacy_core::testkit::differing;
+use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::{disc, testkit, Title};
-
-/// The title as its own crate declares it.
-const ROCK_RAIDERS: Title = Title {
-    key: "lego-rock-raiders",
-    flip_cost: FlipCost::Refresh(60),
-    image: EntryImage {
-        disc_dir: "rock-raiders",
-        pressing: "masterpiece-rock-raiders",
-        path: "EXE/LegoRR.exe",
-        packed: false,
-        sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
-        why: "the Masterpiece pressing ships the game unwrapped (ADR-0006)",
-    },
-    red_book: Some("rock-raiders"),
-    declared: Declared {
-        windows: WINDOWS_98_SE,
-        hz: lego_legacy_core::clock::DECLARED_HZ,
-        megabytes: 128,
-        modes: &[(640, 480, 16)],
-        computer: "LEGO-LEGACY",
-        why: "the title crate's own values",
-    },
-    installed: Installed::Cabinet,
-    registry: &[],
-    install_dir: "C:\\LEGORR",
-    click_in_a_movie: None,
-    pointer_speed: (1.0, 1.0),
-};
+use lego_rock_raiders::ROCK_RAIDERS;
 
 /// The same title pointed at the pressing whose executable is wrapped.
 const ROCK_RAIDERS_WRAPPED: Title = Title {
-    key: "lego-rock-raiders",
-    flip_cost: FlipCost::Free,
     image: EntryImage {
-        disc_dir: "rock-raiders",
         pressing: "rock-raiders",
-        path: "EXE/LEGORR.EXE",
-        packed: false,
         sha256: "cf3ba432a382c2fa229333fd6f7663a0edcda4f9140813e5a8f2e5de2f860328",
         why: "the original pressing, whose executable is a SafeDisc wrapper",
+        ..ROCK_RAIDERS.image
     },
-    red_book: Some("rock-raiders"),
-    declared: Declared {
-        windows: WINDOWS_98_SE,
-        hz: lego_legacy_core::clock::DECLARED_HZ,
-        megabytes: 128,
-        modes: &[(640, 480, 16)],
-        computer: "LEGO-LEGACY",
-        why: "the title crate's own values",
-    },
-    installed: Installed::Cabinet,
-    registry: &[],
-    install_dir: "C:\\LEGORR",
-    click_in_a_movie: None,
-    pointer_speed: (1.0, 1.0),
+    ..ROCK_RAIDERS
 };
 
 /// The boot path, run once and looked at by several tests.
@@ -73,40 +29,18 @@ const ROCK_RAIDERS_WRAPPED: Title = Title {
 /// once rather than once per assertion. Its sounds load before its scene is
 /// built, and the scene's lights come at about 352 million.
 fn boot() -> Option<&'static testkit::Ran> {
-    use std::sync::OnceLock;
-    static RAN: OnceLock<Option<testkit::Ran>> = OnceLock::new();
-    RAN.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        let cli = Cli {
-            trace: Trace::Shims,
-            ..Cli::default()
-        };
-        Some(testkit::try_run_headless(&ROCK_RAIDERS, &cli, 400_000_000).expect("the rip loads"))
-    })
-    .as_ref()
+    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        trace: Trace::Shims,
+        ..Cli::default()
+    };
+    testkit::replay(&RAN, scratch, &ROCK_RAIDERS, &cli, &[], 400_000_000)
 }
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
     std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
-
-    let present = disc::pressing_path("rock-raiders", "masterpiece-rock-raiders").is_file();
-    if !present {
-        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
-        assert!(
-            !required,
-            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
-        );
-        eprintln!(
-            "skipping: no rips under {} (rip your own discs there)",
-            root.display()
-        );
-    }
-    present
+    testkit::rips(&ROCK_RAIDERS.image)
 }
 
 #[test]
@@ -572,13 +506,7 @@ fn the_titles_own_archives_are_on_the_declared_machines_disc() {
 
 /// Every file name in the pressing's archives, in lower case.
 fn wad_names() -> std::collections::BTreeSet<String> {
-    let mut iso = disc::open_pressing("rock-raiders", "masterpiece-rock-raiders")
-        .expect("the pressing opens");
-    let header = iso.read("DATA1.HDR").expect("the cabinet's header");
-    let mut tree = lego_legacy_core::install::Tree::new();
-    tree.set_cabinet(&header, "DATA", ROCK_RAIDERS.install_dir)
-        .expect("the cabinet reads");
-    tree.set_disc(iso);
+    let mut tree = testkit::tree(&ROCK_RAIDERS);
     let mut names = std::collections::BTreeSet::new();
     for wad in ["LegoRR0.wad", "LegoRR1.wad"] {
         let bytes = tree
@@ -628,11 +556,6 @@ const A_NEW_SCREEN: usize = 640 * 480 / 2;
 /// it was over.
 const THE_SAME_SCREEN: usize = 640 * 480 / 20;
 
-fn first_light_route() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../titles/lego-rock-raiders/routes/first-light.route")
-}
-
 /// The committed route, replayed, keeping the frames the tests look at.
 ///
 /// Two slots, so the determinism gate's two runs can go side by side with
@@ -640,40 +563,16 @@ fn first_light_route() -> std::path::PathBuf {
 fn replay(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
 ) -> Option<&'static testkit::Ran> {
-    slot.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        let host = Headless::new().keeping(&[MENU - 1, MENU, HOVERED, CLICKED]);
-        let cli = Cli {
-            route: Some(first_light_route()),
-            ..Cli::default()
-        };
-        Some(testkit::run_on(
-            host,
-            &ROCK_RAIDERS,
-            &cli,
-            FIRST_LIGHT_BUDGET,
-        ))
-    })
-    .as_ref()
+    following(
+        slot,
+        "first-light.route",
+        &[MENU - 1, MENU, HOVERED, CLICKED],
+        FIRST_LIGHT_BUDGET,
+    )
 }
 
 static FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 static SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
-
-/// How many pixels two frames of the same size disagree on, within a rectangle.
-fn differing(
-    a: &Presented,
-    b: &Presented,
-    (x0, y0, x1, y1): (usize, usize, usize, usize),
-) -> usize {
-    let stride = a.width as usize;
-    (y0..y1)
-        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
-        .filter(|at| a.pixels[*at..at + 3] != b.pixels[*at..at + 3])
-        .count()
-}
 
 #[test]
 fn the_route_reaches_first_light_where_the_title_presents_its_menu() {
@@ -795,26 +694,15 @@ fn following(
     keep: &[u64],
     budget: u64,
 ) -> Option<&'static testkit::Ran> {
-    slot.get_or_init(|| {
-        if !scratch() {
-            return None;
-        }
-        let cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../titles/lego-rock-raiders/routes")
-                    .join(route),
-            ),
-            ..Cli::default()
-        };
-        Some(testkit::run_on(
-            Headless::new().keeping(keep),
-            &ROCK_RAIDERS,
-            &cli,
-            budget,
-        ))
-    })
-    .as_ref()
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("routes")
+                .join(route),
+        ),
+        ..Cli::default()
+    };
+    testkit::replay(slot, scratch, &ROCK_RAIDERS, &cli, keep, budget)
 }
 
 /// The committed route to the level select.

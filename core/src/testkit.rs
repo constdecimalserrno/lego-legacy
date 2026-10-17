@@ -6,10 +6,14 @@
 //! how the run ended.
 
 use crate::cli::Cli;
-use crate::host::headless::Headless;
+use crate::disc;
+use crate::host::headless::{Headless, Presented};
+use crate::install::Tree;
 use crate::machine::{Finish, Outcome};
+use crate::title::EntryImage;
 use crate::Title;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// A finished headless run, with everything it produced.
 ///
@@ -169,4 +173,89 @@ pub fn run_route(title: &'static Title, route: &std::path::Path, budget: u64) ->
         ..Cli::default()
     };
     run_headless(title, &cli, budget)
+}
+
+/// Point a test at the checkout's rips, and say whether this pressing is
+/// among them.
+///
+/// Without the rips a disc test prints a skip line and passes, which is a gate
+/// that did not run rather than one that held: `LEGO_LEGACY_REQUIRE_DISC=1`
+/// turns the skip into a failure.
+///
+/// # Panics
+/// When the pressing is absent and `LEGO_LEGACY_REQUIRE_DISC` is set.
+#[must_use]
+pub fn rips(image: &EntryImage) -> bool {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
+    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
+
+    let present = disc::pressing_path(image.disc_dir, image.pressing).is_file();
+    if !present {
+        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
+        assert!(
+            !required,
+            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
+        );
+        eprintln!(
+            "skipping: no rips under {} (rip your own discs there)",
+            root.display()
+        );
+    }
+    present
+}
+
+/// A run done once into its slot, keeping the frames the tests look at, for
+/// every test that looks at it; `None` when `rips` says the pressing is not
+/// there.
+///
+/// A gate that holds a run to replaying gives it a second slot.
+///
+/// # Panics
+/// When the run could not be set up at all.
+pub fn replay(
+    slot: &'static OnceLock<Option<Ran>>,
+    rips: impl FnOnce() -> bool,
+    title: &'static Title,
+    cli: &Cli,
+    keep: &[u64],
+    budget: u64,
+) -> Option<&'static Ran> {
+    slot.get_or_init(|| {
+        if !rips() {
+            return None;
+        }
+        Some(run_on(Headless::new().keeping(keep), title, cli, budget))
+    })
+    .as_ref()
+}
+
+/// How many pixels two frames of the same size disagree on, within a
+/// rectangle given as its left, top, right and bottom.
+#[must_use]
+pub fn differing(
+    a: &Presented,
+    b: &Presented,
+    (x0, y0, x1, y1): (usize, usize, usize, usize),
+) -> usize {
+    let stride = a.width as usize;
+    (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
+        .filter(|at| a.pixels[*at..at + 3] != b.pixels[*at..at + 3])
+        .count()
+}
+
+/// The declared tree over a title's cabinet, as the machine builds it.
+///
+/// # Panics
+/// When the pressing or its cabinet will not read.
+#[must_use]
+pub fn tree(title: &Title) -> Tree {
+    let mut iso = disc::open_pressing(title.image.disc_dir, title.image.pressing)
+        .expect("the pressing opens");
+    let header = iso.read("DATA1.HDR").expect("the cabinet's header reads");
+    let mut tree = Tree::new();
+    tree.set_cabinet(&header, "DATA", title.install_dir)
+        .expect("the cabinet reads");
+    tree.set_disc(iso);
+    tree
 }
