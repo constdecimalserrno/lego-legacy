@@ -172,18 +172,21 @@ fn nothing_is_written_when_nothing_was_asked_for() {
     );
 }
 
+/// Only a wall writes a crash report. The stub guest never reaches one, so
+/// what is held here is the other half: a run cut short by its budget, which
+/// is not a wall, claims no crash.
 #[test]
-fn a_run_that_stops_at_a_wall_leaves_everything_needed_to_reach_it_again() {
+fn a_budget_running_out_writes_no_crash_report() {
     scratch();
-    // The stub title has no disc, so asking for its image is a refusal rather
-    // than a wall; the stub guest's own int is the wall to test with.
     let cli = Cli {
         stub: true,
         ..Cli::default()
     };
     let ran = testkit::run_headless(&STUB, &cli, 6);
-    // A budget shorter than the guest is not a wall either, so this run simply
-    // checks that no crash was claimed where none happened.
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted
+    );
     assert!(
         !ran.dir.join("crash").is_file(),
         "a budget running out is not a crash"

@@ -15,10 +15,7 @@ use lego_rock_raiders::ROCK_RAIDERS;
 /// declaring the bytes of the one that is not: what a person who ripped the
 /// original pressing where the Masterpiece belongs is running (#100).
 const ROCK_RAIDERS_WRAPPED: Title = Title {
-    image: EntryImage {
-        pressing: "rock-raiders",
-        ..ROCK_RAIDERS.image
-    },
+    image: testkit::ROCK_RAIDERS_WRAPPED,
     ..ROCK_RAIDERS
 };
 
@@ -39,8 +36,13 @@ fn boot() -> Option<&'static testkit::Ran> {
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
-    std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
+    runs();
     testkit::rips(&ROCK_RAIDERS.image)
+}
+
+/// Keep run directories out of the checkout.
+fn runs() {
+    std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
 }
 
 #[test]
@@ -74,7 +76,8 @@ fn the_entry_image_loads_from_the_disc_and_stops_at_its_first_import() {
 
 #[test]
 fn a_wrapped_image_is_named_and_never_run() {
-    if !scratch() {
+    runs();
+    if !testkit::rips(&ROCK_RAIDERS_WRAPPED.image) {
         return;
     }
     let err = testkit::try_run_headless(&ROCK_RAIDERS_WRAPPED, &Cli::default(), 100_000)
@@ -123,7 +126,7 @@ fn a_pressing_that_is_not_the_declared_one_is_refused_by_its_own_digest() {
 
 #[test]
 fn a_missing_rip_names_the_path_it_looked_at() {
-    scratch();
+    runs();
     const ABSENT: Title = Title {
         image: EntryImage {
             pressing: "no-such-pressing",
@@ -377,18 +380,7 @@ fn a_click_skips_a_movie_the_way_escape_does() {
     let ran = testkit::run_on(Headless::new(), &ROCK_RAIDERS, &cli, 150_000_000);
 
     ran.assert_logged("movie C:\\LEGORR\\Data\\avi\\intro.avi let go of");
-    let before = ran
-        .log
-        .split_once("intro.avi let go of")
-        .expect("the movie was let go of")
-        .0;
-    let flips_before = before
-        .lines()
-        .filter_map(|l| l.strip_prefix("flip "))
-        .filter_map(|l| l.split_whitespace().next())
-        .filter_map(|n| n.parse::<u64>().ok())
-        .next_back()
-        .unwrap_or(0);
+    let flips_before = ran.flip_before("intro.avi let go of");
     assert!(
         (CLICKED_AT..CLICKED_AT + 8).contains(&flips_before),
         "the click is what ended the movie, not its own end: flip {flips_before}"
@@ -427,22 +419,19 @@ fn the_disc_in_the_declared_drive_is_the_pressing_itself() {
 }
 
 #[test]
-fn a_second_flow_of_control_is_a_wall_rather_than_a_thread_that_never_runs() {
+fn asking_for_a_second_thread_is_answered_by_the_machine() {
     // ADR-0005: a machine that grew a thread the host scheduled would stop
-    // replaying. Nothing on the roster has needed one, so asking for one stops
-    // the run and says so.
+    // replaying, so a guest thread is one the machine runs itself,
+    // cooperatively, on the one host thread. Asking for one is a call the
+    // machine answers, not a wall.
     assert!(
         lego_legacy_core::win32::find("KERNEL32.dll", "CreateThread").is_some(),
-        "the entry point is declared, so that asking for it is a wall with a reason \
-         rather than an import nobody wrote"
+        "CreateThread is a shim of the machine's own"
     );
 }
 
 #[test]
 fn what_the_machine_declares_is_what_the_guest_reads_back() {
-    if !scratch() {
-        return;
-    }
     // The declared machine is the title crate's own, and nothing in it comes
     // from the host.
     assert_eq!(ROCK_RAIDERS.declared.megabytes, 128);
@@ -821,19 +810,6 @@ fn the_sounds_the_title_plays_are_mixed_on_the_declared_clock() {
     let Some(ran) = to_the_level_select(&LEVEL_SELECT_FIRST) else {
         return;
     };
-    // How loud each mixed block is, for the blocks mixed between two flips.
-    let loudness = |from: u64, to: u64| -> Vec<f64> {
-        ran.host
-            .audio_blocks
-            .iter()
-            .zip(&ran.host.audio_flips)
-            .filter(|(_, flip)| (from..to).contains(*flip))
-            .map(|(block, _)| {
-                let power: f64 = block.iter().map(|s| f64::from(*s).powi(2)).sum();
-                (power / block.len().max(1) as f64).sqrt()
-            })
-            .collect()
-    };
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
 
     // Flips before and after the menu's ambience starts, and while the rocks
@@ -846,16 +822,16 @@ fn the_sounds_the_title_plays_are_mixed_on_the_declared_clock() {
     const HEARD: f64 = 500.0;
 
     // The movies are long over by the end of the loading, and nothing plays.
-    let loading = loudness(LOADING_ENDS, MENU);
+    let loading = ran.loudness(LOADING_ENDS, MENU);
     assert!(!loading.is_empty() && loading.iter().all(|r| *r == 0.0));
     // The menu loops its own ambience, from a DirectSound buffer.
-    let menu = loudness(AMBIENCE_PLAYS, CLICKED_AT);
+    let menu = ran.loudness(AMBIENCE_PLAYS, CLICKED_AT);
     assert!(
         !menu.is_empty() && menu.iter().all(|r| *r > HEARD),
         "the menu's ambience is heard: {menu:?}"
     );
     // And the rocks coming down are louder than it.
-    let rockfall = loudness(ROCKS_FALL, LEVEL_SELECT);
+    let rockfall = ran.loudness(ROCKS_FALL, LEVEL_SELECT);
     assert!(
         mean(&rockfall) > 2.0 * mean(&menu),
         "the rockfall is heard over the menu: {} against {}",
@@ -899,19 +875,7 @@ fn the_level_select_route_replays_to_the_same_machine_every_time() {
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
-    assert_eq!(
-        (
-            first.finish.cursor,
-            first.finish.flips,
-            first.finish.declared_millis
-        ),
-        (
-            second.finish.cursor,
-            second.finish.flips,
-            second.finish.declared_millis
-        )
-    );
-    assert_eq!(first.digest, second.digest, "the machine ends the same way");
+    first.assert_same_machine(second);
     for flip in [ROCKFALL, LEVEL_SELECT] {
         assert_eq!(
             first.host.frame(flip).map(|f| &f.pixels),
@@ -938,16 +902,7 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
-    assert_eq!(first.finish.cursor, second.finish.cursor);
-    assert_eq!(first.finish.flips, second.finish.flips);
-    assert_eq!(
-        first.finish.declared_millis, second.finish.declared_millis,
-        "the same declared time"
-    );
-    assert_eq!(
-        first.digest, second.digest,
-        "and the machine ends the same way"
-    );
+    first.assert_same_machine(second);
     assert_eq!(
         first.host.frame(HOVERED).map(|f| &f.pixels),
         second.host.frame(HOVERED).map(|f| &f.pixels),
@@ -1034,7 +989,10 @@ fn choosing_the_first_mission_loads_it_and_plays_it_in_3d_with_its_red_book_audi
 
     // The mission starts its Red Book audio, when the pressing is there to
     // play it from, and the drive says it is playing when the title asks.
-    if disc::open_red_book("rock-raiders", "rock-raiders").is_ok() {
+    let red_book = ROCK_RAIDERS
+        .red_book
+        .expect("this title has Red Book audio");
+    if testkit::red_book_rips(ROCK_RAIDERS.image.disc_dir, red_book) {
         ran.assert_logged("mci \"play cdaudio from");
         ran.assert_logged("mci \"status cdaudio mode\" answered Ok(\"playing\")");
     }
@@ -1060,19 +1018,7 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
-    assert_eq!(
-        (
-            first.finish.cursor,
-            first.finish.flips,
-            first.finish.declared_millis
-        ),
-        (
-            second.finish.cursor,
-            second.finish.flips,
-            second.finish.declared_millis
-        )
-    );
-    assert_eq!(first.digest, second.digest, "the machine ends the same way");
+    first.assert_same_machine(second);
     for flip in [MISSION_BRIEF, IN_THE_MISSION] {
         assert!(
             first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),

@@ -133,16 +133,7 @@ fn the_boot_replays_to_the_same_machine_every_time() {
         return;
     };
 
-    assert_eq!(first.finish.cursor, second.finish.cursor);
-    assert_eq!(first.finish.flips, second.finish.flips);
-    assert_eq!(
-        first.finish.declared_millis, second.finish.declared_millis,
-        "the same declared time"
-    );
-    assert_eq!(
-        first.digest, second.digest,
-        "and the machine ends the same way"
-    );
+    first.assert_same_machine(second);
 }
 
 /// Escape is this title's quit, not its skip (#68).

@@ -32,12 +32,21 @@ fn the_lock_file_names_only_this_workspace() {
 #[test]
 fn no_manifest_declares_a_dependency_that_is_not_a_path_to_a_member() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let manifests = [
-        root.join("Cargo.toml"),
-        root.join("core/Cargo.toml"),
-        root.join("launcher/Cargo.toml"),
-        root.join("titles/lego-rock-raiders/Cargo.toml"),
-    ];
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap_or_else(|e| panic!("no workspace manifest: {e}"));
+    // The workspace's own manifest, and every member's its `members` list
+    // names, so a new title is checked the day it joins.
+    let members: Vec<&str> = workspace
+        .split_once("members = [")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list.split('"').skip(1).step_by(2).collect())
+        .unwrap_or_default();
+    assert!(
+        members.contains(&"core"),
+        "the workspace's members read as {members:?}"
+    );
+    let manifests = std::iter::once(root.join("Cargo.toml"))
+        .chain(members.iter().map(|m| root.join(m).join("Cargo.toml")));
     for manifest in manifests {
         let text = std::fs::read_to_string(&manifest)
             .unwrap_or_else(|e| panic!("no manifest at {}: {e}", manifest.display()));

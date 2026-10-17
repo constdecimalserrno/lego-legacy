@@ -77,6 +77,61 @@ impl Ran {
         );
         self
     }
+
+    /// Fail unless another run ended as this one did: the same instructions
+    /// retired, the same flips presented, the same declared time and the same
+    /// machine. What a determinism gate holds two replays of a route to.
+    ///
+    /// # Panics
+    /// When any of the four differ.
+    pub fn assert_same_machine(&self, other: &Self) -> &Self {
+        let ended = |r: &Self| (r.finish.cursor, r.finish.flips, r.finish.declared_millis);
+        assert_eq!(
+            ended(self),
+            ended(other),
+            "the same instructions, flips and declared time"
+        );
+        assert_eq!(
+            self.digest, other.digest,
+            "and the machine ends the same way"
+        );
+        self
+    }
+
+    /// The last flip the log names before it first carries this, or zero when
+    /// it names none before it.
+    ///
+    /// # Panics
+    /// When the log never carries it.
+    #[must_use]
+    pub fn flip_before(&self, needle: &str) -> u64 {
+        self.log
+            .split_once(needle)
+            .unwrap_or_else(|| panic!("the log never names `{needle}`"))
+            .0
+            .lines()
+            .filter_map(|l| l.strip_prefix("flip "))
+            .filter_map(|l| l.split_whitespace().next())
+            .filter_map(|n| n.parse::<u64>().ok())
+            .next_back()
+            .unwrap_or(0)
+    }
+
+    /// How loud each block mixed from one flip up to another is: the root
+    /// mean square of its samples.
+    #[must_use]
+    pub fn loudness(&self, from: u64, to: u64) -> Vec<f64> {
+        self.host
+            .audio_blocks
+            .iter()
+            .zip(&self.host.audio_flips)
+            .filter(|(_, flip)| (from..to).contains(*flip))
+            .map(|(block, _)| {
+                let power: f64 = block.iter().map(|s| f64::from(*s).powi(2)).sum();
+                (power / block.len().max(1) as f64).sqrt()
+            })
+            .collect()
+    }
 }
 
 /// A directory of this run's own, under the scratch root the tests run in,
@@ -169,13 +224,15 @@ fn try_run_on(
 pub fn run_route(title: &'static Title, route: &std::path::Path, budget: u64) -> Ran {
     let cli = Cli {
         route: Some(route.to_path_buf()),
-        stub: true,
+        // The stub guest is the one title with no image to load.
+        stub: title.key == Title::STUB.key,
         ..Cli::default()
     };
     run_headless(title, &cli, budget)
 }
 
-/// Point a test at the checkout's rips, and say whether this pressing is
+/// Point a test at the checkout's rips, unless `LEGO_LEGACY_GAME_DATA`
+/// already points somewhere else, and say whether this pressing's image is
 /// among them.
 ///
 /// Without the rips a disc test prints a skip line and passes, which is a gate
@@ -183,23 +240,54 @@ pub fn run_route(title: &'static Title, route: &std::path::Path, budget: u64) ->
 /// turns the skip into a failure.
 ///
 /// # Panics
-/// When the pressing is absent and `LEGO_LEGACY_REQUIRE_DISC` is set.
+/// When the image is absent and `LEGO_LEGACY_REQUIRE_DISC` is set.
 #[must_use]
 pub fn rips(image: &EntryImage) -> bool {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
-    std::env::set_var("LEGO_LEGACY_GAME_DATA", &root);
+    point_at_rips();
+    ripped(&disc::pressing_path(image.disc_dir, image.pressing))
+}
 
-    let present = disc::pressing_path(image.disc_dir, image.pressing).is_file();
+/// As [`rips`], for a pressing's Red Book audio: the cue sheet beside its
+/// image and the raw rip beside that.
+///
+/// # Panics
+/// When either is absent and `LEGO_LEGACY_REQUIRE_DISC` is set.
+#[must_use]
+pub fn red_book_rips(disc_dir: &str, pressing: &str) -> bool {
+    point_at_rips();
+    let image = disc::pressing_path(disc_dir, pressing);
+    ripped(&image.with_extension("cue")) && ripped(&image.with_extension("bin"))
+}
+
+/// Rock Raiders pointed at its original pressing, whose executable is wrapped
+/// in SafeDisc (ADR-0006), still declaring the bytes of the Masterpiece's:
+/// what a person who ripped the original where the Masterpiece belongs is
+/// running, and what a test points the title at to see the wrapper named and
+/// refused before anything is hashed (#100).
+pub const ROCK_RAIDERS_WRAPPED: EntryImage = EntryImage {
+    pressing: "rock-raiders",
+    ..crate::roster::ROCK_RAIDERS.image
+};
+
+fn point_at_rips() {
+    if std::env::var_os("LEGO_LEGACY_GAME_DATA").is_none() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");
+        std::env::set_var("LEGO_LEGACY_GAME_DATA", root);
+    }
+}
+
+/// Whether one file of the rips is there; a skip line when it is not, and a
+/// failure when `LEGO_LEGACY_REQUIRE_DISC` is set.
+fn ripped(file: &Path) -> bool {
+    let present = file.is_file();
     if !present {
         let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
         assert!(
             !required,
-            "LEGO_LEGACY_REQUIRE_DISC is set but the rips are absent"
+            "LEGO_LEGACY_REQUIRE_DISC is set but {} is absent",
+            file.display()
         );
-        eprintln!(
-            "skipping: no rips under {} (rip your own discs there)",
-            root.display()
-        );
+        eprintln!("skipping: no {} (rip your own discs there)", file.display());
     }
     present
 }

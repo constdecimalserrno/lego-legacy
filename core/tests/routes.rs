@@ -104,18 +104,7 @@ fn the_same_route_twice_leaves_the_machine_in_the_same_state() {
     let first = testkit::run_route(&STUB, &path, 1_000);
     let second = testkit::run_route(&STUB, &path, 1_000);
 
-    assert_eq!(
-        first.finish.cursor, second.finish.cursor,
-        "the same instructions retired"
-    );
-    assert_eq!(
-        first.finish.flips, second.finish.flips,
-        "the same frames presented"
-    );
-    assert_eq!(
-        first.digest, second.digest,
-        "and the machine ends the same way"
-    );
+    first.assert_same_machine(&second);
     assert_eq!(
         first.host.frames[0].pixels, second.host.frames[0].pixels,
         "including the pixels it presented"

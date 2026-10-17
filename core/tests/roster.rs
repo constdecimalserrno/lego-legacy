@@ -26,17 +26,14 @@ fn a_pressing_that_is_there_and_right_is_ready_to_start() {
 
 #[test]
 fn a_wrapped_pressing_is_named_rather_than_offered() {
-    if !scratch() {
+    if !testkit::rips(&testkit::ROCK_RAIDERS_WRAPPED) {
         return;
     }
     // The same title pointed at the pressing whose executable is wrapped.
     let wrapped = Entry {
         key: "lego-rock-raiders",
         name: "LEGO Rock Raiders",
-        image: EntryImage {
-            pressing: "rock-raiders",
-            ..roster::ROCK_RAIDERS.image
-        },
+        image: testkit::ROCK_RAIDERS_WRAPPED,
         red_book: None,
     };
     let found = roster::look_for(&wrapped);
@@ -52,9 +49,6 @@ fn a_wrapped_pressing_is_named_rather_than_offered() {
 
 #[test]
 fn a_pressing_that_is_not_there_says_where_it_looked() {
-    if !scratch() {
-        return;
-    }
     let absent = Entry {
         key: "lego-rock-raiders",
         name: "LEGO Rock Raiders",
@@ -125,7 +119,7 @@ fn every_title_on_the_roster_can_be_looked_for() {
 /// disc, and the launcher has to read it from there to know the bytes (#53).
 #[test]
 fn an_image_inside_the_cabinet_is_found_and_hashed_like_any_other() {
-    if !scratch() {
+    if !testkit::rips(&roster::ALPHA_TEAM.image) {
         return;
     }
     assert_eq!(
@@ -140,7 +134,7 @@ fn an_image_inside_the_cabinet_is_found_and_hashed_like_any_other() {
 /// looked rather than starting something else (#53).
 #[test]
 fn an_image_the_cabinet_does_not_hold_is_absent() {
-    if !scratch() {
+    if !testkit::rips(&roster::ALPHA_TEAM.image) {
         return;
     }
     let absent = Entry {

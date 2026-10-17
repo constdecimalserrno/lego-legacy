@@ -71,17 +71,23 @@ fn the_declared_install_is_the_typical_one() {
     assert_eq!(lightmaps.len(), 53_475_662, "the hi-res lightmaps");
 }
 
-/// The image comes out of the cabinet, is hashed there, and runs: the wall it
-/// reaches is the C runtime the disc ships, which is the next ticket's (#53).
+/// The image comes out of the cabinet, is hashed there, and runs (#53). The
+/// wall it once reached in the C runtime the disc ships is gone (#56), so it
+/// runs to its budget.
 #[test]
-fn the_title_starts_from_its_cabinet_and_walls_by_name() {
+fn the_title_starts_from_its_cabinet_and_runs() {
     if !scratch() {
         return;
     }
-    testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 100_000)
-        .assert_logged("image LEGOATeam.exe")
+    let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 100_000);
+    ran.assert_logged("image LEGOATeam.exe")
         .assert_logged("imports 328")
         .assert_logged("installed 61 files");
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing in the first hundred thousand instructions stops the run"
+    );
 }
 
 /// An MSVC image reads and writes `fs:[0]` before it does anything else, and
@@ -501,19 +507,9 @@ fn a_click_during_the_intro_is_the_key_the_title_takes() {
             route: Some(route),
             ..Cli::default()
         };
-        let ran = testkit::run_on(Headless::new(), &ALPHA_TEAM, &cli, FIRST_LIGHT_BUDGET);
-        let before = ran
-            .log
-            .split_once("lmiintro.avi let go of")
-            .expect("the movie is let go of, on the click or on its own end")
-            .0;
-        before
-            .lines()
-            .filter_map(|l| l.strip_prefix("flip "))
-            .filter_map(|l| l.split_whitespace().next())
-            .filter_map(|n| n.parse::<u64>().ok())
-            .next_back()
-            .unwrap_or(0)
+        // The movie is let go of, on the click or on its own end.
+        testkit::run_on(Headless::new(), &ALPHA_TEAM, &cli, FIRST_LIGHT_BUDGET)
+            .flip_before("lmiintro.avi let go of")
     };
     assert_eq!(clicked(600), 600, "a click past the logo ends the movie");
     // And the title's own rule is untouched: it refuses every key while its
@@ -542,16 +538,7 @@ fn the_boot_replays_to_the_same_machine_every_time() {
     }) else {
         return;
     };
-    assert_eq!(first.finish.cursor, second.finish.cursor);
-    assert_eq!(first.finish.flips, second.finish.flips);
-    assert_eq!(
-        first.finish.declared_millis, second.finish.declared_millis,
-        "the same declared time"
-    );
-    assert_eq!(
-        first.digest, second.digest,
-        "and the machine ends the same way"
-    );
+    first.assert_same_machine(second);
 }
 
 /// The flip the main menu is up and waiting at, before the route touches the
@@ -639,13 +626,7 @@ fn the_menu_route_replays_to_the_same_machine_every_time() {
     let Some(second) = through_the_menu(&MENU_SECOND) else {
         return;
     };
-    assert_eq!(first.finish.cursor, second.finish.cursor);
-    assert_eq!(first.finish.flips, second.finish.flips);
-    assert_eq!(
-        first.finish.declared_millis, second.finish.declared_millis,
-        "the same declared time"
-    );
-    assert_eq!(first.digest, second.digest);
+    first.assert_same_machine(second);
 }
 
 /// The flip the mission is up and playing at, a hundred flips after the route
@@ -757,10 +738,7 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
     let Some(second) = into_the_mission(&MISSION_SECOND) else {
         return;
     };
-    assert_eq!(first.finish.cursor, second.finish.cursor);
-    assert_eq!(first.finish.flips, second.finish.flips);
-    assert_eq!(first.finish.declared_millis, second.finish.declared_millis);
-    assert_eq!(first.digest, second.digest);
+    first.assert_same_machine(second);
 }
 
 /// Every line the training's coach says, in order: a line ending in `a` asks
@@ -979,25 +957,12 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
     let Some(ran) = into_the_mission(&MISSION_FIRST) else {
         return;
     };
-    // How loud each mixed block is, for the blocks mixed between two flips.
-    let blocks = |from: u64, to: u64| -> Vec<f64> {
-        ran.host
-            .audio_blocks
-            .iter()
-            .zip(&ran.host.audio_flips)
-            .filter(|(_, flip)| (from..to).contains(*flip))
-            .map(|(block, _)| {
-                let power: f64 = block.iter().map(|s| f64::from(*s).powi(2)).sum();
-                (power / block.len().max(1) as f64).sqrt()
-            })
-            .collect()
-    };
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
     // Silence is zero; the menu and the mission measured in the thousands.
     const HEARD: f64 = 300.0;
 
     // The menu has its own music under it, long after the intro movie is over.
-    let menu = blocks(MENU - 80, MENU + 20);
+    let menu = ran.loudness(MENU - 80, MENU + 20);
     assert!(
         mean(&menu) > HEARD,
         "the menu is heard: {:.0} over {} blocks",
@@ -1005,7 +970,7 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
         menu.len()
     );
     // And so does the mission, which is a different piece.
-    let mission = blocks(MISSION, MISSION_LATER);
+    let mission = ran.loudness(MISSION, MISSION_LATER);
     assert!(
         mean(&mission) > HEARD,
         "the mission is heard: {:.0} over {} blocks",
@@ -1017,7 +982,7 @@ fn the_title_is_heard_through_the_a3d_its_own_disc_ships() {
     // buffer that is already playing, and a stream that starves leaves a gap.
     // Every fifty flips from the menu to the end of the run carries blocks.
     for at in (MENU - 80..MISSION_LATER).step_by(50) {
-        let window = blocks(at, at + 50);
+        let window = ran.loudness(at, at + 50);
         assert!(
             !window.is_empty() && mean(&window) > HEARD,
             "the sound stops between flip {at} and flip {}: {window:?}",

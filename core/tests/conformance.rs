@@ -8,7 +8,19 @@
 //!
 //! Fetch it with `scripts/fetch-corpus.sh`. Without it these tests print a
 //! skip line and pass, which is a gate that did not run rather than one that
-//! held: `LEGO_LEGACY_REQUIRE_CORPUS=1` turns the skip into a failure.
+//! held: `LEGO_LEGACY_REQUIRE_CORPUS=1` turns the skip into a failure, and
+//! `LEGO_LEGACY_CORPUS` reads the vectors from somewhere else.
+//!
+//! Three more, for working on the engine rather than for the gate:
+//! - `CONFORMANCE_FILE=<prefix>` runs only the files whose names start with
+//!   it, and lifts the claimed floor, which part of the corpus cannot reach.
+//!   The nine saturating byte divisions are still counted, so a part without
+//!   the byte divisions fails on that count and not on its own vectors.
+//! - `CONFORMANCE_UNCLAIMED` (any value) prints every encoding not decoded
+//!   yet, by name.
+//! - `CONFORMANCE_DUMP` (any value) prints each vector, its bytes, registers
+//!   and memory before and after, as it is compared: with `CONFORMANCE_FILE`,
+//!   to read the vectors one encoding fails on.
 
 use lego_legacy_core::cpu::{interp::Interp, Cpu, CpuEngine, Mode, Stop};
 use lego_legacy_core::guest::{Arena, GuestMem};

@@ -39,6 +39,7 @@ on an unmounted disc).
 |---|---|---|
 | Rock Raiders | `game-data/rock-raiders/masterpiece-rock-raiders/masterpiece-rock-raiders.iso` | The **Masterpiece** re-release. The original pressing's executable is wrapped in SafeDisc copy protection, which is recognised and refused, never bypassed ([ADR-0006](docs/adr/0006-a-title-may-be-two-pressings.md)). |
 | Rock Raiders music (optional) | `game-data/rock-raiders/rock-raiders/rock-raiders.cue` and `.bin` | The original pressing's audio tracks, as one raw 2352-byte-sector `.bin` with its `.cue`. Without it the game runs without music. |
+| Rock Raiders original (tests only) | `game-data/rock-raiders/rock-raiders/rock-raiders.iso` | The original pressing's data track. Needed only by the tests that check its wrapped executable is named and refused; the game never runs from it. |
 | Hot Wheels Stunt Track Driver | `game-data/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver.iso` | |
 | Alpha Team | `game-data/alpha-team/alpha-team/alpha-team.iso` | The original pressing. |
 
