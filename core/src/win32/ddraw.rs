@@ -920,12 +920,15 @@ fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
         // is there: a title that does not see it here does not go looking for
         // a device at all (#57).
         ctx.mem
-            .write_u32(at + 4, 0x0000_5041)
+            .write_u32(at + 4, 0x0400_8041)
             .map_err(Stop::Fault)?;
-        // Four megabytes of video memory, declared.
-        ctx.mem
-            .write_u32(at + 0x60, 4 * 1024 * 1024)
-            .map_err(Stop::Fault)?;
+        // Four megabytes of video memory, declared, whole and free: what
+        // GetAvailableVidMem says, at dwVidMemTotal and dwVidMemFree (#93).
+        for offset in [0x3c, 0x40] {
+            ctx.mem
+                .write_u32(at + offset, 4 * 1024 * 1024)
+                .map_err(Stop::Fault)?;
+        }
     }
     Ok(S_OK)
 }
