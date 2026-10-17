@@ -1772,8 +1772,11 @@ fn seek_to(base: u32, distance: i32) -> Option<u32> {
 }
 
 fn get_file_attributes(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Whether it is there, from the tree: a file packed in a cabinet is not
+    // unpacked to say so.
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    if ctx.open_guest_file(&path).is_some() {
+    let path = ctx.absolute(&path);
+    if ctx.tree.readable(&path) {
         // FILE_ATTRIBUTE_NORMAL.
         return Ok(0x80);
     }

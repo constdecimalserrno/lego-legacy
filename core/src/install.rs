@@ -248,6 +248,27 @@ impl Tree {
                 .is_some_and(|path| path.exists())
     }
 
+    /// Whether [`Tree::read`] would find a file, answered without reading it:
+    /// a packed entry is there whether or not anyone unpacks it.
+    pub fn readable(&mut self, guest_path: &str) -> bool {
+        let key = Self::key(guest_path);
+        if self.profile_path(&key).is_some_and(|p| p.is_file()) {
+            return true;
+        }
+        let on_disc = match self.files.get(&key) {
+            Some(Source::Declared(_) | Source::Packed(_)) => return true,
+            Some(Source::Disc(path)) => path.clone(),
+            None => match key.strip_prefix("D:\\") {
+                Some(rest) => rest.replace('\\', "/"),
+                None => return false,
+            },
+        };
+        self.iso
+            .as_mut()
+            .and_then(|iso| iso.entry(&on_disc).ok())
+            .is_some_and(|entry| !entry.is_dir)
+    }
+
     /// Read a file the guest named.
     pub fn read(&mut self, guest_path: &str) -> Option<Vec<u8>> {
         let key = Self::key(guest_path);
