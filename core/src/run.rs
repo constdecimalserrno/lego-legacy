@@ -84,10 +84,7 @@ pub fn run_digested(
     }
     // A route is the run's only recorded input (ADR-0003).
     if let Some(path) = &cli.route {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("no route at {}: {e}", path.display()))?;
-        let route =
-            crate::route::Route::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let route = crate::route::Route::load(path)?;
         log.line(&format!("route {} events {}", path.display(), route.len()));
         machine.route = Some(route);
     }
@@ -203,25 +200,34 @@ pub fn main(title: &'static Title) -> ExitCode {
     let mut host = Headless::new();
     match run(title, &cli, &mut host, u64::MAX) {
         Ok((finish, log)) => {
-            println!("{}: {}", title.key, finish.outcome);
-            println!(
-                "cursor {} flips {} declared-ms {} log {}",
-                finish.cursor,
-                finish.flips,
-                finish.declared_millis,
-                log.dir().join("log").display()
-            );
-            match finish.outcome {
-                Outcome::Exited { code } => {
-                    ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0xff))
-                }
-                _ => ExitCode::FAILURE,
-            }
+            report(title, &finish, &log);
+            status(&finish)
         }
         Err(e) => {
             eprintln!("lego-legacy: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Say how a finished run ended, where, and where its log is.
+fn report(title: &Title, finish: &Finish, log: &RunLog) {
+    println!("{}: {}", title.key, finish.outcome);
+    println!(
+        "cursor {} flips {} declared-ms {} log {}",
+        finish.cursor,
+        finish.flips,
+        finish.declared_millis,
+        log.dir().join("log").display()
+    );
+}
+
+/// The guest's own exit status when it ended the run itself, and failure
+/// otherwise.
+fn status(finish: &Finish) -> ExitCode {
+    match finish.outcome {
+        Outcome::Exited { code } => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0xff)),
+        _ => ExitCode::FAILURE,
     }
 }
 
@@ -253,14 +259,7 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     host.close_audio();
     match ran {
         Ok((finish, log)) => {
-            println!("{}: {}", title.key, finish.outcome);
-            println!(
-                "cursor {} flips {} declared-ms {} log {}",
-                finish.cursor,
-                finish.flips,
-                finish.declared_millis,
-                log.dir().join("log").display()
-            );
+            report(title, &finish, &log);
             if finish.flips > 0 {
                 println!("close the window to end");
                 while !host.closed() {
@@ -268,12 +267,7 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
                     std::thread::sleep(std::time::Duration::from_millis(16));
                 }
             }
-            match finish.outcome {
-                Outcome::Exited { code } => {
-                    ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0xff))
-                }
-                _ => ExitCode::FAILURE,
-            }
+            status(&finish)
         }
         Err(e) => {
             eprintln!("lego-legacy: {e}");

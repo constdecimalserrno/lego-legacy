@@ -986,19 +986,7 @@ fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Resu
     match (depths, flags) {
         (DDBD_8, D3DRMFPTF_PALETTIZED) => Ok(D3DRMERR_TEXTUREFORMATNOTFOUND),
         (DDBD_16, 0) => {
-            // DDPIXELFORMAT: size, DDPF_RGB, no FourCC, sixteen bits, masks.
-            for (offset, value) in [
-                (0, 32),
-                (4, 0x40),
-                (8, 0),
-                (12, 16),
-                (16, 0xf800),
-                (20, 0x07e0),
-                (24, 0x001f),
-                (28, 0),
-            ] {
-                ctx.mem.write_u32(out + offset, value).map_err(Stop::Fault)?;
-            }
+            super::ddraw::write_pixel_format(ctx, out, crate::raster::PixelFormat::RGB565)?;
             Ok(S_OK)
         }
         _ => Err(Stop::NotWritten {
@@ -1063,7 +1051,7 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         ctx,
         (pixels, pitch, depth),
         (x, y, (x + width).min(sw), (y + height).min(sh)),
-        background,
+        super::pixel(background, depth),
     )?;
     Ok(S_OK)
 }

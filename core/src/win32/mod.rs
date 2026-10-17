@@ -984,20 +984,20 @@ pub fn component(c: f32) -> u32 {
     }
 }
 
-/// A `D3DCOLOR` as a screen of this depth stores it.
+/// A `D3DCOLOR` as a screen of this depth stores it: the declared card's 5-6-5
+/// at sixteen bits, and the colour's own bytes otherwise.
 #[must_use]
-pub fn pixel(colour: u32, depth: u32) -> Vec<u8> {
-    let [b, g, r, _] = colour.to_le_bytes();
-    match depth {
-        16 => {
-            let packed = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
-            packed.to_le_bytes().to_vec()
-        }
-        _ => colour.to_le_bytes()[..depth.div_ceil(8) as usize].to_vec(),
+pub fn pixel(colour: u32, depth: u32) -> u32 {
+    let [b, g, r, a] = colour.to_le_bytes();
+    if depth == 16 {
+        crate::raster::PixelFormat::RGB565.encode([r, g, b, a])
+    } else {
+        colour
     }
 }
 
-/// Fill a rectangle of a surface, `(pixels, pitch, depth)`, with a colour.
+/// Fill a rectangle of a surface, `(pixels, pitch, depth)`, with one pixel
+/// already in the surface's own format.
 ///
 /// # Errors
 /// When the rectangle reaches outside the arena.
@@ -1005,11 +1005,13 @@ pub fn fill(
     ctx: &mut Ctx<'_>,
     (pixels, pitch, depth): (u32, u32, u32),
     (x0, y0, x1, y1): (u32, u32, u32, u32),
-    colour: u32,
+    value: u32,
 ) -> Result<(), Stop> {
     let bytes = depth.div_ceil(8);
-    let one = pixel(colour, depth);
-    let row: Vec<u8> = (x0..x1.max(x0)).flat_map(|_| one.iter().copied()).collect();
+    let one = value.to_le_bytes();
+    let row: Vec<u8> = (x0..x1.max(x0))
+        .flat_map(|_| one.iter().copied().take(bytes as usize))
+        .collect();
     for y in y0..y1 {
         ctx.mem
             .write(pixels + y * pitch + x0 * bytes, &row)

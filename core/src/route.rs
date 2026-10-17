@@ -216,6 +216,17 @@ impl Route {
             .collect()
     }
 
+    /// Read a route from its file.
+    ///
+    /// # Errors
+    /// When there is no file there, or it is not a route; either way the
+    /// message names the path.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("no route at {}: {e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     /// Read a route.
     ///
     /// # Errors

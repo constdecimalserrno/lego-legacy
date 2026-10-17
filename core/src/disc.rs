@@ -4,6 +4,7 @@
 //! disc. Nothing here is ever written: the rip stays exactly as the player made
 //! it, and everything the guest may change lives in the profile instead.
 
+use crate::pe::u32_at;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -93,7 +94,10 @@ impl Iso {
             return Err(DiscError::NotAnIso(path.to_path_buf()));
         }
         let record = &pvd[156..190];
-        let root = (le32(&record[2..6]), le32(&record[10..14]));
+        let root = (
+            u32_at(record, 2).unwrap_or(0),
+            u32_at(record, 10).unwrap_or(0),
+        );
         let label = String::from_utf8_lossy(&pvd[40..72]).trim().to_owned();
         Ok(Self {
             file,
@@ -240,8 +244,8 @@ impl Iso {
                 let name = name.split(';').next().unwrap_or(&name).to_owned();
                 out.push(Entry {
                     name,
-                    sector: le32(&record[2..6]),
-                    len: le32(&record[10..14]),
+                    sector: u32_at(record, 2).unwrap_or(0),
+                    len: u32_at(record, 10).unwrap_or(0),
                     is_dir: record[25] & 2 != 0,
                 });
             }
@@ -249,10 +253,6 @@ impl Iso {
         }
         Ok(out)
     }
-}
-
-fn le32(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
 /// Where a title's pressings are ripped to.

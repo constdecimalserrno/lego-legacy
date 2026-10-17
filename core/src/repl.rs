@@ -124,10 +124,7 @@ pub fn drive(
     // The debugger drives the same machine a route replays, so a person can
     // walk into the middle of a recorded session and look around.
     if let Some(path) = &cli.route {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("no route at {}: {e}", path.display()))?;
-        let route =
-            crate::route::Route::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let route = crate::route::Route::load(path)?;
         let _ = writeln!(output, "route {} events {}", path.display(), route.len());
         machine.route = Some(route);
     }

@@ -567,44 +567,22 @@ fn validate_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
 /// texture rather than as a wall (#57).
 fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // EnumTextureFormats(callback, context).
-    const DDPF_ALPHAPIXELS: u32 = 0x1;
-    const DDPF_PALETTEINDEXED8: u32 = 0x20;
-    const DDPF_RGB: u32 = 0x40;
-    let formats: [(u32, u32, [u32; 4]); 6] = [
+    let format = |bits, masks| crate::raster::PixelFormat { bits, masks };
+    let formats = [
         // Sixteen bits: five-six-five, and the two with alpha in them.
-        (DDPF_RGB, 16, [0xf800, 0x07e0, 0x001f, 0]),
-        (
-            DDPF_RGB | DDPF_ALPHAPIXELS,
-            16,
-            [0x7c00, 0x03e0, 0x001f, 0x8000],
-        ),
-        (
-            DDPF_RGB | DDPF_ALPHAPIXELS,
-            16,
-            [0x0f00, 0x00f0, 0x000f, 0xf000],
-        ),
+        format(16, [0xf800, 0x07e0, 0x001f, 0]),
+        format(16, [0x7c00, 0x03e0, 0x001f, 0x8000]),
+        format(16, [0x0f00, 0x00f0, 0x000f, 0xf000]),
         // Thirty-two, with and without.
-        (DDPF_RGB, 32, [0x00ff_0000, 0xff00, 0xff, 0]),
-        (
-            DDPF_RGB | DDPF_ALPHAPIXELS,
-            32,
-            [0x00ff_0000, 0xff00, 0xff, 0xff00_0000],
-        ),
+        format(32, [0x00ff_0000, 0xff00, 0xff, 0]),
+        format(32, [0x00ff_0000, 0xff00, 0xff, 0xff00_0000]),
         // And a byte an entry, looked up in the surface's own palette.
-        (DDPF_PALETTEINDEXED8 | DDPF_RGB, 8, [0, 0, 0, 0]),
+        format(8, [0, 0, 0, 0]),
     ];
     let mut calls = Vec::with_capacity(formats.len());
-    for (flags, bits, masks) in formats {
+    for format in formats {
         let at = ctx.state.heap.alloc(32);
-        ctx.mem.write(at, &[0u8; 32]).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at, 32).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 4, flags).map_err(Stop::Fault)?;
-        ctx.mem.write_u32(at + 0xc, bits).map_err(Stop::Fault)?;
-        for (i, mask) in masks.iter().enumerate() {
-            ctx.mem
-                .write_u32(at + 0x10 + u32::try_from(i).unwrap_or(0) * 4, *mask)
-                .map_err(Stop::Fault)?;
-        }
+        super::ddraw::write_pixel_format(ctx, at, format)?;
         calls.push(vec![at, args[1]]);
     }
     ctx.log
@@ -1221,7 +1199,6 @@ fn clear_on(
             caller: 0,
         });
     }
-    let bytes = format.bits.div_ceil(8);
     let mut depth = depth_value.map(|_| take_depth(ctx.state, device, width, height));
     // No rectangles at all is the whole of it, which is how DirectX 7's own
     // call is usually made.
@@ -1241,14 +1218,8 @@ fn clear_on(
         };
         if let Some(colour) = colour {
             let [b, g, r, a] = colour.to_le_bytes();
-            let value = format.encode([r, g, b, a]).to_le_bytes();
-            let one = &value[..bytes as usize];
-            let row: Vec<u8> = (x1..x2).flat_map(|_| one.iter().copied()).collect();
-            for y in y1..y2 {
-                ctx.mem
-                    .write(pixels + y * pitch + x1 * bytes, &row)
-                    .map_err(Stop::Fault)?;
-            }
+            let value = format.encode([r, g, b, a]);
+            super::fill(ctx, (pixels, pitch, format.bits), (x1, y1, x2, y2), value)?;
         }
         if let (Some(z), Some(buffer)) = (depth_value, depth.as_mut()) {
             for y in y1..y2 {

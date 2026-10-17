@@ -85,11 +85,13 @@ pub struct Image {
     pub imports: Vec<Import>,
 }
 
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+/// A little-endian field out of a run of bytes, as every format this machine
+/// reads writes one, or nothing when the bytes end first.
+pub(crate) fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes([
         *b.get(at)?,
         *b.get(at + 1)?,

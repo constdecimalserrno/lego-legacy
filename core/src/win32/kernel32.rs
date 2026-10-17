@@ -650,37 +650,6 @@ fn enum_system_locales(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
-/// The days of the week and the months, as US English names them.
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// What `GetTimeFormat`'s flags ask it to leave out, or to write otherwise.
-const TIME_NOMINUTESORSECONDS: u32 = 0x1;
-const TIME_NOSECONDS: u32 = 0x2;
-const TIME_NOTIMEMARKER: u32 = 0x4;
-const TIME_FORCE24HOURFORMAT: u32 = 0x8;
-
 /// Which day of the week a SYSTEMTIME's date falls on, Sunday first, or
 /// nothing when the calendar has no such day.
 ///
@@ -716,101 +685,24 @@ fn weekday(time: &[u16; 8]) -> Option<usize> {
     Some((y + y / 4 - y / 100 + y / 400 + SHIFT[month] + usize::from(day)) % 7)
 }
 
-/// A date or a time written out by a picture, as `GetDateFormat` and
-/// `GetTimeFormat` write one in US English (#87).
-///
-/// A date's fields are `d`, `M` and `y`, a time's `h`, `H`, `m`, `s` and `t`;
-/// anything else, and anything between single quotes, is written as it
-/// stands. A field the time flags leave out takes the separators before it
-/// with it, and a time marker left out takes the ones after it too, which is
-/// how Windows makes `h:mm tt` out of `h:mm:ss tt`.
-///
-/// ponytail: no era (`g`), which no US English picture has.
-fn write_picture(time: &[u16; 8], picture: &str, date: bool, flags: u32) -> String {
-    let [year, month, _, day, hour, minute, second, _] = *time;
-    let weekday = weekday(time).unwrap_or(0);
-    let month_name = MONTHS[usize::from(month.clamp(1, 12)) - 1];
-    let mut out = String::new();
-    // Where the last field written ends, which a field left out cuts back to.
-    let mut kept = 0;
-    let mut dropping = false;
-    let mut rest = picture.chars().peekable();
-    while let Some(c) = rest.next() {
-        if c == '\'' {
-            while let Some(q) = rest.next() {
-                if q != '\'' {
-                    out.push(q);
-                } else if rest.next_if_eq(&'\'').is_some() {
-                    out.push('\'');
-                } else {
-                    break;
-                }
-            }
-            continue;
-        }
-        let field = if date {
-            matches!(c, 'd' | 'M' | 'y')
-        } else {
-            matches!(c, 'h' | 'H' | 'm' | 's' | 't')
-        };
-        if !field {
-            if !dropping {
-                out.push(c);
-            }
-            continue;
-        }
-        dropping = false;
-        let mut count = 1;
-        while rest.next_if_eq(&c).is_some() {
-            count += 1;
-        }
-        let left_out = match c {
-            'm' => flags & TIME_NOMINUTESORSECONDS != 0,
-            's' => flags & (TIME_NOMINUTESORSECONDS | TIME_NOSECONDS) != 0,
-            't' => flags & TIME_NOTIMEMARKER != 0,
-            _ => false,
-        };
-        if left_out {
-            out.truncate(kept);
-            dropping = c == 't';
-            continue;
-        }
-        let number = |n: u16| {
-            if count == 1 {
-                n.to_string()
-            } else {
-                format!("{n:02}")
-            }
-        };
-        let text = match (c, count) {
-            ('d', 1 | 2) => number(day),
-            ('d', 3) => DAYS[weekday][..3].to_owned(),
-            ('d', _) => DAYS[weekday].to_owned(),
-            ('M', 1 | 2) => number(month),
-            ('M', 3) => month_name[..3].to_owned(),
-            ('M', _) => month_name.to_owned(),
-            ('y', 1 | 2) => number(year % 100),
-            ('y', _) => year.to_string(),
-            ('h', _) if flags & TIME_FORCE24HOURFORMAT == 0 => number((hour + 11) % 12 + 1),
-            ('h' | 'H', _) => number(hour),
-            ('m', _) => number(minute),
-            ('s', _) => number(second),
-            (_, 1) => (if hour < 12 { "A" } else { "P" }).to_owned(),
-            _ => (if hour < 12 { "AM" } else { "PM" }).to_owned(),
-        };
-        out.push_str(&text);
-        kept = out.len();
-    }
-    out
+/// `SHORT_DATE`, `M/d/yy`, written out.
+fn short_date([year, month, _, day, ..]: [u16; 8]) -> String {
+    format!("{month}/{day}/{:02}", year % 100)
 }
 
-/// What `GetDateFormatA` and `GetTimeFormatA` share once each has its
-/// picture: the locale, the moment, and the caller's buffer.
+/// `TIME` without its seconds, `h:mm tt`, as `TIME_NOSECONDS` writes it.
+fn time_without_seconds([_, _, _, _, hour, minute, ..]: [u16; 8]) -> String {
+    let marker = if hour < 12 { "AM" } else { "PM" };
+    format!("{}:{minute:02} {marker}", (hour + 11) % 12 + 1)
+}
+
+/// What `GetDateFormatA` and `GetTimeFormatA` share once each knows how it
+/// writes: the locale, the moment, and the caller's buffer.
 fn write_formatted(
     ctx: &mut Ctx<'_>,
     args: &[u32],
-    picture: &str,
     date: bool,
+    write: fn([u16; 8]) -> String,
 ) -> Result<u32, Stop> {
     // (locale, flags, moment, picture, buffer, size). No moment is now, read
     // off the declared clock like `GetLocalTime`, so a replay writes the same.
@@ -830,7 +722,7 @@ fn write_formatted(
         ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
         return Ok(0);
     }
-    let text = write_picture(&time, picture, date, args[1]);
+    let text = write(time);
     ctx.log.line(&format!(
         "{} written {text:?} for locale {:#x} flags {:#x}",
         if date { "date" } else { "time" },
@@ -853,27 +745,30 @@ fn write_formatted(
     Ok(needed)
 }
 
+/// The one way a title on the roster asks for a date or a time to be written:
+/// these flags and no picture of its own. Anything else is a wall naming it.
+fn asked_as(args: &[u32], flags: u32, name: &str) -> Result<(), Stop> {
+    // (locale, flags, moment, picture, buffer, size).
+    if (args[1], args[3]) == (flags, 0) {
+        return Ok(());
+    }
+    Err(Stop::NotWritten {
+        what: format!(
+            "KERNEL32.dll!{name}: flags {:#x}, picture {:#010x}",
+            args[1], args[3]
+        ),
+        caller: 0,
+    })
+}
+
 /// A date, written the way the declared locale writes one (#87).
 ///
 /// Alpha Team's `Localize::SecondsToDateTime` asks with `DATE_SHORTDATE` and
 /// no picture of its own, to label a saved adventure on its Select Adventure
 /// screen.
 fn get_date_format_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GetDateFormatA(locale, flags, date, picture, buffer, size). With no
-    // picture the locale's own is used, the short one unless the long is
-    // asked for; a caller with a picture of its own may ask for neither.
-    const DATE_SHORTDATE: u32 = 0x1;
-    const DATE_LONGDATE: u32 = 0x2;
-    let picture = match (args[3], args[1] & (DATE_SHORTDATE | DATE_LONGDATE)) {
-        (0, DATE_LONGDATE) => LONG_DATE.to_owned(),
-        (0, 0 | DATE_SHORTDATE) => SHORT_DATE.to_owned(),
-        (at, 0) => ctx.string(at).map_err(Stop::Fault)?,
-        _ => {
-            ctx.state.last_error = 1004; // ERROR_INVALID_FLAGS
-            return Ok(0);
-        }
-    };
-    write_formatted(ctx, args, &picture, true)
+    asked_as(args, 0x1, "GetDateFormatA")?;
+    write_formatted(ctx, args, true, short_date)
 }
 
 /// A time of day, written the way the declared locale writes one (#87).
@@ -881,13 +776,8 @@ fn get_date_format_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// Alpha Team asks with `TIME_NOSECONDS` and no picture of its own, beside the
 /// date `GetDateFormatA` wrote.
 fn get_time_format_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GetTimeFormatA(locale, flags, time, picture, buffer, size).
-    let picture = if args[3] == 0 {
-        TIME.to_owned()
-    } else {
-        ctx.string(args[3]).map_err(Stop::Fault)?
-    };
-    write_formatted(ctx, args, &picture, false)
+    asked_as(args, 0x2, "GetTimeFormatA")?;
+    write_formatted(ctx, args, false, time_without_seconds)
 }
 
 /// How two strings sort against each other. One is less, two is equal, three
@@ -1550,11 +1440,18 @@ const WAIT_FAILED: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
 
 fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    wait_for(ctx, &[args[0]], args[1], true)
+    wait_for(ctx, &[args[0]], args[1])
 }
 
 fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // WaitForMultipleObjects(count, handles, all of them, timeout).
+    // WaitForMultipleObjects(count, handles, all of them, timeout). No title
+    // on the roster waits for all of them at once.
+    if args[2] != 0 {
+        return Err(Stop::NotWritten {
+            what: "KERNEL32.dll!WaitForMultipleObjects: a wait for all of them".to_owned(),
+            caller: 0,
+        });
+    }
     let count = args[0] as usize;
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
@@ -1564,36 +1461,28 @@ fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Sto
                 .map_err(Stop::Fault)?,
         );
     }
-    wait_for(ctx, &handles, args[3], args[2] == 0)
+    wait_for(ctx, &handles, args[3])
 }
 
-/// Wait for one of these objects, or for all of them, until the timeout.
+/// Wait for any one of these objects, until the timeout.
 ///
 /// The thread is parked rather than answered at once: a wait that is over the
 /// moment it is asked for turns a paced loop into a spin, and a machine that
 /// keeps no signalled state has no way to wake anybody (#60). The call itself
 /// is left where it is — `Stop::Blocked` brings this thread back to it when
 /// the machine comes round again, so the wait costs nothing while it waits.
-fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32, any: bool) -> Result<u32, Stop> {
+fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
     if handles.is_empty() || handles.iter().any(|h| ctx.state.object(*h).is_none()) {
         // ERROR_INVALID_HANDLE.
         ctx.state.last_error = 6;
         park(ctx, 0, 0);
         return Ok(WAIT_FAILED);
     }
-    if any {
-        for (i, handle) in handles.iter().enumerate() {
-            if claim(ctx, *handle) == Some(true) {
-                park(ctx, 0, 0);
-                return Ok(u32::try_from(i).unwrap_or(0));
-            }
+    for (i, handle) in handles.iter().enumerate() {
+        if claim(ctx, *handle) == Some(true) {
+            park(ctx, 0, 0);
+            return Ok(u32::try_from(i).unwrap_or(0));
         }
-    } else if handles.iter().all(|h| signalled(ctx, *h)) {
-        for handle in handles {
-            claim(ctx, *handle);
-        }
-        park(ctx, 0, 0);
-        return Ok(0);
     }
     // Not available. Whether this thread can be woken at all decides what a
     // wait means: with nobody else to run, waiting is only spending time.
@@ -1630,17 +1519,6 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32, any: bool) -> Resu
     }
     park(ctx, 0, 0);
     Ok(WAIT_TIMEOUT)
-}
-
-/// Whether a wait on this object would be over, without taking it.
-fn signalled(ctx: &Ctx<'_>, handle: u32) -> bool {
-    let me = running_thread(ctx);
-    match ctx.state.object(handle) {
-        Some(Object::Named {
-            signalled, held, ..
-        }) => *signalled || matches!(held, Some((owner, _)) if *owner == me),
-        _ => false,
-    }
 }
 
 /// Put the running thread down on an object until an hour, or pick it back up
@@ -2819,8 +2697,8 @@ fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 #[cfg(test)]
 mod tests {
     use super::{
-        declared_file_time, declared_now, seek_to, weekday, write_picture, DECLARED_DAY, LONG_DATE,
-        SHORT_DATE, TIME,
+        declared_file_time, declared_now, seek_to, short_date, time_without_seconds, weekday,
+        DECLARED_DAY,
     };
 
     /// 1999-10-29, three minutes and fourteen seconds past midnight, where
@@ -2862,37 +2740,12 @@ mod tests {
     fn a_date_and_a_time_are_written_as_us_english_writes_them() {
         // What Alpha Team's Select Adventure asks for: the short date, and the
         // time without its seconds (#87).
-        assert_eq!(write_picture(&SAVED, SHORT_DATE, true, 0x1), "10/29/99");
-        assert_eq!(write_picture(&SAVED, TIME, false, 0x2), "12:03 AM");
-
+        assert_eq!(short_date(SAVED), "10/29/99");
+        assert_eq!(time_without_seconds(SAVED), "12:03 AM");
         assert_eq!(
-            write_picture(&SAVED, LONG_DATE, true, 0),
-            "Friday, October 29, 1999",
-            "the weekday is the date's own, not the one the caller passed"
+            time_without_seconds([2005, 3, 0, 7, 13, 5, 9, 0]),
+            "1:05 PM"
         );
-        assert_eq!(write_picture(&SAVED, TIME, false, 0), "12:03:14 AM");
-        let afternoon = [2005, 3, 0, 7, 13, 5, 9, 0];
-        assert_eq!(write_picture(&afternoon, TIME, false, 0), "1:05:09 PM");
-        assert_eq!(
-            write_picture(&afternoon, "y yy yyyy, M MM MMM, d dd ddd", true, 0),
-            "5 05 2005, 3 03 Mar, 7 07 Mon"
-        );
-        // Quoted text stands as it is, two quotes in it are one, and a date
-        // picture writes a time's letters as letters.
-        assert_eq!(
-            write_picture(&afternoon, "'day' d, 'o''clock' h", true, 0),
-            "day 7, o'clock h"
-        );
-    }
-
-    #[test]
-    fn a_field_the_flags_leave_out_takes_its_separators_with_it() {
-        let at = [1999, 10, 5, 29, 13, 5, 9, 0];
-        assert_eq!(write_picture(&at, TIME, false, 0x1), "1 PM");
-        assert_eq!(write_picture(&at, TIME, false, 0x4), "1:05:09");
-        assert_eq!(write_picture(&at, "tt h:mm", false, 0x4), "1:05");
-        assert_eq!(write_picture(&at, "hh:mm tt", false, 0x8), "13:05 PM");
-        assert_eq!(write_picture(&at, "H:mm t", false, 0), "13:05 P");
     }
 
     #[test]

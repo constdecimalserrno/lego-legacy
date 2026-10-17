@@ -684,7 +684,40 @@ impl Machine {
     }
 }
 
+/// A call's arguments, as a trace line writes them.
+fn listed(args: &[u32]) -> String {
+    args.iter()
+        .map(|a| format!("{a:#x}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Machine {
+    /// What a shim or a method is handed: the machine, for the one call.
+    fn ctx<'a>(&'a mut self, log: &'a mut RunLog) -> Ctx<'a> {
+        Ctx {
+            cpu: &mut self.cpu,
+            mem: &mut self.arena,
+            state: &mut self.state,
+            title: self.title,
+            log,
+            tree: &mut self.tree,
+            modules: &mut self.modules,
+            clock_millis: self.clock.millis(),
+            boundary: &mut self.boundary,
+            call_guest: None,
+            float_answer: None,
+            answer_is_the_call_s: false,
+        }
+    }
+
+    /// A call's four-byte arguments, from where on the stack they start.
+    fn stack_args(&self, from: u32, count: u32) -> Result<Vec<u32>, Stop> {
+        (0..count)
+            .map(|i| self.arena.read_u32(from + i * 4).map_err(Stop::Fault))
+            .collect()
+    }
+
     /// Answer a call the guest made across the boundary.
     ///
     /// The arguments are where the calling convention says they are, the
@@ -781,36 +814,17 @@ impl Machine {
             });
         };
 
-        let mut args = Vec::with_capacity(shim.args as usize);
-        for i in 0..shim.args {
-            args.push(self.arena.read_u32(esp + 4 + i * 4).map_err(Stop::Fault)?);
-        }
+        let args = self.stack_args(esp + 4, shim.args)?;
         let cursor = self.clock.cursor();
         log.at(Trace::Shims, || {
             format!(
                 "call {}({}) from {caller:#010x} cursor {cursor}",
                 what(),
-                args.iter()
-                    .map(|a| format!("{a:#x}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                listed(&args),
             )
         });
 
-        let mut ctx = Ctx {
-            cpu: &mut self.cpu,
-            mem: &mut self.arena,
-            state: &mut self.state,
-            title: self.title,
-            log,
-            tree: &mut self.tree,
-            modules: &mut self.modules,
-            clock_millis: self.clock.millis(),
-            boundary: &mut self.boundary,
-            call_guest: None,
-            float_answer: None,
-            answer_is_the_call_s: false,
-        };
+        let mut ctx = self.ctx(log);
         let answer = match (shim.run)(&mut ctx, &args) {
             // A shim that stops the run cannot see who called it.
             Err(Stop::NotWritten { what, caller: 0 }) => {
@@ -1075,36 +1089,17 @@ impl Machine {
             });
         };
 
-        let mut args = Vec::with_capacity(method.args as usize);
-        for i in 0..method.args {
-            args.push(self.arena.read_u32(esp + 8 + i * 4).map_err(Stop::Fault)?);
-        }
+        let args = self.stack_args(esp + 8, method.args)?;
         let cursor = self.clock.cursor();
         log.at(Trace::Shims, || {
             format!(
                 "call {interface}::{}({}) on {this:#010x} from {caller:#010x} cursor {cursor}",
                 method.name,
-                args.iter()
-                    .map(|a| format!("{a:#x}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                listed(&args),
             )
         });
 
-        let mut ctx = Ctx {
-            cpu: &mut self.cpu,
-            mem: &mut self.arena,
-            state: &mut self.state,
-            title: self.title,
-            log,
-            tree: &mut self.tree,
-            modules: &mut self.modules,
-            clock_millis: self.clock.millis(),
-            boundary: &mut self.boundary,
-            call_guest: None,
-            float_answer: None,
-            answer_is_the_call_s: false,
-        };
+        let mut ctx = self.ctx(log);
         let answer = match (method.run)(&mut ctx, this, &args) {
             // A slot the header declares and nothing has written: the wall
             // names it the way the interface does.

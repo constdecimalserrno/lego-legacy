@@ -355,19 +355,13 @@ pub fn clip(polygon: &[Clipped]) -> Vec<Clipped> {
 }
 
 /// Where the viewport puts clip space on the surface: its rectangle in pixels,
-/// the part of clip space it shows, and its depth range.
+/// which shows all of clip space over the whole of the depth range.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub clip_x: f32,
-    pub clip_y: f32,
-    pub clip_width: f32,
-    pub clip_height: f32,
-    pub min_z: f32,
-    pub max_z: f32,
 }
 
 impl Viewport {
@@ -379,12 +373,6 @@ impl Viewport {
             y: y as f32,
             width: width as f32,
             height: height as f32,
-            clip_x: -1.0,
-            clip_y: 1.0,
-            clip_width: 2.0,
-            clip_height: 2.0,
-            min_z: 0.0,
-            max_z: 1.0,
         }
     }
 
@@ -394,9 +382,10 @@ impl Viewport {
         let rhw = 1.0 / v.clip[3];
         let (nx, ny, nz) = (v.clip[0] * rhw, v.clip[1] * rhw, v.clip[2] * rhw);
         Vertex {
-            x: self.x + (nx - self.clip_x) / self.clip_width * self.width,
-            y: self.y + (self.clip_y - ny) / self.clip_height * self.height,
-            z: self.min_z + nz * (self.max_z - self.min_z),
+            x: self.x + (nx + 1.0) / 2.0 * self.width,
+            y: self.y + (1.0 - ny) / 2.0 * self.height,
+            // From the near end of the range, so that minus zero lands on zero.
+            z: 0.0 + nz,
             rhw,
             diffuse: v.diffuse,
             specular: v.specular,

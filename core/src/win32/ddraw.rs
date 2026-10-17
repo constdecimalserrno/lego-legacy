@@ -445,7 +445,11 @@ const DDPF_PALETTEINDEXED8: u32 = 0x20;
 const DDPF_RGB: u32 = 0x40;
 
 /// Write a `DDPIXELFORMAT`: size, flags, no FourCC, bits, and masks.
-fn write_pixel_format(ctx: &mut Ctx<'_>, at: u32, format: PixelFormat) -> Result<(), Stop> {
+pub(crate) fn write_pixel_format(
+    ctx: &mut Ctx<'_>,
+    at: u32,
+    format: PixelFormat,
+) -> Result<(), Stop> {
     let indexed = format.bits == 8 && format.masks == [0; 4];
     let flags = DDPF_RGB
         | if indexed { DDPF_PALETTEINDEXED8 } else { 0 }
@@ -835,7 +839,7 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             clip(to.3, height),
         );
         if area.0 < area.2 && area.1 < area.3 {
-            fill(ctx, pixels, pitch, depth, area, colour)?;
+            super::fill(ctx, (pixels, pitch, depth), area, colour)?;
         }
         return Ok(S_OK);
     }
@@ -1073,26 +1077,6 @@ fn rect(ctx: &Ctx<'_>, at: u32, width: u32, height: u32) -> Result<(i64, i64, i6
         ))
     };
     Ok((edge(0)?, edge(4)?, edge(8)?, edge(12)?))
-}
-
-fn fill(
-    ctx: &mut Ctx<'_>,
-    pixels: u32,
-    pitch: u32,
-    depth: u32,
-    (x0, y0, x1, y1): (u32, u32, u32, u32),
-    colour: u32,
-) -> Result<(), Stop> {
-    let bytes = depth.div_ceil(8);
-    let row: Vec<u8> = (x0..x1)
-        .flat_map(|_| colour.to_le_bytes().into_iter().take(bytes as usize))
-        .collect();
-    for y in y0..y1 {
-        ctx.mem
-            .write(pixels + y * pitch + x0 * bytes, &row)
-            .map_err(Stop::Fault)?;
-    }
-    Ok(())
 }
 
 /// Where a surface's pixels are, and how long its rows are.

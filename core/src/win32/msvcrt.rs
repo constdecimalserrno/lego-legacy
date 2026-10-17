@@ -128,17 +128,5 @@ fn strdup(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(0);
     }
     let text = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let bytes = text.into_bytes();
-    let addr = ctx
-        .state
-        .heap
-        .alloc(u32::try_from(bytes.len() + 1).unwrap_or(u32::MAX));
-    if addr == 0 {
-        return Ok(0);
-    }
-    ctx.mem.write(addr, &bytes).map_err(Stop::Fault)?;
-    ctx.mem
-        .write(addr + u32::try_from(bytes.len()).unwrap_or(0), &[0])
-        .map_err(Stop::Fault)?;
-    Ok(addr)
+    ctx.intern(&text).map_err(Stop::Fault)
 }

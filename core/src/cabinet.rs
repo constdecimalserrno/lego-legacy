@@ -14,6 +14,7 @@
 //! format has no specification anyone published.
 
 use crate::inflate::inflate;
+use crate::pe::{u16_at, u32_at};
 use std::fmt;
 
 /// What the header turned out not to be.
@@ -118,19 +119,6 @@ impl Entry {
 /// A cabinet's header, read.
 pub struct Cabinet {
     entries: Vec<Entry>,
-}
-
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes([
-        *b.get(at)?,
-        *b.get(at + 1)?,
-        *b.get(at + 2)?,
-        *b.get(at + 3)?,
-    ]))
-}
-
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
 /// A version 6 size or offset, which the header writes as sixty-four bits.

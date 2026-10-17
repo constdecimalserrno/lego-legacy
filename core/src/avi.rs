@@ -4,6 +4,7 @@
 //! Byte in, structure out. What is inside a stream is its codec's business
 //! ([`crate::iv50`] for the roster's video).
 
+use crate::pe::u32_at;
 use std::fmt;
 
 /// Why a file is not a movie this reader understands.
@@ -45,9 +46,7 @@ impl Stream {
     }
 
     fn format_u32(&self, at: usize) -> u32 {
-        self.format
-            .get(at..at + 4)
-            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        u32_at(&self.format, at).unwrap_or(0)
     }
 
     /// A video stream's picture size, from its `BITMAPINFOHEADER`.
@@ -67,12 +66,6 @@ impl Stream {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Avi {
     pub streams: Vec<Stream>,
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a movie's structure.
