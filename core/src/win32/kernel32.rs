@@ -1762,7 +1762,9 @@ fn get_system_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         (0x14, 1),           // and one of them
         (0x18, 586),         // a Pentium II, as the declared machine says
         (0x1c, 0x0001_0000), // images are handed out this far apart
-        (0x20, 0x0006_0000), // model 6, stepping 0
+        // Level 6 and revision 0x0502: family 6, model 5, stepping 2, which
+        // is what cpuid says the declared processor is (#93).
+        (0x20, 0x0502_0006),
     ];
     for (offset, value) in fields {
         ctx.mem
