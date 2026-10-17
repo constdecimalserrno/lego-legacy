@@ -23,6 +23,9 @@ pub enum DiscError {
     Missing(PathBuf),
     /// The file is not an ISO-9660 image.
     NotAnIso(PathBuf),
+    /// The image records more than it holds: a directory record that runs
+    /// past its own length, or a file or directory that runs past the image.
+    Damaged(PathBuf),
     /// The image has no such file.
     NoSuchFile {
         iso: PathBuf,
@@ -41,6 +44,11 @@ impl std::fmt::Display for DiscError {
                 p.display()
             ),
             Self::NotAnIso(p) => write!(f, "{} is not an ISO-9660 image", p.display()),
+            Self::Damaged(p) => write!(
+                f,
+                "{} is damaged: it records more than it holds, so the disc has to be ripped again",
+                p.display()
+            ),
             Self::NoSuchFile { iso, path } => {
                 write!(f, "{} holds no {path}", iso.display())
             }
@@ -72,6 +80,8 @@ pub struct Entry {
 pub struct Iso {
     file: File,
     path: PathBuf,
+    /// How many bytes the image holds, which nothing it records may run past.
+    size: u64,
     root: (u32, u32),
     /// The volume's own name for itself.
     pub label: String,
@@ -87,6 +97,7 @@ impl Iso {
             return Err(DiscError::Missing(path.to_path_buf()));
         }
         let mut file = File::open(path)?;
+        let size = file.metadata()?.len();
         let mut pvd = [0u8; SECTOR as usize];
         file.seek(SeekFrom::Start(FIRST_DESCRIPTOR * SECTOR))?;
         file.read_exact(&mut pvd)?;
@@ -102,6 +113,7 @@ impl Iso {
         Ok(Self {
             file,
             path: path.to_path_buf(),
+            size,
             root,
             label,
         })
@@ -137,11 +149,7 @@ impl Iso {
                 path: path.to_owned(),
             });
         }
-        let mut bytes = vec![0u8; entry.len as usize];
-        self.file
-            .seek(SeekFrom::Start(u64::from(entry.sector) * SECTOR))?;
-        self.file.read_exact(&mut bytes)?;
-        Ok(bytes)
+        self.extent(entry.sector, entry.len)
     }
 
     /// Read part of a file out of the image.
@@ -215,11 +223,21 @@ impl Iso {
         Ok((entry.sector, entry.len))
     }
 
+    /// The bytes of one run of sectors, refused when the image is too short
+    /// to hold them: a length read from a damaged image can be four gigabytes.
+    fn extent(&mut self, sector: u32, len: u32) -> Result<Vec<u8>, DiscError> {
+        let start = u64::from(sector) * SECTOR;
+        if start + u64::from(len) > self.size {
+            return Err(DiscError::Damaged(self.path.clone()));
+        }
+        let mut bytes = vec![0u8; len as usize];
+        self.file.seek(SeekFrom::Start(start))?;
+        self.file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
     fn read_dir(&mut self, sector: u32, len: u32) -> Result<Vec<Entry>, DiscError> {
-        let mut data = vec![0u8; len as usize];
-        self.file
-            .seek(SeekFrom::Start(u64::from(sector) * SECTOR))?;
-        self.file.read_exact(&mut data)?;
+        let data = self.extent(sector, len)?;
 
         let mut out = Vec::new();
         let mut at = 0usize;
@@ -231,11 +249,15 @@ impl Iso {
                 at = (at / SECTOR as usize + 1) * SECTOR as usize;
                 continue;
             }
-            if at + record_len > data.len() {
-                break;
-            }
-            let record = &data[at..at + record_len];
-            let name_len = record[32] as usize;
+            // A record is thirty-three bytes and then its name, and it ends
+            // inside its directory: one that does not is a damaged rip.
+            let name_len = data.get(at + 32).map_or(0, |n| usize::from(*n));
+            let Some(record) = data
+                .get(at..at + record_len)
+                .filter(|r| r.len() >= 33 + name_len)
+            else {
+                return Err(DiscError::Damaged(self.path.clone()));
+            };
             let raw = &record[33..33 + name_len];
             // The first two entries of every directory are itself and its
             // parent, spelled as a single zero or one byte.

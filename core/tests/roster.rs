@@ -160,3 +160,38 @@ fn an_image_the_cabinet_does_not_hold_is_absent() {
         other => panic!("found {other} instead of saying where it looked"),
     }
 }
+
+/// A damaged rip whose volume descriptor is sound, with a root directory of
+/// `len` bytes at sector 17 that starts with `record`.
+fn damaged_rip(name: &str, len: u32, record: &[u8]) -> std::path::PathBuf {
+    let mut image = vec![0u8; 18 * 2048];
+    let pvd = 16 * 2048;
+    image[pvd] = 1;
+    image[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+    image[pvd + 156 + 2..pvd + 156 + 6].copy_from_slice(&17u32.to_le_bytes());
+    image[pvd + 156 + 10..pvd + 156 + 14].copy_from_slice(&len.to_le_bytes());
+    image[17 * 2048..17 * 2048 + record.len()].copy_from_slice(record);
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, image).expect("the rip is written");
+    path
+}
+
+#[test]
+fn a_damaged_rip_is_refused_by_name_rather_than_read_past() {
+    // A record twenty bytes long, shorter than the thirty-three every record
+    // starts with; and a root directory two gigabytes long, in an image of
+    // thirty-six kilobytes.
+    let truncated = damaged_rip("truncated-record.iso", 2048, &[20]);
+    let enormous = damaged_rip("enormous-directory.iso", 0x8000_0000, &[]);
+    for path in [truncated, enormous] {
+        let mut iso = lego_legacy_core::disc::Iso::open(&path).expect("the descriptor is sound");
+        let err = iso
+            .list("")
+            .expect_err("the directory is damaged")
+            .to_string();
+        assert!(
+            err.contains(&path.display().to_string()) && err.contains("ripped again"),
+            "names the image and says what to do: {err}"
+        );
+    }
+}
