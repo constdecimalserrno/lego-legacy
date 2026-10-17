@@ -171,11 +171,12 @@ fn create_device(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
     let guid = ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?;
     let keyboard = guid == GUID_KEYBOARD;
     if guid != GUID_KEYBOARD && guid != GUID_MOUSE {
-        // A device this machine does not have. DIERR_DEVICENOTREG.
+        // A device this machine does not have. DIERR_DEVICENOTREG, which is
+        // REGDB_E_CLASSNOTREG (#93).
         ctx.log.line(&format!(
             "dinput device {guid:#010x} is not one this machine has"
         ));
-        return Ok(0x8007_0002);
+        return Ok(0x8004_0154);
     }
     let object = State::make_com(
         ctx,
