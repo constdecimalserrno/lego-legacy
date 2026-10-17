@@ -2548,17 +2548,8 @@ fn set_file_attributes(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn get_full_path_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // A relative path is resolved against where the guest believes it is.
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let full = if path.len() > 1 && path.as_bytes().get(1) == Some(&b':') {
-        path
-    } else {
-        format!(
-            "{}\\{}",
-            ctx.state.current_directory,
-            path.trim_start_matches('\\')
-        )
-    };
+    let full = ctx.absolute(&path);
     let written = ctx
         .write_string(args[2], args[1], &full)
         .map_err(Stop::Fault)?;

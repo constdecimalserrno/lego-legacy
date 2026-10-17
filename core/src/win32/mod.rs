@@ -937,16 +937,25 @@ impl Ctx<'_> {
         self.tree.holds(&self.absolute(path))
     }
 
-    /// A path the guest gave us, resolved the way the guest means it: a
-    /// relative one is against wherever the guest believes it is.
+    /// A path the guest gave us, resolved the way the guest means it, which
+    /// is the way `GetFullPathNameA` resolves it: a relative one is against
+    /// wherever the guest believes it is, and one rooted without a drive is on
+    /// that place's drive.
     #[must_use]
     pub fn absolute(&self, path: &str) -> String {
         let path = path.trim();
-        let rooted = path.len() > 1 && path.as_bytes().get(1) == Some(&b':');
-        if rooted || path.starts_with('\\') {
+        let here = &self.state.current_directory;
+        if path.len() > 1 && path.as_bytes().get(1) == Some(&b':') {
             path.to_owned()
+        } else if path.starts_with('\\') {
+            let drive = if here.as_bytes().get(1) == Some(&b':') {
+                &here[..2]
+            } else {
+                ""
+            };
+            format!("{drive}{path}")
         } else {
-            format!("{}\\{}", self.state.current_directory, path)
+            format!("{here}\\{path}")
         }
     }
 
