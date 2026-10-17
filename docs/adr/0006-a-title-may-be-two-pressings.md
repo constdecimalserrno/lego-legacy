@@ -15,7 +15,10 @@ wrapped image is recognised and named, never run, decrypted or bypassed.
 ## Consequences
 
 - A player may need both discs for one title to be complete. The launcher says
-  which pressing is missing and what it is for.
-- The roster's other three titles are checked the same way as they arrive.
-- Goldens are keyed to the entry image's bytes, so the pressing a bundle was
-  captured from is never in doubt.
+  which pressing is missing and what it is for: the image, or the music.
+- The roster's other titles are checked the same way as they arrive. Hot Wheels
+  has one pressing. Alpha Team's two carry the same cabinet byte for byte, so
+  the original runs, and neither has an audio track. LEGO Racers is not checked
+  yet.
+- Goldens, when they are built, are keyed to the entry image's bytes, so the
+  pressing a bundle was captured from is never in doubt.

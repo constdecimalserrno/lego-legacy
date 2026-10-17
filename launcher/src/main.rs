@@ -76,9 +76,19 @@ fn list() -> Vec<Found> {
     for (i, entry) in roster::ROSTER.iter().enumerate() {
         let what = roster::look_for(entry);
         println!("  {}. {:<column$} {what}", i + 1, entry.name);
+        // The music may be on a disc the image is not (ADR-0006), and a title
+        // starts without it and plays none, so a missing one is said here.
         if let Some(pressing) = entry.red_book {
-            if pressing != entry.image.pressing {
-                println!("     music comes from the {pressing} pressing");
+            match lego_legacy_core::disc::open_red_book(entry.image.disc_dir, pressing) {
+                Err(e) => {
+                    println!(
+                        "     music comes from the {pressing} pressing, and cannot be played: {e}"
+                    );
+                }
+                Ok(_) if pressing != entry.image.pressing => {
+                    println!("     music comes from the {pressing} pressing");
+                }
+                Ok(_) => {}
             }
         }
         found.push(what);
