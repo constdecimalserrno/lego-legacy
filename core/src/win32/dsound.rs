@@ -53,6 +53,10 @@ struct Buffer {
     started: Option<u64>,
     /// Where in its bytes it starts, or stopped.
     offset: u32,
+    /// The thousandths of a frame it had played past `offset` when a change
+    /// while it plays brought it up to date, which it goes on from rather
+    /// than rounds away (#99).
+    part: u64,
     /// Where it is, when the title made it with 3D.
     place: Option<Place>,
 }
@@ -261,21 +265,27 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         method("Initialize", 2, ok),
         method("Lock", 7, lock),
         method("Play", 3, play),
+        // It moves where it plays from, so a voice starts again from there.
         method("SetCurrentPosition", 1, |ctx, this, args| {
-            change(ctx, this, |b| b.offset = args[0].min(b.bytes))
+            change(ctx, this, false, |b| {
+                b.offset = args[0].min(b.bytes);
+                b.part = 0;
+            })
         }),
         method("SetFormat", 1, set_format),
         method("SetVolume", 1, |ctx, this, args| {
-            change(ctx, this, |b| b.volume = (args[0] as i32).clamp(-10_000, 0))
+            change(ctx, this, true, |b| {
+                b.volume = (args[0] as i32).clamp(-10_000, 0)
+            })
         }),
         method("SetPan", 1, |ctx, this, args| {
-            change(ctx, this, |b| {
+            change(ctx, this, true, |b| {
                 b.pan = (args[0] as i32).clamp(-10_000, 10_000)
             })
         }),
         // DSBFREQUENCY_ORIGINAL, zero, is the format's own rate.
         method("SetFrequency", 1, |ctx, this, args| {
-            change(ctx, this, |b| {
+            change(ctx, this, true, |b| {
                 b.frequency = (args[0] != 0).then_some(args[0])
             })
         }),
@@ -459,6 +469,7 @@ impl Buffer {
             looping: false,
             started: None,
             offset: 0,
+            part: 0,
             place: three_d.then(Place::default),
         }
     }
@@ -476,15 +487,21 @@ impl Buffer {
             .map_or(1, |f| u32::from(f.block_align.max(1)))
     }
 
+    /// How far past `offset` it has played by a declared millisecond, in
+    /// thousandths of a frame, while it plays.
+    fn played(&self, millis: u64) -> Option<u64> {
+        let (started, rate) = (self.started?, self.rate()?);
+        Some(millis.saturating_sub(started) * u64::from(rate) + self.part)
+    }
+
     /// Where it is in its bytes at a declared millisecond, and whether it is
     /// still playing. A sound that has played to its end is stopped, back at
     /// its beginning, as DirectSound leaves it.
     fn progress(&self, millis: u64) -> (u32, bool) {
-        let (Some(started), Some(rate)) = (self.started, self.rate()) else {
+        let Some(played) = self.played(millis) else {
             return (self.offset, self.started.is_some());
         };
-        let frames = millis.saturating_sub(started) * u64::from(rate) / 1000;
-        let at = u64::from(self.offset) + frames * u64::from(self.align());
+        let at = u64::from(self.offset) + played / 1000 * u64::from(self.align());
         let len = u64::from(self.bytes.max(1));
         if self.looping {
             ((at % len) as u32, true)
@@ -495,14 +512,14 @@ impl Buffer {
         }
     }
 
-    /// Bring its state up to a declared millisecond: where it is, and whether
-    /// it has stopped by playing to its end. Only a change to how it plays
-    /// does this: a buffer asked where it is every flip and moved on each time
-    /// would lose the part of a frame each move rounds away, and drift behind
-    /// the mix.
+    /// Bring its state up to a declared millisecond: where it is, to the part
+    /// of a frame, and whether it has stopped by playing to its end. Only a
+    /// change to how it plays does this. Until #99 it rounded the part away,
+    /// and a buffer changed while it played went on a frame behind.
     fn settle(&mut self, millis: u64) {
-        if self.started.is_some() && self.format.is_some() {
+        if let Some(played) = self.played(millis) {
             let (at, playing) = self.progress(millis);
+            self.part = if playing { played % 1000 } else { 0 };
             self.offset = at;
             self.started = playing.then_some(millis);
         }
@@ -606,6 +623,7 @@ fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     let copy = Buffer {
         started: None,
         offset: 0,
+        part: 0,
         looping: false,
         ..template
     };
@@ -773,21 +791,24 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
     };
-    if b.progress(millis).1 && b.looping == looping {
+    let playing = b.progress(millis).1;
+    if playing && b.looping == looping {
         return Ok(S_OK);
     }
     b.settle(millis);
     b.looping = looping;
     b.started = Some(millis);
-    start_voice(ctx, this)
+    start_voice(ctx, this, playing)
 }
 
-/// Put a playing buffer's sound in the mixer, from where it is now.
+/// Put a playing buffer's sound in the mixer, from where it is now: from
+/// where the buffer is, or, when it goes on, from just where its voice has
+/// got to.
 ///
 /// ponytail: its volume, pan and position are taken when it starts, so a
 /// title moving a 3D sound while it plays is heard where it last started; a
 /// sound moved while it plays wants the mixer to weigh it as it goes.
-fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
+fn start_voice(ctx: &mut Ctx<'_>, this: u32, go_on: bool) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let millis = ctx.clock_millis;
     let listener = ctx.state.sound.listener;
@@ -805,10 +826,15 @@ fn start_voice(ctx: &mut Ctx<'_>, this: u32) -> Result<u32, Stop> {
             caller: 0,
         }
     })?;
-    let first = u64::from(b.offset / b.align());
-    ctx.state
-        .mixer
-        .play_buffer(identity, pcm, first, millis * 1_000_000, b.looping);
+    let nanos = millis * 1_000_000;
+    if go_on {
+        ctx.state.mixer.go_on(identity, pcm, nanos, b.looping);
+    } else {
+        let first = u64::from(b.offset / b.align());
+        ctx.state
+            .mixer
+            .play_buffer(identity, pcm, first, nanos, b.looping);
+    }
     Ok(S_OK)
 }
 
@@ -818,14 +844,21 @@ fn stop_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop>
     if let Some(b) = buffer(ctx, this) {
         b.settle(millis);
         b.started = None;
+        // Stopped, it is at a byte, and plays again from that byte.
+        b.part = 0;
     }
     ctx.state.mixer.stop(identity, millis * 1_000_000);
     Ok(S_OK)
 }
 
 /// Change something about a buffer; one that is playing goes on from where
-/// it is, changed.
-fn change(ctx: &mut Ctx<'_>, this: u32, edit: impl FnOnce(&mut Buffer)) -> Result<u32, Stop> {
+/// it is, changed, unless the change moves where it plays from.
+fn change(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    go_on: bool,
+    edit: impl FnOnce(&mut Buffer),
+) -> Result<u32, Stop> {
     let millis = ctx.clock_millis;
     let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
@@ -834,7 +867,7 @@ fn change(ctx: &mut Ctx<'_>, this: u32, edit: impl FnOnce(&mut Buffer)) -> Resul
     edit(b);
     if b.started.is_some() {
         b.started = Some(millis);
-        return start_voice(ctx, this);
+        return start_voice(ctx, this, go_on);
     }
     Ok(S_OK)
 }
@@ -879,6 +912,19 @@ mod tests {
         b.started = Some(1_000);
         b.looping = true;
         assert_eq!(b.progress(4_000), (44_100, true), "a loop goes round");
+    }
+
+    #[test]
+    fn a_change_while_it_plays_leaves_it_on_the_same_sample() {
+        let mut b = Buffer::new(0, 88_200, Some(mono_16bit(22_050)), false);
+        b.started = Some(1_000);
+        let unchanged = b.clone();
+        // Nineteen milliseconds is 418.95 frames and one more is 22.05: the
+        // parts each would round away make a frame between them.
+        b.settle(1_019);
+        b.volume = -1_000;
+        assert_eq!(b.progress(1_020), unchanged.progress(1_020));
+        assert_eq!(b.progress(1_020), (882, true), "441 frames in");
     }
 
     #[test]

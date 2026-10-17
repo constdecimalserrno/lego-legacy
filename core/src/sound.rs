@@ -258,8 +258,9 @@ struct Voice {
     /// Whether it goes round again at its end, until it is stopped.
     looping: bool,
     source: Source,
-    /// The frame of the mix it starts at, and the frame of its own it starts
-    /// from.
+    /// The frame of the mix it starts at, and where in its own frames it
+    /// starts from, in the mix's frames: a voice that goes on from another
+    /// starts part of the way through one of them (#99).
     start: u64,
     first: u64,
     /// The frame of the mix it stops at, once something has stopped it.
@@ -284,7 +285,7 @@ impl Voice {
     /// Where a frame of the mix falls in the sound: its own frame, and the
     /// part of a frame past it, in the mix's frames.
     fn along(&self, frame: u64) -> (u64, u64) {
-        let along = self.first * u64::from(RATE) + frame.saturating_sub(self.start) * self.rate();
+        let along = self.first + frame.saturating_sub(self.start) * self.rate();
         (along / u64::from(RATE), along % u64::from(RATE))
     }
 
@@ -356,6 +357,23 @@ impl Mixer {
     /// once or round and round. A sound already playing under the same id
     /// stops where this one starts.
     pub fn play_buffer(&mut self, id: u32, pcm: Pcm, first: u64, nanos: u64, looping: bool) {
+        let first = first * u64::from(RATE);
+        self.add(id, Source::Guest(pcm), first, nanos, looping);
+    }
+
+    /// Go on playing a title's buffer at a declared time, changed, from just
+    /// where its voice has got to, to the part of a frame: a change to how it
+    /// sounds moves nothing else (#99). A voice that is over stays over.
+    pub fn go_on(&mut self, id: u32, pcm: Pcm, nanos: u64, looping: bool) {
+        let at = frame_at(nanos);
+        let Some(voice) = self.voices.iter().find(|v| v.id == id && !v.over(at)) else {
+            return;
+        };
+        let (mut whole, part) = voice.along(at);
+        if voice.looping {
+            whole %= voice.frames();
+        }
+        let first = whole * u64::from(RATE) + part;
         self.add(id, Source::Guest(pcm), first, nanos, looping);
     }
 
@@ -577,6 +595,32 @@ mod tests {
             block[..10],
             [100, -50, 150, -75, 200, -100, 200, -100, 0, 0]
         );
+    }
+
+    #[test]
+    fn a_buffer_changed_while_it_plays_goes_on_from_the_same_sample() {
+        let ramp: Vec<i16> = (0..BLOCK_FRAMES as i16).flat_map(|s| [s, s]).collect();
+        let mem = guest(&ramp);
+        let at_third = |weights| {
+            let bytes = BLOCK_FRAMES as u32 * 4;
+            Pcm::new(0, bytes, &pcm(2), RATE / 3, weights).expect("PCM")
+        };
+        let (mut changed, mut unchanged) = (Mixer::default(), Mixer::default());
+        for mixer in [&mut changed, &mut unchanged] {
+            mixer.play_buffer(1, at_third((1.0, 1.0)), 0, 0, false);
+        }
+        // Panned hard left a third of the way into a block, between two of
+        // its own frames.
+        let now = BLOCK_NANOS / 3;
+        changed.go_on(1, at_third((1.0, 0.0)), now, false);
+        let end = 2 * BLOCK_NANOS + 1_000_000;
+        let heard = changed.due(end, &mem).concat();
+        let would = unchanged.due(end, &mem).concat();
+        let after = frame_at(now) as usize;
+        for (i, (a, b)) in heard.chunks(2).zip(would.chunks(2)).enumerate() {
+            assert_eq!(a[0], b[0], "the left side is on the same sample at {i}");
+            assert_eq!(a[1], if i < after { b[1] } else { 0 }, "the right at {i}");
+        }
     }
 
     #[test]
