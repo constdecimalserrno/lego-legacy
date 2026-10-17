@@ -1095,10 +1095,10 @@ impl Host for MacWindow {
         self.closed
     }
 
-    fn audio_underruns(&self) -> u64 {
+    fn audio_underruns(&self) -> Option<u64> {
         self.audio
             .as_ref()
-            .map_or(0, super::mac_audio::MacAudio::underruns)
+            .map(super::mac_audio::MacAudio::underruns)
     }
 
     fn wall_nanos(&self) -> u64 {

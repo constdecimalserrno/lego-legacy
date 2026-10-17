@@ -167,14 +167,15 @@ pub trait Host {
         false
     }
 
-    /// How many times a device taking this run's audio ran dry mid-sound.
+    /// How many times a device taking this run's audio ran dry mid-sound, or
+    /// `None` for a host with no device.
     ///
     /// Zero is a mix that kept up. Anything else is what a person hears as
-    /// crackle and as a voice line cut short, and it is the host's own
+    /// crackle and as gaps in a voice line, and it is the host's own
     /// shortfall rather than anything the guest did — a golden hashes what was
-    /// mixed, not what was heard (#75). A host with no device never runs dry.
-    fn audio_underruns(&self) -> u64 {
-        0
+    /// mixed, not what was heard (#75).
+    fn audio_underruns(&self) -> Option<u64> {
+        None
     }
 
     /// Hold presentation back so that a game-second takes a wall-second

@@ -5,8 +5,9 @@
 //! it logged, and how it ended.
 
 use lego_legacy_core::cli::{Cli, Trace};
-use lego_legacy_core::host::{Button, Input};
-use lego_legacy_core::{stub, testkit, Title};
+use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::host::{Button, Frame, Host, HostError, Input, Mapping};
+use lego_legacy_core::{run, stub, testkit, Title};
 
 const TEST_TITLE: Title = Title::STUB;
 
@@ -132,5 +133,64 @@ fn input_is_delivered_at_the_flip_it_names_and_always_recorded() {
         ran.host.undelivered(),
         [(99, Input::Up(Button::Left))],
         "an event naming a flip the run never reached is kept, not lost"
+    );
+}
+
+/// The headless host, with a device that kept up.
+struct Heard(Headless);
+
+impl Host for Heard {
+    fn present(&mut self, frame: &Frame<'_>) {
+        self.0.present(frame);
+    }
+
+    fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+        self.0.poll_input(flip)
+    }
+
+    fn audio(&mut self, samples: &[i16]) {
+        self.0.audio(samples);
+    }
+
+    fn wall_nanos(&self) -> u64 {
+        self.0.wall_nanos()
+    }
+
+    fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+        self.0.map(len)
+    }
+
+    fn audio_underruns(&self) -> Option<u64> {
+        Some(0)
+    }
+}
+
+/// A run a device heard says how often it ran dry, zero included, and a run
+/// nobody heard says nothing (#90): zero is what puts a complaint about the
+/// sound on the mix rather than on the host.
+#[test]
+fn a_run_a_device_heard_says_it_never_ran_dry_and_one_nobody_heard_says_nothing() {
+    scratch();
+    let cli = Cli {
+        stub: true,
+        data_root: Some(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("heard")),
+        ..Cli::default()
+    };
+    let (_, log) =
+        run::run(&TEST_TITLE, &cli, &mut Heard(Headless::new()), 1_000).expect("the stub runs");
+    let dir = log.dir().to_path_buf();
+    drop(log);
+    let text = std::fs::read_to_string(dir.join("log")).expect("the log is there");
+    assert!(
+        text.lines()
+            .any(|l| l == "audio: the device ran dry 0 times"),
+        "{text}"
+    );
+
+    let unheard = testkit::run_headless(&TEST_TITLE, &cli, 1_000);
+    assert!(
+        !unheard.log.contains("audio: the device"),
+        "{}",
+        unheard.log
     );
 }

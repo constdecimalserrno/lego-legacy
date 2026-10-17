@@ -105,11 +105,6 @@ pub fn run_digested(
         machine.run(host, &mut log, budget)
     };
 
-    // Whether the device taking this run's audio ever ran dry. Said out loud
-    // because it is the one thing a person hears that no golden can catch: the
-    // mix is made on the declared clock and hashed as it was mixed, and what
-    // reaches a device is the host's own business (#75). A run that crackles
-    // now says so instead of being reported from a chair.
     // How the pointer was driven, said in one line: a title that puts the
     // pointer somewhere every frame is steering by how far the mouse went
     // since, and that only works where the host was told and froze the
@@ -121,10 +116,20 @@ pub fn run_digested(
         ));
     }
 
-    let underruns = host.audio_underruns();
-    if underruns > 0 {
+    // Whether the device taking this run's audio ever ran dry. Said out loud
+    // because it is the one thing a person hears that no golden can catch: the
+    // mix is made on the declared clock and hashed as it was mixed, and what
+    // reaches a device is the host's own business (#75). Zero is said too: a
+    // played run that says nothing cannot be told from one nobody heard, and
+    // zero is what puts a complaint about the sound on the mix (#90).
+    if let Some(underruns) = host.audio_underruns() {
+        let behind = if underruns > 0 {
+            "; the mix did not keep up"
+        } else {
+            ""
+        };
         log.line(&format!(
-            "audio: the device ran dry {underruns} times; the mix did not keep up"
+            "audio: the device ran dry {underruns} times{behind}"
         ));
     }
 

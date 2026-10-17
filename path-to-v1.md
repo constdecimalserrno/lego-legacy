@@ -24,6 +24,14 @@ Every open ticket is on this path. Anything else was closed on 2026-10-04 (#40, 
 - **#87** (`1f2dddf`, `399d2fb`) `GetDateFormatA`/`GetTimeFormatA`: the wall was Select
   Adventure (main menu → *Adventure*) labelling a saved slot with its date.
 
+### Alpha Team's narration — before the sign-off play
+
+- **#92** Every narration line loses every other second in the mix, because
+  `IDirectSoundBuffer::Lock` never hands out the half of a buffer that wraps.
+  #90 measured it: 41% of the training's narration reaches the mix, and the
+  device is not to blame (it runs dry at loads, not under the coach). The fix
+  re-takes `routes/first-mission.route`, whose steps follow the coach's voice.
+
 ### The sign-off play — needs the maintainer at a window
 
 - **#62** Play Alpha Team's first mission and say what is wrong. It closes these, which are
