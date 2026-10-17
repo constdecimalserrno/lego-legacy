@@ -1194,12 +1194,19 @@ fn create_palette(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     Ok(S_OK)
 }
 
+/// Which of a palette's 256 entries a `SetEntries` or `GetEntries` reaches:
+/// from the start it asks for to the end of the palette and no further.
+fn entries(args: &[u32]) -> (u32, u32) {
+    let start = args[1].min(256);
+    (start, args[2].min(256 - start))
+}
+
 fn set_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetEntries(flags, start, count, entries).
     let Some(ComState::Palette { store }) = ctx.state.com(this).map(|o| o.state.clone()) else {
         return Ok(S_OK);
     };
-    let (start, count) = (args[1].min(256), args[2].min(256));
+    let (start, count) = entries(args);
     let bytes = ctx
         .mem
         .slice(args[3], (count * 4) as usize)
@@ -1215,7 +1222,7 @@ fn get_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     let Some(ComState::Palette { store }) = ctx.state.com(this).map(|o| o.state.clone()) else {
         return Ok(S_OK);
     };
-    let (start, count) = (args[1].min(256), args[2].min(256));
+    let (start, count) = entries(args);
     let bytes = ctx
         .mem
         .slice(store + start * 4, (count * 4) as usize)
@@ -1342,5 +1349,14 @@ mod tests {
             &mem.slice(0x200, 16).expect("in memory")[10..],
             [1, 1, 0, 0, 1, 1]
         );
+    }
+
+    /// A palette's entries are reached from the start asked for to its end,
+    /// and never past it, however many were asked for.
+    #[test]
+    fn a_palette_is_not_written_past_its_last_entry() {
+        assert_eq!(super::entries(&[0, 250, 10, 0]), (250, 6));
+        assert_eq!(super::entries(&[0, 300, 5, 0]), (256, 0));
+        assert_eq!(super::entries(&[0, 0, 256, 0]), (0, 256));
     }
 }
