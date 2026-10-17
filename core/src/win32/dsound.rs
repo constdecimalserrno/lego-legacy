@@ -741,17 +741,17 @@ fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
         for offset in (4..size.min(0x100)).step_by(4) {
             ctx.mem.write_u32(at + offset, 0).map_err(Stop::Fault)?;
         }
-        // DSCAPS_PRIMARY16BIT | DSCAPS_PRIMARYSTEREO.
+        // DSCAPS_PRIMARY16BIT | DSCAPS_PRIMARYSTEREO (#93).
         ctx.mem
-            .write_u32(at + 4, 0x0000_000c)
+            .write_u32(at + 4, 0x0000_000a)
             .map_err(Stop::Fault)?;
     }
     Ok(S_OK)
 }
 
 fn speaker_config(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // DSSPEAKER_STEREO.
-    write_word(ctx, args[0], Some(1))
+    // DSSPEAKER_STEREO (#93).
+    write_word(ctx, args[0], Some(4))
 }
 
 /// A `WAVEFORMATEX` in guest memory. PCM's is sixteen bytes and says nothing
