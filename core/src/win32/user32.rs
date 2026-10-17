@@ -727,14 +727,10 @@ fn post_quit(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn system_metrics(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The declared machine's screen, and nothing measured from the host's.
-    let (width, height, _) = ctx
-        .title
-        .declared
-        .modes
-        .first()
-        .copied()
-        .unwrap_or((640, 480, 16));
+    // The declared machine's screen in the mode it is in, as DirectDraw's
+    // `GetDisplayMode` and GDI's `GetDeviceCaps` say, and nothing measured
+    // from the host's.
+    let (width, height, _) = ctx.state.display_mode;
     Ok(match args[0] {
         0 => width,
         1 => height,
@@ -749,13 +745,8 @@ fn load_resource(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn client_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let (width, height, _) = ctx
-        .title
-        .declared
-        .modes
-        .first()
-        .copied()
-        .unwrap_or((640, 480, 16));
+    // The one window covers the whole screen, as `GetRegionData` says.
+    let (width, height, _) = ctx.state.display_mode;
     let at = args[1];
     for (offset, value) in [(0, 0), (4, 0), (8, width), (12, height)] {
         ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
