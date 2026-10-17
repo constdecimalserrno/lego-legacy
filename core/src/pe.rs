@@ -266,7 +266,7 @@ fn to_file(bytes: &[u8], rva: u32) -> Option<usize> {
         let raw = u32_at(bytes, at + 20)?;
         let span = vsize.max(raw_size);
         if rva >= va && rva < va.saturating_add(span) {
-            return Some((raw + (rva - va)) as usize);
+            return Some(raw.checked_add(rva - va)? as usize);
         }
     }
     None
@@ -385,29 +385,8 @@ fn read_imports(bytes: &[u8], base: u32, optional: usize) -> Result<Vec<Import>,
     if directory == 0 {
         return Ok(Vec::new());
     }
-    // Reading from the file image, so every address has to come back through
-    // the section table to a file offset.
-    let to_file = |rva: u32| -> Option<usize> {
-        let pe_at = u32_at(bytes, 0x3c)? as usize;
-        let optional_size = u16_at(bytes, pe_at + 20)? as usize;
-        let count = u16_at(bytes, pe_at + 6)? as usize;
-        let table = pe_at + 24 + optional_size;
-        for i in 0..count {
-            let at = table + i * 40;
-            let va = u32_at(bytes, at + 12)?;
-            let vsize = u32_at(bytes, at + 8)?;
-            let raw_size = u32_at(bytes, at + 16)?;
-            let raw = u32_at(bytes, at + 20)?;
-            let span = vsize.max(raw_size);
-            if rva >= va && rva < va.saturating_add(span) {
-                return Some((raw + (rva - va)) as usize);
-            }
-        }
-        None
-    };
-
     let mut imports = Vec::new();
-    let mut descriptor = to_file(directory).ok_or(PeError::Truncated("import directory"))?;
+    let mut descriptor = to_file(bytes, directory).ok_or(PeError::Truncated("import directory"))?;
     loop {
         let lookup = u32_at(bytes, descriptor).unwrap_or(0);
         let name_rva = u32_at(bytes, descriptor + 12).unwrap_or(0);
@@ -415,19 +394,15 @@ fn read_imports(bytes: &[u8], base: u32, optional: usize) -> Result<Vec<Import>,
         if name_rva == 0 && iat_rva == 0 {
             break;
         }
-        let dll = to_file(name_rva)
-            .map(|at| {
-                let end = bytes[at..].iter().position(|b| *b == 0).unwrap_or(0) + at;
-                String::from_utf8_lossy(&bytes[at..end]).into_owned()
-            })
-            .unwrap_or_default();
+        // A name that is not there, or runs off the end, is no name.
+        let dll = name_at(bytes, name_rva).unwrap_or_default();
 
         // The lookup table names what is imported; the address table is where
         // the answers go. An image with no lookup table uses the address table
         // for both.
         let names_rva = if lookup == 0 { iat_rva } else { lookup };
         let mut slot = 0u32;
-        while let Some(at) = to_file(names_rva + slot * 4) {
+        while let Some(at) = to_file(bytes, names_rva + slot * 4) {
             let value = u32_at(bytes, at).unwrap_or(0);
             if value == 0 {
                 break;
@@ -435,13 +410,8 @@ fn read_imports(bytes: &[u8], base: u32, optional: usize) -> Result<Vec<Import>,
             let name = if value & 0x8000_0000 != 0 {
                 format!("#{}", value & 0xffff)
             } else {
-                to_file(value)
-                    .map(|hint| {
-                        let start = hint + 2;
-                        let end = bytes[start..].iter().position(|b| *b == 0).unwrap_or(0) + start;
-                        String::from_utf8_lossy(&bytes[start..end]).to_string()
-                    })
-                    .unwrap_or_default()
+                // Its name comes after the two bytes of its hint.
+                name_at(bytes, value + 2).unwrap_or_default()
             };
             imports.push(Import {
                 dll: dll.clone(),
@@ -501,4 +471,47 @@ pub fn relocate(bytes: &[u8], image: &Image, mem: &mut Arena) -> Result<usize, P
         at = at.wrapping_add(block);
     }
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{imports_of, Import};
+
+    #[test]
+    fn a_corrupt_import_name_is_no_name_rather_than_a_panic() {
+        // One section mapping 0x1000 bytes at 0x1000 from 0x200 in the file,
+        // holding one import whose library's name and function's name both
+        // point past the file's end.
+        let mut bytes = vec![0u8; 0x300];
+        let put = |b: &mut Vec<u8>, at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(&mut bytes, 0, b"MZ");
+        put(&mut bytes, 0x3c, &0x40u32.to_le_bytes());
+        put(&mut bytes, 0x40, b"PE\0\0");
+        put(&mut bytes, 0x44, &0x014cu16.to_le_bytes());
+        put(&mut bytes, 0x46, &1u16.to_le_bytes());
+        put(&mut bytes, 0x54, &0xe0u16.to_le_bytes());
+        put(&mut bytes, 0x58, &0x010bu16.to_le_bytes());
+        // The import directory, at 0x1000.
+        put(&mut bytes, 0x58 + 104, &0x1000u32.to_le_bytes());
+        let section = 0x58 + 0xe0;
+        put(&mut bytes, section, b".idata\0\0");
+        put(&mut bytes, section + 8, &0x1000u32.to_le_bytes());
+        put(&mut bytes, section + 12, &0x1000u32.to_le_bytes());
+        put(&mut bytes, section + 16, &0x100u32.to_le_bytes());
+        put(&mut bytes, section + 20, &0x200u32.to_le_bytes());
+        // The descriptor: no lookup table, a name at 0x1f00, and the address
+        // table at 0x1040, whose one entry names a function at 0x1f80.
+        put(&mut bytes, 0x200 + 12, &0x1f00u32.to_le_bytes());
+        put(&mut bytes, 0x200 + 16, &0x1040u32.to_le_bytes());
+        put(&mut bytes, 0x240, &0x1f80u32.to_le_bytes());
+
+        assert_eq!(
+            imports_of(&bytes, 0x1000_0000),
+            Ok(vec![Import {
+                dll: String::new(),
+                name: String::new(),
+                iat: 0x1000_1040,
+            }])
+        );
+    }
 }
