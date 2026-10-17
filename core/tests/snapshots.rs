@@ -67,6 +67,30 @@ fn resuming_from_the_middle_ends_where_running_straight_through_does() {
     );
 }
 
+/// The digest sees every page the guest can write: the main thread's whole
+/// stack, not only what is above where it stands, and the thread block and
+/// the process block above that (#98).
+#[test]
+fn the_digest_sees_the_whole_stack_and_the_blocks_above_it() {
+    use lego_legacy_core::guest::GuestMem;
+    use lego_legacy_core::machine::{PEB, STACK_BYTES, STACK_TOP, TIB};
+    let (mut machine, _host) = machine_at(0);
+    // Standing where a title's main thread starts. The stub's own surface is
+    // at the bottom of the stack, so the stack is written a page above that,
+    // and just below where it stands.
+    machine.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
+    for at in [
+        STACK_TOP - STACK_BYTES + 0x1000,
+        STACK_TOP - 17,
+        TIB,
+        PEB + 0xfff,
+    ] {
+        let before = machine.state_digest();
+        machine.arena.write(at, &[1]).expect("it is mapped");
+        assert_ne!(machine.state_digest(), before, "{at:#010x} is hashed");
+    }
+}
+
 #[test]
 fn a_snapshot_from_another_title_is_refused_by_name() {
     let (mut machine, _host) = machine_at(4);

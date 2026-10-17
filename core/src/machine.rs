@@ -942,19 +942,25 @@ impl Machine {
     }
 
     /// The regions of guest memory a snapshot carries, and the digest hashes:
-    /// where the image and every binary the title ships were placed — whose
-    /// `.data` is where Alpha Team keeps most of itself (#55, #94) — every
-    /// page the guest committed, the stack down to where it stands, and the
-    /// surface. What the guest committed is what it claimed from
+    /// every page the guest can write. That is where the image and every
+    /// binary the title ships were placed — whose `.data` is where Alpha Team
+    /// keeps most of itself (#55, #94) — every page the guest committed, the
+    /// main thread's whole stack and its thread block, the process block, and
+    /// the surface. What the guest committed is what it claimed from
     /// `VirtualAlloc` by address and how far the heap has grown, and Alpha
     /// Team's own loader puts its level images in both: the first at
-    /// `0x1000_0000`, and every one after it wherever the heap puts it (#98).
+    /// `0x1000_0000`, and every one after it wherever the heap puts it. Every
+    /// other thread's stack and block come off the heap (#98).
+    ///
+    /// Files mapped into the arena are not among them: they are the disc's
+    /// own bytes, and the one title that maps any, Alpha Team, maps its eight
+    /// archives read-only and views them only to read (#57, #98).
     ///
     // ponytail: what the guest was handed rather than every page it wrote. A
-    // guest that wrote to the thread block, a file mapped into the arena, or a
-    // stack it is not standing on would resume with that writing lost.
-    // Upgrade path: a dirty-page map in the arena, which the engine's
-    // unchecked path would have to go through.
+    // guest that wrote somewhere it was never handed, a read-only mapping
+    // among them, would resume with that writing lost, where Windows would
+    // have stopped it. Upgrade path: a dirty-page map in the arena, which the
+    // engine's unchecked path would have to go through.
     fn snapshot_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if let Some(image) = &self.image {
@@ -967,10 +973,11 @@ impl Machine {
             regions.push((*start, end - start));
         }
         regions.push((crate::guest::heap::HEAP_BASE, self.state.heap.extent()));
-        let esp = self.cpu.r[crate::cpu::ESP];
-        if esp < STACK_TOP {
-            regions.push((esp, STACK_TOP - esp));
-        }
+        // The whole of it, and whether or not the main thread is the one
+        // running: what lies below where it stands is what an uninitialised
+        // local reads.
+        regions.push((STACK_TOP - STACK_BYTES, STACK_BYTES));
+        regions.push((TIB, PEB + 0x1000 - TIB));
         if let Some(surface) = self.surface {
             regions.push((surface.addr, surface.pitch * surface.height));
         }
