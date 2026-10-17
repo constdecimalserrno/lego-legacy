@@ -6,9 +6,9 @@
 //!
 //! Rock Raiders' movies are all IV50 (#9). The format: a little-endian
 //! bitstream of pictures, each three planes at 4:1:0 (a luma plane and two
-//! chroma planes a quarter its size each way). A plane is one band, or, in the
-//! scalable mode, luma is four half-size wavelet bands put back together at
-//! output. A band is tiles of macroblocks of 8x8 (luma) or 4x4 (chroma)
+//! chroma planes a quarter its size each way). A plane is one band; the
+//! scalable mode, which splits luma into four wavelet bands, is refused. A
+//! band is tiles of macroblocks of 8x8 (luma) or 4x4 (chroma)
 //! blocks: run-value coded coefficients through per-band codebooks,
 //! dequantised, inverse slant transformed, and motion compensated at half a
 //! pixel against sixteen-bit reference planes kept between pictures.
@@ -228,9 +228,6 @@ struct Tile {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Transform {
     Slant8x8,
-    RowSlant8,
-    ColumnSlant8,
-    Pixels8x8,
     Slant4x4,
 }
 
@@ -239,9 +236,8 @@ struct Band {
     height: usize,
     pitch: usize,
     aligned_height: usize,
-    /// The reference planes, kept between pictures: two that trade places,
-    /// and a third for the scalable mode.
-    planes: [Vec<i16>; 3],
+    /// The reference planes, kept between pictures: two that trade places.
+    planes: [Vec<i16>; 2],
     halfpel: bool,
     mb_size: usize,
     blk_size: usize,
@@ -261,16 +257,16 @@ impl Band {
             height,
             pitch: width.div_ceil(align) * align,
             aligned_height: height.div_ceil(align) * align,
-            planes: [Vec::new(), Vec::new(), Vec::new()],
+            planes: [Vec::new(), Vec::new()],
             halfpel: false,
             mb_size: 0,
             blk_size: 0,
             transform: Transform::Slant8x8,
             scan: &tables::SCAN_ZIGZAG_8X8,
-            intra_base: &tables::BASE_QUANT_8X8_INTRA[0],
-            inter_base: &tables::BASE_QUANT_8X8_INTER[0],
-            intra_scale: &tables::SCALE_QUANT_8X8_INTRA[0],
-            inter_scale: &tables::SCALE_QUANT_8X8_INTER[0],
+            intra_base: &tables::BASE_QUANT_8X8_INTRA,
+            inter_base: &tables::BASE_QUANT_8X8_INTER,
+            intra_scale: &tables::SCALE_QUANT_8X8_INTRA,
+            inter_scale: &tables::SCALE_QUANT_8X8_INTER,
             tiles: Vec::new(),
         }
     }
@@ -312,8 +308,6 @@ struct Layout {
     height: usize,
     tile_width: usize,
     tile_height: usize,
-    luma_bands: usize,
-    chroma_bands: usize,
 }
 
 /// One stream's decoder. Pictures depend on the ones before them, so a stream
@@ -329,10 +323,10 @@ pub struct Decoder {
     switch: usize,
     dst: usize,
     reference: usize,
-    second_reference: usize,
-    inter_scalable: bool,
     mb_book: Option<Codebook>,
-    planes: [Vec<Band>; 3],
+    /// Luma's band and the two chroma planes', once a GOP header has said
+    /// what they are.
+    planes: Vec<Band>,
 }
 
 impl Default for Decoder {
@@ -355,10 +349,8 @@ impl Decoder {
             switch: 0,
             dst: 0,
             reference: 1,
-            second_reference: 0,
-            inter_scalable: false,
             mb_book: None,
-            planes: [Vec::new(), Vec::new(), Vec::new()],
+            planes: Vec::new(),
         }
     }
 
@@ -389,8 +381,8 @@ impl Decoder {
             self.gop_header(&mut bits)?;
             self.gop_valid = true;
         }
-        let scalable = self.layout.is_some_and(|l| l.luma_bands > 1);
-        if self.frame_type == INTER_SCALABLE && !scalable {
+        // A GOP header refuses the scalable mode, so its pictures never come.
+        if self.frame_type == INTER_SCALABLE {
             self.frame_type = INTER;
             return Err(Error("a scalable picture in a stream that is not"));
         }
@@ -423,7 +415,7 @@ impl Decoder {
         self.switch_buffers();
 
         if self.frame_type == NULL {
-            if scalable || !self.decoded_any {
+            if !self.decoded_any {
                 return Err(Error("a null picture with nothing to repeat"));
             }
             return Ok(false);
@@ -431,33 +423,28 @@ impl Decoder {
 
         let book = self.mb_book.ok_or(Error("no macroblock codebook"))?;
         for plane in 0..3 {
-            for band in 0..self.planes[plane].len() {
-                let reference: Option<Vec<Vec<Macroblock>>> =
-                    (plane != 0 || band != 0).then(|| {
-                        self.planes[0][0]
-                            .tiles
-                            .iter()
-                            .map(|t| t.blocks.clone())
-                            .collect()
-                    });
-                let context = Context {
-                    plane,
-                    band,
-                    frame_flags: self.frame_flags,
-                    frame_type: self.frame_type,
-                    base_mb_size: self.planes[0][0].mb_size,
-                    dst: self.dst,
-                    reference: self.reference,
-                    scalable,
-                };
-                decode_band(
-                    &mut bits,
-                    &mut self.planes[plane][band],
-                    reference.as_deref(),
-                    &book,
-                    &context,
-                )?;
-            }
+            let reference: Option<Vec<Vec<Macroblock>>> = (plane != 0).then(|| {
+                self.planes[0]
+                    .tiles
+                    .iter()
+                    .map(|t| t.blocks.clone())
+                    .collect()
+            });
+            let context = Context {
+                plane,
+                frame_flags: self.frame_flags,
+                frame_type: self.frame_type,
+                base_mb_size: self.planes[0].mb_size,
+                dst: self.dst,
+                reference: self.reference,
+            };
+            decode_band(
+                &mut bits,
+                &mut self.planes[plane],
+                reference.as_deref(),
+                &book,
+                &context,
+            )?;
         }
         self.decoded_any = true;
 
@@ -467,44 +454,29 @@ impl Decoder {
         out.y.resize(layout.width * layout.height, 0);
         out.u.resize(cw * ch, 0);
         out.v.resize(cw * ch, 0);
-        if scalable {
-            return Err(Error("the scalable mode's wavelet recomposition"));
-        }
         copy_plane(
-            &self.planes[0][0],
+            &self.planes[0],
             self.dst,
             &mut out.y,
             layout.width,
             layout.height,
         );
         // The first chroma plane in the stream is V, the second U.
-        copy_plane(&self.planes[2][0], self.dst, &mut out.u, cw, ch);
-        copy_plane(&self.planes[1][0], self.dst, &mut out.v, cw, ch);
+        copy_plane(&self.planes[2], self.dst, &mut out.u, cw, ch);
+        copy_plane(&self.planes[1], self.dst, &mut out.v, cw, ch);
         Ok(true)
     }
 
     fn switch_buffers(&mut self) {
-        match self.previous_type {
-            INTRA | INTER => {
-                self.switch ^= 1;
-                self.dst = self.switch;
-                self.reference = self.switch ^ 1;
-            }
-            INTER_SCALABLE => {
-                if !self.inter_scalable {
-                    self.second_reference = 2;
-                    self.inter_scalable = true;
-                }
-                std::mem::swap(&mut self.dst, &mut self.second_reference);
-                self.reference = self.second_reference;
-            }
-            _ => {}
+        if matches!(self.previous_type, INTRA | INTER) {
+            self.switch ^= 1;
+            self.dst = self.switch;
+            self.reference = self.switch ^ 1;
         }
         if matches!(self.frame_type, INTRA | INTER) {
             if self.frame_type == INTRA {
                 self.switch = 0;
             }
-            self.inter_scalable = false;
             self.dst = self.switch;
             self.reference = self.switch ^ 1;
         }
@@ -526,9 +498,14 @@ impl Decoder {
         if tile_size > 256 {
             return Err(Error("a tile larger than 256"));
         }
-        let luma_bands = bits.bits(2)? as usize * 3 + 1;
-        let chroma_bands = bits.bits(1)? as usize * 3 + 1;
-        if (luma_bands, chroma_bands) != (1, 1) && (luma_bands, chroma_bands) != (4, 1) {
+        // Luma's bands and chroma's, each written as a third of one less than
+        // the count. One each is all this decodes: four luma bands are the
+        // scalable mode, whose wavelet recomposition is not written.
+        let (luma_bands, chroma_bands) = (bits.bits(2)?, bits.bits(1)?);
+        if luma_bands != 0 {
+            return Err(Error("the scalable mode"));
+        }
+        if chroma_bands != 0 {
             return Err(Error("a band subdivision other than the scalable one"));
         }
         let size = bits.bits(4)? as usize;
@@ -551,15 +528,14 @@ impl Decoder {
             height,
             tile_width: if tile_size == 0 { width } else { tile_size },
             tile_height: if tile_size == 0 { height } else { tile_size },
-            luma_bands,
-            chroma_bands,
         };
         let reconfigured = self.layout != Some(layout);
         if reconfigured {
-            self.planes = [
-                bands(width, height, luma_bands, 16),
-                bands(width.div_ceil(4), height.div_ceil(4), chroma_bands, 8),
-                bands(width.div_ceil(4), height.div_ceil(4), chroma_bands, 8),
+            let (cw, ch) = (width.div_ceil(4), height.div_ceil(4));
+            self.planes = vec![
+                Band::new(width, height, 16),
+                Band::new(cw, ch, 8),
+                Band::new(cw, ch, 8),
             ];
             self.layout = Some(layout);
         }
@@ -568,71 +544,57 @@ impl Decoder {
         // last band read, and a new layout always rebuilds them.
         let mut rebuild = reconfigured;
         for plane in 0..2 {
-            for index in 0..self.planes[plane].len() {
-                let band = &mut self.planes[plane][index];
-                band.halfpel = bits.bit()?;
-                let mb_bit = bits.bits(1)?;
-                let blk_size = 8usize >> bits.bits(1)?;
-                let mb_size = blk_size << (mb_bit ^ 1);
-                if plane == 0 && blk_size == 4 {
-                    return Err(Error("4x4 luma blocks"));
-                }
-                rebuild = mb_size != band.mb_size || blk_size != band.blk_size;
-                band.mb_size = mb_size;
-                band.blk_size = blk_size;
-                if bits.bit()? {
-                    return Err(Error("extended transform information"));
-                }
-                let (transform, scan, size): (Transform, &'static [u8], usize) =
-                    match (plane, index) {
-                        (0, 0) => (Transform::Slant8x8, &tables::SCAN_ZIGZAG_8X8, 8),
-                        (0, 1) => (Transform::RowSlant8, &tables::SCAN_VERTICAL_8X8, 8),
-                        (0, 2) => (Transform::ColumnSlant8, &tables::SCAN_HORIZONTAL_8X8, 8),
-                        (0, 3) => (Transform::Pixels8x8, &tables::SCAN_HORIZONTAL_8X8, 8),
-                        _ => (Transform::Slant4x4, &tables::SCAN_DIRECT_4X4, 4),
-                    };
-                if size != blk_size {
-                    return Err(Error("a transform the size of no block"));
-                }
-                band.transform = transform;
-                band.scan = scan;
-                let matrix = match plane {
-                    0 if luma_bands > 1 => index + 1,
-                    0 => 0,
-                    _ => 5,
-                };
-                if blk_size == 8 {
-                    let matrix = matrix.min(4);
-                    band.intra_base = &tables::BASE_QUANT_8X8_INTRA[matrix];
-                    band.inter_base = &tables::BASE_QUANT_8X8_INTER[matrix];
-                    band.intra_scale = &tables::SCALE_QUANT_8X8_INTRA[matrix];
-                    band.inter_scale = &tables::SCALE_QUANT_8X8_INTER[matrix];
-                } else {
-                    band.intra_base = &tables::BASE_QUANT_4X4_INTRA;
-                    band.inter_base = &tables::BASE_QUANT_4X4_INTER;
-                    band.intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
-                    band.inter_scale = &tables::SCALE_QUANT_4X4_INTER;
-                }
-                if bits.bits(2)? != 0 {
-                    return Err(Error("a band description without its end marker"));
-                }
+            let band = &mut self.planes[plane];
+            band.halfpel = bits.bit()?;
+            let mb_bit = bits.bits(1)?;
+            let blk_size = 8usize >> bits.bits(1)?;
+            let mb_size = blk_size << (mb_bit ^ 1);
+            if plane == 0 && blk_size == 4 {
+                return Err(Error("4x4 luma blocks"));
+            }
+            rebuild = mb_size != band.mb_size || blk_size != band.blk_size;
+            band.mb_size = mb_size;
+            band.blk_size = blk_size;
+            if bits.bit()? {
+                return Err(Error("extended transform information"));
+            }
+            let (transform, scan, size): (Transform, &'static [u8], usize) = if plane == 0 {
+                (Transform::Slant8x8, &tables::SCAN_ZIGZAG_8X8, 8)
+            } else {
+                (Transform::Slant4x4, &tables::SCAN_DIRECT_4X4, 4)
+            };
+            if size != blk_size {
+                return Err(Error("a transform the size of no block"));
+            }
+            band.transform = transform;
+            band.scan = scan;
+            if blk_size == 8 {
+                band.intra_base = &tables::BASE_QUANT_8X8_INTRA;
+                band.inter_base = &tables::BASE_QUANT_8X8_INTER;
+                band.intra_scale = &tables::SCALE_QUANT_8X8_INTRA;
+                band.inter_scale = &tables::SCALE_QUANT_8X8_INTER;
+            } else {
+                band.intra_base = &tables::BASE_QUANT_4X4_INTRA;
+                band.inter_base = &tables::BASE_QUANT_4X4_INTER;
+                band.intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
+                band.inter_scale = &tables::SCALE_QUANT_4X4_INTER;
+            }
+            if bits.bits(2)? != 0 {
+                return Err(Error("a band description without its end marker"));
             }
         }
         // The second chroma plane is described by the first.
-        for index in 0..chroma_bands {
-            let (first, second) = self.planes.split_at_mut(2);
-            let from = &first[1][index];
-            let to = &mut second[0][index];
-            to.halfpel = from.halfpel;
-            to.mb_size = from.mb_size;
-            to.blk_size = from.blk_size;
-            to.transform = from.transform;
-            to.scan = from.scan;
-            to.intra_base = from.intra_base;
-            to.inter_base = from.inter_base;
-            to.intra_scale = from.intra_scale;
-            to.inter_scale = from.inter_scale;
-        }
+        let (first, second) = self.planes.split_at_mut(2);
+        let (from, to) = (&first[1], &mut second[0]);
+        to.halfpel = from.halfpel;
+        to.mb_size = from.mb_size;
+        to.blk_size = from.blk_size;
+        to.transform = from.transform;
+        to.scan = from.scan;
+        to.intra_base = from.intra_base;
+        to.inter_base = from.inter_base;
+        to.intra_scale = from.intra_scale;
+        to.inter_scale = from.inter_scale;
         if rebuild {
             self.build_tiles(layout)?;
         }
@@ -655,7 +617,7 @@ impl Decoder {
 
     fn build_tiles(&mut self, layout: Layout) -> Result<()> {
         for plane in 0..3 {
-            let (mut tile_width, mut tile_height) = if plane == 0 {
+            let (tile_width, tile_height) = if plane == 0 {
                 (layout.tile_width, layout.tile_height)
             } else {
                 (
@@ -663,72 +625,52 @@ impl Decoder {
                     layout.tile_height.div_ceil(4),
                 )
             };
-            if plane == 0 && layout.luma_bands == 4 {
-                if tile_width % 2 != 0 || tile_height % 2 != 0 {
-                    return Err(Error("odd tiles in the scalable mode"));
+            let band = &self.planes[plane];
+            let mut tiles = Vec::new();
+            for y in (0..band.height).step_by(tile_height) {
+                for x in (0..band.width).step_by(tile_width) {
+                    let width = tile_width.min(band.width - x);
+                    let height = tile_height.min(band.height - y);
+                    let count = width.div_ceil(band.mb_size) * height.div_ceil(band.mb_size);
+                    tiles.push(Tile {
+                        x,
+                        y,
+                        width,
+                        height,
+                        blocks: vec![Macroblock::default(); count],
+                    });
                 }
-                tile_width >>= 1;
-                tile_height >>= 1;
             }
-            for index in 0..self.planes[plane].len() {
-                let band = &self.planes[plane][index];
-                let mut tiles = Vec::new();
-                for y in (0..band.height).step_by(tile_height) {
-                    for x in (0..band.width).step_by(tile_width) {
-                        let width = tile_width.min(band.width - x);
-                        let height = tile_height.min(band.height - y);
-                        let count = width.div_ceil(band.mb_size) * height.div_ceil(band.mb_size);
-                        tiles.push(Tile {
-                            x,
-                            y,
-                            width,
-                            height,
-                            blocks: vec![Macroblock::default(); count],
-                        });
-                    }
+            if plane != 0 {
+                let base = &self.planes[0].tiles;
+                if base.len() != tiles.len()
+                    || base
+                        .iter()
+                        .zip(&tiles)
+                        .any(|(a, b)| a.blocks.len() != b.blocks.len())
+                {
+                    return Err(Error("a band whose tiles do not line up with luma's"));
                 }
-                if plane != 0 || index != 0 {
-                    let base = &self.planes[0][0].tiles;
-                    if base.len() != tiles.len()
-                        || base
-                            .iter()
-                            .zip(&tiles)
-                            .any(|(a, b)| a.blocks.len() != b.blocks.len())
-                    {
-                        return Err(Error("a band whose tiles do not line up with luma's"));
-                    }
-                }
-                self.planes[plane][index].tiles = tiles;
             }
+            self.planes[plane].tiles = tiles;
         }
         Ok(())
     }
 }
 
-fn bands(width: usize, height: usize, count: usize, align: usize) -> Vec<Band> {
-    let (w, h) = if count == 1 {
-        (width, height)
-    } else {
-        (width.div_ceil(2), height.div_ceil(2))
-    };
-    (0..count).map(|_| Band::new(w, h, align)).collect()
-}
-
 /// What a band is decoded against.
 struct Context {
     plane: usize,
-    band: usize,
     frame_flags: u32,
     frame_type: u8,
     base_mb_size: usize,
     dst: usize,
     reference: usize,
-    scalable: bool,
 }
 
 impl Context {
     fn is_base(&self) -> bool {
-        self.plane == 0 && self.band == 0
+        self.plane == 0
     }
 }
 
@@ -740,9 +682,6 @@ fn decode_band(
     cx: &Context,
 ) -> Result<()> {
     for i in [cx.dst, cx.reference] {
-        if i == 2 && !cx.scalable {
-            return Err(Error("a third reference plane outside the scalable mode"));
-        }
         if band.planes[i].is_empty() {
             band.planes[i] = vec![0; band.pitch * band.aligned_height];
         }
@@ -1053,7 +992,7 @@ fn halfpel_split(halfpel: bool, mv_x: i32, mv_y: i32) -> (i32, i32, i32) {
     }
 }
 
-fn two_planes(planes: &mut [Vec<i16>; 3], dst: usize, src: usize) -> (&mut [i16], &[i16]) {
+fn two_planes(planes: &mut [Vec<i16>; 2], dst: usize, src: usize) -> (&mut [i16], &[i16]) {
     let (low, high) = planes.split_at_mut(dst.max(src));
     if dst < src {
         (&mut low[dst], &high[0])
@@ -1071,7 +1010,6 @@ fn blocks(
 ) -> Result<()> {
     let (pitch, height, blk_size) = (band.pitch, band.aligned_height, band.blk_size);
     let per_mb = if band.mb_size == blk_size { 1 } else { 4 };
-    let two_d = matches!(band.transform, Transform::Slant8x8 | Transform::Slant4x4);
     let shape = band.shape();
     let (transform, scan) = (band.transform, band.scan);
     let mut prev_dc = 0i32;
@@ -1121,7 +1059,7 @@ fn blocks(
                     &mut coeffs,
                     &mut columns,
                 )?;
-                if intra && two_d {
+                if intra {
                     prev_dc += coeffs[0];
                     coeffs[0] = prev_dc;
                     columns[0] |= prev_dc != 0;
@@ -1133,7 +1071,7 @@ fn blocks(
                     )?;
                 }
             } else if intra {
-                dc_only(transform, prev_dc, &mut dst[offset..], pitch, blk_size);
+                dc_only(prev_dc, &mut dst[offset..], pitch, blk_size);
             } else {
                 motion(
                     dst, src, offset, mv_x, mv_y, kind, pitch, height, blk_size, false,
@@ -1273,38 +1211,6 @@ fn inverse(
                 }
             }
         }
-        Transform::RowSlant8 => {
-            for row in 0..8 {
-                let line: [i32; 8] = std::array::from_fn(|k| c[8 * row + k]);
-                let at = row * pitch;
-                if line == [0; 8] {
-                    out[at..at + 8].fill(0);
-                } else {
-                    for (k, v) in slant8(line, true).into_iter().enumerate() {
-                        out[at + k] = v as i16;
-                    }
-                }
-            }
-        }
-        Transform::ColumnSlant8 => {
-            for i in 0..8 {
-                let column = if columns[i] {
-                    slant8(std::array::from_fn(|k| c[i + 8 * k]), true)
-                } else {
-                    [0; 8]
-                };
-                for (k, v) in column.into_iter().enumerate() {
-                    out[i + k * pitch] = v as i16;
-                }
-            }
-        }
-        Transform::Pixels8x8 => {
-            for row in 0..8 {
-                for k in 0..8 {
-                    out[row * pitch + k] = c[8 * row + k] as i16;
-                }
-            }
-        }
         Transform::Slant4x4 => {
             let mut tmp = [0i32; 16];
             for i in (0..4).filter(|i| columns[*i]) {
@@ -1328,26 +1234,12 @@ fn inverse(
     }
 }
 
-/// An intra block with no coefficients: the running DC, spread the way the
-/// band's transform would have spread it.
-fn dc_only(transform: Transform, dc: i32, out: &mut [i16], pitch: usize, size: usize) {
+/// An intra block with no coefficients: the running DC, spread over the
+/// block as either slant transform spreads it.
+fn dc_only(dc: i32, out: &mut [i16], pitch: usize, size: usize) {
     let half = ((dc + 1) >> 1) as i16;
     for row in 0..size {
-        let line = &mut out[row * pitch..row * pitch + size];
-        match transform {
-            Transform::Slant8x8 | Transform::Slant4x4 => line.fill(half),
-            Transform::RowSlant8 => line.fill(if row == 0 { half } else { 0 }),
-            Transform::ColumnSlant8 => {
-                line.fill(0);
-                line[0] = half;
-            }
-            Transform::Pixels8x8 => {
-                line.fill(0);
-                if row == 0 {
-                    line[0] = dc as i16;
-                }
-            }
-        }
+        out[row * pitch..row * pitch + size].fill(half);
     }
 }
 
