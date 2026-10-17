@@ -10,7 +10,7 @@
 //! scales it, keeps its aspect, and asks nothing of us per pixel.
 
 use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::time::Instant;
 
 type Id = *mut c_void;
@@ -40,6 +40,7 @@ type MsgIdRect = unsafe extern "C" fn(Id, Sel, Rect, u64, u64, bool) -> Id;
 type MsgIdCharPtr = unsafe extern "C" fn(Id, Sel, *const c_char) -> Id;
 type MsgIdEvent = unsafe extern "C" fn(Id, Sel, u64, Id, Id, bool) -> Id;
 type MsgU64 = unsafe extern "C" fn(Id, Sel) -> u64;
+type MsgCharPtr = unsafe extern "C" fn(Id, Sel) -> *const c_char;
 type MsgPoint = unsafe extern "C" fn(Id, Sel) -> Point;
 type MsgRect = unsafe extern "C" fn(Id, Sel) -> Rect;
 type MsgF64 = unsafe extern "C" fn(Id, Sel) -> f64;
@@ -849,13 +850,30 @@ impl MacWindow {
                 // chain in which nothing answers keys: what comes back is the
                 // system beep, once a keystroke, which is what a person
                 // driving with the arrow keys hears (#47). A key held with
-                // Command is not the title's — it is how a person quits or
-                // closes the window — so that one is still offered.
-                let ours_alone = matches!(kind, 10 | 11) && {
+                // Command is not the title's, so that one is still offered.
+                let command = matches!(kind, 10 | 11) && {
                     const COMMAND: u64 = 1 << 20;
                     let flags: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("modifierFlags"));
-                    flags & COMMAND == 0
+                    flags & COMMAND != 0
                 };
+                let ours_alone = matches!(kind, 10 | 11) && !command;
+                // Command-Q and Command-W are how a person quits or closes the
+                // window, and with no main menu nothing in AppKit answers them,
+                // so they end the run here, as closing the window does. They
+                // are read by the character the key types, not where it sits,
+                // so they hold on any keyboard layout (#100).
+                if kind == 10 && command {
+                    let typed: Id =
+                        self.rt.send::<MsgId>()(event, self.rt.sel("charactersIgnoringModifiers"));
+                    let utf8: *const c_char =
+                        self.rt.send::<MsgCharPtr>()(typed, self.rt.sel("UTF8String"));
+                    if !utf8.is_null()
+                        && matches!(CStr::from_ptr(utf8).to_bytes(), b"q" | b"Q" | b"w" | b"W")
+                    {
+                        self.closed = true;
+                        continue;
+                    }
+                }
                 match kind {
                     // A move of nobody's window carries screen coordinates
                     // rather than the window's, so taking one would throw the
