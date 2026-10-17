@@ -41,11 +41,7 @@ impl Interface {
 /// names the method rather than a slot number (#12).
 #[must_use]
 pub const fn wall(name: &'static str, args: u32) -> Method {
-    Method {
-        name,
-        args,
-        run: unwritten,
-    }
+    method(name, args, unwritten)
 }
 
 /// A written method, spelled on one line.
@@ -69,21 +65,9 @@ fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop>
 /// holds every object it made until the run ends, because a guest that
 /// released an object and then used it would otherwise read a plausible
 /// answer instead of stopping.
-pub const QUERY_INTERFACE: Method = Method {
-    name: "QueryInterface",
-    args: 2,
-    run: query_interface,
-};
-pub const ADD_REF: Method = Method {
-    name: "AddRef",
-    args: 0,
-    run: add_ref,
-};
-pub const RELEASE: Method = Method {
-    name: "Release",
-    args: 0,
-    run: release,
-};
+pub const QUERY_INTERFACE: Method = method("QueryInterface", 2, query_interface);
+pub const ADD_REF: Method = method("AddRef", 0, add_ref);
+pub const RELEASE: Method = method("Release", 0, release);
 
 /// The answer a COM call gives when it worked.
 pub const S_OK: u32 = 0;

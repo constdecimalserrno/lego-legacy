@@ -6,7 +6,7 @@
 //! now.
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -31,31 +31,11 @@ pub static DIRECT_INPUT: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "CreateDevice",
-            args: 3,
-            run: create_device,
-        },
-        Method {
-            name: "EnumDevices",
-            args: 4,
-            run: enum_devices,
-        },
-        Method {
-            name: "GetDeviceStatus",
-            args: 1,
-            run: device_status,
-        },
-        Method {
-            name: "RunControlPanel",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Initialize",
-            args: 2,
-            run: ok,
-        },
+        method("CreateDevice", 3, create_device),
+        method("EnumDevices", 4, enum_devices),
+        method("GetDeviceStatus", 1, device_status),
+        method("RunControlPanel", 2, ok),
+        method("Initialize", 2, ok),
     ],
 };
 
@@ -66,81 +46,21 @@ pub static DIRECT_INPUT_DEVICE: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        Method {
-            name: "GetCapabilities",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "EnumObjects",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "GetProperty",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "SetProperty",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Acquire",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "Unacquire",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetDeviceState",
-            args: 2,
-            run: device_state,
-        },
-        Method {
-            name: "GetDeviceData",
-            args: 4,
-            run: device_data,
-        },
-        Method {
-            name: "SetDataFormat",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetEventNotification",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "SetCooperativeLevel",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "GetObjectInfo",
-            args: 3,
-            run: ok,
-        },
-        Method {
-            name: "GetDeviceInfo",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "RunControlPanel",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Initialize",
-            args: 3,
-            run: ok,
-        },
+        method("GetCapabilities", 1, ok),
+        method("EnumObjects", 3, ok),
+        method("GetProperty", 2, ok),
+        method("SetProperty", 2, ok),
+        method("Acquire", 0, ok),
+        method("Unacquire", 0, ok),
+        method("GetDeviceState", 2, device_state),
+        method("GetDeviceData", 4, device_data),
+        method("SetDataFormat", 1, ok),
+        method("SetEventNotification", 1, ok),
+        method("SetCooperativeLevel", 2, ok),
+        method("GetObjectInfo", 3, ok),
+        method("GetDeviceInfo", 1, ok),
+        method("RunControlPanel", 2, ok),
+        method("Initialize", 3, ok),
     ],
 };
 

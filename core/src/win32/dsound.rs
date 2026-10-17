@@ -11,7 +11,7 @@
 //! it is still playing, follow from the declared clock (ADR-0003).
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{wall, Interface, Method, ADD_REF, QUERY_INTERFACE, S_OK};
+use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
 use crate::cpu::x87::maths;
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
@@ -163,16 +163,8 @@ pub static CLASS_FACTORY: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         crate::com::RELEASE,
-        Method {
-            name: "CreateInstance",
-            args: 3,
-            run: factory_create,
-        },
-        Method {
-            name: "LockServer",
-            args: 1,
-            run: lock_server,
-        },
+        method("CreateInstance", 3, factory_create),
+        method("LockServer", 1, lock_server),
     ],
 };
 
@@ -232,46 +224,14 @@ pub static DIRECT_SOUND: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         crate::com::RELEASE,
-        Method {
-            name: "CreateSoundBuffer",
-            args: 3,
-            run: create_buffer,
-        },
-        Method {
-            name: "GetCaps",
-            args: 1,
-            run: caps,
-        },
-        Method {
-            name: "DuplicateSoundBuffer",
-            args: 2,
-            run: duplicate,
-        },
-        Method {
-            name: "SetCooperativeLevel",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Compact",
-            args: 0,
-            run: ok,
-        },
-        Method {
-            name: "GetSpeakerConfig",
-            args: 1,
-            run: speaker_config,
-        },
-        Method {
-            name: "SetSpeakerConfig",
-            args: 1,
-            run: ok,
-        },
-        Method {
-            name: "Initialize",
-            args: 1,
-            run: ok,
-        },
+        method("CreateSoundBuffer", 3, create_buffer),
+        method("GetCaps", 1, caps),
+        method("DuplicateSoundBuffer", 2, duplicate),
+        method("SetCooperativeLevel", 2, ok),
+        method("Compact", 0, ok),
+        method("GetSpeakerConfig", 1, speaker_config),
+        method("SetSpeakerConfig", 1, ok),
+        method("Initialize", 1, ok),
     ],
 };
 
@@ -281,117 +241,47 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        Method {
-            name: "Release",
-            args: 0,
-            run: release_buffer,
-        },
-        Method {
-            name: "GetCaps",
-            args: 1,
-            run: caps,
-        },
-        Method {
-            name: "GetCurrentPosition",
-            args: 2,
-            run: position,
-        },
+        method("Release", 0, release_buffer),
+        method("GetCaps", 1, caps),
+        method("GetCurrentPosition", 2, position),
         wall("GetFormat", 3),
-        Method {
-            name: "GetVolume",
-            args: 1,
-            run: |ctx, this, args| {
-                let volume = buffer(ctx, this).map(|b| b.volume as u32);
-                write_word(ctx, args[0], volume)
-            },
-        },
-        Method {
-            name: "GetPan",
-            args: 1,
-            run: |ctx, this, args| {
-                let pan = buffer(ctx, this).map(|b| b.pan as u32);
-                write_word(ctx, args[0], pan)
-            },
-        },
-        Method {
-            name: "GetFrequency",
-            args: 1,
-            run: |ctx, this, args| {
-                let rate = buffer(ctx, this).and_then(|b| b.rate());
-                write_word(ctx, args[0], rate)
-            },
-        },
-        Method {
-            name: "GetStatus",
-            args: 1,
-            run: status,
-        },
-        Method {
-            name: "Initialize",
-            args: 2,
-            run: ok,
-        },
-        Method {
-            name: "Lock",
-            args: 7,
-            run: lock,
-        },
-        Method {
-            name: "Play",
-            args: 3,
-            run: play,
-        },
-        Method {
-            name: "SetCurrentPosition",
-            args: 1,
-            run: |ctx, this, args| change(ctx, this, |b| b.offset = args[0].min(b.bytes)),
-        },
-        Method {
-            name: "SetFormat",
-            args: 1,
-            run: set_format,
-        },
-        Method {
-            name: "SetVolume",
-            args: 1,
-            run: |ctx, this, args| {
-                change(ctx, this, |b| b.volume = (args[0] as i32).clamp(-10_000, 0))
-            },
-        },
-        Method {
-            name: "SetPan",
-            args: 1,
-            run: |ctx, this, args| {
-                change(ctx, this, |b| {
-                    b.pan = (args[0] as i32).clamp(-10_000, 10_000)
-                })
-            },
-        },
-        Method {
-            name: "SetFrequency",
-            args: 1,
-            // DSBFREQUENCY_ORIGINAL, zero, is the format's own rate.
-            run: |ctx, this, args| {
-                change(ctx, this, |b| {
-                    b.frequency = (args[0] != 0).then_some(args[0])
-                })
-            },
-        },
-        Method {
-            name: "Stop",
-            args: 0,
-            run: stop_buffer,
-        },
-        Method {
-            name: "Unlock",
-            args: 4,
-            run: ok,
-        },
-        Method {
-            name: "Restore",
-            args: 0,
-            run: ok,
-        },
+        method("GetVolume", 1, |ctx, this, args| {
+            let volume = buffer(ctx, this).map(|b| b.volume as u32);
+            write_word(ctx, args[0], volume)
+        }),
+        method("GetPan", 1, |ctx, this, args| {
+            let pan = buffer(ctx, this).map(|b| b.pan as u32);
+            write_word(ctx, args[0], pan)
+        }),
+        method("GetFrequency", 1, |ctx, this, args| {
+            let rate = buffer(ctx, this).and_then(|b| b.rate());
+            write_word(ctx, args[0], rate)
+        }),
+        method("GetStatus", 1, status),
+        method("Initialize", 2, ok),
+        method("Lock", 7, lock),
+        method("Play", 3, play),
+        method("SetCurrentPosition", 1, |ctx, this, args| {
+            change(ctx, this, |b| b.offset = args[0].min(b.bytes))
+        }),
+        method("SetFormat", 1, set_format),
+        method("SetVolume", 1, |ctx, this, args| {
+            change(ctx, this, |b| b.volume = (args[0] as i32).clamp(-10_000, 0))
+        }),
+        method("SetPan", 1, |ctx, this, args| {
+            change(ctx, this, |b| {
+                b.pan = (args[0] as i32).clamp(-10_000, 10_000)
+            })
+        }),
+        // DSBFREQUENCY_ORIGINAL, zero, is the format's own rate.
+        method("SetFrequency", 1, |ctx, this, args| {
+            change(ctx, this, |b| {
+                b.frequency = (args[0] != 0).then_some(args[0])
+            })
+        }),
+        method("Stop", 0, stop_buffer),
+        method("Unlock", 4, ok),
+        method("Restore", 0, ok),
     ],
 };
 
@@ -403,106 +293,57 @@ pub static DIRECT_SOUND_3D_LISTENER: Interface = Interface {
         ADD_REF,
         crate::com::RELEASE,
         wall("GetAllParameters", 1),
-        Method {
-            name: "GetDistanceFactor",
-            args: 1,
-            run: |ctx, _, args| {
-                let value = ctx.state.sound.listener.distance_factor;
-                write_float(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetDopplerFactor",
-            args: 1,
-            run: |ctx, _, args| {
-                let value = ctx.state.sound.listener.doppler_factor;
-                write_float(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetOrientation",
-            args: 2,
-            run: |ctx, _, args| {
-                let Listener { front, top, .. } = ctx.state.sound.listener;
-                write_vector(ctx, args[0], front)?;
-                write_vector(ctx, args[1], top)
-            },
-        },
-        Method {
-            name: "GetPosition",
-            args: 1,
-            run: |ctx, _, args| {
-                let value = ctx.state.sound.listener.position;
-                write_vector(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetRolloffFactor",
-            args: 1,
-            run: |ctx, _, args| {
-                let value = ctx.state.sound.listener.rolloff_factor;
-                write_float(ctx, args[0], value)
-            },
-        },
+        method("GetDistanceFactor", 1, |ctx, _, args| {
+            let value = ctx.state.sound.listener.distance_factor;
+            write_float(ctx, args[0], value)
+        }),
+        method("GetDopplerFactor", 1, |ctx, _, args| {
+            let value = ctx.state.sound.listener.doppler_factor;
+            write_float(ctx, args[0], value)
+        }),
+        method("GetOrientation", 2, |ctx, _, args| {
+            let Listener { front, top, .. } = ctx.state.sound.listener;
+            write_vector(ctx, args[0], front)?;
+            write_vector(ctx, args[1], top)
+        }),
+        method("GetPosition", 1, |ctx, _, args| {
+            let value = ctx.state.sound.listener.position;
+            write_vector(ctx, args[0], value)
+        }),
+        method("GetRolloffFactor", 1, |ctx, _, args| {
+            let value = ctx.state.sound.listener.rolloff_factor;
+            write_float(ctx, args[0], value)
+        }),
         wall("GetVelocity", 1),
         wall("SetAllParameters", 2),
-        Method {
-            name: "SetDistanceFactor",
-            args: 2,
-            run: |ctx, _, args| {
-                ctx.state.sound.listener.distance_factor = float(args[0]);
-                Ok(S_OK)
-            },
-        },
-        Method {
-            name: "SetDopplerFactor",
-            args: 2,
-            run: |ctx, _, args| {
-                ctx.state.sound.listener.doppler_factor = float(args[0]);
-                Ok(S_OK)
-            },
-        },
-        Method {
-            name: "SetOrientation",
-            args: 7,
-            run: |ctx, _, args| {
-                let listener = &mut ctx.state.sound.listener;
-                listener.front = [float(args[0]), float(args[1]), float(args[2])];
-                listener.top = [float(args[3]), float(args[4]), float(args[5])];
-                Ok(S_OK)
-            },
-        },
-        Method {
-            name: "SetPosition",
-            args: 4,
-            run: |ctx, _, args| {
-                ctx.state.sound.listener.position =
-                    [float(args[0]), float(args[1]), float(args[2])];
-                Ok(S_OK)
-            },
-        },
-        Method {
-            name: "SetRolloffFactor",
-            args: 2,
-            run: |ctx, _, args| {
-                ctx.state.sound.listener.rolloff_factor = float(args[0]);
-                Ok(S_OK)
-            },
-        },
+        method("SetDistanceFactor", 2, |ctx, _, args| {
+            ctx.state.sound.listener.distance_factor = float(args[0]);
+            Ok(S_OK)
+        }),
+        method("SetDopplerFactor", 2, |ctx, _, args| {
+            ctx.state.sound.listener.doppler_factor = float(args[0]);
+            Ok(S_OK)
+        }),
+        method("SetOrientation", 7, |ctx, _, args| {
+            let listener = &mut ctx.state.sound.listener;
+            listener.front = [float(args[0]), float(args[1]), float(args[2])];
+            listener.top = [float(args[3]), float(args[4]), float(args[5])];
+            Ok(S_OK)
+        }),
+        method("SetPosition", 4, |ctx, _, args| {
+            ctx.state.sound.listener.position = [float(args[0]), float(args[1]), float(args[2])];
+            Ok(S_OK)
+        }),
+        method("SetRolloffFactor", 2, |ctx, _, args| {
+            ctx.state.sound.listener.rolloff_factor = float(args[0]);
+            Ok(S_OK)
+        }),
         // How fast the listener moves is for the Doppler shift, which the mix
         // does not make.
-        Method {
-            name: "SetVelocity",
-            args: 4,
-            run: ok,
-        },
+        method("SetVelocity", 4, ok),
         // Deferred or not, a listener's settings are kept when they are made;
         // a sound takes them when it starts.
-        Method {
-            name: "CommitDeferredSettings",
-            args: 0,
-            run: ok,
-        },
+        method("CommitDeferredSettings", 0, ok),
     ],
 };
 
@@ -517,78 +358,46 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
         wall("GetConeAngles", 2),
         wall("GetConeOrientation", 1),
         wall("GetConeOutsideVolume", 1),
-        Method {
-            name: "GetMaxDistance",
-            args: 1,
-            run: |ctx, this, args| {
-                let value = place(ctx, this).map(|p| p.max_distance.to_bits());
-                write_word(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetMinDistance",
-            args: 1,
-            run: |ctx, this, args| {
-                let value = place(ctx, this).map(|p| p.min_distance.to_bits());
-                write_word(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetMode",
-            args: 1,
-            run: |ctx, this, args| {
-                let value = place(ctx, this).map(|p| p.mode.to_ds());
-                write_word(ctx, args[0], value)
-            },
-        },
-        Method {
-            name: "GetPosition",
-            args: 1,
-            run: |ctx, this, args| match place(ctx, this) {
-                Some(p) => write_vector(ctx, args[0], p.position),
-                None => Ok(DSERR_INVALIDCALL),
-            },
-        },
+        method("GetMaxDistance", 1, |ctx, this, args| {
+            let value = place(ctx, this).map(|p| p.max_distance.to_bits());
+            write_word(ctx, args[0], value)
+        }),
+        method("GetMinDistance", 1, |ctx, this, args| {
+            let value = place(ctx, this).map(|p| p.min_distance.to_bits());
+            write_word(ctx, args[0], value)
+        }),
+        method("GetMode", 1, |ctx, this, args| {
+            let value = place(ctx, this).map(|p| p.mode.to_ds());
+            write_word(ctx, args[0], value)
+        }),
+        method("GetPosition", 1, |ctx, this, args| match place(ctx, this) {
+            Some(p) => write_vector(ctx, args[0], p.position),
+            None => Ok(DSERR_INVALIDCALL),
+        }),
         wall("GetVelocity", 1),
         wall("SetAllParameters", 2),
         wall("SetConeAngles", 3),
         wall("SetConeOrientation", 4),
         wall("SetConeOutsideVolume", 2),
-        Method {
-            name: "SetMaxDistance",
-            args: 2,
-            run: |ctx, this, args| with_place(ctx, this, |p| p.max_distance = float(args[0])),
-        },
-        Method {
-            name: "SetMinDistance",
-            args: 2,
-            run: |ctx, this, args| with_place(ctx, this, |p| p.min_distance = float(args[0])),
-        },
-        Method {
-            name: "SetMode",
-            args: 2,
-            run: |ctx, this, args| {
-                let Some(mode) = Mode::from_ds(args[0]) else {
-                    return Ok(DSERR_INVALIDPARAM);
-                };
-                with_place(ctx, this, |p| p.mode = mode)
-            },
-        },
-        Method {
-            name: "SetPosition",
-            args: 4,
-            run: |ctx, this, args| {
-                with_place(ctx, this, |p| {
-                    p.position = [float(args[0]), float(args[1]), float(args[2])];
-                })
-            },
-        },
+        method("SetMaxDistance", 2, |ctx, this, args| {
+            with_place(ctx, this, |p| p.max_distance = float(args[0]))
+        }),
+        method("SetMinDistance", 2, |ctx, this, args| {
+            with_place(ctx, this, |p| p.min_distance = float(args[0]))
+        }),
+        method("SetMode", 2, |ctx, this, args| {
+            let Some(mode) = Mode::from_ds(args[0]) else {
+                return Ok(DSERR_INVALIDPARAM);
+            };
+            with_place(ctx, this, |p| p.mode = mode)
+        }),
+        method("SetPosition", 4, |ctx, this, args| {
+            with_place(ctx, this, |p| {
+                p.position = [float(args[0]), float(args[1]), float(args[2])];
+            })
+        }),
         // For the Doppler shift, which the mix does not make.
-        Method {
-            name: "SetVelocity",
-            args: 4,
-            run: ok,
-        },
+        method("SetVelocity", 4, ok),
     ],
 };
 
