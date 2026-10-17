@@ -55,8 +55,9 @@ cargo run --release -p lego-rock-raiders -- --audio    # or start a title direct
 ```
 
 Run from the repository root. Each run writes a directory under `runs/` holding its log (and,
-with `--record`, the inputs you gave, as a route that replays the same run). Useful flags, all
-listed by `--help`:
+with `--record`, the inputs you gave, as a route that replays the same run). A run that stops at a
+wall also leaves a `wall` report there: what was asked for, where, and the inputs that reached it,
+with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 
 | Flag | |
 |---|---|

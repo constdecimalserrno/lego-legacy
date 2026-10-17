@@ -162,11 +162,12 @@ pub(crate) fn wrap_up(
     }
 
     // A run that stopped at a wall leaves behind everything needed to reach it
-    // again: what was done, where it stopped, and the last snapshot before it.
+    // again: what was done, where it stopped, and a snapshot taken at the
+    // wall.
     if let crate::machine::Outcome::Wall { what } = &finish.outcome {
         let dir = log.dir().to_path_buf();
         let mut report = format!(
-            "#lego-legacy-crash 1\ntitle {}\nwall {what}\ncursor {}\nflips {}\n",
+            "#lego-legacy-wall 1\ntitle {}\nwall {what}\ncursor {}\nflips {}\n",
             title.key, finish.cursor, finish.flips
         );
         let mut route = crate::route::Route::new();
@@ -175,14 +176,14 @@ pub(crate) fn wrap_up(
         }
         report.push('\n');
         report.push_str(&route.to_text());
-        let written = std::fs::write(dir.join("crash"), report).and_then(|()| {
+        let written = std::fs::write(dir.join("wall"), report).and_then(|()| {
             machine.snapshot().map_or(Ok(()), |bytes| {
-                std::fs::write(dir.join("crash.snapshot"), bytes)
+                std::fs::write(dir.join("wall.snapshot"), bytes)
             })
         });
         match written {
-            Ok(()) => log.line("crash written"),
-            Err(e) => log.line(&format!("crash not written: {e}")),
+            Ok(()) => log.line("wall report written"),
+            Err(e) => log.line(&format!("wall report not written: {e}")),
         }
     }
 

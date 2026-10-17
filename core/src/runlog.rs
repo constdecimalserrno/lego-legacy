@@ -2,7 +2,7 @@
 //!
 //! Every run gets its own directory holding one append-only text log. Inputs
 //! and flips are always recorded, because a run whose inputs were not written
-//! down cannot be replayed, and a crash that cannot be replayed is a bug report
+//! down cannot be replayed, and a wall that cannot be replayed is a bug report
 //! nobody can act on. Everything heavier than that is behind `--trace`.
 
 use crate::cli::Trace;

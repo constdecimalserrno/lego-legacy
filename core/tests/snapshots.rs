@@ -172,11 +172,11 @@ fn nothing_is_written_when_nothing_was_asked_for() {
     );
 }
 
-/// Only a wall writes a crash report. The stub guest never reaches one, so
+/// Only a wall writes a wall report. The stub guest never reaches one, so
 /// what is held here is the other half: a run cut short by its budget, which
-/// is not a wall, claims no crash.
+/// is not a wall, writes none.
 #[test]
-fn a_budget_running_out_writes_no_crash_report() {
+fn a_budget_running_out_writes_no_wall_report() {
     scratch();
     let cli = Cli {
         stub: true,
@@ -188,7 +188,7 @@ fn a_budget_running_out_writes_no_crash_report() {
         lego_legacy_core::machine::Outcome::BudgetExhausted
     );
     assert!(
-        !ran.dir.join("crash").is_file(),
-        "a budget running out is not a crash"
+        !ran.dir.join("wall").is_file(),
+        "a budget running out is not a wall"
     );
 }
