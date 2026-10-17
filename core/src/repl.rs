@@ -10,7 +10,6 @@ use crate::cpu::{REG_NAMES, SEG_NAMES};
 use crate::guest::GuestMem;
 use crate::host::Host;
 use crate::machine::{Finish, Machine, Outcome};
-use crate::runlog::RunLog;
 use crate::Title;
 use std::io::{BufRead, Write};
 
@@ -110,23 +109,11 @@ pub fn drive(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<Finish, Box<dyn std::error::Error>> {
-    let mut log = RunLog::create(title.key, cli.trace)?;
-    let mut machine = Machine::new(title, host)?;
-    if cli.stub {
-        machine.load_stub()?;
-    } else {
-        machine.load_title(title)?;
-        machine
-            .tree
-            .set_profile(crate::run::profile_dir(title, cli));
-    }
-
     // The debugger drives the same machine a route replays, so a person can
     // walk into the middle of a recorded session and look around.
-    if let Some(path) = &cli.route {
-        let route = crate::route::Route::load(path)?;
+    let (mut machine, mut log) = crate::run::setup(title, cli, host)?;
+    if let (Some(path), Some(route)) = (&cli.route, &machine.route) {
         let _ = writeln!(output, "route {} events {}", path.display(), route.len());
-        machine.route = Some(route);
     }
 
     let mut breaks: Vec<u32> = Vec::new();
@@ -234,8 +221,9 @@ pub fn drive(
         }
     }
 
-    let finish = machine.finish(outcome.unwrap_or(Outcome::Closed));
+    let finish = machine.finish(outcome.unwrap_or(Outcome::Quit));
     log.line(&format!("end {} cursor {}", finish.outcome, finish.cursor));
+    crate::run::wrap_up(title, &mut machine, host, &mut log, &finish);
     Ok(finish)
 }
 

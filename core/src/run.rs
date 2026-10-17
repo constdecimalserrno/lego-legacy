@@ -45,6 +45,23 @@ pub fn run_digested(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
+    let (mut machine, mut log) = setup(title, cli, host)?;
+    let finish = machine.run(host, &mut log, budget);
+    let digest = wrap_up(title, &mut machine, host, &mut log, &finish);
+    Ok((finish, log, digest))
+}
+
+/// Everything a run is given before its first instruction, said in its log.
+/// The debugger starts here too, so what a person steps through is what a
+/// route replays.
+///
+/// # Errors
+/// As [`run`].
+pub(crate) fn setup(
+    title: &'static Title,
+    cli: &Cli,
+    host: &mut dyn Host,
+) -> Result<(Machine, RunLog), Box<dyn std::error::Error>> {
     let mut log = RunLog::create(title.key, cli.trace)?;
     log.line(&format!("headless {}", cli.headless));
     // Whether a device was listening. Mixing runs either way, so without this
@@ -94,9 +111,18 @@ pub fn run_digested(
     machine.screenshots = cli.screenshots.clone();
     machine.snapshot_every = cli.snapshot_every;
     machine.tree.set_profile(profile_dir(title, cli));
+    Ok((machine, log))
+}
 
-    let finish = machine.run(host, &mut log, budget);
-
+/// Everything a run leaves behind after its last instruction, said in its
+/// log, and the digest a determinism gate compares.
+pub(crate) fn wrap_up(
+    title: &Title,
+    machine: &mut Machine,
+    host: &mut dyn Host,
+    log: &mut RunLog,
+    finish: &Finish,
+) -> String {
     // A save the host refused was said when it happened, and is said again
     // here, where a person looking at how the run ended will see it.
     let refused = machine.state.saves_refused;
@@ -190,7 +216,7 @@ pub fn run_digested(
     }
     let digest = machine.state_digest();
     log.line(&format!("digest {digest}"));
-    Ok((finish, log, digest))
+    digest
 }
 
 /// What a title binary's `main` calls.

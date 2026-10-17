@@ -5,6 +5,7 @@
 
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::machine::Outcome;
 use lego_legacy_core::{repl, stub, Title};
 
 const STUB: Title = Title::STUB;
@@ -21,6 +22,25 @@ fn drive(script: &str) -> String {
     };
     let mut host = Headless::new();
     repl::transcript(&STUB, &cli, &mut host, script).expect("the stub guest loads")
+}
+
+#[test]
+fn quitting_before_the_guest_stops_ends_the_run_as_a_quit() {
+    scratch();
+    let cli = Cli {
+        stub: true,
+        ..Cli::default()
+    };
+    let mut input = std::io::Cursor::new(b"step\nquit\n".to_vec());
+    let finish = repl::drive(
+        &STUB,
+        &cli,
+        &mut Headless::new(),
+        &mut input,
+        &mut Vec::new(),
+    )
+    .expect("the stub guest loads");
+    assert_eq!(finish.outcome, Outcome::Quit, "not a window closing");
 }
 
 #[test]

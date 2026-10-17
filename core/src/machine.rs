@@ -40,6 +40,8 @@ pub enum Outcome {
     BudgetExhausted,
     /// The person closed the window.
     Closed,
+    /// The person quit the debugger before the guest stopped.
+    Quit,
 }
 
 impl fmt::Display for Outcome {
@@ -49,6 +51,7 @@ impl fmt::Display for Outcome {
             Self::Wall { what } => write!(f, "wall: {what}"),
             Self::BudgetExhausted => write!(f, "budget exhausted"),
             Self::Closed => write!(f, "window closed"),
+            Self::Quit => write!(f, "quit from the debugger"),
         }
     }
 }
