@@ -109,9 +109,9 @@ pub fn run_digested(
     }
 
     // Whether the device taking this run's audio ever ran dry. Said out loud
-    // because it is the one thing a person hears that no golden can catch: the
-    // mix is made on the declared clock and hashed as it was mixed, and what
-    // reaches a device is the host's own business (#75). Zero is said too: a
+    // because it is the one thing a person hears that no test can catch: the
+    // mix is made on the declared clock and a test reads it as it was mixed,
+    // and what reaches a device is the host's own business (#75). Zero is said too: a
     // played run that says nothing cannot be told from one nobody heard, and
     // zero is what puts a complaint about the sound on the mix (#90).
     if let Some(underruns) = host.audio_underruns() {
@@ -239,8 +239,9 @@ fn status(finish: &Finish) -> ExitCode {
 fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     use crate::host::mac::MacWindow;
 
-    // The window opens at the declared machine's own screen size; the guest's
-    // frame is scaled into it, its aspect kept, and the guest is never told.
+    // The window opens at 640 by 480, the one screen every title on the roster
+    // declares; the guest's frame is scaled into it, its aspect kept, and the
+    // guest is never told.
     let mut host = match MacWindow::open(title.key, 640, 480, title.pointer_speed) {
         Ok(w) => w,
         Err(e) => {

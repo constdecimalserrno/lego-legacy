@@ -10,9 +10,9 @@ use crate::pe::Import;
 
 /// Where the boundary's addresses live.
 ///
-/// Chosen well above where a title's own images land and below the arena's
-/// end, so that an address in this range can only be a call across the
-/// boundary and never a guest address that happens to collide.
+/// Above where a title's own image lands and below the heap, with the binaries
+/// it ships and the files it maps above that, so that an address in this range
+/// is a call across the boundary and nothing the machine placed.
 pub const THUNK_BASE: u32 = 0x0f00_0000;
 
 /// How far apart two entry points are. Sixteen bytes, so a disassembler

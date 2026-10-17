@@ -1,7 +1,8 @@
 //! The command line, parsed once for every title.
 //!
 //! Every title binary takes the same flags, because a player who learns one
-//! learns all four and a route that runs on one reads the same on another.
+//! has learnt all three supported titles' and a route that runs on one reads
+//! the same on another.
 
 use std::fmt;
 use std::path::PathBuf;

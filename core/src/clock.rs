@@ -15,14 +15,11 @@ pub const DECLARED_HZ: u64 = 450_000_000;
 
 /// What one presented frame costs the declared clock.
 ///
-/// A title declares this once its own drawing has been measured. Until then it
-/// is [`FlipCost::Free`], and a run that presents costs nothing extra: honest,
-/// because nothing has been measured yet, and visible, because the value is
-/// named rather than defaulted silently.
+/// Every title declares [`FlipCost::Refresh`], as a flip on real hardware waits
+/// for the display; [`FlipCost::Free`] is the stub's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlipCost {
-    /// Drawing is instantaneous on this declared machine. Unmeasured, or
-    /// deliberately uncapped for a headless run.
+    /// A flip costs nothing: the stub's, which has no display to wait for.
     Free,
     /// A presented frame waits for the declared display's next refresh, at
     /// this many per second: what a flip does by default on real hardware.

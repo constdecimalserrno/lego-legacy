@@ -897,18 +897,15 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// `DDERR_INVALIDRECT` and `DDERR_BLTFASTCANTCLIP`.
 /// A surface that holds depth rather than colour.
 const DDPF_ZBUFFER: u32 = 0x0000_0400;
 
+/// `DDERR_INVALIDRECT` and `DDERR_BLTFASTCANTCLIP`.
 const DDERR_INVALIDRECT: u32 = 0x8876_0096;
-/// What a surface says when it has nothing of the kind that was asked for.
-///
-/// It was written here as `0x8878_0033`, which is neither DirectDraw's own
-/// facility nor any code in it. Alpha Team reads the difference: not found
-/// means make one, and anything else means give up (#57).
-const DDERR_NOTFOUND: u32 = 0x8876_00ff;
 const DDERR_BLTFASTCANTCLIP: u32 = 0x8876_023e;
+/// What a surface says when it has nothing of the kind that was asked for,
+/// which Alpha Team reads as make one, where anything else is give up (#57).
+const DDERR_NOTFOUND: u32 = 0x8876_00ff;
 
 /// Whether a rectangle is the right way round and inside a surface.
 fn within((left, top, right, bottom): (i64, i64, i64, i64), width: u32, height: u32) -> bool {

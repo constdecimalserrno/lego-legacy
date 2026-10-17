@@ -95,10 +95,9 @@ pub enum Installed {
 
 /// One supported game, identified by the bytes of its entry image.
 ///
-/// The roster key is the name of the title's binary and of its data-root
-/// directory. Everything else on this struct is a declared value: a chosen
-/// input the guest reads as fact, carried with the reason for that value and
-/// no other.
+/// The roster key is the name of the title's binary, and the image is which
+/// bytes it runs. Everything else on this struct is a declared value: a chosen
+/// input the guest reads as fact, never measured from the host.
 pub struct Title {
     /// Roster key, e.g. `lego-rock-raiders`.
     pub key: &'static str,
@@ -148,7 +147,7 @@ pub struct Title {
     /// line up (#86).
     ///
     /// It is only ever used where the title draws its own pointer and the host
-    /// is steering by how far the mouse went ([`crate::host::mac::steered`]);
+    /// is steering by how far the mouse went ([`crate::host::mac::Steer`]);
     /// where the pointer is the person's own, its place is its own and there
     /// is nothing to scale.
     pub pointer_speed: (f64, f64),

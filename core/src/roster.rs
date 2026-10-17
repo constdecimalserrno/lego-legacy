@@ -81,10 +81,9 @@ pub const ALPHA_TEAM: Entry = Entry {
     red_book: None,
 };
 
-/// The whole roster, in the order the titles are being taken.
-///
-/// One of the four is not here yet: a title joins when its own crate does,
-/// so the launcher never offers something that cannot be started.
+/// The roster's supported titles, three of its four, in the order they were
+/// taken. A title joins when its own crate does, so the launcher never offers
+/// something that cannot be started.
 pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS, &HOT_WHEELS, &ALPHA_TEAM];
 
 /// What the launcher found when it went looking for a title.

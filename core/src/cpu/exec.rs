@@ -216,13 +216,6 @@ fn branch(cpu: &mut Cpu, target: u32, w: Width) {
     };
 }
 
-/// Run one decoded instruction. The instruction pointer must already have been
-/// advanced past it, which is what makes a relative branch relative to the
-/// right place.
-///
-/// # Errors
-/// When the instruction stops the run: an interrupt, or an address outside the
-/// arena.
 /// The handful of instruction shapes that are most of every run, named once
 /// at decode time so that running one reads no description (#70).
 ///
@@ -344,6 +337,13 @@ pub fn execute_fast(
     }
 }
 
+/// Run one decoded instruction. The instruction pointer must already have been
+/// advanced past it, which is what makes a relative branch relative to the
+/// right place.
+///
+/// # Errors
+/// When the instruction stops the run: an interrupt, or an address outside the
+/// arena.
 pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Result<(), Stop> {
     let w = insn.width;
     match insn.kind {

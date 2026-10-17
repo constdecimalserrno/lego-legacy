@@ -173,8 +173,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Image, PeError> {
 
 /// Map an image into the arena and read its imports.
 ///
-/// The image is placed at the address it asks for. Relocating it elsewhere is
-/// what [`relocate`] is for, and no title on the roster has needed it yet.
+/// The image is placed at the address it asks for; [`load_at`] places one
+/// anywhere else, relocating it.
 ///
 /// # Errors
 /// When the bytes are not a 32-bit PE image, when the image is a copy
@@ -282,7 +282,8 @@ fn name_at(bytes: &[u8], rva: u32) -> Option<String> {
 /// What a binary offers to everything that imports it.
 ///
 /// A name, an ordinal, or a forwarder: a name that stands for one in another
-/// binary, which is how MSVCP60 hands half of itself off to MSVCRT.
+/// binary. Nothing on the roster forwards one, and the loader follows none
+/// (#55).
 #[derive(Debug, Default)]
 pub struct Exports {
     /// Exported names, to the address inside the image.

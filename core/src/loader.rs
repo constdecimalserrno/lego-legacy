@@ -217,10 +217,10 @@ impl Modules {
 
     /// The guest program that attaches every module and then starts the title.
     ///
-    /// Sixteen bytes a module: the three arguments `DllMain` takes, a call to
-    /// it, and a jump to a place on the boundary that names this module if it
-    /// answers that it did not attach. `DllMain` is stdcall, so it clears its
-    /// own arguments and nothing here has to.
+    /// Twenty-seven bytes a module: the three arguments `DllMain` takes, a
+    /// call to it, and a jump to a place on the boundary that names this
+    /// module if it answers that it did not attach. `DllMain` is stdcall, so it
+    /// clears its own arguments and nothing here has to.
     pub fn attach_program(&self, entry: u32, boundary: &mut Boundary) -> Vec<u8> {
         let mut out = Vec::new();
         for module in &self.list {

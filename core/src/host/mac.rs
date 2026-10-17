@@ -169,6 +169,12 @@ pub fn content_scale(content: (f64, f64), frame: (u32, u32)) -> f64 {
     (cw / fw).min(ch / fh).max(f64::MIN_POSITIVE)
 }
 
+/// How far past the edge of the screen the hand may run, in screens, for a
+/// title that puts the pointer back every frame ([`Steer::moved`]). Paid back
+/// half a screen a frame, so this is also how long a wild swing can go on
+/// after the hand has stopped: eight frames.
+const OWED_SCREENS: f64 = 4.0;
+
 /// The pointer the guest is handed while the pointer is taken.
 ///
 /// The person's own pointer is frozen, so this is the only one that moves,
@@ -185,12 +191,6 @@ pub fn content_scale(content: (f64, f64), frame: (u32, u32)) -> f64 {
 /// here is a declared value. A title that only moves its own pointer by a
 /// fraction of what it is handed has that fraction put back here, so that the
 /// pointer a person watches goes where their hand goes (#86).
-/// How far past the edge of the screen the hand may run, in screens, for a
-/// title that puts the pointer back every frame ([`Steer::moved`]). Paid back
-/// half a screen a frame, so this is also how long a wild swing can go on
-/// after the hand has stopped: eight frames.
-const OWED_SCREENS: f64 = 4.0;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Steer {
     hand: (f64, f64),
@@ -592,7 +592,7 @@ fn button(kind: u64) -> Button {
 
 impl MacWindow {
     /// Open a window of this size, titled after the title being run, with the
-    /// declared machine's own pointer speed ([`steered`]).
+    /// declared machine's own pointer speed ([`Steer`]).
     ///
     /// # Errors
     /// When the frameworks cannot be opened, or the window cannot be made.
@@ -772,7 +772,7 @@ impl MacWindow {
             self.rt.send::<MsgVoid>()(cursor, self.rt.sel(what));
             // A taken pointer is also a frozen one: the mouse stops moving the
             // person's pointer and moves the guest's instead, by how far it
-            // went (`steered`). That is what a title steering by distance
+            // went (`Steer`). That is what a title steering by distance
             // needs, and it is why a hand can never outrun the window (#64,
             // #40). It is switched off for the whole desktop, which is why it
             // is only ever on while the title has asked, the person is over

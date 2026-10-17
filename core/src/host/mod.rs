@@ -167,7 +167,7 @@ pub trait Host {
     ///
     /// Zero is a mix that kept up. Anything else is what a person hears as
     /// crackle and as gaps in a voice line, and it is the host's own
-    /// shortfall rather than anything the guest did — a golden hashes what was
+    /// shortfall rather than anything the guest did — a test reads what was
     /// mixed, not what was heard (#75).
     fn audio_underruns(&self) -> Option<u64> {
         None

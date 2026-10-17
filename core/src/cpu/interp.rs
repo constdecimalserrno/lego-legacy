@@ -34,9 +34,10 @@ pub struct Interp {
     /// transfer of control, next to each other, so executing one after
     /// another reads memory in order.
     //
-    // A write to a page this has decoded out of throws the whole cache away,
-    // which is what a title that loads its own code needs: Alpha Team unpacks
-    // DLLs out of its archives into memory it has run before (#58).
+    // A write to a page this has decoded out of drops the runs decoded from
+    // that page (#65), which is what a title that loads its own code needs:
+    // Alpha Team unpacks DLLs out of its archives into memory it has run
+    // before (#58).
     insns: Vec<Insn>,
     /// The shape of each of `insns`, worked out when it was decoded, so that
     /// running one does not work it out again (#70).
@@ -151,12 +152,8 @@ impl Interp {
     /// The run of instructions starting at a linear address, decoding it if
     /// this is the first time the engine has stood there.
     fn run_at(&mut self, lin: u32, mem: &mut Arena) -> Result<(u32, u32), Stop> {
-        // Bytes have been written over something this decoded: what is cached
-        // is no longer what is there (#58). Only the pages actually written
-        // over are dropped (#65) — Alpha Team's own loader puts a level's code
-        // and its data on the same pages, and forgetting everything each time
-        // it wrote to one of them threw the whole cache away twenty-six
-        // thousand times a second.
+        // Bytes have been written over something this decoded (#58): only the
+        // pages written over are dropped (#65).
         if std::mem::take(&mut mem.code_written) {
             if std::mem::take(&mut mem.written_all) {
                 mem.written_code.clear();

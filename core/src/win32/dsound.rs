@@ -1,7 +1,7 @@
 //! DirectSound.
 //!
 //! Mixing is real and runs whether or not a device is listening, because a
-//! golden hashes what was mixed rather than what was heard. What reaches a
+//! test reads what was mixed rather than what was heard. What reaches a
 //! host device is `--audio`'s business and the host's.
 //!
 //! A buffer the title plays becomes a voice in the machine's mixer at the

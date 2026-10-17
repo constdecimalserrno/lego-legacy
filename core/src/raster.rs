@@ -1,4 +1,5 @@
-//! Triangles into a surface's own bytes (ADR-0004: one thread, no host GPU).
+//! Triangles into a surface's own bytes, on the host's processor and never
+//! its GPU (ADR-0004).
 //!
 //! What Direct3D's fixed pipeline does once a triangle is on the screen:
 //! which pixels it covers, how deep each is, what colour and texel each takes,
@@ -461,7 +462,7 @@ impl Default for States {
 /// another **1.6%**, and the banded path 4.9% on top. Of that, the attribute
 /// stepping — the one thing left that a different shape could remove — is
 /// **1.8% of the whole run**, measured by making the loop step twice. A
-/// rewrite that has to leave every golden hash unchanged is not worth two
+/// rewrite that has to leave every run's digest unchanged is not worth two
 /// percent.
 pub fn triangle(
     target: &mut Target<'_>,

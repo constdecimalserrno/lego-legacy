@@ -15,7 +15,7 @@ use std::fmt;
 
 /// How much address space the declared machine has.
 ///
-/// A gigabyte: the heap alone is half of it, and an anonymous mapping costs
+/// Two gigabytes: the heap is a quarter of it, and an anonymous mapping costs
 /// only the pages something writes to, so the rest is free until it is used.
 pub const ARENA_BYTES: usize = 2 * 1024 * 1024 * 1024;
 

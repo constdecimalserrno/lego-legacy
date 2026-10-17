@@ -628,8 +628,8 @@ fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn translate_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // Only a key message has a character to make, and this machine posts
-    // none: a title's keys arrive through DirectInput.
+    // Key messages are posted (#59), and no character message is ever made
+    // from one.
     Ok(0)
 }
 

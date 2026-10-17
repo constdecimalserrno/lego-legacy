@@ -29,9 +29,9 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
-        why: "Windows 98 SE is what this pressing shipped against; the rest is the roster's \
-              baseline, unmeasured against this title because it has not asked for any of it \
-              yet",
+        why: "Windows 98 SE is what this pressing shipped against and a Pentium 166 is what \
+              its box asks for; the rest is the roster's baseline, unmeasured against this \
+              title because it has not asked for any of it yet",
     },
     // No cabinet on this disc: the installer copies SETUP/HOT98 whole, and the
     // declared tree says so rather than unpacking anything.

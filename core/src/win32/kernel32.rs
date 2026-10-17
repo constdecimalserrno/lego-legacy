@@ -583,9 +583,7 @@ fn locale_field(what: u32) -> Option<&'static str> {
         0x0014 => "$",
         0x001d => "/", // how a date is written
         0x001e => ":", // and a time
-        // The short date, the long one and the time (#87). The two pictures
-        // were once filed under 0x11 and 0x12, which are how many decimal
-        // digits a number has and whether a fraction has a leading zero.
+        // The short date, the long one and the time (#87).
         0x001f => SHORT_DATE,
         0x0020 => LONG_DATE,
         0x1003 => TIME,
@@ -2702,8 +2700,7 @@ mod tests {
     };
 
     /// 1999-10-29, three minutes and fourteen seconds past midnight, where
-    /// Select Adventure saves (#87), with a weekday that is not its own: the
-    /// Thursday the declared clock gave it until #91.
+    /// Select Adventure saves (#87), with a weekday that is not its own (#91).
     const SAVED: [u16; 8] = [1999, 10, 4, 29, 0, 3, 14, 0];
 
     #[test]

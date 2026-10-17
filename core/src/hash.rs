@@ -1,7 +1,7 @@
 //! SHA-256, written here because nothing may be linked (ADR-0001).
 //!
-//! It identifies a title by the bytes of its entry image, which is the only
-//! thing that makes a golden's provenance certain.
+//! It identifies a title by the bytes of its entry image, and a run by the
+//! digest of where it ended.
 
 const K: [u32; 64] = [
     0x428a_2f98,

@@ -46,9 +46,8 @@ impl Width {
 
 /// Which segment an address is taken through.
 ///
-/// The declared machine is flat: every segment's base is zero, so a prefix
-/// changes nothing today. It is decoded rather than dropped because `fs` stops
-/// being flat the moment a title reads its thread information block.
+/// The declared machine is flat but for `fs`, whose base is the running
+/// thread's information block; every other segment's base is zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Seg {
