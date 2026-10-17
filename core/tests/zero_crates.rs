@@ -6,15 +6,6 @@
 
 use std::path::Path;
 
-/// Every package this workspace is allowed to resolve.
-const MEMBERS: [&str; 5] = [
-    "lego-legacy-core",
-    "lego-legacy-launcher",
-    "lego-rock-raiders",
-    "hotwheels-stunt-track-driver",
-    "lego-alpha-team",
-];
-
 #[test]
 fn the_lock_file_names_only_this_workspace() {
     let lock_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,25 +14,18 @@ fn the_lock_file_names_only_this_workspace() {
     let lock = std::fs::read_to_string(&lock_path)
         .unwrap_or_else(|e| panic!("no lock file at {}: {e}", lock_path.display()));
 
-    let names: Vec<String> = lock
-        .lines()
-        .filter_map(|l| l.strip_prefix("name = "))
-        .map(|n| n.trim().trim_matches('"').to_owned())
-        .collect();
-
-    let foreign: Vec<&String> = names
-        .iter()
-        .filter(|n| !MEMBERS.contains(&n.as_str()))
+    // A package fetched from anywhere, a registry or a repository, carries a
+    // `source` saying where; a workspace member has none. So a new title is a
+    // new member and not an edit here.
+    let foreign: Vec<&str> = lock
+        .split("[[package]]")
+        .filter(|p| p.lines().any(|l| l.starts_with("source = ")))
+        .filter_map(|p| p.lines().find_map(|l| l.strip_prefix("name = ")))
         .collect();
     assert!(
         foreign.is_empty(),
         "Cargo.lock resolves crates that are not ours: {foreign:?}. \
          ADR-0001 says the emulator links nothing it did not write."
-    );
-    assert_eq!(
-        names.len(),
-        MEMBERS.len(),
-        "the workspace has members the zero-crate gate does not know about: {names:?}"
     );
 }
 
