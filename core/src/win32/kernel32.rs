@@ -1517,7 +1517,7 @@ fn write_formatted(
     // (locale, flags, moment, picture, buffer, size). No moment is now, read
     // off the declared clock like `GetLocalTime`, so a replay writes the same.
     let time: [u16; 8] = if args[2] == 0 {
-        declared_now(ctx)
+        declared_now(ctx.declared_millis())
     } else {
         let bytes = ctx.mem.slice(args[2], 16).map_err(Stop::Fault)?;
         std::array::from_fn(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
@@ -1668,14 +1668,9 @@ fn get_environment_variable(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop
     Ok(needed)
 }
 
-/// The declared clock as Windows counts it: hundreds of nanoseconds since the
-/// start of 1601.
+/// The declared moment `GetSystemTime` answers with, counted the other way.
 fn get_system_time_as_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // The same declared moment `GetSystemTime` answers with — 1999-10-04,
-    // plus however long this run has been going — counted the other way.
-    const EPOCH: u64 = 11_644_473_600;
-    const NINETEEN_NINETY_NINE: u64 = 939_000_000;
-    let ticks = (EPOCH + NINETEEN_NINETY_NINE) * 10_000_000 + ctx.declared_millis() * 10_000;
+    let ticks = declared_file_time(ctx.declared_millis());
     ctx.mem
         .write(args[0], &ticks.to_le_bytes())
         .map_err(Stop::Fault)?;
@@ -2704,9 +2699,14 @@ fn compare_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// One declared moment for all three, and the same one for every file: the
 /// pressing's own files were all written when it was pressed, and a run that
 /// read the host's clock here would replay differently tomorrow (ADR-0003).
+///
+/// So it stands for the date of the pressing, and is not the declared moment
+/// the clock starts at (`DECLARED_DAY`): 1999-10-04 01:20 universal time,
+/// 939,000,000 seconds after 1970, which is before any run starts. It is
+/// declared, not read from the disc's own directory (#91).
 fn get_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GetFileTime(file, created, accessed, written). 1999-10-04, as Windows
-    // counts: hundreds of nanoseconds since the start of 1601.
+    // GetFileTime(file, created, accessed, written), as Windows counts:
+    // hundreds of nanoseconds since the start of 1601.
     const WHEN: u64 = (11_644_473_600 + 939_000_000) * 10_000_000;
     for at in &args[1..4] {
         if *at != 0 {
@@ -3102,29 +3102,60 @@ fn query_performance_frequency(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, S
     Ok(1)
 }
 
-/// The declared moment as a SYSTEMTIME's eight sixteen-bit fields: year,
-/// month, day of the week, day, hour, minute, second, millisecond.
+/// The declared moment a run starts at: midnight, universal time, at the start
+/// of Friday 1999-10-29, in whole days since the start of 1601, which is where
+/// Windows counts from.
 ///
 /// A declared date: a run that read the host's calendar would replay
-/// differently tomorrow. `GetSystemTime`, `GetLocalTime` and a date or time
-/// formatted for "now" (#87) all read it here, so they cannot disagree.
-fn declared_now(ctx: &Ctx<'_>) -> [u16; 8] {
-    let millis = ctx.declared_millis();
-    [
-        1999,
-        10,
-        4,
-        29,
-        u16::try_from(millis / 3_600_000 % 24).unwrap_or(0),
-        u16::try_from(millis / 60_000 % 60).unwrap_or(0),
-        u16::try_from(millis / 1000 % 60).unwrap_or(0),
-        u16::try_from(millis % 1000).unwrap_or(0),
-    ]
+/// differently tomorrow. This one is the date `GetSystemTime` has answered
+/// with since the first title booted (#8), and the one Alpha Team's Select
+/// Adventure labels a saved adventure with (#87). Every clock that tells the
+/// date is this day plus the declared clock's milliseconds, so none of them
+/// can disagree with another (#91).
+const DECLARED_DAY: u64 = 145_667;
+
+/// The declared moment `millis` into a run, as a SYSTEMTIME's eight
+/// sixteen-bit fields: year, month, day of the week, day, hour, minute,
+/// second, millisecond. `GetSystemTime`, `GetLocalTime` and a date or time
+/// formatted for "now" (#87) all read it here.
+fn declared_now(millis: u64) -> [u16; 8] {
+    // Hinnant's `civil_from_days`, counted from 0000-03-01 so that every four
+    // hundred years start alike and the leap day falls last.
+    let days = DECLARED_DAY + millis / 86_400_000 + 584_694;
+    let (era, day) = (days / 146_097, days % 146_097);
+    let year = (day - day / 1460 + day / 36_524 - day / 146_096) / 365;
+    let day = day - (365 * year + year / 4 - year / 100);
+    let march = (5 * day + 2) / 153;
+    let date = day - (153 * march + 2) / 5 + 1;
+    let (year, month) = if march < 10 {
+        (era * 400 + year, march + 3)
+    } else {
+        (era * 400 + year + 1, march - 9)
+    };
+    let field = |value: u64| u16::try_from(value).unwrap_or(0);
+    let mut now = [
+        field(year),
+        field(month),
+        0,
+        field(date),
+        field(millis / 3_600_000 % 24),
+        field(millis / 60_000 % 60),
+        field(millis / 1000 % 60),
+        field(millis % 1000),
+    ];
+    now[2] = weekday(&now).map_or(0, |day| day as u16);
+    now
+}
+
+/// The same moment as a FILETIME: hundreds of nanoseconds since the start of
+/// 1601.
+fn declared_file_time(millis: u64) -> u64 {
+    (DECLARED_DAY * 86_400_000 + millis) * 10_000
 }
 
 fn get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let at = args[0];
-    let fields = declared_now(ctx);
+    let fields = declared_now(ctx.declared_millis());
     for (i, value) in fields.iter().enumerate() {
         ctx.mem
             .write(at + (i as u32) * 2, &value.to_le_bytes())
@@ -3494,11 +3525,45 @@ fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 #[cfg(test)]
 mod tests {
-    use super::{seek_to, weekday, write_picture, LONG_DATE, SHORT_DATE, TIME};
+    use super::{
+        declared_file_time, declared_now, seek_to, weekday, write_picture, DECLARED_DAY, LONG_DATE,
+        SHORT_DATE, TIME,
+    };
 
-    /// 1999-10-29, three minutes and fourteen seconds past midnight, with the
-    /// weekday the declared clock gives it (#87).
+    /// 1999-10-29, three minutes and fourteen seconds past midnight, where
+    /// Select Adventure saves (#87), with a weekday that is not its own: the
+    /// Thursday the declared clock gave it until #91.
     const SAVED: [u16; 8] = [1999, 10, 4, 29, 0, 3, 14, 0];
+
+    #[test]
+    fn the_declared_clock_names_one_moment_however_it_is_asked() {
+        // 1999-10-29 00:00 universal time is 941,155,200 seconds after 1970,
+        // and 1970 is 11,644,473,600 seconds after the start of 1601.
+        assert_eq!(
+            declared_file_time(0),
+            (11_644_473_600 + 941_155_200) * 10_000_000
+        );
+        assert_eq!(declared_now(0), [1999, 10, 5, 29, 0, 0, 0, 0], "a Friday");
+
+        // Where Select Adventure saves, both ways round (#87).
+        assert_eq!(declared_now(194_000), [1999, 10, 5, 29, 0, 3, 14, 0]);
+        assert_eq!(
+            declared_file_time(194_000),
+            declared_file_time(0) + 194_000 * 10_000
+        );
+
+        // Past midnight the date turns over with the FILETIME's day, and the
+        // weekday with it.
+        let later = (25 * 3600 + 3) * 1000 + 7;
+        assert_eq!(declared_now(later), [1999, 10, 6, 30, 1, 0, 3, 7]);
+        assert_eq!(
+            declared_file_time(later) / 864_000_000_000,
+            DECLARED_DAY + 1
+        );
+        // And over the year's end and the next leap day.
+        assert_eq!(declared_now(64 * 86_400_000)[..4], [2000, 1, 6, 1]);
+        assert_eq!(declared_now(123 * 86_400_000)[..4], [2000, 2, 2, 29]);
+    }
 
     #[test]
     fn a_date_and_a_time_are_written_as_us_english_writes_them() {
