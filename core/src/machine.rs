@@ -107,7 +107,6 @@ pub struct Machine {
     /// that changes: hiding is counted, and telling it twice would take two
     /// showings to undo.
     pointer_shown: bool,
-    /// Calls the machine made into guest code, waiting to come back.
     /// Calls the machine made into guest code, waiting to come back: where to
     /// resume, what to answer with, and where the guest's stack stood when the
     /// call was set up. The last of those is how an abandoned call is
@@ -344,15 +343,14 @@ impl Machine {
         // A call that lands on the boundary is a call into something Microsoft
         // wrote. Either it is implemented here, or the run stops and names
         // what was asked for, who asked, and where.
-        // A crossing costs about thirty nanoseconds of machinery, measured
-        // (#74): at Alpha Team's menu the guest crosses 3,951 times a flip
-        // and the whole of it is 6.9 ms, of which 6.6 ms is one method —
-        // `IDirect3DDevice7::DrawIndexedPrimitiveVB` rasterising, 171 calls a
-        // flip at 38.7 us each. The 3,182 `EnterCriticalSection` and
-        // `LeaveCriticalSection` calls a flip that ticket was written about
-        // come to 0.10 ms a flip against a 36 ms frame, under a third of one
-        // percent, and that figure still carries the two `Instant::now()`
-        // calls that measured it. There is nothing here to make faster.
+        //
+        // A crossing costs about thirty nanoseconds of machinery (#74). At
+        // Alpha Team's menu the guest crosses 3,951 times a flip for 6.9 ms in
+        // all, and 6.6 ms of that is one method rasterising,
+        // `IDirect3DDevice7::DrawIndexedPrimitiveVB`. The menu's 3,182
+        // `EnterCriticalSection` and `LeaveCriticalSection` calls a flip come
+        // to 0.10 ms against a 36 ms frame. The crossing is not where a flip's
+        // time goes.
         if self.boundary.holds(self.cpu.eip) {
             return match self.cross(log) {
                 Ok(()) => None,
@@ -439,9 +437,10 @@ impl Machine {
     pub fn run(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Finish {
         log.line(&format!("engine {}", self.engine.name()));
         // Snapshots are taken here, in the loop every run goes through, so a
-        // run that keeps them is the same machine as one that does not
-        // (ADR-0005, #94). They are off unless asked for: scrubbability costs
-        // nothing until a person wants it.
+        // run that keeps them is the same machine as one that does not: the
+        // same bursts, thread switches and mixing (#94). They are off unless
+        // asked for, and they are for inspecting: only the stub resumes from
+        // one, because the Win32 state is not in it (`snap`).
         let every = self.snapshot_every.map(|n| n.max(1));
         let mut next_snapshot = every;
         let outcome = loop {
@@ -895,8 +894,8 @@ impl Machine {
     /// Two runs of the same route on the same build must produce the same
     /// value: the processor, the clock, and the parts of memory anything has
     /// written to. The whole arena is not hashed, because most of it has never
-    /// been touched and hashing 256 MB to prove that is a slow way to learn
-    /// nothing.
+    /// been touched and hashing two gigabytes to prove that is a slow way to
+    /// learn nothing.
     #[must_use]
     pub fn state_digest(&self) -> String {
         let mut hash = crate::hash::Sha256::new();
@@ -981,8 +980,8 @@ impl Machine {
     // ponytail: what the guest was handed rather than every page it wrote. A
     // guest that wrote somewhere it was never handed, a read-only mapping
     // among them, would resume with that writing lost, where Windows would
-    // have stopped it. Upgrade path: a dirty-page map in the arena, which the
-    // engine's unchecked path would have to go through.
+    // have stopped it. Upgrade path: a dirty-page map in the arena, kept by
+    // `GuestMem`, the one path every write already goes through.
     fn snapshot_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if let Some(image) = &self.image {
@@ -1041,7 +1040,10 @@ impl Machine {
         Ok(out)
     }
 
-    /// Put the machine back where a snapshot left it.
+    /// Put the machine back where a snapshot left it: its processor, declared
+    /// clock, flips and guest memory. The Win32 state and the x87's status
+    /// word and stack top stay as this machine already has them, so only the
+    /// stub, which keeps no Win32 state, resumes whole (`snap`).
     ///
     /// # Errors
     /// When the snapshot came from another build, title or route, or when it

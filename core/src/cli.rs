@@ -43,11 +43,13 @@ pub struct Cli {
     /// Let mixed audio reach a host device. Mixing runs either way.
     pub audio: bool,
     pub trace: Trace,
-    /// Write a snapshot every this many flips.
+    /// Write a snapshot every this many flips, to inspect: only the stub
+    /// resumes from one.
     pub snapshot_every: Option<u64>,
     /// Which flips to write into the run directory as pictures.
     pub screenshots: Screenshots,
-    /// Where what the guest writes lands, instead of beside the pressing.
+    /// Where what the guest writes lands, in its `profile`, instead of beside
+    /// the pressing.
     pub data_root: Option<PathBuf>,
     /// Drive the machine from a debugger on standard input.
     pub repl: bool,
@@ -104,11 +106,13 @@ usage: <title> [flags]
   --record                 write this run's inputs into the run directory
   --audio                  let mixed audio reach a host device
   --trace off|shims|insns  how much the run log keeps (default: off)
-  --snapshot-every <flips> write a snapshot this often
+  --snapshot-every <flips> write a snapshot this often, to inspect; only the
+                           stub resumes from one
   --screenshot <flip,...>  write these flips as PNGs into the run directory,
                            as shots/<flip, ten digits>.png
   --screenshot-every <n>   write every nth flip as a PNG
-  --data-root <dir>        keep what the guest writes here, not beside the rip
+  --data-root <dir>        keep what the guest writes in <dir>/profile, not
+                           beside the rip
   --repl                   drive the machine from a debugger on stdin
   --stub                   run the machine's own stub guest
   -h, --help               this";

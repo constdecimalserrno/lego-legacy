@@ -1,6 +1,6 @@
 //! The stub guest: the machine's own test guest.
 //!
-//! A dozen hand-assembled x86 instructions that count, write a pixel, present
+//! Eight hand-assembled x86 instructions that count, write a pixel, present
 //! one frame and exit. It exists so the run seam can be tested without a
 //! pressing on disk, and so a change to the machine is falsified by something
 //! cheaper than a retail title.
@@ -44,7 +44,7 @@ pub fn surface() -> Surface {
 /// 0x400015  cd 21            int 0x21         ; exit(eax)
 /// ```
 ///
-/// Fourteen instructions retired, three flips of the counter, one frame, exit
+/// Fourteen instructions retired, three turns of the loop, one frame, exit
 /// code 3.
 #[must_use]
 pub fn program() -> &'static [u8] {

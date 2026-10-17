@@ -26,11 +26,12 @@ pub const HEAP_BYTES: u32 = 0x2000_0000;
 /// again at its own size or not at all — but the block chosen is the smallest
 /// one that will do, found by a lookup rather than a walk.
 //
-// It was a linear scan of every free block until a title made that the cost
-// that showed (#80): Alpha Team's front end allocates 397,000 times over its
-// menu route, and with the C runtime's heap written against this one the scan
-// cost more than the interpreted allocator it replaced. Measured: 51.8 flips a
-// second with the scan, 52.9 with this, against 52.2 with the runtime's own.
+// A lookup rather than a scan of every free block, because a title makes that
+// the cost that shows (#80): Alpha Team's front end allocates 397,000 times
+// over its menu route, and with the C runtime's heap written against this one
+// a scan costs more than the interpreted allocator it replaces. Measured: 51.8
+// flips a second with a scan, 52.9 with this, against 52.2 with the runtime's
+// own.
 //
 // ponytail: a freed block is never split and neighbours are never joined, so a
 // run that asks for one size and then a larger one for ever still grows. The

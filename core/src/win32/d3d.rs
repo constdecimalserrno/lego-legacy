@@ -96,7 +96,8 @@ pub static DEVICE2: Interface = Interface {
     ],
 };
 
-/// `IDirect3DDevice3`: DirectX 6's face of the same device, which this title draws through.
+/// `IDirect3DDevice3`: DirectX 6's face of the same device, which Rock Raiders
+/// draws through.
 pub static DEVICE3: Interface = Interface {
     name: "IDirect3DDevice3",
     methods: &[
@@ -384,7 +385,7 @@ fn vertex_buffer_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32,
     Ok(S_OK)
 }
 
-/// `IDirect3DDevice7`: DirectX 7's device, which this title draws through.
+/// `IDirect3DDevice7`: DirectX 7's device, which Alpha Team draws through.
 ///
 /// Not DirectX 6's device with slots added: the execute-buffer calls are gone,
 /// viewports and lights belong to the device rather than to objects of their
@@ -523,12 +524,13 @@ fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
     put(0x3c + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
     put(0x3c + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate
     put(0x3c + 0x2c, 0x0000_0001)?; // dwTextureAddressCaps: wrap
-                                    // The screen this machine declares, and a depth buffer to match.
+
+    // The screen this machine declares, and a depth buffer to match.
     const DDBD_16: u32 = 0x0000_0400;
     put(0x74, DDBD_16)?;
     put(0x78, DDBD_16)?;
     // Textures: one pixel up to a thousand a side, which is every texture
-    // this title ships.
+    // Alpha Team ships.
     put(0x7c, 1)?;
     put(0x80, 1)?;
     put(0x84, 1024)?;
@@ -537,8 +539,9 @@ fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
     put(0x94, 1)?; // no anisotropy, which is one sample
     put(0xb8, 1 | (1 << 16))?; // one blend stage, one texture at a time
     put(0xbc, 8)?; // lights lit at once
-                   // The device this is: a hardware one, named by the identifier every title
-                   // compares against.
+
+    // The device this is: a hardware one, named by the identifier every title
+    // compares against.
     ctx.mem
         .write(desc + 0xc4, &HAL_DEVICE)
         .map_err(Stop::Fault)?;
@@ -1159,7 +1162,6 @@ fn material_colour(ctx: &Ctx<'_>, handle: u32) -> u32 {
         | super::component(channel(12))
 }
 
-/// Fill rectangles of a viewport's device surface with a colour.
 /// Clear rectangles of a viewport's device: the surface to a colour, the
 /// depth buffer to a depth, or both.
 fn clear_rects(
@@ -1246,7 +1248,7 @@ fn clear_on(
     Ok(S_OK)
 }
 
-/// What a clear may ask for that is written: the target.
+/// What a clear may ask for that is written: the target and the depth buffer.
 const D3DCLEAR_TARGET: u32 = 0x1;
 const D3DCLEAR_ZBUFFER: u32 = 0x2;
 
@@ -1279,7 +1281,7 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 /// DirectX 7's clear, which the device answers itself.
 fn clear7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Clear(count, rects, flags, colour, z, stencil). There is no stencil
-    // buffer on the mode this title asks for, and it does not ask to clear
+    // buffer on the mode Alpha Team asks for, and it does not ask to clear
     // one.
     if args[2] & !(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER) != 0 {
         return Err(Stop::NotWritten {
@@ -1302,7 +1304,7 @@ fn clear7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Clear2(count, rects, flags, colour, z, stencil). There is no stencil
-    // buffer on the declared card's modes this title asks for.
+    // buffer on the declared card's mode Rock Raiders asks for.
     if args[2] & !(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER) != 0 {
         return Err(Stop::NotWritten {
             what: format!("IDirect3DViewport3::Clear2: flags {:#x}", args[2]),

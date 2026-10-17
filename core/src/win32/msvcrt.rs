@@ -7,10 +7,11 @@
 //!
 //! What is written here is the heap, and only the heap (#80). It is the one
 //! part of that runtime whose behaviour a title can observe only through the
-//! pointers it gets back, and it was 4.1% of every instruction the guest
-//! retired at Alpha Team's front end: 397,000 allocations over the committed
-//! menu route, almost all of them through `operator new`, each one walking the
-//! runtime's own small-block allocator as interpreted x86.
+//! pointers it gets back, and run as the runtime's own interpreted x86 it is
+//! 4.1% of every instruction the guest retires at Alpha Team's front end:
+//! 397,000 allocations over the committed menu route, almost all of them
+//! through `operator new`, each one walking the runtime's own small-block
+//! allocator.
 //!
 //! **The two heaps are kept apart by the pointer, not by an audit.** The
 //! machine's heap answers for blocks it handed out and for nothing else; the
@@ -23,8 +24,8 @@
 //! heap again. The other direction cannot be answered — there is no way to
 //! hand a block back to the runtime's allocator from here — so the run log
 //! counts them. Over Alpha Team's whole menu route there are twelve, and the
-//! number does not grow with the run: `_strdup` was the one that mattered and
-//! it is written here.
+//! number does not grow with the run, because `_strdup`, the one call that
+//! would make it grow, is written here.
 //!
 //! These are cdecl: the caller cleans the stack.
 

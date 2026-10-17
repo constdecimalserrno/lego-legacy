@@ -12,7 +12,7 @@ use crate::guest::{Arena, GuestMem};
 /// A decode-cached interpreter.
 ///
 /// **Runs are not linked to one another, and that was measured (#71).** A
-/// taken branch leaves the loop and comes back through [`Interp::run_at`], and
+/// taken branch leaves the loop and comes back through `Interp::run_at`, and
 /// recording a direct branch's target run so the loop steps straight to it
 /// would save exactly that lookup. Measured by making the loop pay for the
 /// lookup twice — the same run, the same results — over Alpha Team's menu
@@ -90,8 +90,9 @@ impl Interp {
         self.insns.len()
     }
 
-    /// Forget every decoded instruction. What a loader calls after it has
-    /// placed new bytes where old ones were.
+    /// Forget every decoded instruction: what `run_at` does when more pages
+    /// were written over than the arena keeps a list of, and when the cache
+    /// reaches its ceiling.
     pub fn forget(&mut self) {
         self.insns.clear();
         self.shapes.clear();

@@ -314,9 +314,11 @@ impl Tree {
     /// Every file the tree holds under a directory whose name matches a
     /// pattern, with how big each one is.
     ///
-    /// What `FindFirstFileA` enumerates. The sizes come from the header rather
-    /// than from unpacking anything: a title looking for its archives should
-    /// not cost four hundred megabytes of inflating to answer.
+    /// What `FindFirstFileA` enumerates. The sizes are what the tree already
+    /// knows, without unpacking anything: a packed file's from the cabinet's
+    /// header and a declared file's from its bytes, and a file on the disc
+    /// itself is answered as zero bytes long. A title looking for its archives
+    /// should not cost four hundred megabytes of inflating to answer.
     #[must_use]
     pub fn matching(&self, dir: &str, pattern: &str) -> Vec<(String, u32)> {
         let dir = Self::key(dir);

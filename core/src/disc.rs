@@ -1,8 +1,10 @@
 //! Reading a pressing.
 //!
-//! A rip is an ISO-9660 image beside the cue sheet that describes the whole
-//! disc. Nothing here is ever written: the rip stays exactly as the player made
-//! it, and everything the guest may change lives in the profile instead.
+//! A rip is an ISO-9660 image of the disc's data track, and, for a pressing
+//! whose Red Book audio is played, the raw rip of the whole disc and the cue
+//! sheet that describes it. Nothing here is ever written: the rip stays
+//! exactly as the player made it, and everything the guest may change lives
+//! in the profile instead.
 
 use crate::pe::u32_at;
 use std::fs::File;
@@ -279,7 +281,7 @@ impl Iso {
 
 /// Where a title's pressings are ripped to.
 ///
-/// `LEGO_LEGACY_GAME_DATA` moves the root; the default is `game-data` beside
+/// `LEGO_LEGACY_GAME_DATA` moves the root; the default is `game-data` inside
 /// the working directory, which is where the rips live in a checkout.
 #[must_use]
 pub fn game_data_root() -> PathBuf {

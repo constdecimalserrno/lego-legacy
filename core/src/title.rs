@@ -16,12 +16,12 @@ pub struct EntryImage {
     /// The pressing directory under that.
     pub pressing: &'static str,
     /// Where the executable sits inside that pressing's image: a path on the
-    /// disc, or — when `packed` — the name the pressing's cabinet gives it.
+    /// disc, or — when `in_cabinet` — the name the pressing's cabinet gives it.
     pub path: &'static str,
     /// Whether the image is inside the pressing's cabinet rather than on the
     /// disc as a file of its own. Alpha Team ships nothing of itself loose
     /// (#53).
-    pub packed: bool,
+    pub in_cabinet: bool,
     /// The bytes that make this title this title.
     pub sha256: &'static str,
     /// Why this pressing and not the other.
@@ -34,7 +34,7 @@ impl EntryImage {
     /// # Errors
     /// When the pressing does not hold it, or its cabinet will not give it up.
     pub fn read(&self, iso: &mut crate::disc::Iso) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        if !self.packed {
+        if !self.in_cabinet {
             return Ok(iso.read(self.path)?);
         }
         let header = iso.read("DATA1.HDR")?;
@@ -157,9 +157,11 @@ pub struct Title {
 }
 
 impl Title {
-    /// The machine's own test guest, which has no disc behind it.
+    /// The title the tests run the stub guest as, which has no disc behind
+    /// it. `--stub` on a title's own binary runs the stub guest on that
+    /// title's declared machine instead.
     ///
-    /// `--stub` never opens a pressing, so the image this declares is a
+    /// The stub never opens a pressing, so the image this declares is a
     /// description rather than a lookup: it says out loud that the stub is not
     /// a game.
     pub const STUB: Self = Self {
@@ -169,7 +171,7 @@ impl Title {
             disc_dir: "",
             pressing: "",
             path: "",
-            packed: false,
+            in_cabinet: false,
             sha256: "",
             why: "the stub guest is assembled by hand in this crate and comes off no disc",
         },

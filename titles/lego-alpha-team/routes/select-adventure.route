@@ -11,9 +11,8 @@
 # three eighths of one down. The pointer starts in the bottom left corner.
 #
 # The machine starts with nothing saved, so this saves something first: a new
-# adventure, its training mission skipped, and back to HQ. Every click waits
-# for the slower of the two declared refresh rates this title is run at, the
-# test suite's sixty and the title's own thirty, and every screen it clicks on
+# adventure, its training mission skipped, and back to HQ. Every click is
+# timed at the title's own declared thirty, and every screen it clicks on
 # waits for it.
 flip 1792 key Space down
 flip 1794 key Space up

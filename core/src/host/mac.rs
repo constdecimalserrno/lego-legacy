@@ -258,7 +258,7 @@ impl Steer {
     /// frame, until it is all said: a flick lands where the hand went, a few
     /// frames late, rather than short of it.
     ///
-    /// ponytail: [`OWED_SCREENS`] of it and no more, so that a wild swing
+    /// ponytail: `OWED_SCREENS` of it and no more, so that a wild swing
     /// plays out in a fraction of a second rather than going on after the
     /// hand has stopped. Faster than that in one frame is lost, as it is on
     /// a real machine where the cursor is against the edge of the display.
@@ -875,13 +875,6 @@ impl MacWindow {
                     }
                 }
                 match kind {
-                    // A move of nobody's window carries screen coordinates
-                    // rather than the window's, so taking one would throw the
-                    // pointer somewhere else. Ignored, the pointer stays where
-                    // it last was inside the window, which is what a title
-                    // scrolling its camera from a pointer held at an edge
-                    // needs. A button is not ignored: a press that is dropped
-                    // is a button the guest never sees let go of.
                     // Either button down, either button up. A press on the
                     // window's own frame — its title bar, its edges — is the
                     // person taking hold of the window, not a click on the
@@ -1519,8 +1512,9 @@ mod tests {
         // the flags, but the left one is up.
         assert_eq!(direct_input_modifier(0x38, 0x0002_0004), key(0x2a, false));
         assert_eq!(direct_input_modifier(0x3e, 0x0004_2000), key(0x9d, true));
-        assert_eq!(direct_input_modifier(0x39, 0x0001_0000), None); // Caps Lock
-                                                                    // An event that does not say which side: the modifier's own bit.
+        // Caps Lock locks rather than holds, so it is not here.
+        assert_eq!(direct_input_modifier(0x39, 0x0001_0000), None);
+        // An event that does not say which side: the modifier's own bit.
         assert_eq!(direct_input_modifier(0x3a, 0x0008_0000), key(0x38, true));
         assert_eq!(direct_input_modifier(0x3a, 0), key(0x38, false));
     }

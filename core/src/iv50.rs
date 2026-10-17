@@ -14,7 +14,7 @@
 //! pixel against sixteen-bit reference planes kept between pictures.
 //!
 //! Written against FFmpeg's decoder read as the format's reference; the
-//! constants are in [`tables`]. What a stream asks for that this does not
+//! constants are in `tables`. What a stream asks for that this does not
 //! decode is an error that names it, never a picture that is not the movie.
 
 mod tables;

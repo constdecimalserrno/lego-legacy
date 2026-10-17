@@ -18,6 +18,8 @@ something the emulator does not have, the run stops at a named **wall** instead 
 
 The vocabulary is in [`CONTEXT.md`](CONTEXT.md), the decisions behind it are in
 [`docs/adr/`](docs/adr/), and what is left before v1 is in [`path-to-v1.md`](path-to-v1.md).
+A comment tagged `ponytail:` marks a deliberate simplification with a known ceiling, and says
+what the ceiling is and the way past it.
 
 ## What you need
 
@@ -66,7 +68,7 @@ with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 | `--route <file>` | replay a route; committed ones are in `titles/<title>/routes/` |
 | `--screenshot <flip,…>` | write those frames as PNGs into the run directory |
 | `--headless` | no window, uncapped |
-| `--data-root <dir>` | keep saves there instead of beside the rip |
+| `--data-root <dir>` | keep saves in `<dir>/profile` instead of beside the rip |
 
 While the window is in front and the pointer is over the picture, a title that draws its own
 pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q or Cmd-W ends the run. In Hot Wheels,

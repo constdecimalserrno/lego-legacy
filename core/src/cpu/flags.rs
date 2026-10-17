@@ -28,8 +28,8 @@
 //! decimal adjusts, x87's `fnstsw` — and each has to compose correctly with
 //! whatever was left lazy before it.
 //!
-//! #65 needs two and a half times, not five percent. The time at that menu is
-//! not here.
+//! So the flags stay eager: five percent at most is not worth that, and it is
+//! not where the time at that menu goes (#65).
 
 use super::insn::Width;
 

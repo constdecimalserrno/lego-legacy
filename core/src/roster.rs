@@ -30,7 +30,7 @@ pub const ROCK_RAIDERS: Entry = Entry {
         // archives' and its window class's from (#93). The disc spells it in
         // capitals and is read without regard to case, as Windows reads one.
         path: "EXE/LegoRR.exe",
-        packed: false,
+        in_cabinet: false,
         sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
         why: "the original pressing's EXE/LEGORR.EXE is a 280 KB SafeDisc wrapper beside a \
               737 KB LEGORR.ICD holding the encrypted game; the Masterpiece pressing ships \
@@ -50,7 +50,7 @@ pub const HOT_WHEELS: Entry = Entry {
         disc_dir: "hotwheels-stunt-track-driver",
         pressing: "hotwheels-stunt-track-driver",
         path: "SETUP/HOT98/STUNT.EXE",
-        packed: false,
+        in_cabinet: false,
         sha256: "a938949d705e2e06af80c22bdd76b10b52df811342e5a5b28bc23ba716903850",
         why: "this title has one pressing and its executable is on the disc unwrapped, \
               beside the data an installer would have copied from the same directory",
@@ -70,7 +70,7 @@ pub const ALPHA_TEAM: Entry = Entry {
         // A name in the pressing's cabinet, not a path on its disc: this title
         // ships nothing of itself loose (#53).
         path: "LEGOATeam.exe",
-        packed: true,
+        in_cabinet: true,
         sha256: "36f77aa72b9345af2667f8e2c2395318bdbc9ac7649d378684a6bb0179eecc01",
         why: "both of this title's pressings carry the same cabinet byte for byte, so the \
               original is taken and the Masterpiece re-release buys nothing but an EA \

@@ -1,10 +1,14 @@
 //! Snapshots: the machine's state, written down.
 //!
-//! A snapshot is a cache and never evidence. It exists so a run can be resumed
-//! at a cursor instead of replayed from its start, and it is keyed by what
-//! produced it: another build, another title or another route cannot resume
-//! from it, and a resume that tried would be told which of the three did not
-//! match.
+//! A snapshot is a cache and never evidence. It is keyed by what produced it:
+//! another build, another title or another route cannot resume from it, and a
+//! resume that tried would be told which of the three did not match.
+//!
+//! It carries the processor, the declared clock, the flips and the guest
+//! memory, and nothing else: not the Win32 state the shims keep (handles,
+//! files, threads, objects), and not the x87's status word or stack top. So a
+//! retail title's snapshot can be inspected but not resumed. Only the stub,
+//! which keeps no such state, really resumes from one.
 
 use std::fmt;
 
@@ -280,8 +284,10 @@ impl Snap for crate::cpu::Cpu {
 impl Snap for crate::cpu::x87::X87 {
     fn snap(&mut self, v: &mut dyn Visitor) {
         // The unit's own state travels through its accessors, because its
-        // registers are private and its stack top is not where a reader would
-        // guess.
+        // registers are private: the control word, and each stack slot by its
+        // place from the top. The status word and which physical register the
+        // top is are not carried, so a resume leaves them as the machine had
+        // them.
         let mut control = self.control();
         v.u16(&mut control);
         self.set_control(control);

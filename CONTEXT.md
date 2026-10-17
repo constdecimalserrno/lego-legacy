@@ -143,9 +143,11 @@ An input script, authored or recorded, that drives a title from boot to a named 
 _Avoid_: test script, macro, TAS as a noun, session log
 
 **Snapshot**:
-The processor, the declared clock, the flip count and the guest memory of the entry image, heap,
-stack and surface at one cursor, kept so a run can resume there. Keyed to the build, title and
-route that made it. A cache, never evidence, never committed.
+The processor, the declared clock, the flip count and the guest memory at one cursor: the entry
+image and the module images, every page the guest committed, the heap, the main thread's stack and
+blocks, and the surface. Keyed to the build, title and route that made it. It can be inspected,
+but only the stub resumes from one: the Win32 state and the x87's status and stack top are not in
+it. A cache, never evidence, never committed.
 _Avoid_: save state, rung, checkpoint
 
 **Golden**:

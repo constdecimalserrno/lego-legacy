@@ -28,9 +28,8 @@ const BUFFERS: usize = 3;
 /// Samples kept waiting before the oldest are dropped: eight of the mix's
 /// blocks, about 370 ms. The mix reaches the host a flip at a time, and a
 /// title playing a movie flips at its frame rate, fifteen a second: a block
-/// and a half at once, every 67 ms. Two blocks' room was too little and
-/// skipped; eight only drops what a run that stalled and caught up has
-/// piled up.
+/// and a half at once, every 67 ms. Two blocks' room would skip; eight drops
+/// only what a run that stalled and caught up has piled up.
 const MOST_WAITING: usize = 8 * BLOCK_FRAMES * 2;
 
 /// Samples waited for before the device plays, and after it has run dry:

@@ -209,7 +209,8 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
             0x26 => seg = Some(Seg::Es),
             0x64 => seg = Some(Seg::Fs),
             0x65 => seg = Some(Seg::Gs),
-            // `lock` changes nothing on a machine with one flow of control.
+            // `lock` changes nothing: guest threads switch only between
+            // bursts of instructions (ADR-0005), never inside one.
             0xf0 => {}
             0xf3 => rep = Some(Rep::WhileEqual),
             0xf2 => rep = Some(Rep::WhileNotEqual),

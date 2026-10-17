@@ -5,8 +5,9 @@
 //! emulator's own rasteriser, into the guest's own surface.
 //!
 //! Every table is the interface's full width, named and sized from its own
-//! header. A slot is written when this title has called it; the rest stop the
-//! run and name the method (#11).
+//! header. A slot is written when Rock Raiders, the one title on the roster
+//! that drives retained mode, has called it; the rest stop the run and name
+//! the method (#11).
 
 use super::scene::Matrix;
 use super::{stdcall, ComState, Ctx, Shim, State};
@@ -34,7 +35,8 @@ fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// `IDirect3DRM`: what `Direct3DRMCreate` hands out. This title asks it for its DirectX 6 face straight away, and nothing else of it is written.
+/// `IDirect3DRM`: what `Direct3DRMCreate` hands out. Rock Raiders asks it for
+/// its DirectX 6 face straight away, and nothing else of it is written.
 pub static D3DRM: Interface = Interface {
     name: "IDirect3DRM",
     methods: &[
@@ -76,7 +78,7 @@ pub static D3DRM: Interface = Interface {
     ],
 };
 
-/// `IDirect3DRM3`: DirectX 6's retained mode, which this title drives.
+/// `IDirect3DRM3`: DirectX 6's retained mode, which Rock Raiders drives.
 pub static D3DRM3: Interface = Interface {
     name: "IDirect3DRM3",
     methods: &[
@@ -560,7 +562,8 @@ pub static USER_VISUAL: Interface = Interface {
     ],
 };
 
-/// `IDirect3DRMFrame`: DirectX 3's face of a frame, which is what a frame array hands out; this title only asks it for the newer face.
+/// `IDirect3DRMFrame`: DirectX 3's face of a frame, which is what a frame array
+/// hands out; Rock Raiders only asks it for the newer face.
 pub static FRAME: Interface = Interface {
     name: "IDirect3DRMFrame",
     methods: &[
@@ -877,7 +880,7 @@ fn get_buffer_count(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, 
 }
 
 fn direct3d_device2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // The immediate-mode device underneath: what this title actually draws
+    // The immediate-mode device underneath: what Rock Raiders actually draws
     // through.
     let Some(device) = immediate_device(ctx, this)? else {
         return Ok(D3DRMERR_BADOBJECT);
@@ -971,9 +974,10 @@ fn immediate_viewport(ctx: &mut Ctx<'_>, this: u32) -> Result<Option<u32>, Stop>
 
 fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // FindPreferredTextureFormat(bit depths, flags, format). The declared card
-    // is TNT2-class. Rock Raiders asks two things: an eight-bit palettized
-    // format, which a TNT2 does not have, and then any sixteen-bit one, which
-    // is 5-6-5, the screen's own. What else a TNT2 offers has not been asked.
+    // offers what this machine's rasteriser draws, which has no palettized
+    // texture. Rock Raiders asks two things: an eight-bit palettized format,
+    // which is refused, and then any sixteen-bit one, which is 5-6-5, the
+    // screen's own. Nothing else has been asked.
     const DDBD_8: u32 = 0x0800;
     const DDBD_16: u32 = 0x0400;
     const D3DRMFPTF_PALETTIZED: u32 = 0x4;
@@ -1128,7 +1132,8 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     };
     let mut visits = Vec::new();
     let scene = ctx.state.identity(args[0]);
-    // A scene's fog is kept when a title sets it up, and nothing here draws it.
+    // Whether a scene's fog is on is kept when a title sets it, and nothing
+    // here draws fog, so a scene with it on is a wall.
     let root = ctx
         .state
         .scene
@@ -1394,7 +1399,7 @@ fn frame_setting(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Sto
 
 /// Where a reference frame the guest passed puts things in the scene.
 ///
-/// A null reference is what this title passes for a frame with no parent,
+/// A null reference is what Rock Raiders passes for a frame with no parent,
 /// having asked the frame for its parent first; for a frame at the top of its
 /// scene, relative to nothing and relative to the scene are the same thing.
 /// What a null means for a frame that has a parent has not been measured.

@@ -236,9 +236,8 @@ pub fn load_at(bytes: &[u8], at: u32, mem: &mut Arena) -> Result<Image, PeError>
     }
 
     if image.base != image.preferred_base {
-        // Data directory five. It was read as seven, which is the architecture
-        // directory and is always empty, so nothing had ever been relocated
-        // (#55).
+        // Data directory five, the base relocations; seven is the
+        // architecture directory, which is always empty (#55).
         let (directory, size) = (
             u32_at(bytes, optional + 136).unwrap_or(0),
             u32_at(bytes, optional + 140).unwrap_or(0),

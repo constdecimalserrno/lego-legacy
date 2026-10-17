@@ -151,8 +151,8 @@ fn the_title_s_own_archives_unpack_and_are_what_they_claim_to_be() {
     assert!(checked > 400, "only {checked} entries were checked");
 }
 
-/// Alpha Team's header is version 6, and reading it as version 5 found none of
-/// its files rather than failing (#52).
+/// Alpha Team's header is version 6, whose file descriptors are an array
+/// rather than version 5's table of offsets, and it is read as one (#52).
 #[test]
 fn a_version_6_header_names_its_files_their_sizes_and_their_volumes() {
     let Some(mut iso) = alpha() else { return };

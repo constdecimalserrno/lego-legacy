@@ -1,4 +1,4 @@
-//! Snapshots: a cache a run can be resumed from, and never evidence.
+//! Snapshots: a cache, never evidence, that the stub can be resumed from.
 
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::host::headless::Headless;
@@ -143,7 +143,7 @@ fn snapshots_are_written_on_the_cadence_that_was_asked_for() {
         "the snapshot is in the run directory"
     );
     // Taking them goes through the one run loop, so the run is the same
-    // machine as one that took none (ADR-0005, #94).
+    // machine as one that took none (#94).
     let none = Cli {
         snapshot_every: None,
         ..cli

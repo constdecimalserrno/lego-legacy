@@ -39,7 +39,7 @@ flip 2784 up
 # pickable types (0x1009f418) holds only T0001. Each step below is taken thirty
 # flips after the title asked for it, at the pointer place it flashed. The
 # title asks for the next step only once the coach has finished the line
-# before it, so the steps were re-taken when he was first heard whole (#92).
+# before it, heard whole (#92).
 #
 # The bar, at 640x480: the book (Menu) 66,428; PrevCam 215; Nav_InOut 283;
 # Nav_Pivot 348; NextCam 412; GO/Stop 573. Once Dash is running the four

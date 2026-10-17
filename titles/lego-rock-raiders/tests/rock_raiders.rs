@@ -1,4 +1,6 @@
-//! LEGO Rock Raiders, from the disc to its first import.
+//! LEGO Rock Raiders, run headless from the player's rips: which pressing it
+//! runs from, its boot and its movies, a person's pointer and clicks, and each
+//! committed route replayed to the same machine every time.
 //!
 //! These need the player's own rips under `game-data/`. Without them the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -46,7 +48,7 @@ fn runs() {
 }
 
 #[test]
-fn the_entry_image_loads_from_the_disc_and_stops_at_its_first_import() {
+fn the_entry_image_loads_from_the_disc_and_starts_calling() {
     if !scratch() {
         return;
     }
@@ -250,8 +252,8 @@ fn the_screen_mode_is_the_one_the_titles_own_dialog_chose() {
     let Some(ran) = boot() else { return };
 
     // Its setup dialog lists the modes the declared machine has and selects
-    // the first; a person pressing Enter takes it. The title set 320x200 when
-    // its dialog was skipped, which is not what anyone playing it saw.
+    // the first; a person pressing Enter takes it. Without the dialog the
+    // title would set 320x200, which is not what anyone playing it sees.
     ran.assert_logged("ddraw modes: 640x480x16")
         .assert_logged("dialog default button pressed")
         .assert_logged("dialog ended with 1")
@@ -358,11 +360,10 @@ fn a_click_skips_a_movie_the_way_escape_does() {
     if !scratch() {
         return;
     }
-    // #67 asked whether a click gets past this title's intro. It already
-    // does: the title takes a click during a movie exactly as it takes
-    // Escape, so the machine has nothing to translate. Measured headless —
-    // a click at flip 1000 lets go of `intro.avi` at flip 1001, where the
-    // same run with nobody clicking plays it to flip 4134.
+    // The title takes a click during a movie exactly as it takes Escape, so
+    // the machine has nothing to translate (#67). Measured headless: a click
+    // at flip 1000 lets go of `intro.avi` at flip 1001, where the same run
+    // with nobody clicking plays it to flip 4134.
     const CLICKED_AT: u64 = 1000;
     let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("click-the-intro.route");
     std::fs::write(
@@ -461,9 +462,8 @@ fn what_the_machine_declares_is_what_the_guest_reads_back() {
 fn the_titles_own_archives_are_on_the_declared_machines_disc() {
     let Some(ran) = boot() else { return };
 
-    // Before the cabinet was read, this title opened its ten archives, found
-    // none, and gave up. Now it finds the two the pressing ships and goes on
-    // to load its own art out of them.
+    // The title opens its ten archives, finds the two the pressing ships,
+    // and goes on to load its own art out of them.
     for shipped in ["LegoRR0.wad", "LegoRR1.wad"] {
         assert!(
             !ran.log.contains(&format!("file missing {shipped}")),
@@ -529,10 +529,9 @@ const MENU: u64 = 4603;
 
 /// Enough instructions to reach the menu and a couple of hundred flips of it:
 /// the movies, the loading, and the menu waiting for a person. The loading
-/// takes the title's own texture conversion, which runs now that its 8-bit
-/// images are the 8-bit surfaces it asked for (#18), about 115 million
-/// instructions, and its sounds, which it loads now that DirectSound keeps a
-/// listener (#19), about 230 million more.
+/// is the title's own texture conversion into the 8-bit surfaces it asked
+/// for (#18), about 115 million instructions, and its sounds, loaded through
+/// DirectSound's listener (#19), about 230 million more.
 const FIRST_LIGHT_BUDGET: u64 = 8_010_000_000;
 
 /// The flip the pointer has been on Start Game long enough to be drawn.
@@ -787,8 +786,7 @@ fn scrolling_the_level_select_draws_the_crosses_passing_its_top_edge() {
         return;
     };
     // The crosses' yellow tape in the top forty rows: a blit reaching above
-    // the screen draws what of it is still on the screen (#27), where it once
-    // drew nothing at all.
+    // the screen draws what of it is still on the screen (#27).
     let scrolled = ran
         .host
         .frame(SCROLLED_LEVEL_SELECT)

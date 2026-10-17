@@ -7,13 +7,12 @@
 //! ADR-0003 already names the honest symptom of a throughput problem: slow
 //! motion with stretched audio.
 //!
-//! **Stretched in time, and not in pitch.** The first version of this
-//! resampled — read the mix more slowly — which fills the device but drops
-//! every pitch by the same ratio it stretches by. At the 0.42x this machine
-//! holds at Alpha Team's menu that is more than an octave, and a person who
-//! played it said so: *"TV's voice is very deep, like its slowed down"*. A
-//! pitch that low is the resampler's own artefact, not the guest's sound,
-//! which makes it the less faithful of the two as well as the uglier.
+//! **Stretched in time, and not in pitch.** Resampling — reading the mix more
+//! slowly — fills the device too, but drops every pitch by the same ratio it
+//! stretches by. At four tenths of real time that is more than an octave, a
+//! voice heard as *"very deep, like its slowed down"*. A pitch that low is the
+//! resampler's own artefact, not the guest's sound, which makes it the less
+//! faithful of the two as well as the uglier.
 //!
 //! So instead: overlap-add. Take a window of the mix, lay it over the tail of
 //! the last one, and advance through the input more slowly than through the

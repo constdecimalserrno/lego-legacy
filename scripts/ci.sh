@@ -15,9 +15,9 @@ say 'clippy'
 cargo clippy --workspace --all-targets -- -D warnings
 
 # The suite runs optimised, because the disc tests replay every committed
-# route, Alpha Team's training alone eighteen billion guest instructions. That
-# is about ten minutes optimised; unoptimised the interpreter is twenty times
-# slower, which is hours.
+# route, Alpha Team's training alone over twenty-three billion guest
+# instructions. That is about ten minutes optimised; unoptimised the
+# interpreter is twenty times slower, which is hours.
 say 'tests'
 # Runs land under the target directory, never among the sources.
 LEGO_LEGACY_RUNS="${CARGO_TARGET_DIR:-target}/runs" cargo test --workspace --release

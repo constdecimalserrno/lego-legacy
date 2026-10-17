@@ -163,9 +163,9 @@ pub static DIRECT_DRAW_CLIPPER: Interface = Interface {
     ],
 };
 
-/// `IDirectDraw4`: DirectX 6's own DirectDraw, which is what the roster asks
-/// for. The same machine underneath; four more slots at the end, and a display
-/// mode that takes a refresh rate.
+/// `IDirectDraw4`: DirectX 6's own DirectDraw, which is what Rock Raiders and
+/// Hot Wheels ask for. The same machine underneath; four more slots at the
+/// end, and a display mode that takes a refresh rate.
 pub static DIRECT_DRAW4: Interface = Interface {
     name: "IDirectDraw4",
     methods: &[

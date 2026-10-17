@@ -57,9 +57,8 @@ impl Default for Frame {
     }
 }
 
-/// A light, as a title sets it up. What it has not been told is `None`:
-/// retained mode's own defaults for those have not been measured, and nothing
-/// reads them yet.
+/// A light, as a title sets it up. What it has not been told is `None`, and
+/// the viewport's render lights with a value of its own in its place.
 #[derive(Clone, Debug, Default)]
 pub struct Light {
     pub kind: u32,

@@ -1,9 +1,11 @@
 //! The host seam (ADR-0001).
 //!
-//! Everything the emulator touches outside its own process lives behind this
-//! trait: the window, input, the audio device, the wall clock, memory mapping
-//! and dynamic loading. A new operating system is one implementation of
-//! [`Host`] and nothing else.
+//! Everything the emulator touches outside its own process lives in this
+//! module. The [`Host`] trait is what a run asks of it: the window, input, the
+//! audio device, memory mapping, and holding presentation to a wall-clock pace.
+//! The wall clock and dynamic loading are not in it: a backend reads the clock
+//! for itself, and [`sys`] declares the loader's entry points. A new operating
+//! system is one backend here, implementing [`Host`].
 
 pub mod headless;
 #[cfg(target_os = "macos")]

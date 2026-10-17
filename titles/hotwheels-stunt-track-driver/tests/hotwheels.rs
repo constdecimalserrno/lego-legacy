@@ -1,4 +1,6 @@
-//! Hot Wheels Stunt Track Driver, from the rip to first light (#33).
+//! Hot Wheels Stunt Track Driver, run headless from the player's rip: its
+//! declared tree, its boot to first light replayed to the same machine every
+//! time, its quit key, and the committed route driven into a race.
 //!
 //! Everything here goes through the run seam on the headless host: what the
 //! title presented, what it logged, and how the run ended.
@@ -17,7 +19,7 @@ fn scratch() -> bool {
 ///
 /// This title paces itself by reading the tick count in a loop rather than by
 /// sleeping, so it retires about fifteen million instructions between frames
-/// waiting for its next one to be due: a declared Pentium II's worth of
+/// waiting for its next one to be due: a declared Pentium 166's worth of
 /// spinning, and most of this budget.
 const FIRST_LIGHT_BUDGET: u64 = 2_200_000_000;
 

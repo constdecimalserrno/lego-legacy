@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             println!("\nflags are passed to the title's own binary, unchanged");
             return ExitCode::SUCCESS;
         }
-        eprintln!("lego-legacy: no title called `{first}` is on the roster");
+        eprintln!("lego-legacy: no supported title is called `{first}`");
         list();
         return ExitCode::FAILURE;
     }

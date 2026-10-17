@@ -44,16 +44,15 @@ fn task_mem_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// does not have. Alpha Team's sound system asks for A3D by this identifier
 /// and `a3dapi.dll`, in its own cabinet, is what answers it (#60).
 ///
-/// #60 offered two ways to sound: run the disc's own `a3dapi.dll` as guest
-/// code, or write `IA3d4` and its source and listener interfaces here. The
-/// first was taken. A3D mixes in software when it finds no Aureal hardware —
-/// and it finds none here — so what it produces is ordinary DirectSound
-/// buffers, which this machine already puts in its mix (#19, #23); the second
-/// would have meant writing a 3D mixer against no specification to replace a
-/// software one the disc already carries. What it cost was a machine whose
-/// waits are real: events that remember being signalled, mutexes that
-/// remember who holds them, timeouts that are honoured, and threads that park
-/// rather than ask again (ADR-0005).
+/// The disc's own `a3dapi.dll` runs as guest code, rather than `IA3d4` and its
+/// source and listener interfaces being written here (#60). A3D mixes in
+/// software when it finds no Aureal hardware — and it finds none here — so
+/// what it produces is ordinary DirectSound buffers, which this machine
+/// already puts in its mix (#19, #23); writing it here would mean a 3D mixer
+/// against no specification to replace a software one the disc already
+/// carries. Running it needs a machine whose waits are real: events that
+/// remember being signalled, mutexes that remember who holds them, timeouts
+/// that are honoured, and threads that park rather than ask again (ADR-0005).
 const SERVERS: &[(&str, &str)] = &[("92fa2c24-253c-11d2-90fb-006008a1f441", "a3dapi.dll")];
 
 /// Make a class through the server the title ships for it.

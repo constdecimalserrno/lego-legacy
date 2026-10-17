@@ -19,8 +19,8 @@ use crate::sound::{frame_at, Format, Pcm};
 use std::collections::BTreeMap;
 
 pub const SHIMS: &[Shim] = &[
-    // DirectSound exports its creator by ordinal as well as by name, and this
-    // title imports the ordinal.
+    // DirectSound exports its creator by ordinal as well as by name, and Rock
+    // Raiders imports the ordinal.
     stdcall("DSOUND", "#1", 3, create),
     stdcall("DSOUND", "DirectSoundCreate", 3, create),
 ];
@@ -716,10 +716,10 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 /// The two runs a lock hands out: from the offset to as far as was asked or
 /// the buffer's end, and then what was asked past the end, from the buffer's
 /// start. A caller that gave nowhere to put a second run gets a lock that
-/// stops at the end. Until #92 the second run was always empty, and a title
-/// streaming through a looping buffer wrote the rest of its chunk nowhere
-/// and went on from where it thought it had got to: a second of every lap of
-/// a one-second buffer was never heard.
+/// stops at the end. A title streaming through a looping buffer writes the
+/// rest of its chunk into the second run and goes on from past it, so a lock
+/// that left the second run empty would lose a second of every lap of a
+/// one-second buffer (#92).
 fn runs(offset: u32, wanted: u32, bytes: u32, second: bool) -> (u32, u32) {
     let first = wanted.min(bytes - offset);
     let wrapped = if second {

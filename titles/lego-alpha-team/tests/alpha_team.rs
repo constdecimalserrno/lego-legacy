@@ -1,4 +1,8 @@
-//! LEGO Alpha Team, from the rip to first light (#50).
+//! LEGO Alpha Team, run headless from the player's rip: its declared tree and
+//! the binaries it ships, its DirectX 7 device, its boot and intro, and its
+//! committed routes through the menu, the training mission and Select
+//! Adventure, the boot and the first two replayed to the same machine every
+//! time.
 //!
 //! Everything here goes through the run seam or the declared tree: this title
 //! ships nothing of itself loose on its disc, so what it is made of only
@@ -337,7 +341,7 @@ fn the_c_runtime_the_disc_ships_gets_what_it_calls() {
     for library in ["MSVCRT.dll!", "MSVCP60.dll!", "KERNEL32.dll!"] {
         assert!(
             !end.contains(library),
-            "the run no longer stops inside the runtime or the kernel: {end}"
+            "the run does not stop inside the runtime or the kernel: {end}"
         );
     }
     // It reaches the title's own code, which goes looking for its archives.
@@ -351,8 +355,7 @@ fn the_title_brings_up_a_directx_7_device_and_presents_through_it() {
     if !scratch() {
         return;
     }
-    // Far enough to get its renderer up and its first frames out; the run
-    // carries on past this and is #58's.
+    // Far enough to get its renderer up and its first frames out.
     let ran = testkit::run_headless(&ALPHA_TEAM, &Cli::default(), 600_000_000);
     // Its own words for what happened, which is the strongest thing there is
     // to assert: the title says whether it liked the device.
@@ -426,7 +429,7 @@ fn a_second_image_asking_for_a_taken_address_is_refused_and_relocated() {
     ran.assert_logged("address 0x10000000 is already taken");
     assert!(
         !ran.log.contains("abnormal program termination"),
-        "the C runtime no longer gives up on a frame handler reached through \
+        "the C runtime does not give up on a frame handler reached through \
          code that has been overwritten"
     );
 }
@@ -435,9 +438,8 @@ fn a_second_image_asking_for_a_taken_address_is_refused_and_relocated() {
 /// frame of its intro movie, which is the first one that is not black (#63).
 const FIRST_LIGHT: u64 = 5;
 
-/// The flip its own Loading panel is on the screen at, drawn through
-/// Direct3D 7 — what #58 called first light, before the intro movie in front
-/// of it was being presented at all (#63).
+/// The flip its own Loading panel is on the screen at, after the intro movie:
+/// the first frame it draws through Direct3D 7 (#58, #63).
 const LOADING_PANEL: u64 = 1633;
 
 /// What it costs to get there. Most of it is the title reading four hundred
@@ -492,9 +494,8 @@ fn a_click_during_the_intro_is_the_key_the_title_takes() {
     if !scratch() {
         return;
     }
-    // Measured before this landed: a click at flip 600 was ignored outright
-    // and the movie ran to its own end at flip 1631. Escape is the one key
-    // this intro takes, and only from about flip 440 on.
+    // Escape is the one key this intro takes, and only from about flip 440
+    // on; with nothing taken the movie runs to its own end at flip 1631.
     let clicked = |at: u64| {
         let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("click-the-intro-{at}.route"));
@@ -836,10 +837,10 @@ fn asked_at(ran: &testkit::Ran, line: &str) -> u64 {
 /// The training waits for each of his lines to finish before it asks for
 /// the next, so a line cut short in the mix is a training that goes on
 /// early. His first, `m0010_010`, is 10.31 seconds long, which is 309 flips
-/// at the title's thirty. While `Lock` handed out only the part of a lock
-/// before a buffer's end, the voice's one-second stream buffer lost a second
-/// of every lap and the next line was asked 173 flips after it. Measured
-/// since: 313.
+/// at the title's thirty, and the next is asked 313 flips after it. A `Lock`
+/// that handed out only the part of a lock before a buffer's end would lose
+/// a second of every lap of the voice's one-second stream buffer, and the
+/// next line would be asked 173 flips after it.
 #[test]
 fn the_training_waits_for_the_coach_to_finish_his_first_line() {
     let Some(ran) = into_the_mission(&MISSION_FIRST) else {
@@ -857,11 +858,10 @@ fn the_training_waits_for_the_coach_to_finish_his_first_line() {
 /// `DDSpace::FormShadow` lays a shadow under each actor that makes one, on
 /// whatever is beneath it, textured with `ShadowMap.tga` and blended
 /// `D3DBLEND_ZERO`, `D3DBLEND_INVSRCCOLOR`: it darkens what it covers. Under
-/// a throwaway probe 37 flips after GO, which was flip 6010 before #92 and is
-/// 7644 now, Dash's shadow darkened 570 pixels of the blue floor, the
-/// rectangle here among them and clear of his legs. By flip 7834 he is at
-/// the console, and with the camera exactly where it was, that floor is
-/// lighter again.
+/// a throwaway probe at flip 7644, 37 flips after GO, Dash's shadow darkened
+/// 570 pixels of the blue floor, the rectangle here among them and clear of
+/// his legs. By flip 7834 he is at the console, and with the camera exactly
+/// where it was, that floor is lighter again.
 #[test]
 fn dash_runs_for_the_console_and_his_shadow_goes_with_him() {
     let Some(ran) = into_the_mission(&MISSION_FIRST) else {
@@ -1000,19 +1000,16 @@ const SLOT_SAVED: u64 = 4140;
 
 /// Enough instructions for the committed route to start an adventure, skip
 /// its training mission, go back to HQ and open Select Adventure again: at the
-/// title's thirty, 14 billion reaches flip 4454. Since its loading voice was
-/// heard whole (#92), Mission One starts 176 flips later than it did, still
-/// well before the route's click at 3562, and every flip the route and this
-/// test name is where it was.
+/// title's thirty, 14 billion reaches flip 4454. Mission One starts once its
+/// loading voice is heard whole (#92), well before the route's click at 3562.
 const SELECT_ADVENTURE_BUDGET: u64 = 14_000_000_000;
 
 /// A saved adventure is labelled on Select Adventure with the date it was
 /// saved on, and the machine writes that date as Windows 98 writes one for
 /// US English (#87).
 ///
-/// This was a wall a person could reach: `KERNEL32!GetDateFormatA` was not
-/// written, and the first time the screen had a saved adventure to show, the
-/// run stopped there.
+/// The screen asks `KERNEL32!GetDateFormatA` for the label the first time it
+/// has a saved adventure to show, so without it a person reaches a wall here.
 #[test]
 fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
     if !scratch() {

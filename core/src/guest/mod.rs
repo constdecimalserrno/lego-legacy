@@ -1,9 +1,9 @@
 //! Guest memory.
 //!
-//! The arena is the whole address space the guest can see. Two paths reach it:
-//! a checked one for shims and tooling, which refuses an address the guest does
-//! not own, and an unchecked one for the engine, which has already bounded the
-//! address by decoding the instruction that produced it (ADR-0004).
+//! The arena is the whole address space the guest can see, and every way into
+//! it is checked: the engine, the shims and tooling all go through
+//! [`GuestMem`] or [`Arena::read_and_write`], which refuse a range outside the
+//! arena and notice a write over decoded code (ADR-0004).
 
 pub mod heap;
 
@@ -86,7 +86,8 @@ impl Arena {
     }
 }
 
-/// The checked path into guest memory: what shims and tooling read and write.
+/// The checked path into guest memory: what the engine, shims and tooling read
+/// and write.
 ///
 /// Every access names the address it refused, so a fault is a diagnosis rather
 /// than a crash.

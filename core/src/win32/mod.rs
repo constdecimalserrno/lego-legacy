@@ -212,7 +212,7 @@ pub struct State {
     /// image rather than lay it over the last one (#61).
     pub claimed: Vec<(u32, u32)>,
     /// Where the next file mapped into the arena will go. Mappings sit above
-    /// everything else the machine hands out, because this title maps four
+    /// everything else the machine hands out, because Alpha Team maps four
     /// hundred megabytes of archives and never lets go (#57).
     pub next_mapping: u32,
     /// Which failures the guest asked to be shown rather than handed back.
@@ -330,9 +330,9 @@ impl State {
             saves_refused: 0,
             heap: Heap::new(),
             handles: BTreeMap::new(),
-            // Handles are small odd numbers, distinct from any address, so a
-            // guest that uses one as a pointer faults instead of reading
-            // something plausible.
+            // Handles are small multiples of four, as Windows' are, and below
+            // anything the machine hands out as memory, so one is never
+            // mistaken for an address the guest was given.
             next_handle: 0x0000_0100,
             command_line: None,
             last_error: 0,

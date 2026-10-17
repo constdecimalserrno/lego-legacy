@@ -849,8 +849,9 @@ fn get_system_time_as_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, 
     Ok(0)
 }
 
-/// Nothing else runs on this machine, so the lock these take is already held
-/// (ADR-0005): the read and the write cannot be interrupted.
+/// Guest threads switch only between bursts of instructions and at waits,
+/// never inside a call across the boundary (ADR-0005), so the read and the
+/// write cannot be interrupted.
 fn interlocked_increment(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let value = ctx
         .mem
@@ -891,8 +892,9 @@ fn is_bad_code_ptr(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(u32::from(!ok))
 }
 
-/// A module saying it does not want to hear about threads. There is one thread
-/// and its attach has already happened, so there is nothing to stop telling it.
+/// A module saying it does not want to hear about threads starting and ending.
+/// The machine tells a module only of its process attaching, never of a
+/// thread, so there is nothing to stop telling it.
 fn disable_thread_library_calls(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
@@ -966,8 +968,8 @@ fn terminate_process(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Err(Stop::Exited { code: args[1] })
 }
 
-/// The handle standing for the thread that is asking, which on this machine is
-/// the only one there is.
+/// The pseudo-handle standing for whichever thread is asking, as Windows hands
+/// it out.
 fn get_current_thread(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0xffff_fffe)
 }
@@ -1014,10 +1016,9 @@ fn running_thread(ctx: &Ctx<'_>) -> u32 {
 
 /// Take a lock, or wait for whoever has it (ADR-0005).
 ///
-/// With one thread this costs nothing, which is what it did when there was
-/// only ever one. With two it is the only thing keeping them out of each
-/// other's C++ runtime: a section that did nothing let Alpha Team's sound
-/// thread and its loader tear the same allocator apart.
+/// A title with one thread takes every section at once. With more it is what
+/// keeps them out of each other's C++ runtime: Alpha Team's sound thread and
+/// its loader share one allocator.
 fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let me = running_thread(ctx);
     match ctx.state.sections.get_mut(&args[0]) {
@@ -1460,8 +1461,8 @@ fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Sto
 /// Wait for any one of these objects, until the timeout.
 ///
 /// The thread is parked rather than answered at once: a wait that is over the
-/// moment it is asked for turns a paced loop into a spin, and a machine that
-/// keeps no signalled state has no way to wake anybody (#60). The call itself
+/// moment it is asked for turns a paced loop into a spin. Each object keeps
+/// whether it is signalled, which is what wakes a waiter (#60). The call itself
 /// is left where it is — `Stop::Blocked` brings this thread back to it when
 /// the machine comes round again, so the wait costs nothing while it waits.
 fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
@@ -1608,9 +1609,9 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
     // A title about to make a file asks whether one is there already. That is
     // not the pressing failing to hold something, so it is asked without
-    // recording a miss: the list of what the declared tree is missing is how
-    // the tree learns what it has to ship, and a player's own save is not
-    // something it ships (#44). OPEN_ALWAYS keeps what is there, so it reads.
+    // logging a miss: the run log's `file missing` lines are how the tree
+    // learns what it has to ship, and a player's own save is not something it
+    // ships (#44). OPEN_ALWAYS keeps what is there, so it reads.
     let making = writing && matches!(args[4], CREATE_NEW | CREATE_ALWAYS | TRUNCATE_EXISTING);
     let there = if making {
         ctx.guest_file_is_there(&path).then(Vec::new)
@@ -1803,7 +1804,7 @@ fn get_logical_drives(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 
 /// A file the guest would rather read as memory than through a handle.
 ///
-/// This title's archives are up to a hundred and twenty megabytes each and it
+/// Alpha Team's archives are up to a hundred and twenty megabytes each and it
 /// maps every one of them, so the bytes go into the arena where the guest can
 /// address them, once, and stay there (#57).
 fn create_file_mapping(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1874,10 +1875,10 @@ fn compare_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// pressing's own files were all written when it was pressed, and a run that
 /// read the host's clock here would replay differently tomorrow (ADR-0003).
 ///
-/// So it stands for the date of the pressing, and is not the declared moment
-/// the clock starts at (`DECLARED_DAY`): 1999-10-04 01:20 universal time,
-/// 939,000,000 seconds after 1970, which is before any run starts. It is
-/// declared, not read from the disc's own directory (#91).
+/// So `WHEN` stands for the date of the pressing: 1999-10-04 01:20 universal
+/// time, 939,000,000 seconds after 1970. That is before `DECLARED_DAY`, the
+/// moment every run's clock starts at, so no file is newer than the run. It
+/// is declared, not read from the disc's own directory (#91).
 fn get_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetFileTime(file, created, accessed, written), as Windows counts:
     // hundreds of nanoseconds since the start of 1601.
@@ -1926,7 +1927,8 @@ fn call_handler(code: &mut Vec<u8>, holes: &mut Vec<usize>, handler: u32, args: 
     code.extend_from_slice(&[0; 4]);
     code.push(0x50); // push eax: the chain as it was
     code.extend_from_slice(&[0x64, 0x89, 0x25, 0, 0, 0, 0]); // mov fs:[0], esp
-                                                             // Last argument first, as cdecl puts them on the stack.
+
+    // Last argument first, as cdecl puts them on the stack.
     for value in args.iter().rev() {
         code.push(0x68);
         code.extend_from_slice(&value.to_le_bytes());
@@ -2281,11 +2283,10 @@ fn query_performance_frequency(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, S
 /// Windows counts from.
 ///
 /// A declared date: a run that read the host's calendar would replay
-/// differently tomorrow. This one is the date `GetSystemTime` has answered
-/// with since the first title booted (#8), and the one Alpha Team's Select
-/// Adventure labels a saved adventure with (#87). Every clock that tells the
-/// date is this day plus the declared clock's milliseconds, so none of them
-/// can disagree with another (#91).
+/// differently tomorrow. This one is the date `GetSystemTime` answers with
+/// (#8), and the one Alpha Team's Select Adventure labels a saved adventure
+/// with (#87). Every clock that tells the date is this day plus the declared
+/// clock's milliseconds, so none of them can disagree with another (#91).
 const DECLARED_DAY: u64 = 145_667;
 
 /// The declared moment `millis` into a run, as a SYSTEMTIME's eight
@@ -2667,7 +2668,7 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// How much stack a thread gets when it does not ask for a size.
 ///
 /// A declared value: what an image's own header would have asked for, and
-/// enough for the one this title makes.
+/// enough for each of the threads Alpha Team makes.
 const THREAD_STACK: u32 = 0x0010_0000;
 
 fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

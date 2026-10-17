@@ -143,7 +143,7 @@ impl Cabinet {
     /// Read a cabinet's header.
     ///
     /// # Errors
-    /// When the bytes are not an InstallShield 5 header.
+    /// When the bytes are not an InstallShield 5 or 6 header.
     pub fn open(header: &[u8]) -> Result<Self, CabinetError> {
         if header.get(..4) != Some(b"ISc(") {
             return Err(CabinetError::NotACabinet);
