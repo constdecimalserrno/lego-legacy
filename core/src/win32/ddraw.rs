@@ -1412,12 +1412,13 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     if !ordered || (!ctx.state.clipped.contains(&pixels) && !within(to, width, height)) {
         return Ok(DDERR_INVALIDRECT);
     }
-    // DDBLT_COLORFILL: the fill value is the effects block's own first word.
+    // DDBLT_COLORFILL: the fill value is the effects block's dwFillColor,
+    // eighty bytes in (#93).
     if flags & DDBLT_COLORFILL != 0 {
         let colour = if args[4] == 0 {
             0
         } else {
-            ctx.mem.read_u32(args[4] + 0x14).map_err(Stop::Fault)?
+            ctx.mem.read_u32(args[4] + 0x50).map_err(Stop::Fault)?
         };
         let clip = |v: i64, edge: u32| v.clamp(0, i64::from(edge)) as u32;
         let area = (
