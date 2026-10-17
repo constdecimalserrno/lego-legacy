@@ -584,17 +584,29 @@ impl Machine {
         let bytes = title.image.read(&mut iso)?;
 
         // A title is the bytes it is made of. A pressing that has been patched
-        // or is simply the other one is refused by name rather than run.
-        let digest = crate::hash::sha256_hex(&bytes);
-        if digest != title.image.sha256 {
-            return Err(format!(
-                "{} in {} hashes {digest}, and this title is declared as {}. \
-                 A different pressing, a patched executable, or a bad rip",
-                title.image.path,
-                iso.path().display(),
-                title.image.sha256
-            )
-            .into());
+        // or is simply the other one is refused by name rather than run, and a
+        // wrapped one is named as wrapped, as the launcher names it.
+        match crate::roster::judge(&title.image, &bytes) {
+            crate::roster::Found::Wrapped { scheme, .. } => {
+                return Err(format!(
+                    "{} in {}: {}",
+                    title.image.path,
+                    iso.path().display(),
+                    crate::pe::PeError::Wrapped { scheme }
+                )
+                .into());
+            }
+            crate::roster::Found::WrongBytes { found, .. } => {
+                return Err(format!(
+                    "{} in {} hashes {found}, and this title is declared as {}. \
+                     A different pressing, a patched executable, or a bad rip",
+                    title.image.path,
+                    iso.path().display(),
+                    title.image.sha256
+                )
+                .into());
+            }
+            _ => {}
         }
 
         // The pressing stays in the declared machine's drive for the whole

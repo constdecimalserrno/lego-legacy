@@ -16,7 +16,7 @@ pub enum PeError {
     /// The image is a copy-protection wrapper around the real one
     /// (ADR-0006). Named, never run.
     Wrapped {
-        scheme: &'static str,
+        scheme: String,
     },
     Truncated(&'static str),
     /// An image that has to be moved and carries nothing saying how.
@@ -196,7 +196,9 @@ pub fn load(bytes: &[u8], mem: &mut Arena) -> Result<Image, PeError> {
 pub fn load_at(bytes: &[u8], at: u32, mem: &mut Arena) -> Result<Image, PeError> {
     let mut image = inspect(bytes)?;
     if let Some(scheme) = wrapper_scheme(&image.sections) {
-        return Err(PeError::Wrapped { scheme });
+        return Err(PeError::Wrapped {
+            scheme: scheme.to_owned(),
+        });
     }
     image.base = at;
 

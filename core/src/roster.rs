@@ -135,17 +135,26 @@ pub fn look_for(entry: &Entry) -> Found {
             looked_at: format!("{}!{}", path.display(), entry.image.path),
         };
     };
-    let pressing = entry.image.pressing.to_owned();
-    if let Ok(image) = crate::pe::inspect(&bytes) {
-        if let Some(scheme) = crate::pe::wrapper_scheme(&image.sections) {
+    judge(&entry.image, &bytes)
+}
+
+/// What an image's bytes are, asked the same way by the launcher and by the
+/// machine about to run them. The wrapper is looked for before the bytes are
+/// hashed: a wrapped image is never the declared bytes, and its hash alone
+/// would call it a bad rip.
+#[must_use]
+pub fn judge(image: &EntryImage, bytes: &[u8]) -> Found {
+    let pressing = image.pressing.to_owned();
+    if let Ok(inspected) = crate::pe::inspect(bytes) {
+        if let Some(scheme) = crate::pe::wrapper_scheme(&inspected.sections) {
             return Found::Wrapped {
                 pressing,
                 scheme: scheme.to_owned(),
             };
         }
     }
-    let digest = crate::hash::sha256_hex(&bytes);
-    if digest == entry.image.sha256 {
+    let digest = crate::hash::sha256_hex(bytes);
+    if digest == image.sha256 {
         Found::Runnable { pressing }
     } else {
         Found::WrongBytes {

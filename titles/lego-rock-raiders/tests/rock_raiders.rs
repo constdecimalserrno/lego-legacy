@@ -11,12 +11,12 @@ use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::{disc, testkit, Title};
 use lego_rock_raiders::ROCK_RAIDERS;
 
-/// The same title pointed at the pressing whose executable is wrapped.
+/// The same title pointed at the pressing whose executable is wrapped, still
+/// declaring the bytes of the one that is not: what a person who ripped the
+/// original pressing where the Masterpiece belongs is running (#100).
 const ROCK_RAIDERS_WRAPPED: Title = Title {
     image: EntryImage {
         pressing: "rock-raiders",
-        sha256: "cf3ba432a382c2fa229333fd6f7663a0edcda4f9140813e5a8f2e5de2f860328",
-        why: "the original pressing, whose executable is a SafeDisc wrapper",
         ..ROCK_RAIDERS.image
     },
     ..ROCK_RAIDERS
@@ -80,9 +80,15 @@ fn a_wrapped_image_is_named_and_never_run() {
     let err = testkit::try_run_headless(&ROCK_RAIDERS_WRAPPED, &Cli::default(), 100_000)
         .expect_err("a SafeDisc wrapper is refused");
 
+    // The wrapper is named before the bytes are hashed, or the refusal would
+    // call it a bad rip.
     assert!(
         err.contains("SafeDisc"),
         "the refusal names the scheme: {err}"
+    );
+    assert!(
+        err.contains("/rock-raiders.iso"),
+        "and the image it is in: {err}"
     );
     assert!(
         err.contains("never runs, decrypts or bypasses"),
