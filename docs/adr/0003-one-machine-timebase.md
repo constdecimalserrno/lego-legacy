@@ -1,7 +1,7 @@
 # One machine timebase for every title
 
 The declared clock is derived from instructions retired plus declared costs (a presented frame,
-an audio block), for every title on the roster. There is no host timebase. The host audio device
+a wait), for every title on the roster. There is no host timebase. The host audio device
 is a consumer paced by the machine clock, so audio cannot desync from the guest; the host
 throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
 
@@ -20,6 +20,6 @@ throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
 
 ## Considered options
 
-- **Per-title host timebase** (the previous tree, three of these four titles): every frame became a
-  reading of the wall clock, the clock had to be recorded to replay, and the same throughput
-  produced a different experience per title; rejected.
+- **Per-title host timebase**, as an earlier, unpublished emulator had for three of the roster's
+  four titles: every frame became a reading of the wall clock, the clock had to be recorded to
+  replay, and the same throughput produced a different experience per title; rejected.

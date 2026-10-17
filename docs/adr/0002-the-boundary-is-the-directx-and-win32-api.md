@@ -1,11 +1,10 @@
 # The emulation boundary is the DirectX and Win32 API
 
 A title's own binaries (its executable and the DLLs it ships) run as guest x86. Microsoft's DLLs
-(KERNEL32, USER32, MSVCRT, DDRAW, D3DIM, D3DRM, DSOUND, DINPUT, and vendor audio such as A3D) are
-written in Rust as shims at their export tables. Run-versus-write is priced per binary: a binary
-that the title's own disc ships may run as guest code when that is cheaper than writing it,
-whoever wrote it. No binary from the host, and none from a redistributable this emulator would
-have to install, is ever run.
+(KERNEL32, USER32, MSVCRT, DDRAW, D3DIM, D3DRM, DSOUND, DINPUT) are written in Rust as shims at
+their export tables. Run-versus-write is priced per binary: a binary that the title's own disc
+ships may run as guest code when that is cheaper than writing it, whoever wrote it. No binary from
+the host, and none from a redistributable this emulator would have to install, is ever run.
 
 ## Considered options
 
@@ -25,11 +24,15 @@ So the priced-per-binary sentence is the rule, and the absolute is gone. What it
 that maps, relocates, binds and initialises a PE that was never a shim (#55), which this title
 needs anyway for `NiMain.dll` and the nine beside it. What it does not buy: any right to reach for
 the host's own `msvcrt.dll`, or to run a redistributable off the disc. The bytes that run are the
-bytes the player's own pressing carries, hashed like any other.
+bytes the player's own pressing carries, out of the same cabinet as the entry image whose hash is
+checked.
 
-`a3dapi.dll` is the same question and is not settled here. It ships in the same cabinet, and
-whether it runs or is shimmed at its COM interfaces is decided by the ticket that reaches sound
-(#60), which records which was taken and why.
+`a3dapi.dll` was the same question, and #60 settled it: it runs as guest code. A3D mixes in
+software when it finds no Aureal hardware, and it finds none here, so what it makes is ordinary
+DirectSound buffers, which this machine already mixes; writing `IA3d4` and its source and listener
+interfaces instead would have been a 3D mixer written against no specification. `CoCreateInstance`
+reaches it through the one class server the machine names (`SERVERS` in `ole32.rs`). What it cost
+was waits that are real (ADR-0005).
 
 ## Priced per binary, and not per whole binary (#80)
 
@@ -91,8 +94,11 @@ not a switch that was left lying around.
 
 ## Consequences
 
-- A binary that runs as guest code is declared, per title, like everything else the machine is
-  told: which file, from which pressing, and the reason running it was cheaper than writing it.
+- No list says which binaries run. The loader follows the entry image's imports: a DLL the
+  title's declared tree holds is mapped, bound and attached as guest code, and one it does not
+  hold is taken to be Microsoft's and its names are bound to the boundary. A COM class runs as
+  guest code only when `ole32.rs` names the file in that tree that serves it. Why running each was
+  cheaper than writing it is said where it was decided: here, and beside the code.
 - The shim tables stay the boundary for everything the disc does not ship. A title that imports
   KERNEL32 still meets Rust, because no disc on the roster ships KERNEL32.
-- An import no shim implements is still a wall. A DLL the tree does not hold is still a refusal.
+- An import no shim implements is still a wall, met when it is called.

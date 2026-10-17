@@ -1280,10 +1280,10 @@ fn collect_lights(
         // An umbra and a penumbra are each the angle off the light's axis to
         // the cone's edge: as half the cone's width, Rock Raiders' lamps
         // light a narrow circle and leave its level's walls dark.
-        // ponytail: measured against the previous tree's frames of that
-        // mission, not native retained mode; immediate mode documents its own
-        // spot angles as the whole cone, so a title passing those through
-        // would be lit too wide.
+        // ponytail: measured against an earlier, unpublished emulator's frames
+        // of that mission, not native retained mode; immediate mode documents
+        // its own spot angles as the whole cone, so a title passing those
+        // through would be lit too wide.
         let cone_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle)) as f32;
         let converted = match light.kind {
             0 => Light::Ambient { colour },

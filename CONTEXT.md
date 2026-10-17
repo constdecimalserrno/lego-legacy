@@ -1,26 +1,27 @@
 # lego-legacy
 
-A zero-crate Rust emulator that runs the original retail binaries of four late-90s Win32/DirectX
-titles. Not a reimplementation, and not a general PC emulator: the machine it presents is tailored
-to each title it supports.
+A zero-crate Rust emulator that runs the original retail binaries of three late-90s Win32/DirectX
+titles, with a fourth to come. Not a reimplementation, and not a general PC emulator: the machine
+it presents is tailored to each title it supports.
 
 ## Language
 
 ### Titles
 
 **Title**:
-One supported game, identified by the bytes of its entry binary.
+One game on the roster, identified by the bytes of its entry binary.
 _Avoid_: game, ROM, image, guest as a synonym
 
 **Roster**:
-The exact set of four titles the emulator supports: `lego-rock-raiders`,
-`hotwheels-stunt-track-driver`, `lego-racers`, `lego-alpha-team`. Support is per title, never
-inferred from a hardware standard.
+The exact set of four titles the emulator is for: `lego-rock-raiders`,
+`hotwheels-stunt-track-driver`, `lego-alpha-team`, `lego-racers`. Three are supported, each by a
+crate of its own under `titles/`, and v1 is those three; `lego-racers` is the likely next. Support
+is per title, never inferred from a hardware standard.
 _Avoid_: compatibility list, catalogue, platform support, the collection
 
 **Pressing**:
-One physical release of a title, original retail or Masterpiece re-release, with its own
-executable. A title has one or two, and they are not interchangeable.
+One physical release of a title, original retail or Masterpiece re-release. A title has one or
+two, and declares the one it runs.
 _Avoid_: disc, rip, edition, version, release as a synonym for title
 
 **Wrapped image**:
@@ -36,8 +37,10 @@ need not be the pressing its entry image comes from.
 _Avoid_: CD audio, soundtrack, music as a synonym
 
 **Game data**:
-A pressing's own bytes, ripped from the player's disc into `game-data/<title>/<pressing>/`. Never
-committed; its absence is a refusal, not a fallback.
+A pressing's own bytes, ripped from the player's disc into
+`game-data/<disc>/<pressing>/<pressing>.iso`; a pressing whose Red Book audio is played also needs
+the whole disc's `.bin` and its `.cue` beside that. `<disc>` is the rip's own name for the title,
+not always its roster key. Never committed; a missing image is a refusal, not a fallback.
 _Avoid_: assets, resources, ROM
 
 **Core**:
@@ -56,12 +59,12 @@ _Avoid_: boots, runs, works
 
 **Playable**:
 The title's first unit of play (mission, race, level) completes by a replaying route, and a
-person drove it from the keyboard and said so.
+person drove it with the keyboard and mouse and said so.
 _Avoid_: works, done, boots
 
 **Complete**:
-Every unit of play the title ships is completable from the keyboard, saves included. The bar
-every roster title must reach.
+Every unit of play the title ships is completable with the keyboard and mouse, saves included.
+The bar every roster title must reach.
 _Avoid_: fully playable, finished, done, 100%
 
 **Credits**:
@@ -87,8 +90,9 @@ Frames the guest presents per game-second; what the guest believes it draws at.
 _Avoid_: frame rate, fps, draw rate
 
 **Intended rate**:
-The frame rate a title itself authors as its target, read from the title's own data. A title
-without one is recorded as unreached, never defaulted.
+The frame rate a title itself authors as its target, read from the title's own code or data. It
+is declared as the refresh a flip waits for (`FlipCost::Refresh`). A title not yet seen to author
+one is declared the roster's baseline sixty, and says so beside the value.
 _Avoid_: target fps, native fps, cap
 
 ### The declared machine
@@ -139,14 +143,17 @@ An input script, authored or recorded, that drives a title from boot to a named 
 _Avoid_: test script, macro, TAS as a noun, session log
 
 **Snapshot**:
-The whole machine's state at one cursor, kept so a run can resume there. A cache, never evidence,
-never committed.
+The processor, the declared clock, the flip count and the guest memory of the entry image, heap,
+stack and surface at one cursor, kept so a run can resume there. Keyed to the build, title and
+route that made it. A cache, never evidence, never committed.
 _Avoid_: save state, rung, checkpoint
 
 **Golden**:
-A committed bundle of hashes fixing the emulator's observable output for one route.
+A committed bundle of hashes fixing the emulator's observable output for one route. Not built
+yet: none is committed.
 _Avoid_: snapshot, baseline, fixture
 
 **Blessing**:
 The maintainer's own act of accepting a captured golden as correct. Nobody else's, and no test's.
+Not built yet: there is no golden to bless.
 _Avoid_: approving, signing off, validating

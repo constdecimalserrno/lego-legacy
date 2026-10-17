@@ -14,16 +14,17 @@ cargo fmt --all -- --check
 say 'clippy'
 cargo clippy --workspace --all-targets -- -D warnings
 
-# The suite runs optimised, because the disc tests retire a hundred million
-# guest instructions and unpack eighty megabytes on the way, which is half a
-# minute unoptimised and three seconds optimised.
+# The suite runs optimised, because the disc tests replay every committed
+# route, Alpha Team's training alone eighteen billion guest instructions. That
+# is about ten minutes optimised; unoptimised the interpreter is twenty times
+# slower, which is hours.
 say 'tests'
-# Runs land in the target scratch root, never in the working tree.
+# Runs land under the target directory, never among the sources.
 LEGO_LEGACY_RUNS="${CARGO_TARGET_DIR:-target}/runs" cargo test --workspace --release
 
 # The unit tests run again unoptimised, where arithmetic that overflows panics
 # instead of wrapping. That is how the heap's own rounding bug was found, and
-# it costs a second.
+# the run costs two seconds.
 say 'tests, with overflow checks'
 LEGO_LEGACY_RUNS="${CARGO_TARGET_DIR:-target}/runs" cargo test -p lego-legacy-core --lib
 

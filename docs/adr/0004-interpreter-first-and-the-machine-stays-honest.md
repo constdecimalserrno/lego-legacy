@@ -15,6 +15,6 @@ triangles in the same order as on one thread, so the frame is the same on every 
 
 - **Native override of hot guest functions**: fast, but the emulator would no longer be running the
   game; rejected.
-- **JIT from the start**: the previous tree measured that its JIT gates could not be reached from a
-  149 MIPS interpreter at any cost, and every optimisation short of code generation was still
-  available; deferred behind the seam.
+- **JIT from the start**: an earlier, unpublished emulator for these titles measured that its JIT
+  gates could not be reached from a 149 MIPS interpreter at any cost, and every optimisation short
+  of code generation was still available; deferred behind the seam.
