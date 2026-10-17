@@ -1547,7 +1547,14 @@ fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
                 bytes.len(),
                 at.display()
             )),
-            Err(e) => ctx.log.line(&format!("file write refused {path}: {e}")),
+            // The guest is still told the handle closed, because changing its
+            // answer would change what the title does; the person is told
+            // instead, now and when the run ends.
+            Err(e) => {
+                ctx.log.line(&format!("file write refused {path}: {e}"));
+                eprintln!("lego-legacy: {path} was not saved: {e}");
+                ctx.state.saves_refused += 1;
+            }
         }
     }
     Ok(u32::from(ctx.state.close(args[0])))

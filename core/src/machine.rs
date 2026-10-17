@@ -446,8 +446,12 @@ impl Machine {
                 match self.snapshot() {
                     Ok(bytes) => {
                         let name = format!("flip-{}.snapshot", self.flips);
-                        let _ = std::fs::write(log.dir().join(&name), bytes);
-                        log.line(&format!("snapshot {name} cursor {}", self.clock.cursor()));
+                        match std::fs::write(log.dir().join(&name), bytes) {
+                            Ok(()) => {
+                                log.line(&format!("snapshot {name} cursor {}", self.clock.cursor()))
+                            }
+                            Err(e) => log.line(&format!("snapshot {name} not written: {e}")),
+                        }
                     }
                     Err(fault) => log.line(&format!("snapshot refused: {fault}")),
                 }

@@ -97,6 +97,16 @@ pub fn run_digested(
 
     let finish = machine.run(host, &mut log, budget);
 
+    // A save the host refused was said when it happened, and is said again
+    // here, where a person looking at how the run ended will see it.
+    let refused = machine.state.saves_refused;
+    if refused > 0 {
+        eprintln!(
+            "lego-legacy: saves refused this run: {refused}; the log says which: {}",
+            log.dir().join("log").display()
+        );
+    }
+
     // How the pointer was driven, said in one line: a title that puts the
     // pointer somewhere every frame is steering by how far the mouse went
     // since, and that only works where the host was told and froze the
@@ -139,11 +149,15 @@ pub fn run_digested(
         }
         report.push('\n');
         report.push_str(&route.to_text());
-        let _ = std::fs::write(dir.join("crash"), report);
-        if let Ok(bytes) = machine.snapshot() {
-            let _ = std::fs::write(dir.join("crash.snapshot"), bytes);
+        let written = std::fs::write(dir.join("crash"), report).and_then(|()| {
+            machine.snapshot().map_or(Ok(()), |bytes| {
+                std::fs::write(dir.join("crash.snapshot"), bytes)
+            })
+        });
+        match written {
+            Ok(()) => log.line("crash written"),
+            Err(e) => log.line(&format!("crash not written: {e}")),
         }
-        log.line("crash written");
     }
 
     // What the route asked for after the run's last flip was never delivered,
@@ -161,12 +175,18 @@ pub fn run_digested(
     }
     if let Some(recording) = &machine.recording {
         let path = log.dir().join("route");
-        let _ = std::fs::write(&path, recording.to_text());
-        log.line(&format!(
-            "recorded {} events to {}",
-            recording.len(),
-            path.display()
-        ));
+        match std::fs::write(&path, recording.to_text()) {
+            Ok(()) => log.line(&format!(
+                "recorded {} events to {}",
+                recording.len(),
+                path.display()
+            )),
+            Err(e) => log.line(&format!(
+                "recorded {} events, not written to {}: {e}",
+                recording.len(),
+                path.display()
+            )),
+        }
     }
     let digest = machine.state_digest();
     log.line(&format!("digest {digest}"));

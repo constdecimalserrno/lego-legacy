@@ -181,6 +181,9 @@ pub struct State {
     /// Blocks handed to the C runtime's written `free` or `realloc` that this
     /// machine's heap never handed out, so it could not answer for them (#80).
     pub foreign_frees: u64,
+    /// Files the guest wrote that the host would not keep, said again when
+    /// the run ends: a save that never reached the profile is lost.
+    pub saves_refused: u64,
     pub heap: Heap,
     /// Handles the guest has been given.
     handles: BTreeMap<u32, Object>,
@@ -324,6 +327,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             foreign_frees: 0,
+            saves_refused: 0,
             heap: Heap::new(),
             handles: BTreeMap::new(),
             // Handles are small odd numbers, distinct from any address, so a
