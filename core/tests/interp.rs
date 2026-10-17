@@ -198,42 +198,116 @@ fn a_repeated_scan_stops_on_the_byte_it_was_looking_for() {
     );
 }
 
-/// What the declared processor says it is, and what it says it can do: only
-/// what this emulator can actually run (#56).
+/// What each declared processor says it is: the part's own answer, with a
+/// feature word naming only what that part has and this emulator can actually
+/// run (#56, #104).
 #[test]
-fn cpuid_answers_with_the_declared_processor_and_nothing_it_cannot_run() {
-    use lego_legacy_core::cpu::{EBX, ECX, EDX};
+fn cpuid_answers_as_the_declared_processor_and_nothing_it_cannot_run() {
+    use lego_legacy_core::cpu::{Processor, EBX, ECX, EDX};
     let mut host = Headless::new();
     let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
     mem.write(0x0040_0000, &[0x0f, 0xa2]).unwrap();
-    let mut cpu = Interp::new(Mode::FLAT);
-
-    let mut regs = Cpu {
-        eip: 0x0040_0000,
-        ..Cpu::default()
+    let mut ask = |processor, leaf| {
+        let mut cpu = Interp::new(Mode {
+            processor,
+            ..Mode::FLAT
+        });
+        let mut regs = Cpu {
+            eip: 0x0040_0000,
+            r: [leaf, 0, 0, 0, 0, 0, 0, 0],
+            ..Cpu::default()
+        };
+        cpu.step(&mut regs, &mut mem).expect("cpuid is decoded");
+        [regs.r[EAX], regs.r[EBX], regs.r[ECX], regs.r[EDX]]
     };
-    cpu.step(&mut regs, &mut mem).expect("cpuid is decoded");
-    assert_eq!(regs.r[EAX], 1, "one leaf past the first");
-    let vendor: Vec<u8> = [regs.r[EBX], regs.r[EDX], regs.r[ECX]]
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    assert_eq!(&vendor, b"GenuineIntel");
-
-    let mut regs = Cpu {
-        eip: 0x0040_0000,
-        r: [1, 0, 0, 0, 0, 0, 0, 0],
-        ..Cpu::default()
+    let vendor = |[_, b, c, d]: [u32; 4]| -> Vec<u8> {
+        [b, d, c].iter().flat_map(|w| w.to_le_bytes()).collect()
     };
-    cpu.step(&mut regs, &mut mem).expect("cpuid is decoded");
-    assert_eq!(regs.r[EAX], 0x0652, "family 6, model 5: a Pentium II");
-    assert_eq!(regs.r[EDX] & 1, 1, "it has a floating point unit");
-    assert_eq!(regs.r[EDX] & (1 << 4), 1 << 4, "and a cycle counter");
+    let (fpu, tsc, cmov, mmx) = (1, 1 << 4, 1 << 15, 1 << 23);
+
+    // A Pentium 166, the P54C: one leaf past the first, family 5, and no
+    // conditional moves.
+    let first = ask(Processor::Pentium, 0);
+    assert_eq!(first[0], 1, "one leaf past the first");
+    assert_eq!(vendor(first), b"GenuineIntel");
     assert_eq!(
-        regs.r[EDX] & (1 << 23),
-        0,
-        "and no MMX, which this emulator does not decode"
+        ask(Processor::Pentium, 1),
+        [0x052c, 0, 0, fpu | tsc],
+        "family 5, model 2, stepping C, with floating point and a cycle counter"
     );
+    assert_eq!(ask(Processor::Pentium, 2), [0; 4], "and nothing past it");
+
+    // A Pentium II 450, Deschutes: two leaves past the first, the second its
+    // caches, and conditional moves but no MMX, which this emulator does not
+    // decode.
+    let first = ask(Processor::PentiumII, 0);
+    assert_eq!(first[0], 2, "two leaves past the first");
+    assert_eq!(vendor(first), b"GenuineIntel");
+    let [signature, _, _, features] = ask(Processor::PentiumII, 1);
+    assert_eq!(signature, 0x0652, "family 6, model 5, stepping 2");
+    assert_eq!(features, fpu | tsc | cmov);
+    assert_eq!(features & mmx, 0);
+    assert_eq!(
+        ask(Processor::PentiumII, 2),
+        [0x0302_0101, 0, 0, 0x0c04_0843],
+        "its TLBs, 16 KB caches and 512 KB second level"
+    );
+    assert_eq!(
+        ask(Processor::PentiumII, 0x8000_0000),
+        [0; 4],
+        "and no extended leaves"
+    );
+}
+
+/// A title finds out whether it may ask `cpuid` by toggling the ID flag, and a
+/// Pentium lets it, and alignment check with it. An Intel386 lets neither, and
+/// has no `cpuid` to ask (#104).
+#[test]
+fn the_id_flag_toggles_on_a_processor_that_has_cpuid() {
+    use lego_legacy_core::cpu::{Processor, ECX, ESP};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    // pushfd; pop eax; mov ecx, eax; xor eax, 0x240000; push eax; popfd;
+    // pushfd; pop eax: AP-485's own test, for both bits at once.
+    mem.write(
+        0x0040_0000,
+        &[
+            0x9c, 0x58, 0x89, 0xc1, 0x35, 0x00, 0x00, 0x24, 0x00, 0x50, 0x9d, 0x9c, 0x58,
+        ],
+    )
+    .unwrap();
+    mem.write(0x0041_0000, &[0x0f, 0xa2]).unwrap();
+    for (processor, toggled) in [
+        (Processor::I386, 0),
+        (Processor::Pentium, 0x24_0000),
+        (Processor::PentiumII, 0x24_0000),
+    ] {
+        let mut cpu = Interp::new(Mode {
+            processor,
+            ..Mode::FLAT
+        });
+        let mut regs = Cpu {
+            eip: 0x0040_0000,
+            ..Cpu::default()
+        };
+        regs.r[ESP] = 0x0050_0000;
+        let (retired, result) = cpu.run(&mut regs, &mut mem, 8, 0..1);
+        result.expect("the flags round trip");
+        assert_eq!(retired, 8);
+        assert_eq!(
+            (regs.r[EAX] ^ regs.r[ECX]) & 0x24_0000,
+            toggled,
+            "{processor:?}"
+        );
+
+        regs.eip = 0x0041_0000;
+        let asked = cpu.step(&mut regs, &mut mem);
+        assert_eq!(
+            asked.is_ok(),
+            toggled != 0,
+            "{processor:?} has cpuid exactly when it has the ID flag"
+        );
+    }
 }
 
 /// The cycle counter a title times itself against is the declared clock's,

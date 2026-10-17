@@ -1,6 +1,7 @@
 //! LEGO Alpha Team: the roster's third title.
 
 use lego_legacy_core::clock::FlipCost;
+use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::ALPHA_TEAM as ENTRY;
 use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
 use lego_legacy_core::Title;
@@ -59,6 +60,13 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
         // baseline, and for no reason of this title's own. There is no quality
         // to be bought by declaring less, and none to be lost.
         hz: lego_legacy_core::clock::DECLARED_HZ,
+        // And it is told it is that Pentium II. `NiMain` asks `cpuid` once at
+        // boot, with no ID flag test first, for the extended leaves and then
+        // leaf 1, and sorts the machine into a class by MMX and conditional
+        // moves (#104). The class picks its transform routines, and every
+        // class but MMX with the streaming extensions picks the same ones;
+        // this machine is not told it has MMX.
+        processor: Processor::PentiumII,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",

@@ -1,6 +1,7 @@
 //! Hot Wheels Stunt Track Driver: the roster's second title.
 
 use lego_legacy_core::clock::FlipCost;
+use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::HOT_WHEELS as ENTRY;
 use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
 use lego_legacy_core::Title;
@@ -26,6 +27,10 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
         // frame of waiting costs, and a machine far faster than the one it
         // was written for spends its whole frame spinning.
         hz: 166_000_000,
+        // And that Pentium is told about as itself: family 5, which has no
+        // conditional moves. Measured over the race route: this title never
+        // asks, by `cpuid` or by the flags (#104).
+        processor: Processor::Pentium,
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",

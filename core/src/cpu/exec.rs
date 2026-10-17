@@ -5,7 +5,7 @@
 //! the cache means it said so once.
 
 use super::insn::{BcdOp, BitOp, FlagBit, Insn, Kind, MemRef, Op, Rep, ShiftOp, StringOp, Width};
-use super::{Cpu, Mode, Stop, EAX, EBX, ECX, EDI, EDX, ESI, ESP};
+use super::{Cpu, Mode, Processor, Stop, EAX, EBX, ECX, EDI, EDX, ESI, ESP};
 use crate::guest::{Arena, GuestMem};
 
 /// Where a value comes from and goes back to.
@@ -350,7 +350,7 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         Kind::Nop => {}
         Kind::Int(n) => return Err(Stop::Interrupt(n)),
         Kind::Hlt => return Err(Stop::Halted),
-        Kind::Cpuid => cpuid(cpu),
+        Kind::Cpuid => cpuid(cpu, mode.processor),
         Kind::Rdtsc => {
             cpu.r[super::EAX] = (cpu.tsc & 0xffff_ffff) as u32;
             cpu.r[super::EDX] = (cpu.tsc >> 32) as u32;
@@ -817,10 +817,9 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
             write_reg(cpu, EDX as u8, w, high);
         }
         Kind::Pushf => {
-            // The declared processor implements the flags up to the virtual
-            // mode bit and nothing above it, so the bits it does not have are
-            // pushed as zero however they were set.
-            let v = cpu.flags.to_eflags() & IMPLEMENTED_FLAGS;
+            // The bits the declared processor does not have are pushed as
+            // zero however they were set.
+            let v = cpu.flags.to_eflags() & implemented_flags(mode.processor);
             push(cpu, mem, v, w, mode)?;
         }
         Kind::Popf => {
@@ -829,7 +828,8 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
             let kept = if w == Width::B16 {
                 (old & 0xffff_0000) | (v & 0xffff)
             } else {
-                (old & !IMPLEMENTED_FLAGS) | (v & IMPLEMENTED_FLAGS)
+                let implemented = implemented_flags(mode.processor);
+                (old & !implemented) | (v & implemented)
             };
             cpu.flags = super::flags::Flags::from_eflags(kept);
         }
@@ -1005,10 +1005,20 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
     Ok(())
 }
 
-/// The flag bits the declared processor actually has: everything up to the
-/// virtual-8086 bit. What it does not have reads as zero when pushed and
-/// cannot be written by popping.
-const IMPLEMENTED_FLAGS: u32 = 0x0003_ffff;
+/// The flag bits the declared processor actually has. What it does not have
+/// reads as zero when pushed and cannot be written by popping.
+///
+/// An Intel386 has everything up to the virtual-8086 bit. A Pentium adds
+/// alignment check (bit 18) and ID (bit 21), and a program that can toggle ID
+/// knows it may ask `cpuid`, which is how Intel's AP-485 says to find out
+/// (#104). A Pentium's virtual interrupt bits are left out: an application's
+/// `popf` cannot write them.
+fn implemented_flags(processor: Processor) -> u32 {
+    match processor {
+        Processor::I386 => 0x0003_ffff,
+        Processor::Pentium | Processor::PentiumII => 0x0027_ffff,
+    }
+}
 
 /// A value widened to thirty-two bits with its sign.
 fn sign_extend(v: u32, w: Width) -> i32 {
@@ -1306,43 +1316,46 @@ fn advance(cpu: &mut Cpu, reg: usize, step: u32, addr32: bool) {
     }
 }
 
-/// What the declared processor answers when a title asks what it is.
+/// What the declared processor answers when a title asks what it is (#104).
 ///
-/// Declared values, like the rest of the machine: a Pentium II, and a feature
-/// word naming only what this emulator can actually run. Saying MMX here would
-/// have a title reach for instructions the interpreter does not decode, so it
-/// does not say it (ADR-0004).
-fn cpuid(cpu: &mut Cpu) {
-    use super::{EAX, EBX, ECX, EDX};
-    match cpu.r[EAX] {
-        0 => {
-            // One leaf past this one, and "GenuineIntel" in the order the
-            // three registers spell it.
-            cpu.r[EAX] = 1;
-            cpu.r[EBX] = u32::from_le_bytes(*b"Genu");
-            cpu.r[EDX] = u32::from_le_bytes(*b"ineI");
-            cpu.r[ECX] = u32::from_le_bytes(*b"ntel");
-        }
-        1 => {
-            // Family 6, model 5, stepping 2: a Pentium II, which is the
-            // processor the roster's declared machine has.
-            cpu.r[EAX] = 0x0000_0652;
-            cpu.r[EBX] = 0;
-            cpu.r[ECX] = 0;
-            // Floating point, the time stamp counter and conditional moves,
-            // which is what this machine can actually run. Not MMX, and not
-            // compare-and-exchange-eight: a title told it had those would
-            // reach for instructions the interpreter does not decode
-            // (ADR-0004).
-            cpu.r[EDX] = (1 << 0) | (1 << 4) | (1 << 15);
-        }
-        _ => {
-            // Including the extended leaves, which is where a title looks for
-            // a vendor's own additions: this machine has none.
-            cpu.r[EAX] = 0;
-            cpu.r[EBX] = 0;
-            cpu.r[ECX] = 0;
-            cpu.r[EDX] = 0;
-        }
-    }
+/// Each answer is what that part itself returned, as InstLatx64's dumps of the
+/// parts record it: `GenuineIntel000052C_P54C`, a Pentium at 166 MHz, and
+/// `GenuineIntel0000651_P2_Descuthes`, a Pentium II of the same model one
+/// stepping earlier with the same cache. That cache is also the one Intel's
+/// own Pentium II example in AP-485 (241618-011, Table 9) returns.
+///
+/// One thing is held back: the feature word names only what the part has
+/// **and** this emulator can run. Floating point, the cycle counter and, on
+/// the Pentium II, conditional moves. Not MMX and not
+/// compare-and-exchange-eight, which a title told it had would reach for
+/// instructions the interpreter does not decode (ADR-0004), and none of the
+/// bits only an operating system can use.
+///
+/// A leaf past the last one is undefined (AP-485, Table 1) and answers nothing,
+/// and so do the extended leaves, which is where a title looks for a vendor's
+/// own additions: neither part has any.
+fn cpuid(cpu: &mut Cpu, processor: Processor) {
+    // Floating point, the cycle counter and conditional moves.
+    const RUNS: u32 = (1 << 0) | (1 << 4) | (1 << 15);
+    // "GenuineIntel", in the order EBX, EDX and ECX spell it.
+    const GENU: u32 = u32::from_le_bytes(*b"Genu");
+    const INEI: u32 = u32::from_le_bytes(*b"ineI");
+    const NTEL: u32 = u32::from_le_bytes(*b"ntel");
+    // EAX, EBX, ECX and EDX, leaf by leaf; the feature words are the parts'
+    // own, less what this emulator cannot run.
+    let leaves: &[[u32; 4]] = match processor {
+        // An Intel386 has no `cpuid`, and the decoder refuses it there.
+        Processor::I386 => &[],
+        Processor::Pentium => &[[1, GENU, NTEL, INEI], [0x052c, 0, 0, 0x0000_01bf & RUNS]],
+        Processor::PentiumII => &[
+            [2, GENU, NTEL, INEI],
+            [0x0652, 0, 0, 0x0183_fbff & RUNS],
+            [0x0302_0101, 0, 0, 0x0c04_0843],
+        ],
+    };
+    let [a, b, c, d] = leaves.get(cpu.r[EAX] as usize).copied().unwrap_or_default();
+    cpu.r[EAX] = a;
+    cpu.r[EBX] = b;
+    cpu.r[ECX] = c;
+    cpu.r[EDX] = d;
 }

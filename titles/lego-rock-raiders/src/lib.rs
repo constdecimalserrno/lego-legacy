@@ -1,6 +1,7 @@
 //! LEGO Rock Raiders: the roster's first title.
 
 use lego_legacy_core::clock::FlipCost;
+use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::ROCK_RAIDERS as ENTRY;
 use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
 use lego_legacy_core::Title;
@@ -26,6 +27,9 @@ pub const ROCK_RAIDERS: Title = Title {
         // The roster's baseline processor, which this title has never been
         // seen to measure or to wait on.
         hz: lego_legacy_core::clock::DECLARED_HZ,
+        // Nor to ask what it is: no `cpuid` and no toggled ID flag over any
+        // committed route (#104).
+        processor: Processor::PentiumII,
         // A Pentium II era machine with 128 MB: what the box asked for, and
         // more than this title ever allocates. The figure only reaches the
         // guest through GlobalMemoryStatus, and a title that sized its caches

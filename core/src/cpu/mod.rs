@@ -39,23 +39,34 @@ pub const GS: usize = 5;
 
 pub const SEG_NAMES: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
 
-/// Which machine the processor believes it is inside.
+/// Which machine the processor believes it is inside, and which processor it
+/// is.
 ///
-/// The roster's titles run flat and 32-bit; the conformance corpus is real
-/// mode. One engine serves both, because the difference is entirely in how an
-/// address is formed and how wide an operand is by default.
+/// The roster's titles run flat and 32-bit, on the processor each declares;
+/// the conformance corpus is an Intel386 in real mode. One engine serves both,
+/// because the difference is in how an address is formed, how wide an operand
+/// is by default, and what the processor says about itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mode {
     /// Segment registers are shifted four bits and added, rather than naming a
     /// descriptor.
     pub real: bool,
+    /// What `cpuid` answers, and which flags `popf` can write (#104).
+    pub processor: Processor,
 }
 
 impl Mode {
-    /// The declared machine the roster runs on: flat, 32-bit, protected.
-    pub const FLAT: Self = Self { real: false };
-    /// What the conformance corpus was recorded on.
-    pub const REAL: Self = Self { real: true };
+    /// The declared machine the roster runs on: flat, 32-bit, protected, on
+    /// the roster's baseline processor.
+    pub const FLAT: Self = Self {
+        real: false,
+        processor: Processor::PentiumII,
+    };
+    /// What the conformance corpus was recorded on: an Intel386 in real mode.
+    pub const REAL: Self = Self {
+        real: true,
+        processor: Processor::I386,
+    };
 
     /// The operand width an instruction has with no size prefix.
     #[must_use]
@@ -72,6 +83,24 @@ impl Mode {
     pub fn default_addr32(self) -> bool {
         !self.real
     }
+}
+
+/// A processor a declared machine can have. Each is one real part, so what it
+/// says about itself is what that part said (#104).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Processor {
+    /// An Intel386: no `cpuid`, and no flags above the virtual-8086 bit. What
+    /// the conformance corpus was recorded on.
+    I386,
+    /// A Pentium at 166 MHz: the P54C at stepping cC0, signature 052Ch, which
+    /// is what Intel's Pentium Processor Specification Update (242480-041)
+    /// lists every 166 MHz part of it as.
+    Pentium,
+    /// A Pentium II at 450 MHz: Deschutes at stepping dB0, signature 0652h,
+    /// with 512 KB of second-level cache, which is what Intel's Pentium II
+    /// Processor Specification Update (243337-049) lists the 450 MHz parts
+    /// SL2WB and SL37H as. The roster's baseline.
+    PentiumII,
 }
 
 /// Everything the processor is, at one cursor.

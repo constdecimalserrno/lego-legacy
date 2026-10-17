@@ -785,8 +785,10 @@ pub fn decode(bytes: &[u8], mode: Mode) -> Result<Insn, Undecoded> {
                         Some(m.rm)
                     )
                 }
-                // cpuid
-                0xa2 => done!(Kind::Cpuid, width, None, None),
+                // cpuid, which an Intel386 does not have
+                0xa2 if mode.processor != super::Processor::I386 => {
+                    done!(Kind::Cpuid, width, None, None)
+                }
                 // rdtsc
                 0x31 => done!(Kind::Rdtsc, width, None, None),
                 // imul r, r/m

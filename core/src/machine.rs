@@ -144,7 +144,10 @@ impl Machine {
             arena: Arena::new(host, ARENA_BYTES)?,
             cpu: Cpu::default(),
             clock: Clock::at(title.declared.hz),
-            engine: Box::new(Interp::new(Mode::FLAT)),
+            engine: Box::new(Interp::new(Mode {
+                processor: title.declared.processor,
+                ..Mode::FLAT
+            })),
             flip_cost: title.flip_cost,
             surface: None,
             stub: false,
@@ -1095,7 +1098,10 @@ impl Machine {
     /// Throw away every decoded instruction, after memory has changed under
     /// the engine.
     pub fn forget_decoded(&mut self) {
-        self.engine = Box::new(Interp::new(Mode::FLAT));
+        self.engine = Box::new(Interp::new(Mode {
+            processor: self.title.declared.processor,
+            ..Mode::FLAT
+        }));
     }
 }
 

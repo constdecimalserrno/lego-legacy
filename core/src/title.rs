@@ -65,6 +65,9 @@ pub struct Declared {
     /// the cycle. It decides how much a declared second is worth in work,
     /// which is what a title that waits by reading the clock spends.
     pub hz: u64,
+    /// Which part that processor is: what `cpuid` tells the title, and which
+    /// flags it can toggle (#104).
+    pub processor: crate::cpu::Processor,
     /// How much memory the machine says it has.
     pub megabytes: u32,
     /// The screen sizes the machine offers, as width, height and bit depth.
@@ -174,6 +177,7 @@ impl Title {
         declared: Declared {
             windows: WINDOWS_98_SE,
             hz: crate::clock::DECLARED_HZ,
+            processor: crate::cpu::Processor::PentiumII,
             megabytes: 128,
             modes: &[(640, 480, 16)],
             computer: "LEGO-LEGACY",
