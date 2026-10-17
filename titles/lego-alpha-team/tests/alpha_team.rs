@@ -622,31 +622,31 @@ const MISSION_LATER: u64 = 3232;
 
 /// The flip the route clicks the movable Direction Tile at, which is when the
 /// training's step 230a asks for it (#85).
-const TILE_CLICKED: u64 = 5497;
+const TILE_CLICKED: u64 = 7011;
 
 /// Just before that click, and once the Unit Menu it opens is up.
-const BEFORE_UNIT_MENU: u64 = 5490;
-const UNIT_MENU: u64 = 5520;
+const BEFORE_UNIT_MENU: u64 = 7004;
+const UNIT_MENU: u64 = 7034;
 
 /// The flip the route presses GO at, which is the training's last step: Dash
 /// runs for the console (#61).
-const GO: u64 = 5973;
+const GO: u64 = 7607;
 
 /// Dash running across the blue floor for the tile, and the same floor once
 /// the tile has turned him and he has gone up the steps to the console. The
 /// camera does not move between the two.
-const DASH_RUNNING: u64 = 6010;
-const DASH_GONE: u64 = 6200;
+const DASH_RUNNING: u64 = 7644;
+const DASH_GONE: u64 = 7834;
 
 /// The flip the title is back at its main menu, the training over (#61).
-const MENU_AGAIN: u64 = 6300;
+const MENU_AGAIN: u64 = 7990;
 
 /// Enough instructions for the committed route to load the first mission,
-/// play its training to its end and be back at the main menu: 18.42 billion
-/// reaches flip 6300. The mission costs about three and a half million
+/// play its training to its end and be back at the main menu: 23.22 billion
+/// reaches flip 7990. The mission costs about three and a half million
 /// instructions a flip: the title's own director, its actors and the
 /// rasteriser under them.
-const MISSION_BUDGET: u64 = 18_600_000_000;
+const MISSION_BUDGET: u64 = 23_400_000_000;
 
 /// The committed route into the first mission, replayed once into its slot.
 fn into_the_mission(
@@ -799,15 +799,55 @@ fn the_route_plays_the_training_to_its_end_and_the_title_goes_back_to_its_menu()
     assert!(differing(mission, again, SCREEN) > pixels / 2);
 }
 
+/// The flip at which the title asked for one of the coach's lines.
+fn asked_at(ran: &testkit::Ran, line: &str) -> u64 {
+    let wanted = format!("\\m0010_{line}_EN.dds");
+    let mut flip = 0;
+    for l in ran.log.lines() {
+        if let Some(n) = l
+            .strip_prefix("flip ")
+            .and_then(|l| l.split(' ').next())
+            .and_then(|n| n.parse().ok())
+        {
+            flip = n;
+        } else if l.contains(&wanted) {
+            return flip;
+        }
+    }
+    panic!("the title never asks for m0010_{line}");
+}
+
+/// The coach is heard out (#92).
+///
+/// The training waits for each of his lines to finish before it asks for
+/// the next, so a line cut short in the mix is a training that goes on
+/// early. His first, `m0010_010`, is 10.31 seconds long, which is 309 flips
+/// at the title's thirty. While `Lock` handed out only the part of a lock
+/// before a buffer's end, the voice's one-second stream buffer lost a second
+/// of every lap and the next line was asked 173 flips after it. Measured
+/// since: 313.
+#[test]
+fn the_training_waits_for_the_coach_to_finish_his_first_line() {
+    let Some(ran) = into_the_mission(&MISSION_FIRST) else {
+        return;
+    };
+    let waited = asked_at(ran, "020a") - asked_at(ran, "010");
+    assert!(
+        waited >= 310,
+        "m0010_020a was asked {waited} flips after m0010_010"
+    );
+}
+
 /// Dash runs, and his shadow runs with him (#61).
 ///
 /// `DDSpace::FormShadow` lays a shadow under each actor that makes one, on
 /// whatever is beneath it, textured with `ShadowMap.tga` and blended
 /// `D3DBLEND_ZERO`, `D3DBLEND_INVSRCCOLOR`: it darkens what it covers. Under
-/// a throwaway probe at flip 6010 Dash's shadow darkened 570 pixels of the
-/// blue floor, the rectangle here among them and clear of his legs. By flip
-/// 6200 he is at the console, and with the camera exactly where it was, that
-/// floor is lighter again.
+/// a throwaway probe 37 flips after GO, which was flip 6010 before #92 and is
+/// 7644 now, Dash's shadow darkened 570 pixels of the blue floor, the
+/// rectangle here among them and clear of his legs. By flip 7834 he is at
+/// the console, and with the camera exactly where it was, that floor is
+/// lighter again.
 #[test]
 fn dash_runs_for_the_console_and_his_shadow_goes_with_him() {
     let Some(ran) = into_the_mission(&MISSION_FIRST) else {
@@ -959,7 +999,10 @@ const SLOT_SAVED: u64 = 4140;
 
 /// Enough instructions for the committed route to start an adventure, skip
 /// its training mission, go back to HQ and open Select Adventure again: at the
-/// title's thirty, 14 billion reaches flip 4262.
+/// title's thirty, 14 billion reaches flip 4454. Since its loading voice was
+/// heard whole (#92), Mission One starts 176 flips later than it did, still
+/// well before the route's click at 3562, and every flip the route and this
+/// test name is where it was.
 const SELECT_ADVENTURE_BUDGET: u64 = 14_000_000_000;
 
 /// A saved adventure is labelled on Select Adventure with the date it was

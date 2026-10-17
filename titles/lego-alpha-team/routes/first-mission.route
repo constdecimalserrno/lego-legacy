@@ -37,168 +37,170 @@ flip 2784 up
 # 220a nothing in the space but the coach can be picked at all: a click on a
 # tile is refused at Pe0300 0x10057d7f, because the training's set of
 # pickable types (0x1009f418) holds only T0001. Each step below is taken thirty
-# flips after the title asked for it, at the pointer place it flashed.
+# flips after the title asked for it, at the pointer place it flashed. The
+# title asks for the next step only once the coach has finished the line
+# before it, so the steps were re-taken when he was first heard whole (#92).
 #
 # The bar, at 640x480: the book (Menu) 66,428; PrevCam 215; Nav_InOut 283;
 # Nav_Pivot 348; NextCam 412; GO/Stop 573. Once Dash is running the four
 # camera glyphs give way to six faces and ICam, Dash (T0011) the sixth at 419,
 # ICam at 470, and the SmartCam toggle at 534,433.
 # 020a: the coach flashes. Click it, at 200,102.
-flip 2987 move 454 10
-flip 2989 move 320 10
-flip 2991 move 320 139
-flip 2993 down
-flip 2995 up
-# 030a, asked at flip 3256: the book flashes. It opens the mission menu.
-flip 3286 move 52 470
-flip 3288 move 320 470
-flip 3290 move 320 470
-flip 3292 move 320 419
-flip 3294 down
-flip 3296 up
-# 040a, asked at flip 3424: Keep Playing flashes, at 320,90 in that menu.
-flip 3454 move 620 10
-flip 3456 move 528 10
-flip 3458 move 320 10
-flip 3460 move 320 29
-flip 3462 down
-flip 3464 up
-# 050a, asked at flip 3532: NextCam.
-flip 3562 move 504 470
-flip 3564 move 320 470
-flip 3566 move 320 470
-flip 3568 move 320 451
-flip 3570 down
-flip 3572 up
-# 060a, asked at flip 3592: NextCam again.
-flip 3622 down
-flip 3624 up
-# 070a, asked at flip 3644: PrevCam.
-flip 3674 move 20 240
-flip 3676 move 226 240
-flip 3678 down
-flip 3680 up
-# 080a, asked at flip 3760: Nav_Pivot.
-flip 3790 move 586 240
-flip 3792 down
-flip 3794 up
-# 090a, asked at flip 3876: Nav_InOut.
-flip 3906 move 190 240
-flip 3908 down
-flip 3910 up
-# 100a, asked at flip 3932: Nav_InOut again.
-flip 3962 down
-flip 3964 up
+flip 3127 move 454 10
+flip 3129 move 320 10
+flip 3131 move 320 139
+flip 3133 down
+flip 3135 up
+# 030a, asked at flip 3622: the book flashes. It opens the mission menu.
+flip 3652 move 52 470
+flip 3654 move 320 470
+flip 3656 move 320 470
+flip 3658 move 320 419
+flip 3660 down
+flip 3662 up
+# 040a, asked at flip 3884: Keep Playing flashes, at 320,90 in that menu.
+flip 3914 move 620 10
+flip 3916 move 528 10
+flip 3918 move 320 10
+flip 3920 move 320 29
+flip 3922 down
+flip 3924 up
+# 050a, asked at flip 4054: NextCam.
+flip 4084 move 504 470
+flip 4086 move 320 470
+flip 4088 move 320 470
+flip 4090 move 320 451
+flip 4092 down
+flip 4094 up
+# 060a, asked at flip 4120: NextCam again.
+flip 4150 down
+flip 4152 up
+# 070a, asked at flip 4180: PrevCam.
+flip 4210 move 20 240
+flip 4212 move 226 240
+flip 4214 down
+flip 4216 up
+# 080a, asked at flip 4398: Nav_Pivot.
+flip 4428 move 586 240
+flip 4430 down
+flip 4432 up
+# 090a, asked at flip 4576: Nav_InOut.
+flip 4606 move 190 240
+flip 4608 down
+flip 4610 up
+# 100a, asked at flip 4632: Nav_InOut again.
+flip 4662 down
+flip 4664 up
 # 110a to 140a scroll the view by putting the pointer within a fortieth of
 # the window of an edge (Pe0300 0x10026d20): left, right, top, bottom.
-# 110a, asked at flip 4138: the left edge.
-flip 4168 move 20 10
-flip 4170 move 56 10
-flip 4172 move 320 92
-# 120a, asked at flip 4196: the right edge.
-flip 4226 move 620 240
-flip 4228 move 620 240
-flip 4230 move 620 240
-flip 4232 move 620 240
-flip 4234 move 396 240
-# 130a, asked at flip 4264: the top edge.
-flip 4294 move 20 10
-flip 4296 move 20 10
-flip 4298 move 282 170
-# 140a, asked at flip 4328: the bottom edge, and back to the middle once 150
+# 110a, asked at flip 4998: the left edge.
+flip 5028 move 20 10
+flip 5030 move 56 10
+flip 5032 move 320 92
+# 120a, asked at flip 5056: the right edge.
+flip 5086 move 620 240
+flip 5088 move 620 240
+flip 5090 move 620 240
+flip 5092 move 620 240
+flip 5094 move 396 240
+# 130a, asked at flip 5142: the top edge.
+flip 5172 move 20 10
+flip 5174 move 20 10
+flip 5176 move 282 170
+# 140a, asked at flip 5216: the bottom edge, and back to the middle once 150
 # and 160, which ask for nothing, have begun.
-flip 4358 move 320 470
-flip 4360 move 320 470
-flip 4362 move 320 470
-flip 4364 move 320 470
-flip 4366 move 320 470
-flip 4368 move 320 364
-flip 4411 move 320 10
-flip 4413 move 320 10
-flip 4415 move 320 10
-flip 4417 move 320 186
-# 170a, asked at flip 4630: GO. Dash runs.
-flip 4660 move 620 470
-flip 4662 move 526 470
-flip 4664 move 320 388
-flip 4666 down
-flip 4668 up
-# 180a, asked at flip 4748: Dash's own camera, T0011.
-flip 4778 move 20 240
-flip 4780 move 312 240
-flip 4782 down
-flip 4784 up
-# 190a, asked at flip 4896: ICam.
-flip 4926 move 422 240
-flip 4928 down
-flip 4930 up
-# 195a, asked at flip 4950: SmartCam.
-flip 4980 move 448 254
-flip 4982 down
-flip 4984 up
-# 200a, asked at flip 5064: Stop. The view goes back to where it began.
-flip 5094 move 398 226
-flip 5096 down
-flip 5098 up
-# 210 asks for nothing. 220a, asked at flip 5322, adds U0179, the movable
+flip 5246 move 320 470
+flip 5248 move 320 470
+flip 5250 move 320 470
+flip 5252 move 320 470
+flip 5254 move 320 470
+flip 5256 move 320 364
+flip 5299 move 320 10
+flip 5301 move 320 10
+flip 5303 move 320 10
+flip 5305 move 320 186
+# 170a, asked at flip 5652: GO. Dash runs.
+flip 5682 move 620 470
+flip 5684 move 526 470
+flip 5686 move 320 388
+flip 5688 down
+flip 5690 up
+# 180a, asked at flip 5840: Dash's own camera, T0011.
+flip 5870 move 20 240
+flip 5872 move 312 240
+flip 5874 down
+flip 5876 up
+# 190a, asked at flip 6074: ICam.
+flip 6104 move 422 240
+flip 6106 down
+flip 6108 up
+# 195a, asked at flip 6130: SmartCam.
+flip 6160 move 448 254
+flip 6162 down
+flip 6164 up
+# 200a, asked at flip 6314: Stop. The view goes back to where it began.
+flip 6344 move 398 226
+flip 6346 down
+flip 6348 up
+# 210 asks for nothing. 220a, asked at flip 6756, adds U0179, the movable
 # Direction Tile, to what can be picked, and flashes the blue pad it is meant
 # to go onto: press on the tile's middle, 487,262, carry it eight pixels a
 # flip to the pad's, 408,214, and let go there.
-flip 5352 move 148 10
-flip 5354 move 320 28
-flip 5356 down
-flip 5360 move 304 219
-flip 5362 move 304 219
-flip 5364 move 304 219
-flip 5366 move 304 219
-flip 5368 move 304 219
-flip 5370 move 304 219
-flip 5372 move 304 238
-flip 5374 move 304 240
-flip 5376 move 304 240
-flip 5378 move 306 240
-flip 5382 up
-# 230a, asked at flip 5465: click the tile, now on the pad. Letting go opens
+flip 6786 move 148 10
+flip 6788 move 320 28
+flip 6790 down
+flip 6794 move 304 219
+flip 6796 move 304 219
+flip 6798 move 304 219
+flip 6800 move 304 219
+flip 6802 move 304 219
+flip 6804 move 304 219
+flip 6806 move 304 238
+flip 6808 move 304 240
+flip 6810 move 304 240
+flip 6812 move 306 240
+flip 6816 up
+# 230a, asked at flip 6979: click the tile, now on the pad. Letting go opens
 # its Unit Menu: rotate either way, Info, Hint, and "Hints left: 0", which is
 # the training's own `option HintCount;0`.
-flip 5495 move 324 269
-flip 5497 down
-flip 5499 up
-# 240a, asked at flip 5518: RotateCW flashes in the Unit Menu, at 404,140.
+flip 7009 move 324 269
+flip 7011 down
+flip 7013 up
+# 240a, asked at flip 7032: RotateCW flashes in the Unit Menu, at 404,140.
 # The tile turns a quarter clockwise.
-flip 5548 move 308 13
-flip 5550 down
-flip 5552 up
-# 250a, asked at flip 5648: RotateCW again. The step goes on only once the
+flip 7062 move 308 13
+flip 7064 down
+flip 7066 up
+# 250a, asked at flip 7228: RotateCW again. The step goes on only once the
 # tile's arrows face the way the training wants, which from here is two turns
 # more: one alone was measured not to be enough.
-flip 5678 down
-flip 5680 up
-flip 5708 down
-flip 5710 up
-# 260a, asked at flip 5746: Info, the magnifier, at 428,140. The camera goes
+flip 7258 down
+flip 7260 up
+flip 7288 down
+flip 7290 up
+# 260a, asked at flip 7326: Info, the magnifier, at 428,140. The camera goes
 # down onto the tile.
-flip 5776 move 368 240
-flip 5778 down
-flip 5780 up
-# 270a, asked at flip 5858: click the tile, close up at 310,220. The camera
+flip 7356 move 368 240
+flip 7358 down
+flip 7360 up
+# 270a, asked at flip 7492: click the tile, close up at 310,220. The camera
 # comes back and its Unit Menu opens again, now centred at 340,110.
-flip 5890 move 84 453
-flip 5892 down
-flip 5894 up
-# 275, asked at flip 5895: Hint, at 405,100 in that menu.
-flip 5927 move 415 80
-flip 5929 move 415 80
-flip 5931 down
-flip 5933 up
-# 280a, asked at flip 5933: GO, at 573,428. Dash comes down off the walkway
+flip 7524 move 84 453
+flip 7526 down
+flip 7528 up
+# 275, asked at flip 7529: Hint, at 405,100 in that menu.
+flip 7561 move 415 80
+flip 7563 move 415 80
+flip 7565 down
+flip 7567 up
+# 280a, asked at flip 7567: GO, at 573,428. Dash comes down off the walkway
 # onto the blue floor, runs onto the tile, which turns him to the steps, and
-# runs up them to the console: 280b and his victory line at flip 6109. The
+# runs up them to the console: 280b and his victory line at flip 7743. The
 # title then puts up "Destination: Alpha Team Headquarters" and is back at its
-# main menu by flip 6300.
-flip 5965 move 404 459
-flip 5967 move 404 458
-flip 5969 move 404 459
-flip 5971 move 404 459
-flip 5973 down
-flip 5975 up
+# main menu by flip 7990.
+flip 7599 move 404 459
+flip 7601 move 404 458
+flip 7603 move 404 459
+flip 7605 move 404 459
+flip 7607 down
+flip 7609 up

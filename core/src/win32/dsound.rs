@@ -881,23 +881,43 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let (offset, wanted) = if args[6] & DSBLOCK_ENTIREBUFFER != 0 {
-        (0, bytes)
+    // The whole buffer is every byte of it, from the offset given.
+    let wanted = if args[6] & DSBLOCK_ENTIREBUFFER != 0 {
+        bytes
     } else {
-        (args[0], args[1])
+        args[1]
     };
-    let give = wanted.min(bytes.saturating_sub(offset));
+    let offset = args[0].min(bytes);
+    let (first, second) = runs(offset, wanted, bytes, args[4] != 0);
     ctx.mem
-        .write_u32(args[2], store + offset.min(bytes))
+        .write_u32(args[2], store + offset)
         .map_err(Stop::Fault)?;
-    ctx.mem.write_u32(args[3], give).map_err(Stop::Fault)?;
-    // The wrap-around half is empty: this machine hands out one run.
-    for out in [args[4], args[5]] {
-        if out != 0 {
-            ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
-        }
+    ctx.mem.write_u32(args[3], first).map_err(Stop::Fault)?;
+    if args[4] != 0 {
+        let at = if second > 0 { store } else { 0 };
+        ctx.mem.write_u32(args[4], at).map_err(Stop::Fault)?;
+    }
+    if args[5] != 0 {
+        ctx.mem.write_u32(args[5], second).map_err(Stop::Fault)?;
     }
     Ok(S_OK)
+}
+
+/// The two runs a lock hands out: from the offset to as far as was asked or
+/// the buffer's end, and then what was asked past the end, from the buffer's
+/// start. A caller that gave nowhere to put a second run gets a lock that
+/// stops at the end. Until #92 the second run was always empty, and a title
+/// streaming through a looping buffer wrote the rest of its chunk nowhere
+/// and went on from where it thought it had got to: a second of every lap of
+/// a one-second buffer was never heard.
+fn runs(offset: u32, wanted: u32, bytes: u32, second: bool) -> (u32, u32) {
+    let first = wanted.min(bytes - offset);
+    let wrapped = if second {
+        (wanted - first).min(offset)
+    } else {
+        0
+    };
+    (first, wrapped)
 }
 
 /// Decibels, in hundredths, as a gain.
@@ -1036,7 +1056,7 @@ fn set_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> 
 
 #[cfg(test)]
 mod tests {
-    use super::{gain, weights, Buffer, Listener, Place};
+    use super::{gain, runs, weights, Buffer, Listener, Place};
     use crate::sound::Format;
 
     fn mono_16bit(rate: u32) -> Format {
@@ -1062,6 +1082,17 @@ mod tests {
         b.started = Some(1_000);
         b.looping = true;
         assert_eq!(b.progress(4_000), (44_100, true), "a loop goes round");
+    }
+
+    #[test]
+    fn a_lock_past_the_end_goes_on_from_the_start() {
+        // Alpha Team's one-second stream buffer, locked as it was on #92.
+        assert_eq!(runs(82_288, 11_728, 88_200, true), (5_912, 5_816));
+        assert_eq!(runs(88_196, 11_732, 88_200, true), (4, 11_728));
+        // With nowhere to put a second run, the lock stops at the end.
+        assert_eq!(runs(82_288, 11_728, 88_200, false), (5_912, 0));
+        // And one that does not reach the end is one run.
+        assert_eq!(runs(1_000, 11_728, 88_200, true), (11_728, 0));
     }
 
     #[test]
