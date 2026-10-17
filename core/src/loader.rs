@@ -39,6 +39,8 @@ pub struct Module {
     /// As its own file is named, which is how an import names it.
     pub name: String,
     pub base: u32,
+    /// How much of the address space its image takes.
+    pub size: u32,
     /// Its `DllMain`, or zero when it has none.
     pub entry: u32,
     exports: Exports,
@@ -123,6 +125,7 @@ impl Modules {
         self.list.push(Module {
             name: name.to_owned(),
             base: image.base,
+            size: image.size,
             entry: if image.entry == 0 {
                 0
             } else {

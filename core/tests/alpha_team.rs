@@ -9,6 +9,7 @@ use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::disc;
 use lego_legacy_core::host::headless::{Headless, Presented};
 use lego_legacy_core::install::Tree;
+use lego_legacy_core::machine::Machine;
 use lego_legacy_core::roster::ALPHA_TEAM as ENTRY;
 use lego_legacy_core::testkit;
 use lego_legacy_core::title::{Declared, Installed, Title, WINDOWS_98_SE};
@@ -242,6 +243,25 @@ fn the_names_the_title_imports_are_bound_to_the_code_that_exports_them() {
             ran.log.lines().last().unwrap_or_default()
         );
     }
+}
+
+/// The digest a determinism gate compares sees inside the binaries this title
+/// ships, which is where most of it lives (#55, #94).
+#[test]
+fn the_digest_sees_inside_the_binaries_the_title_ships() {
+    use lego_legacy_core::guest::GuestMem;
+    if !scratch() {
+        return;
+    }
+    let mut host = Headless::new();
+    let mut machine = Machine::new(&ALPHA_TEAM, &mut host).expect("a machine");
+    machine.load_title(&ALPHA_TEAM).expect("the title loads");
+    let before = machine.state_digest();
+    let module = machine.modules.modules().last().expect("a module");
+    let at = module.base + module.size - 1;
+    let byte = machine.arena.slice(at, 1).expect("it is mapped")[0];
+    machine.arena.write(at, &[!byte]).expect("it is mapped");
+    assert_ne!(machine.state_digest(), before, "{} is hashed", module.name);
 }
 
 /// A forwarded export stands for one somewhere else, and this loader does not

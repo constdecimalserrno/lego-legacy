@@ -896,25 +896,12 @@ impl Machine {
             }
         }
 
-        // The regions anything writes to: where the image was placed, how far
-        // the heap has grown, and the stack down to where it stands.
-        let mut region = |start: u32, len: u32| {
-            if len > 0 {
-                if let Ok(bytes) = self.arena.slice(start, len as usize) {
-                    hash.update(bytes);
-                }
+        // The regions anything writes to, which are the ones a snapshot
+        // carries.
+        for (start, len) in self.snapshot_regions() {
+            if let Ok(bytes) = self.arena.slice(start, len as usize) {
+                hash.update(bytes);
             }
-        };
-        if let Some(image) = &self.image {
-            region(image.base, image.size);
-        }
-        region(crate::guest::heap::HEAP_BASE, self.state.heap.extent());
-        let esp = self.cpu.r[crate::cpu::ESP];
-        if esp < STACK_TOP {
-            region(esp, STACK_TOP - esp);
-        }
-        if let Some(surface) = self.surface {
-            region(surface.addr, surface.pitch * surface.height);
         }
         crate::hash::hex(&hash.finish())
     }
@@ -935,16 +922,22 @@ impl Machine {
         }
     }
 
-    /// The regions of guest memory a snapshot carries.
+    /// The regions of guest memory a snapshot carries, and the digest hashes:
+    /// where the image and every binary the title ships were placed — whose
+    /// `.data` is where Alpha Team keeps most of itself (#55, #94) — how far
+    /// the heap has grown, the stack down to where it stands, and the surface.
     ///
     // ponytail: the declared regions rather than every page. A guest that
-    // wrote outside its own image, heap, stack and surface would resume with
+    // wrote outside its own images, heap, stack and surface would resume with
     // that writing lost. Upgrade path: a dirty-page map in the arena, which
     // the engine's unchecked path would have to go through.
     fn snapshot_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if let Some(image) = &self.image {
             regions.push((image.base, image.size));
+        }
+        for module in self.modules.modules() {
+            regions.push((module.base, module.size));
         }
         regions.push((crate::guest::heap::HEAP_BASE, self.state.heap.extent()));
         let esp = self.cpu.r[crate::cpu::ESP];
