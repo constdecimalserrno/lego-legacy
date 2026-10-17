@@ -28,58 +28,22 @@
 //!
 //! These are cdecl: the caller cleans the stack.
 
-use super::{Convention, Ctx, Shim};
+use super::{cdecl, Ctx, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "MSVCRT",
-        name: "malloc",
-        args: 1,
-        convention: Convention::Cdecl,
-        run: malloc,
-    },
+    cdecl("MSVCRT", "malloc", 1, malloc),
     // `operator new`. Alpha Team reaches the heap through this and almost
     // never through `malloc`: 396,976 calls against 2,211 over the menu route.
-    Shim {
-        dll: "MSVCRT",
-        name: "??2@YAPAXI@Z",
-        args: 1,
-        convention: Convention::Cdecl,
-        run: malloc,
-    },
-    Shim {
-        dll: "MSVCRT",
-        name: "calloc",
-        args: 2,
-        convention: Convention::Cdecl,
-        run: calloc,
-    },
-    Shim {
-        dll: "MSVCRT",
-        name: "realloc",
-        args: 2,
-        convention: Convention::Cdecl,
-        run: realloc,
-    },
-    Shim {
-        dll: "MSVCRT",
-        name: "free",
-        args: 1,
-        convention: Convention::Cdecl,
-        run: free,
-    },
+    cdecl("MSVCRT", "??2@YAPAXI@Z", 1, malloc),
+    cdecl("MSVCRT", "calloc", 2, calloc),
+    cdecl("MSVCRT", "realloc", 2, realloc),
+    cdecl("MSVCRT", "free", 1, free),
     // The one entry point of that runtime, other than the heap itself, that
     // hands a caller a block to free: LoadComp asks for it, and its answer
     // would otherwise be one of the runtime's own blocks reaching this `free`.
-    Shim {
-        dll: "MSVCRT",
-        name: "_strdup",
-        args: 1,
-        convention: Convention::Cdecl,
-        run: strdup,
-    },
+    cdecl("MSVCRT", "_strdup", 1, strdup),
 ];
 
 fn malloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

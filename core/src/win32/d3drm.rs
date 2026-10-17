@@ -9,33 +9,15 @@
 //! run and name the method (#11).
 
 use super::scene::Matrix;
-use super::{ComState, Convention, Ctx, Shim, State};
+use super::{stdcall, ComState, Ctx, Shim, State};
 use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "d3drm",
-        name: "Direct3DRMCreate",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: create,
-    },
-    Shim {
-        dll: "d3drm",
-        name: "D3DRMVectorRotate",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: vector_rotate,
-    },
-    Shim {
-        dll: "d3drm",
-        name: "D3DRMVectorRandom",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: vector_random,
-    },
+    stdcall("d3drm", "Direct3DRMCreate", 1, create),
+    stdcall("d3drm", "D3DRMVectorRotate", 4, vector_rotate),
+    stdcall("d3drm", "D3DRMVectorRandom", 1, vector_random),
 ];
 
 /// An object this machine never made, or made as something else.

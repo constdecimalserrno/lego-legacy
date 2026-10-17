@@ -10,7 +10,7 @@
 //! its pan, and where it is from the listener. Where it has got to, and whether
 //! it is still playing, follow from the declared clock (ADR-0003).
 
-use super::{ComState, Convention, Ctx, Shim, State};
+use super::{stdcall, ComState, Ctx, Shim, State};
 use crate::com::{wall, Interface, Method, ADD_REF, QUERY_INTERFACE, S_OK};
 use crate::cpu::x87::maths;
 use crate::cpu::Stop;
@@ -21,20 +21,8 @@ use std::collections::BTreeMap;
 pub const SHIMS: &[Shim] = &[
     // DirectSound exports its creator by ordinal as well as by name, and this
     // title imports the ordinal.
-    Shim {
-        dll: "DSOUND",
-        name: "#1",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: create,
-    },
-    Shim {
-        dll: "DSOUND",
-        name: "DirectSoundCreate",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: create,
-    },
+    stdcall("DSOUND", "#1", 3, create),
+    stdcall("DSOUND", "DirectSoundCreate", 3, create),
 ];
 
 /// Every buffer, by the object the guest holds, and the listener.

@@ -5,18 +5,12 @@
 //! the device is a view of what was recorded, not of what a person is doing
 //! now.
 
-use super::{ComState, Convention, Ctx, Shim, State};
+use super::{stdcall, ComState, Ctx, Shim, State};
 use crate::com::{Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
-pub const SHIMS: &[Shim] = &[Shim {
-    dll: "DINPUT",
-    name: "DirectInputCreateA",
-    args: 4,
-    convention: Convention::Stdcall,
-    run: create,
-}];
+pub const SHIMS: &[Shim] = &[stdcall("DINPUT", "DirectInputCreateA", 4, create)];
 
 /// What a DirectInput call answers with when it worked.
 const DI_OK: u32 = S_OK;

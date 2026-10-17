@@ -2,102 +2,24 @@
 //! it, what it asks of sound hardware, the RIFF reader it loads its sounds
 //! with, and the drive it plays its Red Book audio from.
 
-use super::{Convention, Ctx, Object, Shim};
+use super::{stdcall, Ctx, Object, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "WINMM",
-        name: "timeGetTime",
-        args: 0,
-        convention: Convention::Stdcall,
-        run: time_get_time,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mixerGetNumDevs",
-        args: 0,
-        convention: Convention::Stdcall,
-        run: mixer_devices,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioOpenA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_open,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioDescend",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: mmio_descend,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioAscend",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_ascend,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioRead",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_read,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioSeek",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_seek,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioGetInfo",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_get_info,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioSetInfo",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_set_info,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioAdvance",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mmio_advance,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mmioClose",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: mmio_close,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mciSendStringA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: mci_send_string,
-    },
-    Shim {
-        dll: "WINMM",
-        name: "mciGetErrorStringA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: mci_error_string,
-    },
+    stdcall("WINMM", "timeGetTime", 0, time_get_time),
+    stdcall("WINMM", "mixerGetNumDevs", 0, mixer_devices),
+    stdcall("WINMM", "mmioOpenA", 3, mmio_open),
+    stdcall("WINMM", "mmioDescend", 4, mmio_descend),
+    stdcall("WINMM", "mmioAscend", 3, mmio_ascend),
+    stdcall("WINMM", "mmioRead", 3, mmio_read),
+    stdcall("WINMM", "mmioSeek", 3, mmio_seek),
+    stdcall("WINMM", "mmioGetInfo", 3, mmio_get_info),
+    stdcall("WINMM", "mmioSetInfo", 3, mmio_set_info),
+    stdcall("WINMM", "mmioAdvance", 3, mmio_advance),
+    stdcall("WINMM", "mmioClose", 2, mmio_close),
+    stdcall("WINMM", "mciSendStringA", 4, mci_send_string),
+    stdcall("WINMM", "mciGetErrorStringA", 3, mci_error_string),
 ];
 
 /// The `cdaudio` device: the title's Red Book pressing, once it is open;

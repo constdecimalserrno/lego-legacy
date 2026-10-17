@@ -6,53 +6,17 @@
 //! because there isn't one, and a run must not depend on the machine it was
 //! taken on.
 
-use super::{Convention, Ctx, Shim};
+use super::{stdcall, Ctx, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegCreateKeyA",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: reg_create_key,
-    },
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegCreateKeyExA",
-        args: 9,
-        convention: Convention::Stdcall,
-        run: reg_create_key_ex,
-    },
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegOpenKeyExA",
-        args: 5,
-        convention: Convention::Stdcall,
-        run: reg_open_key_ex,
-    },
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegQueryValueExA",
-        args: 6,
-        convention: Convention::Stdcall,
-        run: reg_query_value_ex,
-    },
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegSetValueExA",
-        args: 6,
-        convention: Convention::Stdcall,
-        run: reg_set_value_ex,
-    },
-    Shim {
-        dll: "ADVAPI32",
-        name: "RegCloseKey",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: reg_close_key,
-    },
+    stdcall("ADVAPI32", "RegCreateKeyA", 3, reg_create_key),
+    stdcall("ADVAPI32", "RegCreateKeyExA", 9, reg_create_key_ex),
+    stdcall("ADVAPI32", "RegOpenKeyExA", 5, reg_open_key_ex),
+    stdcall("ADVAPI32", "RegQueryValueExA", 6, reg_query_value_ex),
+    stdcall("ADVAPI32", "RegSetValueExA", 6, reg_set_value_ex),
+    stdcall("ADVAPI32", "RegCloseKey", 1, reg_close_key),
 ];
 
 /// What the registry answers with.

@@ -4,34 +4,16 @@
 //! writes and the machine presents (ADR-0002). Nothing is uploaded anywhere,
 //! because the frame the guest made is already the frame to show.
 
-use super::{ComState, Convention, Ctx, Shim, State};
+use super::{stdcall, ComState, Ctx, Shim, State};
 use crate::com::{method, wall, Interface, Method, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use crate::raster::PixelFormat;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "DDRAW",
-        name: "DirectDrawCreate",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: create,
-    },
-    Shim {
-        dll: "DDRAW",
-        name: "DirectDrawCreateEx",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: create_ex,
-    },
-    Shim {
-        dll: "DDRAW",
-        name: "DirectDrawEnumerateA",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: enumerate,
-    },
+    stdcall("DDRAW", "DirectDrawCreate", 3, create),
+    stdcall("DDRAW", "DirectDrawCreateEx", 4, create_ex),
+    stdcall("DDRAW", "DirectDrawEnumerateA", 2, enumerate),
 ];
 
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

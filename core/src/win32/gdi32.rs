@@ -3,45 +3,20 @@
 //! These titles draw with DirectDraw and touch GDI only for the odd region or
 //! stock object on the way to a window. Nothing here draws anything.
 
-use super::{Convention, Ctx, Shim};
+use super::{stdcall, Ctx, Shim};
 use crate::cpu::Stop;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "GDI32",
-        name: "CreateRectRgn",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: region,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "GetStockObject",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: stock_object,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "GetSystemPaletteEntries",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: system_palette_entries,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "GetDeviceCaps",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: device_caps,
-    },
-    Shim {
-        dll: "GDI32",
-        name: "GetRegionData",
-        args: 3,
-        convention: Convention::Stdcall,
-        run: region_data,
-    },
+    stdcall("GDI32", "CreateRectRgn", 4, region),
+    stdcall("GDI32", "GetStockObject", 1, stock_object),
+    stdcall(
+        "GDI32",
+        "GetSystemPaletteEntries",
+        4,
+        system_palette_entries,
+    ),
+    stdcall("GDI32", "GetDeviceCaps", 2, device_caps),
+    stdcall("GDI32", "GetRegionData", 3, region_data),
 ];
 
 /// A region handle. Regions are not drawn with here, so one is as good as

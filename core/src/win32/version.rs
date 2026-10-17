@@ -5,25 +5,13 @@
 //! itself: every file it is asked about is part of DirectX 7, which is what
 //! this title's own disc installs.
 
-use super::{Convention, Ctx, Shim};
+use super::{stdcall, Ctx, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "VERSION",
-        name: "GetFileVersionInfoA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: info,
-    },
-    Shim {
-        dll: "VERSION",
-        name: "VerQueryValueA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: query,
-    },
+    stdcall("VERSION", "GetFileVersionInfoA", 4, info),
+    stdcall("VERSION", "VerQueryValueA", 4, query),
 ];
 
 /// How big the block this machine hands out is: one `VS_FIXEDFILEINFO` and

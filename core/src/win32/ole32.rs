@@ -4,40 +4,16 @@
 //! makes is one a roster title asked for, written in Rust like everything
 //! else at the boundary (ADR-0002); any other class is a wall that names it.
 
-use super::{Convention, Ctx, Shim};
+use super::{stdcall, Ctx, Shim};
 use crate::com::{iid_text, read_iid, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
-    Shim {
-        dll: "ole32",
-        name: "CoInitialize",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: initialize,
-    },
-    Shim {
-        dll: "ole32",
-        name: "CoUninitialize",
-        args: 0,
-        convention: Convention::Stdcall,
-        run: uninitialize,
-    },
-    Shim {
-        dll: "ole32",
-        name: "CoTaskMemFree",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: task_mem_free,
-    },
-    Shim {
-        dll: "ole32",
-        name: "CoCreateInstance",
-        args: 5,
-        convention: Convention::Stdcall,
-        run: create_instance,
-    },
+    stdcall("ole32", "CoInitialize", 1, initialize),
+    stdcall("ole32", "CoUninitialize", 0, uninitialize),
+    stdcall("ole32", "CoTaskMemFree", 1, task_mem_free),
+    stdcall("ole32", "CoCreateInstance", 5, create_instance),
 ];
 
 fn initialize(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

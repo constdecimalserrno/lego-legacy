@@ -53,6 +53,32 @@ pub struct Shim {
 /// what the guest will find in `eax`.
 pub type ShimFn = fn(&mut Ctx<'_>, &[u32]) -> Result<u32, Stop>;
 
+/// An entry point that takes its own arguments off the stack, spelled on one
+/// line.
+#[must_use]
+pub const fn stdcall(dll: &'static str, name: &'static str, args: u32, run: ShimFn) -> Shim {
+    Shim {
+        dll,
+        name,
+        args,
+        convention: Convention::Stdcall,
+        run,
+    }
+}
+
+/// An entry point whose caller takes the arguments off the stack, spelled on
+/// one line.
+#[must_use]
+pub const fn cdecl(dll: &'static str, name: &'static str, args: u32, run: ShimFn) -> Shim {
+    Shim {
+        dll,
+        name,
+        args,
+        convention: Convention::Cdecl,
+        run,
+    }
+}
+
 /// One open thing the guest holds a handle to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Object {
