@@ -184,8 +184,8 @@ pub static VIEWPORT3: Interface = Interface {
         wall("AddLight", 1),
         wall("DeleteLight", 1),
         wall("NextLight", 3),
-        method("GetViewport2", 1, get_viewport2),
-        method("SetViewport2", 1, set_viewport2),
+        method("GetViewport2", 1, get_viewport),
+        method("SetViewport2", 1, set_viewport),
         wall("SetBackgroundDepth2", 1),
         wall("GetBackgroundDepth2", 2),
         method("Clear2", 6, clear2),
@@ -519,11 +519,9 @@ fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
     put(0xbc, 8)?; // lights lit at once
                    // The device this is: a hardware one, named by the identifier every title
                    // compares against.
-    for (at, byte) in HAL_DEVICE.iter().enumerate() {
-        ctx.mem
-            .write(desc + 0xc4 + u32::try_from(at).unwrap_or(0), &[*byte])
-            .map_err(Stop::Fault)?;
-    }
+    ctx.mem
+        .write(desc + 0xc4, &HAL_DEVICE)
+        .map_err(Stop::Fault)?;
     Ok(())
 }
 
@@ -537,7 +535,7 @@ fn enum_z_buffer_formats(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
     ctx.mem.write(format, &[0u8; 32]).map_err(Stop::Fault)?;
     let mut put = |at: u32, value: u32| ctx.mem.write_u32(format + at, value).map_err(Stop::Fault);
     put(0x00, 32)?; // how big it says it is
-    put(0x04, 0x0000_0400)?; // DDPF_ZBUFFER: what kind of format this is
+    put(0x04, super::ddraw::DDPF_ZBUFFER)?; // what kind of format this is
     put(0x0c, 16)?; // bits of depth
     put(0x14, 0x0000_ffff)?; // and which of them the depth is in
     ctx.log.line("d3d7 z buffers: one, sixteen bits deep");
@@ -1063,14 +1061,6 @@ fn set_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 }
 
 fn get_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    fetch_viewport(ctx, this, args[0])
-}
-
-fn set_viewport2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    store_viewport(ctx, this, args[0])
-}
-
-fn get_viewport2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     fetch_viewport(ctx, this, args[0])
 }
 

@@ -157,11 +157,7 @@ impl Modules {
             let module = self.list.remove(here);
             self.list.insert(last, module);
         }
-        Ok(Some(self.base_of(name)))
-    }
-
-    fn base_of(&self, name: &str) -> u32 {
-        self.find(name).map_or(0, |m| m.base)
+        Ok(self.base_of_name(name))
     }
 
     /// Where a module the title ships was put, by name.

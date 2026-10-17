@@ -236,6 +236,9 @@ pub fn load_at(bytes: &[u8], at: u32, mem: &mut Arena) -> Result<Image, PeError>
     }
 
     if image.base != image.preferred_base {
+        // Data directory five. It was read as seven, which is the architecture
+        // directory and is always empty, so nothing had ever been relocated
+        // (#55).
         let (directory, size) = (
             u32_at(bytes, optional + 136).unwrap_or(0),
             u32_at(bytes, optional + 140).unwrap_or(0),
@@ -245,7 +248,7 @@ pub fn load_at(bytes: &[u8], at: u32, mem: &mut Arena) -> Result<Image, PeError>
                 preferred: image.preferred_base,
             });
         }
-        relocate(bytes, &image, mem)?;
+        relocate(&image, directory, size, mem)?;
     }
     image.imports = read_imports(bytes, image.base, optional)?;
     Ok(image)
@@ -427,28 +430,13 @@ fn read_imports(bytes: &[u8], base: u32, optional: usize) -> Result<Vec<Import>,
     Ok(imports)
 }
 
-/// Apply an image's base relocations, for an image that did not land where it
-/// asked to.
+/// Apply an image's base relocations, from its relocation directory, for an
+/// image that did not land where it asked to.
 ///
 /// # Errors
 /// When a relocation reaches outside the arena.
-pub fn relocate(bytes: &[u8], image: &Image, mem: &mut Arena) -> Result<usize, PeError> {
+pub fn relocate(image: &Image, directory: u32, size: u32, mem: &mut Arena) -> Result<(), PeError> {
     let delta = image.base.wrapping_sub(image.preferred_base);
-    if delta == 0 {
-        return Ok(0);
-    }
-    let pe_at = u32_at(bytes, 0x3c).unwrap_or(0) as usize;
-    let optional = pe_at + 24;
-    // Data directory five. It was read as seven, which is the architecture
-    // directory and is always empty, so nothing had ever been relocated (#55).
-    let (directory, size) = (
-        u32_at(bytes, optional + 136).unwrap_or(0),
-        u32_at(bytes, optional + 140).unwrap_or(0),
-    );
-    if directory == 0 || size == 0 {
-        return Ok(0);
-    }
-    let mut applied = 0;
     let mut at = image.base.wrapping_add(directory);
     let end = at.wrapping_add(size);
     while at < end {
@@ -467,12 +455,11 @@ pub fn relocate(bytes: &[u8], image: &Image, mem: &mut Arena) -> Result<usize, P
                 let value = mem.read_u32(target).map_err(PeError::Fault)?;
                 mem.write_u32(target, value.wrapping_add(delta))
                     .map_err(PeError::Fault)?;
-                applied += 1;
             }
         }
         at = at.wrapping_add(block);
     }
-    Ok(applied)
+    Ok(())
 }
 
 #[cfg(test)]

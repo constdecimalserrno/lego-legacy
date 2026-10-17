@@ -75,8 +75,7 @@ impl Boundary {
     /// When the address table is outside the arena.
     pub fn bind(&mut self, imports: &[Import], mem: &mut Arena) -> Result<(), Fault> {
         for import in imports {
-            let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-            mem.write_u32(import.iat, addr)?;
+            mem.write_u32(import.iat, address(self.slots.len()))?;
             self.slots.push(Entry::Import(import.clone()));
         }
         Ok(())
@@ -112,11 +111,9 @@ impl Boundary {
     /// Give a module a place the loader's program can jump to when its
     /// `DllMain` says it did not attach.
     pub fn bind_attach(&mut self, module: &str) -> u32 {
-        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-        self.slots.push(Entry::Attach {
+        self.push(Entry::Attach {
             module: module.to_owned(),
-        });
-        addr
+        })
     }
 
     /// A place for the exception walk to end at when nothing took it.
@@ -126,11 +123,9 @@ impl Boundary {
             .iter()
             .position(|e| *e == Entry::Unhandled { code })
         {
-            return THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE;
+            return address(slot);
         }
-        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-        self.slots.push(Entry::Unhandled { code });
-        addr
+        self.push(Entry::Unhandled { code })
     }
 
     /// A place for one name of a library this emulator writes, asked for by
@@ -142,39 +137,43 @@ impl Boundary {
             _ => false,
         };
         if let Some(slot) = self.slots.iter().position(matches) {
-            return THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE;
+            return address(slot);
         }
-        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-        self.slots.push(Entry::Import(Import {
+        self.push(Entry::Import(Import {
             dll: dll.to_owned(),
             name: name.to_owned(),
             // Nothing wrote this address into an import table: the guest was
             // handed it and will call it directly.
             iat: 0,
-        }));
-        addr
+        }))
     }
 
     /// Where a thread returns to when it is done. One address serves every
     /// thread: which one ended is whichever was running.
     pub fn bind_thread_end(&mut self) -> u32 {
         if let Some(slot) = self.slots.iter().position(|e| *e == Entry::ThreadEnd) {
-            return THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE;
+            return address(slot);
         }
-        let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-        self.slots.push(Entry::ThreadEnd);
-        addr
+        self.push(Entry::ThreadEnd)
     }
 
     /// Give an interface's slots addresses of their own, and hand back the
     /// address of each in slot order. What a vtable is filled with.
     pub fn bind_interface(&mut self, interface: &'static str, slots: usize) -> Vec<u32> {
-        let mut out = Vec::with_capacity(slots);
-        for slot in 0..slots {
-            let addr = THUNK_BASE + u32::try_from(self.slots.len()).unwrap_or(0) * THUNK_STRIDE;
-            self.slots.push(Entry::Method { interface, slot });
-            out.push(addr);
-        }
-        out
+        (0..slots)
+            .map(|slot| self.push(Entry::Method { interface, slot }))
+            .collect()
     }
+
+    /// Give an entry the next address, and hand that address back.
+    fn push(&mut self, entry: Entry) -> u32 {
+        let addr = address(self.slots.len());
+        self.slots.push(entry);
+        addr
+    }
+}
+
+/// The address of one slot on the boundary.
+fn address(slot: usize) -> u32 {
+    THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE
 }

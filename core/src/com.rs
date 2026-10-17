@@ -50,6 +50,11 @@ pub const fn method(name: &'static str, args: u32, run: ComFn) -> Method {
     Method { name, args, run }
 }
 
+/// What a method that has nothing to do answers: that it worked.
+pub fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(S_OK)
+}
+
 /// What a declared but unwritten slot does. The machine fills in which
 /// interface and method it was, because only it knows which slot was called.
 fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {

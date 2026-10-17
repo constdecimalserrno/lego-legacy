@@ -1155,11 +1155,7 @@ impl Host for MacWindow {
             declared_nanos.saturating_sub(was_declared),
         );
         if gone >= PACE_NANOS {
-            self.pace = if gone == 0 {
-                1.0
-            } else {
-                (made as f64 / gone as f64).clamp(0.0, 1.0)
-            };
+            self.pace = (made as f64 / gone as f64).clamp(0.0, 1.0);
             self.paced_from = (now, declared_nanos);
         }
         self.pace

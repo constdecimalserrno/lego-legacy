@@ -1046,10 +1046,7 @@ pub fn interface_named(name: &str) -> Option<&'static crate::com::Interface> {
 /// One method of one interface, if it is declared.
 #[must_use]
 pub fn com_method(interface: &str, slot: usize) -> Option<&'static crate::com::Method> {
-    interfaces()
-        .iter()
-        .find(|i| i.name == interface)?
-        .method(slot)
+    interface_named(interface)?.method(slot)
 }
 
 /// Find the shim behind an import, if one is written.

@@ -11,7 +11,7 @@
 //! it is still playing, follow from the declared clock (ADR-0003).
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
+use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
 use crate::cpu::x87::maths;
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
@@ -150,9 +150,8 @@ const DSERR_INVALIDCALL: u32 = 0x8878_0032;
 
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DirectSoundCreate(guid, out, outer).
-    let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
+    let object = make(ctx)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
-    ctx.log.line(&format!("dsound created at {object:#010x}"));
     Ok(S_OK)
 }
 
@@ -418,10 +417,6 @@ pub static INTERFACES: &[&Interface] = &[
     &DIRECT_SOUND_3D_LISTENER,
     &DIRECT_SOUND_3D_BUFFER,
 ];
-
-fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
-}
 
 /// A `D3DVALUE` passed on the stack.
 fn float(word: u32) -> f32 {

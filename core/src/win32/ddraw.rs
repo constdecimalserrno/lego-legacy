@@ -5,7 +5,7 @@
 //! because the frame the guest made is already the frame to show.
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use crate::raster::PixelFormat;
@@ -97,7 +97,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        method("AddAttachedSurface", 1, attach),
+        method("AddAttachedSurface", 1, ok),
         method("AddOverlayDirtyRect", 1, ok),
         method("Blt", 5, blit),
         method("BltBatch", 3, ok),
@@ -207,7 +207,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        method("AddAttachedSurface", 1, attach),
+        method("AddAttachedSurface", 1, ok),
         method("AddOverlayDirtyRect", 1, ok),
         method("Blt", 5, blit),
         method("BltBatch", 3, ok),
@@ -304,10 +304,6 @@ pub static INTERFACES: &[&Interface] = &[
     &DIRECT_DRAW_CLIPPER,
 ];
 
-fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
-}
-
 fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The declared machine's graphics hardware: it can do what a title needs
     // and claims nothing it cannot.
@@ -326,11 +322,11 @@ fn caps(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem
             .write_u32(at + 4, 0x0400_8041)
             .map_err(Stop::Fault)?;
-        // Four megabytes of video memory, declared, whole and free: what
-        // GetAvailableVidMem says, at dwVidMemTotal and dwVidMemFree (#93).
+        // The declared video memory, as GetAvailableVidMem says it, at
+        // dwVidMemTotal and dwVidMemFree (#93).
         for offset in [0x3c, 0x40] {
             ctx.mem
-                .write_u32(at + offset, 4 * 1024 * 1024)
+                .write_u32(at + offset, VIDEO_MEMORY)
                 .map_err(Stop::Fault)?;
         }
     }
@@ -759,10 +755,6 @@ fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn attach(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(S_OK)
-}
-
 fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // What a title asks for right after making a flipping chain: the buffer
     // behind the one on screen.
@@ -898,7 +890,7 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// A surface that holds depth rather than colour.
-const DDPF_ZBUFFER: u32 = 0x0000_0400;
+pub(crate) const DDPF_ZBUFFER: u32 = 0x0000_0400;
 
 /// `DDERR_INVALIDRECT` and `DDERR_BLTFASTCANTCLIP`.
 const DDERR_INVALIDRECT: u32 = 0x8876_0096;
@@ -1257,15 +1249,14 @@ fn create_clipper(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     Ok(S_OK)
 }
 
+/// The declared machine's video memory, four megabytes, whole and free. A
+/// title sizes its surfaces from this, so it must be the same on every run.
+const VIDEO_MEMORY: u32 = 4 * 1024 * 1024;
+
 fn available_video_memory(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // The declared machine's video memory, whole and free. A title sizes its
-    // surfaces from this, so it must be the same on every run.
-    let four_megabytes = 4 * 1024 * 1024;
     for out in [args[1], args[2]] {
         if out != 0 {
-            ctx.mem
-                .write_u32(out, four_megabytes)
-                .map_err(Stop::Fault)?;
+            ctx.mem.write_u32(out, VIDEO_MEMORY).map_err(Stop::Fault)?;
         }
     }
     Ok(S_OK)

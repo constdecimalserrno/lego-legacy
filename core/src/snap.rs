@@ -6,7 +6,6 @@
 //! from it, and a resume that tried would be told which of the three did not
 //! match.
 
-use crate::hash::{hex, Sha256};
 use std::fmt;
 
 /// The first bytes of every snapshot.
@@ -229,11 +228,7 @@ pub fn build_digest() -> String {
         .get_or_init(|| {
             let bytes = std::env::current_exe().and_then(std::fs::read);
             match bytes {
-                Ok(bytes) => {
-                    let mut h = Sha256::new();
-                    h.update(&bytes);
-                    hex(&h.finish())
-                }
+                Ok(bytes) => crate::hash::sha256_hex(&bytes),
                 // A build that cannot read itself is still a build, and saying
                 // so is better than pretending every build is the same one.
                 Err(_) => "unknown-build".to_owned(),

@@ -47,32 +47,19 @@ pub const SHIMS: &[Shim] = &[
 ];
 
 fn malloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let size = args[0];
     // `malloc(0)` gives back a pointer of its own that may be freed, which is
-    // what the heap's own `max(1)` already does.
-    let addr = ctx.state.heap.alloc(size);
-    if addr == 0 {
-        ctx.log.line(&format!(
-            "heap exhausted asking for {size} bytes: {} handed out, {} live",
-            ctx.state.heap.extent(),
-            ctx.state.heap.live_bytes()
-        ));
-    }
-    Ok(addr)
+    // what the heap's own `max(1)` already does. It is `HeapAlloc` with no
+    // flags.
+    super::kernel32::heap_alloc(ctx, &[0, 0, args[0]])
 }
 
 fn calloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let Some(size) = args[0].checked_mul(args[1]) else {
         return Ok(0);
     };
-    let addr = ctx.state.heap.alloc(size);
-    if addr != 0 {
-        // A block handed back and given out again is not zero any more, so the
-        // zeros are written rather than assumed, as `HeapAlloc` does.
-        let zeros = vec![0u8; size as usize];
-        ctx.mem.write(addr, &zeros).map_err(Stop::Fault)?;
-    }
-    Ok(addr)
+    // HEAP_ZERO_MEMORY: a block handed back and given out again is not zero
+    // any more.
+    super::kernel32::heap_alloc(ctx, &[0, 0x8, size])
 }
 
 fn realloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

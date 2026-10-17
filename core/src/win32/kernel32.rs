@@ -298,12 +298,7 @@ fn get_command_line_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // was built to handle both.
     let addr = get_command_line(ctx, args)?;
     let line = ctx.string(addr).map_err(Stop::Fault)?;
-    let wide: Vec<u8> = line
-        .as_bytes()
-        .iter()
-        .flat_map(|b| [*b, 0])
-        .chain([0, 0])
-        .collect();
+    let wide = wide(format!("{line}\0").as_bytes());
     let at = ctx.state.heap.alloc(u32::try_from(wide.len()).unwrap_or(0));
     ctx.mem.write(at, &wide).map_err(Stop::Fault)?;
     Ok(at)
@@ -331,7 +326,7 @@ fn heap_destroy(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(u32::from(ctx.state.close(args[0])))
 }
 
-fn heap_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+pub(super) fn heap_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (flags, size) = (args[1], args[2]);
     let addr = ctx.state.heap.alloc(size);
     if addr == 0 {
@@ -599,18 +594,7 @@ fn get_locale_info_a(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.state.last_error = 1004;
         return Ok(0);
     };
-    let mut bytes = value.as_bytes().to_vec();
-    bytes.push(0);
-    let needed = u32::try_from(bytes.len()).unwrap_or(0);
-    if args[3] == 0 {
-        return Ok(needed);
-    }
-    if args[3] < needed {
-        ctx.state.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
-        return Ok(0);
-    }
-    ctx.mem.write(args[2], &bytes).map_err(Stop::Fault)?;
-    Ok(needed)
+    write_sized(ctx, format!("{value}\0").as_bytes(), 1, args[2], args[3])
 }
 
 fn get_locale_info_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -618,22 +602,37 @@ fn get_locale_info_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.state.last_error = 1004;
         return Ok(0);
     };
-    let wide: Vec<u8> = value
-        .as_bytes()
-        .iter()
-        .flat_map(|b| [*b, 0])
-        .chain([0, 0])
-        .collect();
-    let needed = u32::try_from(wide.len() / 2).unwrap_or(0);
-    if args[3] == 0 {
+    let wide = wide(format!("{value}\0").as_bytes());
+    write_sized(ctx, &wide, 2, args[2], args[3])
+}
+
+/// A string handed back the way the locale's calls hand one back: a size of
+/// nothing asks how much room it would take and writes nowhere, too little
+/// room is `ERROR_INSUFFICIENT_BUFFER`, and the answer counts characters,
+/// each `width` bytes, the terminator among them.
+fn write_sized(
+    ctx: &mut Ctx<'_>,
+    bytes: &[u8],
+    width: usize,
+    at: u32,
+    room: u32,
+) -> Result<u32, Stop> {
+    let needed = u32::try_from(bytes.len() / width).unwrap_or(0);
+    if room == 0 {
         return Ok(needed);
     }
-    if args[3] < needed {
-        ctx.state.last_error = 122;
+    if room < needed {
+        ctx.state.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
         return Ok(0);
     }
-    ctx.mem.write(args[2], &wide).map_err(Stop::Fault)?;
+    ctx.mem.write(at, bytes).map_err(Stop::Fault)?;
     Ok(needed)
+}
+
+/// Text in the declared code page as two bytes a character, which for
+/// everything these titles carry is each byte and a zero.
+fn wide(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().flat_map(|b| [*b, 0]).collect()
 }
 
 /// Every locale the declared machine has, handed to the guest's own callback.
@@ -727,20 +726,7 @@ fn write_formatted(
         args[0],
         args[1]
     ));
-    let mut bytes = text.into_bytes();
-    bytes.push(0);
-    let needed = u32::try_from(bytes.len()).unwrap_or(0);
-    if args[5] == 0 {
-        // A size of nothing asks how much room it would take, and writes
-        // nowhere.
-        return Ok(needed);
-    }
-    if args[5] < needed {
-        ctx.state.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
-        return Ok(0);
-    }
-    ctx.mem.write(args[4], &bytes).map_err(Stop::Fault)?;
-    Ok(needed)
+    write_sized(ctx, format!("{text}\0").as_bytes(), 1, args[4], args[5])
 }
 
 /// The one way a title on the roster asks for a date or a time to be written:
@@ -999,11 +985,7 @@ fn get_environment_strings(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop
 }
 
 fn get_environment_strings_w(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    let wide: Vec<u8> = ENVIRONMENT
-        .as_bytes()
-        .iter()
-        .flat_map(|b| [*b, 0])
-        .collect();
+    let wide = wide(ENVIRONMENT.as_bytes());
     let addr = ctx.state.heap.alloc(u32::try_from(wide.len()).unwrap_or(0));
     if addr != 0 {
         ctx.mem.write(addr, &wide).map_err(Stop::Fault)?;
@@ -1140,12 +1122,7 @@ fn current_process_id(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 fn current_thread_id(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Whichever thread is running, which is the only one until a title makes
     // another (ADR-0005).
-    let running = ctx.state.thread;
-    Ok(ctx
-        .state
-        .threads
-        .get(running)
-        .map_or(crate::machine::THREAD_ID, |t| t.id))
+    Ok(running_thread(ctx))
 }
 
 fn get_last_error(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -1218,8 +1195,9 @@ fn multi_to_wide(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(u32::try_from(bytes.len()).unwrap_or(0));
     }
     let take = bytes.len().min(room as usize);
-    let wide: Vec<u8> = bytes[..take].iter().flat_map(|b| [*b, 0]).collect();
-    ctx.mem.write(dst, &wide).map_err(Stop::Fault)?;
+    ctx.mem
+        .write(dst, &wide(&bytes[..take]))
+        .map_err(Stop::Fault)?;
     Ok(u32::try_from(take).unwrap_or(0))
 }
 
@@ -2408,17 +2386,8 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if let Some(module) = ctx.modules.base_of_name(&file) {
         return Ok(module);
     }
-    let under = ctx.title.install_dir;
-    match ctx.modules.load(&file, under, ctx.tree, ctx.mem) {
-        Ok(Some(base)) => {
-            let imports = ctx
-                .tree
-                .read(&format!("{under}\\{file}"))
-                .and_then(|bytes| crate::pe::imports_of(&bytes, base).ok())
-                .unwrap_or_default();
-            ctx.modules
-                .bind(&imports, ctx.boundary, ctx.mem)
-                .map_err(Stop::Fault)?;
+    match load_and_bind(ctx, &file)? {
+        Some(base) => {
             // Its own code attaches it, as it does for the ones loaded before
             // the title started. A dynamic load passes no reserved argument.
             if let Some(entry) = ctx.modules.entry_of(&file).filter(|e| *e != 0) {
@@ -2426,12 +2395,36 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             }
             Ok(base)
         }
-        Ok(None) => Ok(ctx.state.give(Object::Module { name, base: 0 })),
-        Err(e) => Err(Stop::NotWritten {
+        None => Ok(ctx.state.give(Object::Module { name, base: 0 })),
+    }
+}
+
+/// Load a binary the title ships while it runs, and bind its own imports:
+/// where it was put, or nothing when it is not one of the title's own.
+///
+/// # Errors
+/// When the image will not load, or its address table is outside the arena.
+pub(super) fn load_and_bind(ctx: &mut Ctx<'_>, file: &str) -> Result<Option<u32>, Stop> {
+    let under = ctx.title.install_dir;
+    let Some(base) = ctx
+        .modules
+        .load(file, under, ctx.tree, ctx.mem)
+        .map_err(|e| Stop::NotWritten {
             what: format!("{file} will not load: {e}"),
             caller: 0,
-        }),
-    }
+        })?
+    else {
+        return Ok(None);
+    };
+    let imports = ctx
+        .tree
+        .read(&format!("{under}\\{file}"))
+        .and_then(|bytes| crate::pe::imports_of(&bytes, base).ok())
+        .unwrap_or_default();
+    ctx.modules
+        .bind(&imports, ctx.boundary, ctx.mem)
+        .map_err(Stop::Fault)?;
+    Ok(Some(base))
 }
 
 fn free_library(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -2633,7 +2626,7 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
     // Its first frame: the argument it was made with, and a return address
     // that ends the thread rather than returning into nothing.
-    let mut esp = top - 16;
+    let esp = top - 16;
     ctx.mem.write_u32(esp + 4, parameter).map_err(Stop::Fault)?;
     ctx.mem
         .write_u32(esp, ctx.boundary.bind_thread_end())
@@ -2644,8 +2637,6 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     };
     cpu.r[crate::cpu::ESP] = esp;
     cpu.seg_base[crate::cpu::FS] = block;
-    esp = 0;
-    let _ = esp;
 
     let id = ctx.state.next_thread_id + 1;
     ctx.state.next_thread_id = id;

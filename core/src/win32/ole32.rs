@@ -69,34 +69,15 @@ fn from_the_title_s_own_server(
     let Some((_, file)) = SERVERS.iter().find(|(c, _)| *c == class) else {
         return Ok(None);
     };
-    let under = ctx.title.install_dir;
     // Whether this is the first time: a server attaches once, before anything
     // calls into it.
     let fresh = !ctx.modules.holds(file);
-    let loaded = ctx
-        .modules
-        .load(file, under, ctx.tree, ctx.mem)
-        .map_err(|e| Stop::NotWritten {
-            what: format!("ole32.dll!CoCreateInstance: {file} will not load: {e}"),
-            caller: 0,
-        })?;
-    if loaded.is_none() {
+    if super::kernel32::load_and_bind(ctx, file)?.is_none() {
         ctx.log
             .line(&format!("com: {file} is not on the declared machine"));
         // REGDB_E_CLASSNOTREG, which is what a machine without it says.
         return Ok(Some(0x8004_0154));
     }
-    // Its own imports, now that it is mapped.
-    let imports = ctx
-        .tree
-        .read(&format!("{under}\\{file}"))
-        .and_then(|bytes| {
-            crate::pe::imports_of(&bytes, ctx.modules.base_of_name(file).unwrap_or(0)).ok()
-        })
-        .unwrap_or_default();
-    ctx.modules
-        .bind(&imports, ctx.boundary, ctx.mem)
-        .map_err(Stop::Fault)?;
     let Some(get_class_object) = ctx.modules.resolve(file, "DllGetClassObject") else {
         return Err(Stop::NotWritten {
             what: format!("ole32.dll!CoCreateInstance: {file} exports no DllGetClassObject"),

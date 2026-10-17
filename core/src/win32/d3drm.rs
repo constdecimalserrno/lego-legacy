@@ -98,7 +98,7 @@ pub static D3DRM3: Interface = Interface {
         method("CreateDeviceFromSurface", 5, device_from_surface),
         wall("CreateDeviceFromD3D", 3),
         wall("CreateDeviceFromClipper", 5),
-        method("CreateTextureFromSurface", 2, create_texture_from_surface),
+        method("CreateTextureFromSurface", 2, create_texture),
         wall("CreateShadow", 9),
         method("CreateViewport", 7, create_viewport),
         wall("CreateWrap", 16),
@@ -717,12 +717,7 @@ fn create_mesh_builder(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u3
 }
 
 fn create_texture(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateTexture(image, out).
-    make(ctx, &TEXTURE3, args[1])
-}
-
-fn create_texture_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateTextureFromSurface(surface, out).
+    // CreateTexture(image, out), and CreateTextureFromSurface(surface, out).
     make(ctx, &TEXTURE3, args[1])
 }
 

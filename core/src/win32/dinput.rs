@@ -6,7 +6,7 @@
 //! now.
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, ok, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -69,10 +69,6 @@ pub static INTERFACES: &[&Interface] = &[&DIRECT_INPUT, &DIRECT_INPUT_DEVICE];
 
 /// A method that has nothing to do on this machine, and says so by
 /// succeeding: there is no device to configure behind it.
-fn ok(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(DI_OK)
-}
-
 /// The two device identifiers a title asks for by name.
 ///
 /// GUID_SysKeyboard and GUID_SysMouse, recognised by their first word, which
