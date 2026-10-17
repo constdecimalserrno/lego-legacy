@@ -22,6 +22,7 @@ pub const SHIMS: &[Shim] = &[
 /// What the registry answers with.
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_MORE_DATA: u32 = 234;
 
 /// The value kinds a title on this roster stores.
 pub const REG_SZ: u32 = 1;
@@ -96,13 +97,20 @@ fn reg_query_value_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     } else {
         ctx.mem.read_u32(size_at).map_err(Stop::Fault)?
     };
-    if data_at != 0 && room >= needed {
+    let fits = room >= needed;
+    if data_at != 0 && fits {
         ctx.mem.write(data_at, &bytes).map_err(Stop::Fault)?;
     }
     if size_at != 0 {
         ctx.mem.write_u32(size_at, needed).map_err(Stop::Fault)?;
     }
-    Ok(ERROR_SUCCESS)
+    // No buffer at all asks how big the value is; one too small for it is
+    // told so, with the size it needs written, as Windows does.
+    Ok(if data_at != 0 && !fits {
+        ERROR_MORE_DATA
+    } else {
+        ERROR_SUCCESS
+    })
 }
 
 fn reg_set_value_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
