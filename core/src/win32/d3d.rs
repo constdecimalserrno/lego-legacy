@@ -328,7 +328,17 @@ fn draw_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
     };
     let at = store + args[2] * fvf_stride(fvf);
     let indices: Vec<u32> = (0..args[3]).collect();
-    draw(ctx, this, args[0], fvf, at, args[3], &indices, args[4])
+    draw(
+        ctx,
+        "IDirect3DDevice7::DrawPrimitiveVB",
+        this,
+        args[0],
+        fvf,
+        at,
+        args[3],
+        &indices,
+        args[4],
+    )
 }
 
 fn draw_indexed_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -349,7 +359,17 @@ fn draw_indexed_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Resu
         .iter()
         .map(|c| u32::from(u16::from_le_bytes(*c)))
         .collect();
-    draw(ctx, this, args[0], fvf, at, args[3], &indices, args[6])
+    draw(
+        ctx,
+        "IDirect3DDevice7::DrawIndexedPrimitiveVB",
+        this,
+        args[0],
+        fvf,
+        at,
+        args[3],
+        &indices,
+        args[6],
+    )
 }
 
 fn vertex_buffer_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1144,6 +1164,7 @@ fn material_colour(ctx: &Ctx<'_>, handle: u32) -> u32 {
 /// depth buffer to a depth, or both.
 fn clear_rects(
     ctx: &mut Ctx<'_>,
+    method: &str,
     this: u32,
     count: u32,
     rects: u32,
@@ -1154,13 +1175,14 @@ fn clear_rects(
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
-    clear_on(ctx, device, count, rects, colour, depth_value)
+    clear_on(ctx, method, device, count, rects, colour, depth_value)
 }
 
 /// Clear a device's own surface, which is what both versions of the call come
 /// down to: DirectX 6 asks a viewport and DirectX 7 asks the device (#57).
 fn clear_on(
     ctx: &mut Ctx<'_>,
+    method: &str,
     device: u32,
     count: u32,
     rects: u32,
@@ -1185,7 +1207,7 @@ fn clear_on(
     };
     if colour.is_some() && format.masks == [0; 4] {
         return Err(Stop::NotWritten {
-            what: "IDirect3DViewport3::Clear: an indexed surface".to_owned(),
+            what: format!("{method}: an indexed surface"),
             caller: 0,
         });
     }
@@ -1243,7 +1265,15 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     };
     let colour = (args[2] & D3DCLEAR_TARGET != 0).then(|| material_colour(ctx, handle));
     let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then_some(1.0);
-    clear_rects(ctx, this, args[0], args[1], colour, depth)
+    clear_rects(
+        ctx,
+        "IDirect3DViewport3::Clear",
+        this,
+        args[0],
+        args[1],
+        colour,
+        depth,
+    )
 }
 
 /// DirectX 7's clear, which the device answers itself.
@@ -1259,7 +1289,15 @@ fn clear7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     }
     let colour = (args[2] & D3DCLEAR_TARGET != 0).then_some(args[3]);
     let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then(|| f32::from_bits(args[4]));
-    clear_on(ctx, this, args[0], args[1], colour, depth)
+    clear_on(
+        ctx,
+        "IDirect3DDevice7::Clear",
+        this,
+        args[0],
+        args[1],
+        colour,
+        depth,
+    )
 }
 
 fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1273,14 +1311,30 @@ fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     }
     let colour = (args[2] & D3DCLEAR_TARGET != 0).then_some(args[3]);
     let depth = (args[2] & D3DCLEAR_ZBUFFER != 0).then(|| f32::from_bits(args[4]));
-    clear_rects(ctx, this, args[0], args[1], colour, depth)
+    clear_rects(
+        ctx,
+        "IDirect3DViewport3::Clear2",
+        this,
+        args[0],
+        args[1],
+        colour,
+        depth,
+    )
 }
 
 fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // DrawPrimitive(type, format, vertices, count, flags).
     let indices: Vec<u32> = (0..args[3]).collect();
     draw(
-        ctx, this, args[0], args[1], args[2], args[3], &indices, args[4],
+        ctx,
+        "IDirect3DDevice3::DrawPrimitive",
+        this,
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        &indices,
+        args[4],
     )
 }
 
@@ -1298,7 +1352,15 @@ fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<
         .map(|w| u32::from(u16::from_le_bytes(*w)))
         .collect();
     draw(
-        ctx, this, args[0], args[1], args[2], args[3], &indices, args[6],
+        ctx,
+        "IDirect3DDevice3::DrawIndexedPrimitive",
+        this,
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        &indices,
+        args[6],
     )
 }
 
@@ -1364,7 +1426,7 @@ fn unwritten(what: String) -> Stop {
 
 /// A render state's value, set or as it starts; one with no declared start
 /// value is a wall rather than a guess.
-fn render_state(device: &Device, state: u32) -> Result<u32, Stop> {
+fn render_state(device: &Device, method: &str, state: u32) -> Result<u32, Stop> {
     device
         .render
         .get(&state)
@@ -1372,19 +1434,23 @@ fn render_state(device: &Device, state: u32) -> Result<u32, Stop> {
         .or_else(|| render_state_at_start(state))
         .ok_or_else(|| {
             unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: render state {state}, never set and not declared"
+                "{method}: render state {state}, never set and not declared"
             ))
         })
 }
 
 /// The first texture stage's state, set or as it starts.
-fn stage_state(device: &Device, state: u32) -> Result<u32, Stop> {
+fn stage_state(device: &Device, method: &str, state: u32) -> Result<u32, Stop> {
     device
         .stages
         .get(&(0, state))
         .copied()
         .or_else(|| stage_state_at_start(state, 0))
-        .ok_or_else(|| unwritten(format!("IDirect3DDevice3::DrawPrimitive: texture stage state {state}, never set and not declared")))
+        .ok_or_else(|| {
+            unwritten(format!(
+                "{method}: texture stage state {state}, never set and not declared"
+            ))
+        })
 }
 
 /// A transform as a device keeps it, as a matrix.
@@ -1444,6 +1510,7 @@ fn clamps(address: u32) -> Option<bool> {
 #[allow(clippy::too_many_arguments)]
 fn draw(
     ctx: &mut Ctx<'_>,
+    method: &str,
     this: u32,
     kind: u32,
     format: u32,
@@ -1456,9 +1523,7 @@ fn draw(
     use crate::raster::{self, Blend, Combine, Compare, States};
 
     let Some(size) = pipeline::vertex_size(format) else {
-        return Err(unwritten(format!(
-            "IDirect3DDevice3::DrawPrimitive: vertex format {format:#x}"
-        )));
+        return Err(unwritten(format!("{method}: vertex format {format:#x}")));
     };
     let Some(ComState::Device3D { surface }) = ctx.state.com(this).map(|o| o.state.clone()) else {
         return Ok(DDERR_INVALIDPARAMS);
@@ -1475,9 +1540,7 @@ fn draw(
         return Ok(DDERR_INVALIDPARAMS);
     };
     if pixel_format.masks == [0; 4] {
-        return Err(unwritten(
-            "IDirect3DDevice3::DrawPrimitive: into an indexed surface".to_owned(),
-        ));
+        return Err(unwritten(format!("{method}: into an indexed surface")));
     }
 
     // The vertices as the title wrote them.
@@ -1493,8 +1556,8 @@ fn draw(
     // What the device draws them with. A state this pipeline does not honour
     // is a wall once a title turns it on, not a frame drawn as if it had not.
     let device = device_of(ctx.state, this);
-    let state = |s: u32| render_state(device, s);
-    let stage = |s: u32| stage_state(device, s);
+    let state = |s: u32| render_state(device, method, s);
+    let stage = |s: u32| stage_state(device, method, s);
     for (what, on) in [
         ("a texture by handle", state(rs::TEXTUREHANDLE)? != 0),
         (
@@ -1508,9 +1571,7 @@ fn draw(
         ("a fill that is not solid", state(rs::FILLMODE)? != 3),
     ] {
         if on {
-            return Err(unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: {what}"
-            )));
+            return Err(unwritten(format!("{method}: {what}")));
         }
     }
     let world = matrix_of(device, WORLD);
@@ -1525,18 +1586,10 @@ fn draw(
     let material_handle = device.light.get(&LIGHT_MATERIAL).copied().unwrap_or(0);
     let ambient = pipeline::colour(device.light.get(&LIGHT_AMBIENT).copied().unwrap_or(0));
     let compare = |value: u32| {
-        Compare::from_d3d(value).ok_or_else(|| {
-            unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: comparison {value}"
-            ))
-        })
+        Compare::from_d3d(value).ok_or_else(|| unwritten(format!("{method}: comparison {value}")))
     };
     let blend = |value: u32| {
-        Blend::from_d3d(value).ok_or_else(|| {
-            unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: blend factor {value}"
-            ))
-        })
+        Blend::from_d3d(value).ok_or_else(|| unwritten(format!("{method}: blend factor {value}")))
     };
     // Fog. With neither mode a curve of its own, Direct3D takes each
     // vertex's factor from the alpha its title wrote in the specular colour,
@@ -1545,7 +1598,7 @@ fn draw(
         let (table, vertex) = (state(rs::FOGTABLEMODE)?, state(rs::FOGVERTEXMODE)?);
         if table != 0 || vertex != 0 || format & fvf::SPECULAR == 0 {
             return Err(unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: fog, table mode {table}, vertex mode {vertex},                  vertex format {format:#x}"
+                "{method}: fog, table mode {table}, vertex mode {vertex}, vertex format {format:#x}"
             )));
         }
         let [r, g, b, _] = pipeline::colour(state(rs::FOGCOLOR)?);
@@ -1562,21 +1615,13 @@ fn draw(
         match state(rs::TEXTUREMAG)? {
             1 | 3 | 4 => false,
             2 | 5 | 6 => true,
-            other => {
-                return Err(unwritten(format!(
-                    "IDirect3DDevice3::DrawPrimitive: texture filter {other}"
-                )))
-            }
+            other => return Err(unwritten(format!("{method}: texture filter {other}"))),
         }
     } else {
         match stage(tss::MAGFILTER)? {
             1 => false,
             2 => true,
-            other => {
-                return Err(unwritten(format!(
-                    "IDirect3DDevice3::DrawPrimitive: magnification filter {other}"
-                )))
-            }
+            other => return Err(unwritten(format!("{method}: magnification filter {other}"))),
         }
     };
     let address = |legacy: u32, own: u32| -> Result<bool, Stop> {
@@ -1587,11 +1632,7 @@ fn draw(
         } else {
             stage(own)?
         };
-        clamps(value).ok_or_else(|| {
-            unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: texture address {value}"
-            ))
-        })
+        clamps(value).ok_or_else(|| unwritten(format!("{method}: texture address {value}")))
     };
     let clamp = [
         address(rs::TEXTUREADDRESSU, tss::ADDRESSU)?,
@@ -1639,7 +1680,7 @@ fn draw(
     let (Some(colour_combine), Some(alpha_combine)) = (combine(op, a1, a2), combine(aop, aa1, aa2))
     else {
         return Err(unwritten(format!(
-            "IDirect3DDevice3::DrawPrimitive: texture stage colour {op} ({a1:#x}, {a2:#x}), alpha {aop} ({aa1:#x}, {aa2:#x})"
+            "{method}: texture stage colour {op} ({a1:#x}, {a2:#x}), alpha {aop} ({aa1:#x}, {aa2:#x})"
         )));
     };
     states.colour = colour_combine;
@@ -1665,10 +1706,9 @@ fn draw(
                 pipeline::Viewport::whole(x, y, w, h)
             }
             _ => {
-                return Err(unwritten(
-                    "IDirect3DDevice3::DrawPrimitive: a viewport the title described itself"
-                        .to_owned(),
-                ))
+                return Err(unwritten(format!(
+                    "{method}: a viewport the title described itself"
+                )))
             }
         }
     };
@@ -1677,9 +1717,9 @@ fn draw(
     let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
     let lighting = untransformed && format & fvf::NORMAL != 0 && flags & D3DDP_DONOTLIGHT == 0;
     if lighting && states.specular {
-        return Err(unwritten(
-            "IDirect3DDevice3::DrawPrimitive: specular highlights on lit vertices".to_owned(),
-        ));
+        return Err(unwritten(format!(
+            "{method}: specular highlights on lit vertices"
+        )));
     }
     let material = if lighting {
         let bytes = ctx
@@ -1692,7 +1732,7 @@ fn draw(
             Some(m) => Some(m),
             None => {
                 return Err(unwritten(format!(
-                    "IDirect3DDevice3::DrawPrimitive: lit vertices with material handle {material_handle}"
+                    "{method}: lit vertices with material handle {material_handle}"
                 )))
             }
         }
@@ -1755,11 +1795,7 @@ fn draw(
             })
             .collect(),
         6 => (1..n.saturating_sub(1)).map(|t| [0, t, t + 1]).collect(),
-        other => {
-            return Err(unwritten(format!(
-                "IDirect3DDevice3::DrawPrimitive: primitive type {other}"
-            )))
-        }
+        other => return Err(unwritten(format!("{method}: primitive type {other}"))),
     };
 
     // The texture the first stage samples, in its own format.
@@ -1784,10 +1820,9 @@ fn draw(
                     Some(out)
                 }
                 _ if tf.masks == [0; 4] => {
-                    return Err(unwritten(
-                        "IDirect3DDevice3::DrawPrimitive: an indexed texture with no palette"
-                            .to_owned(),
-                    ))
+                    return Err(unwritten(format!(
+                        "{method}: an indexed texture with no palette"
+                    )))
                 }
                 _ => None,
             };

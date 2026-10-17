@@ -31,6 +31,7 @@ extern "C" {
         symbol: *const core::ffi::c_char,
     ) -> *mut core::ffi::c_void;
     fn dlclose(handle: *mut core::ffi::c_void) -> i32;
+    fn dlerror() -> *const core::ffi::c_char;
     #[cfg_attr(target_os = "macos", link_name = "__error")]
     #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
     fn errno_location() -> *mut i32;
@@ -39,6 +40,23 @@ extern "C" {
 fn errno() -> i32 {
     // Safety: the platform's own thread-local errno accessor.
     unsafe { *errno_location() }
+}
+
+/// Why the dynamic loader last refused. It says so through `dlerror`, and
+/// leaves `errno` holding whatever it held.
+fn loader_error(what: &'static str) -> HostError {
+    // Safety: the loader's own message, read before any other call to it on
+    // this thread can replace it.
+    let message = unsafe { dlerror() };
+    let why = if message.is_null() {
+        "no reason given".to_owned()
+    } else {
+        // Safety: a non-null answer is a NUL-terminated string.
+        unsafe { std::ffi::CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    HostError::Loader { what, why }
 }
 
 /// Map anonymous, private, readable and writable memory.
@@ -91,10 +109,7 @@ impl Library {
         // Safety: `c` is a live NUL-terminated string for the call's duration.
         let handle = unsafe { dlopen(c.as_ptr(), RTLD_NOW) };
         if handle.is_null() {
-            return Err(HostError::Os {
-                what: "dlopen",
-                errno: errno(),
-            });
+            return Err(loader_error("dlopen"));
         }
         Ok(Self { handle })
     }
@@ -122,10 +137,7 @@ impl Library {
         // Safety: `c` is a live NUL-terminated string for the call's duration.
         let p = unsafe { dlsym(self.handle, c.as_ptr()) };
         if p.is_null() {
-            return Err(HostError::Os {
-                what: "dlsym",
-                errno: errno(),
-            });
+            return Err(loader_error("dlsym"));
         }
         Ok(p)
     }
@@ -135,5 +147,20 @@ impl Drop for Library {
     fn drop(&mut self) {
         // Safety: the handle came from `dlopen` and is closed once.
         unsafe { dlclose(self.handle) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A library that is not there is refused in the loader's own words,
+    /// which name it, rather than with an errno the loader never set.
+    #[test]
+    fn a_library_that_is_not_there_is_refused_in_the_loaders_words() {
+        let said = match super::Library::open("/nonexistent/lego-legacy.dylib") {
+            Ok(_) => panic!("a library that is not there opened"),
+            Err(e) => e.to_string(),
+        };
+        assert!(said.starts_with("dlopen failed: "), "{said}");
+        assert!(said.contains("lego-legacy.dylib"), "{said}");
     }
 }

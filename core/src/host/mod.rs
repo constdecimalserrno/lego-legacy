@@ -107,6 +107,8 @@ pub enum HostError {
     Unsupported(&'static str),
     /// The operating system refused, with its own errno.
     Os { what: &'static str, errno: i32 },
+    /// The dynamic loader refused, saying why in its own words.
+    Loader { what: &'static str, why: String },
     /// An operating system framework refused, with the status it returned.
     Status { what: &'static str, status: i32 },
 }
@@ -116,6 +118,7 @@ impl fmt::Display for HostError {
         match self {
             Self::Unsupported(why) => write!(f, "unsupported: {why}"),
             Self::Os { what, errno } => write!(f, "{what} failed: errno {errno}"),
+            Self::Loader { what, why } => write!(f, "{what} failed: {why}"),
             Self::Status { what, status } => write!(f, "{what} failed: status {status}"),
         }
     }
