@@ -145,6 +145,21 @@ fn class_factory_program(
     // null rather than whatever was on the heap.
     ctx.mem.write_u32(args[4], 0).map_err(Stop::Fault)?;
 
+    let code = class_factory_code(get_class_object, attach, args, iid, factory);
+    let at = ctx.state.heap.alloc(u32::try_from(code.len()).unwrap_or(0));
+    ctx.mem.write(at, &code).map_err(Stop::Fault)?;
+    Ok(at)
+}
+
+/// The class factory program's bytes, given where the interface it asks for
+/// and the factory it is handed live.
+fn class_factory_code(
+    get_class_object: u32,
+    attach: Option<(u32, u32)>,
+    args: &[u32],
+    iid: u32,
+    factory: u32,
+) -> Vec<u8> {
     let mut code: Vec<u8> = Vec::new();
     let push = |code: &mut Vec<u8>, value: u32| {
         code.push(0x68);
@@ -168,8 +183,9 @@ fn class_factory_program(
     code.extend_from_slice(&get_class_object.to_le_bytes());
     code.extend_from_slice(&[0xff, 0xd0]); // call eax
     code.extend_from_slice(&[0x85, 0xc0]); // test eax, eax
-    code.extend_from_slice(&[0x75, 0x16]); // jnz over the rest, keeping its answer
-                                           // factory->CreateInstance(outer, iid, out): slot three of its table.
+    code.extend_from_slice(&[0x75, 0x1c]); // jnz past the second call's 0x1c bytes to the ret
+
+    // factory->CreateInstance(outer, iid, out): slot three of its table.
     push(&mut code, args[4]);
     push(&mut code, args[3]);
     push(&mut code, args[1]);
@@ -180,10 +196,7 @@ fn class_factory_program(
     code.extend_from_slice(&[0x8b, 0x41, 0x0c]); // mov eax, [ecx+0xc]
     code.extend_from_slice(&[0xff, 0xd0]); // call eax
     code.push(0xc3); // ret, back into the machine with its answer in eax
-
-    let at = ctx.state.heap.alloc(u32::try_from(code.len()).unwrap_or(0));
-    ctx.mem.write(at, &code).map_err(Stop::Fault)?;
-    Ok(at)
+    code
 }
 
 fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -245,4 +258,49 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         what: format!("ole32.dll!CoCreateInstance: class {class} as {interface} is not a class this machine makes"),
         caller: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_factory_code;
+    use crate::cpu::{interp::Interp, Cpu, CpuEngine, Mode, EAX, ESP};
+    use crate::guest::{Arena, GuestMem};
+    use crate::host::headless::Headless;
+
+    #[test]
+    fn a_server_that_will_not_hand_out_a_factory_is_answered_with_its_own_refusal() {
+        const SERVER: u32 = 0x0050_0000;
+        const PROGRAM: u32 = 0x0051_0000;
+        const BACK: u32 = 0x0052_0000;
+        const STACK: u32 = 0x0010_0000;
+        let mut host = Headless::new();
+        let mut mem = Arena::new(&mut host, crate::machine::ARENA_BYTES).unwrap();
+        // A DllGetClassObject that answers CLASS_E_CLASSNOTAVAILABLE:
+        // `mov eax, 0x80040111; ret 12`.
+        mem.write(SERVER, &[0xb8, 0x11, 0x01, 0x04, 0x80, 0xc2, 0x0c, 0x00])
+            .unwrap();
+        let args = [0x0053_0000, 0, 0, 0x0053_0010, 0x0053_0020];
+        let code = class_factory_code(SERVER, None, &args, 0x0053_0030, 0x0053_0040);
+        mem.write(PROGRAM, &code).unwrap();
+        // Called by the machine, which takes its answer back at BACK.
+        mem.write_u32(STACK, BACK).unwrap();
+        let mut cpu = Cpu {
+            eip: PROGRAM,
+            ..Cpu::default()
+        };
+        cpu.r[ESP] = STACK;
+
+        let mut engine = Interp::new(Mode::FLAT);
+        for _ in 0..32 {
+            if cpu.eip == BACK {
+                break;
+            }
+            engine
+                .step(&mut cpu, &mut mem)
+                .expect("the program runs whole instructions");
+        }
+        assert_eq!(cpu.eip, BACK, "the program comes back");
+        assert_eq!(cpu.r[EAX], 0x8004_0111, "the server's own answer");
+        assert_eq!(cpu.r[ESP], STACK + 4, "and the stack as it was");
+    }
 }
