@@ -5,8 +5,8 @@ from your own discs:
 
 | Title | Status |
 |---|---|
-| LEGO Rock Raiders | **Playable**: the first mission plays through |
-| Hot Wheels Stunt Track Driver | **Playable**: the first race drives to the finish |
+| LEGO Rock Raiders | **Playable**: a person has played the first mission through |
+| Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable by route**: the Training Area plays to its end; a person's sign-off is pending |
 | LEGO Racers | On the roster, not started |
 
