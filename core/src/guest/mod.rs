@@ -272,6 +272,10 @@ impl Arena {
                 len: write_len,
             });
         }
+        // Handing out a run to change is writing it, as `slice_mut` is.
+        if self.wrote_over_code(write, write_len) {
+            self.note_written(write, write_len);
+        }
         // Safety: both runs are bounds checked directly above and do not
         // overlap, so the shared borrow and the exclusive one never alias;
         // the mapping is live for both, and neither outlives the arena's own
@@ -283,5 +287,23 @@ impl Arena {
                 core::slice::from_raw_parts_mut(base.add(w), write_len),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Arena;
+    use crate::host::headless::Headless;
+
+    /// A run handed out to change beside one to read is a write, and a write
+    /// over decoded code is noticed however it was made (#58).
+    #[test]
+    fn code_changed_through_a_read_and_a_write_is_noticed() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).expect("an arena");
+        mem.mark_code(0x2000);
+        mem.read_and_write((0x100, 4), (0x2000, 4))
+            .expect("in the arena, and apart");
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [2]);
     }
 }
