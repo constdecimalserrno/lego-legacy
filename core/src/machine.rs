@@ -1627,21 +1627,22 @@ impl Machine {
     /// Whether the processor is running somewhere that is not the guest's own
     /// code.
     ///
-    /// The image it loaded, and the boundary it calls across, are the only two
-    /// places a healthy run ever executes. Anything else is a return address
-    /// that was not one.
+    /// The image it loaded, every binary the title ships beside it, the
+    /// loader's own program that attaches them and is where every run starts
+    /// (#55), and the boundary it calls across, are the only places a healthy
+    /// run ever executes. Anything else is a return address that was not one.
     #[must_use]
     pub fn is_wild(&self) -> bool {
-        if crate::shim::Boundary::in_range(self.cpu.eip) {
+        // The stub guest is its own small thing and is never wild.
+        let Some(image) = &self.image else {
             return false;
-        }
-        match &self.image {
-            Some(image) => {
-                let eip = self.cpu.eip;
-                eip < image.base || eip >= image.base.wrapping_add(image.size)
-            }
-            // The stub guest is its own small thing and is never wild.
-            None => false,
-        }
+        };
+        let eip = self.cpu.eip;
+        let inside = |base: u32, size: u32| eip.wrapping_sub(base) < size;
+        let modules = self.modules.modules();
+        !(crate::shim::Boundary::in_range(eip)
+            || inside(image.base, image.size)
+            || inside(crate::loader::ATTACH_PROGRAM, 0x1000)
+            || modules.iter().any(|m| inside(m.base, m.size)))
     }
 }

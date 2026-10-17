@@ -264,6 +264,34 @@ fn the_digest_sees_inside_the_binaries_the_title_ships() {
     assert_ne!(machine.state_digest(), before, "{} is hashed", module.name);
 }
 
+/// The debugger's `until wild` stops where the guest first runs outside its
+/// own code. Every run starts in the loader's own program and goes from there
+/// into each binary's `DllMain`, and both are the title's own (#55, #94).
+#[test]
+fn the_loader_and_the_binaries_it_attaches_are_not_wild() {
+    if !scratch() {
+        return;
+    }
+    let mut host = Headless::new();
+    let mut machine = Machine::new(&ALPHA_TEAM, &mut host).expect("a machine");
+    machine.load_title(&ALPHA_TEAM).expect("the title loads");
+    machine
+        .tree
+        .set_profile(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("wild"));
+    let mut log =
+        lego_legacy_core::runlog::RunLog::create(ALPHA_TEAM.key, lego_legacy_core::cli::Trace::Off)
+            .expect("a run directory");
+    while machine.clock.cursor() < 200_000 {
+        assert!(
+            !machine.is_wild(),
+            "wild at {:#010x} cursor {}",
+            machine.cpu.eip,
+            machine.clock.cursor()
+        );
+        assert_eq!(machine.tick(&mut host, &mut log), None, "the run goes on");
+    }
+}
+
 /// A forwarded export stands for one somewhere else, and this loader does not
 /// follow one. Nothing on this disc has one, and this is what says so: if a
 /// pressing ever does, the following gets written (#55).
