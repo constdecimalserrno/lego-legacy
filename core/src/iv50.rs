@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Derived from FFmpeg's Indeo 5 decoder, Copyright (c) 2009-2011 Maxim
+// Poliakovski and the FFmpeg developers. See NOTICE.
+
 //! Indeo Video Interactive 5, the codec the roster's movies are written in.
 //!
 //! Rock Raiders' movies are all IV50 (#9). The format: a little-endian

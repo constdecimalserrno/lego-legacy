@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Derived from FFmpeg's Indeo 5 decoder, Copyright (c) 2009-2011 Maxim
+// Poliakovski and the FFmpeg developers. See NOTICE.
+
 //! The constants Indeo Video 5 is defined by.
 //!
 //! Numbers, not code: the codebooks, run-value maps, scan orders and

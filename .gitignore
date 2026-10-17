@@ -1,7 +1,6 @@
-game-data/rock-raiders
-game-data/racers
-game-data/alpha-team
-game-data/hotwheels-stunt-track-driver
+/game-data/
 /target
 /runs
 /vendor
+/.claude/
+.DS_Store

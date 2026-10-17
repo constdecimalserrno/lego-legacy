@@ -1,0 +1,28 @@
+lego-legacy
+Copyright (c) 2026 constdecimalserrno
+
+Licensed under the Apache License, Version 2.0 (LICENSE-APACHE) or the MIT
+license (LICENSE-MIT), at your option, except as stated below.
+
+Indeo Video 5 decoder
+---------------------
+core/src/iv50.rs and everything under core/src/iv50/ are derived from FFmpeg's
+Indeo Video Interactive 5 decoder (libavcodec/indeo5.c, indeo5data.h, ivi.c,
+ivi.h, ivi_dsp.c, ivi_dsp.h): its codebooks, run-value maps, scan orders and
+dequantisation tables, and the structure of its inverse transforms.
+
+  Copyright (c) 2009-2011 Maxim Poliakovski and the FFmpeg developers
+
+These files are licensed under the GNU Lesser General Public License, version
+2.1 or (at your option) any later version (LICENSE-LGPL-2.1). Because they are
+compiled into the lego-legacy-core library, a binary built from this
+repository includes LGPL-licensed code; its source is this repository.
+
+FFmpeg: https://ffmpeg.org/
+
+Not affiliated
+--------------
+LEGO, Rock Raiders and Alpha Team are trademarks of the LEGO Group. Hot Wheels
+and Stunt Track Driver are trademarks of Mattel. Windows and DirectX are
+trademarks of Microsoft. This project is not affiliated with or endorsed by
+any of them, and distributes none of their games, data or binaries.
