@@ -129,6 +129,9 @@ pub struct Machine {
     pub recording: Option<crate::route::Route>,
     /// Which flips to write into the run directory as pictures.
     pub screenshots: crate::cli::Screenshots,
+    /// How many flips apart to write a snapshot into the run directory, if
+    /// anyone asked for them.
+    pub snapshot_every: Option<u64>,
 }
 
 impl Machine {
@@ -167,6 +170,7 @@ impl Machine {
             route: None,
             recording: None,
             screenshots: crate::cli::Screenshots::default(),
+            snapshot_every: None,
         })
     }
 
@@ -423,9 +427,26 @@ impl Machine {
     /// budget runs out.
     pub fn run(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Finish {
         log.line(&format!("engine {}", self.engine.name()));
+        // Snapshots are taken here, in the loop every run goes through, so a
+        // run that keeps them is the same machine as one that does not
+        // (ADR-0005, #94). They are off unless asked for: scrubbability costs
+        // nothing until a person wants it.
+        let every = self.snapshot_every.map(|n| n.max(1));
+        let mut next_snapshot = every;
         let outcome = loop {
             if self.clock.cursor() >= budget {
                 break Outcome::BudgetExhausted;
+            }
+            if let Some(at) = next_snapshot.filter(|at| self.flips >= *at) {
+                match self.snapshot() {
+                    Ok(bytes) => {
+                        let name = format!("flip-{}.snapshot", self.flips);
+                        let _ = std::fs::write(log.dir().join(&name), bytes);
+                        log.line(&format!("snapshot {name} cursor {}", self.clock.cursor()));
+                    }
+                    Err(fault) => log.line(&format!("snapshot refused: {fault}")),
+                }
+                next_snapshot = every.map(|every| at + every);
             }
             if let Some(outcome) = self.run_guest(host, log, budget) {
                 break outcome;

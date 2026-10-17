@@ -95,15 +95,10 @@ pub fn run_digested(
         machine.recording = Some(crate::route::Route::new());
     }
     machine.screenshots = cli.screenshots.clone();
+    machine.snapshot_every = cli.snapshot_every;
     machine.tree.set_profile(profile_dir(title, cli));
 
-    // Snapshots are off unless asked for: scrubbability costs nothing until a
-    // person wants it.
-    let finish = if let Some(every) = cli.snapshot_every {
-        run_with_snapshots(&mut machine, host, &mut log, budget, every)
-    } else {
-        machine.run(host, &mut log, budget)
-    };
+    let finish = machine.run(host, &mut log, budget);
 
     // How the pointer was driven, said in one line: a title that puts the
     // pointer somewhere every frame is steering by how far the mouse went
@@ -309,39 +304,4 @@ fn debugger(title: &'static Title, cli: &Cli) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Run, writing a snapshot every so many flips.
-fn run_with_snapshots(
-    machine: &mut crate::machine::Machine,
-    host: &mut dyn Host,
-    log: &mut RunLog,
-    budget: u64,
-    every: u64,
-) -> Finish {
-    let dir = log.dir().to_path_buf();
-    let mut next_at = every.max(1);
-    let outcome = loop {
-        if machine.clock.cursor() >= budget {
-            break Outcome::BudgetExhausted;
-        }
-        if machine.flips() >= next_at {
-            match machine.snapshot() {
-                Ok(bytes) => {
-                    let name = format!("flip-{}.snapshot", machine.flips());
-                    let _ = std::fs::write(dir.join(&name), bytes);
-                    log.line(&format!(
-                        "snapshot {name} cursor {}",
-                        machine.clock.cursor()
-                    ));
-                }
-                Err(fault) => log.line(&format!("snapshot refused: {fault}")),
-            }
-            next_at += every.max(1);
-        }
-        if let Some(outcome) = machine.tick(host, log) {
-            break outcome;
-        }
-    };
-    machine.finish(outcome)
 }

@@ -118,6 +118,15 @@ fn snapshots_are_written_on_the_cadence_that_was_asked_for() {
         ran.dir.join("flip-1.snapshot").is_file(),
         "the snapshot is in the run directory"
     );
+    // Taking them goes through the one run loop, so the run is the same
+    // machine as one that took none (ADR-0005, #94).
+    let none = Cli {
+        snapshot_every: None,
+        ..cli
+    };
+    let plain = testkit::run_headless(&STUB, &none, 1_000);
+    assert_eq!(ran.finish, plain.finish, "the same run");
+    assert_eq!(ran.digest, plain.digest, "and the machine looks the same");
 }
 
 #[test]
