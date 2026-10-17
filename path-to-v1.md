@@ -35,16 +35,16 @@ elsewhere.
 
 ### Alpha Team by route — 2026-10-04
 
-- **#85** (`0d118d2`) The Unit Menu was never a machine bug: the training lets only its
+- **#85** (`af81a39`) The Unit Menu was never a machine bug: the training lets only its
   coach be picked until step 220a, and no route had taken its first step.
-- **#61** (`858f687`) `routes/first-mission.route` plays the Training Area to its end and
+- **#61** (`d23364e`) `routes/first-mission.route` plays the Training Area to its end and
   back to the main menu (18.42 G instructions), with the determinism gate over all of it.
-- **#87** (`1f2dddf`, `399d2fb`) `GetDateFormatA`/`GetTimeFormatA`: the wall was Select
+- **#87** (`3d282e6`, `d33e170`) `GetDateFormatA`/`GetTimeFormatA`: the wall was Select
   Adventure (main menu → *Adventure*) labelling a saved slot with its date.
 
 ### Alpha Team's narration — 2026-10-17
 
-- **#92** (`5d3b8ac`) `IDirectSoundBuffer::Lock` hands out the part of a lock that runs past
+- **#92** (`cebf92d`) `IDirectSoundBuffer::Lock` hands out the part of a lock that runs past
   a buffer's end. Every line the coach finishes is heard whole (#90 measured 41% of his
   narration reaching the mix), the music streams play without a skip, and
   `routes/first-mission.route` was re-taken at his pace: back at the main menu at flip 7990
