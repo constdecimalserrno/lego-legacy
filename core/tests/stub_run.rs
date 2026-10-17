@@ -194,3 +194,51 @@ fn a_run_a_device_heard_says_it_never_ran_dry_and_one_nobody_heard_says_nothing(
         unheard.log
     );
 }
+
+/// A host that cannot keep pace says so, and the run says it back for a
+/// title's own frames as it does for the stub's: those are presented by
+/// another path, and it never asked (#75, #94).
+#[test]
+fn a_title_s_frame_on_a_slow_host_logs_its_pace() {
+    struct Slow(Headless);
+    impl Host for Slow {
+        fn present(&mut self, frame: &Frame<'_>) {
+            self.0.present(frame);
+        }
+        fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+            self.0.poll_input(flip)
+        }
+        fn audio(&mut self, samples: &[i16]) {
+            self.0.audio(samples);
+        }
+        fn wall_nanos(&self) -> u64 {
+            self.0.wall_nanos()
+        }
+        fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+            self.0.map(len)
+        }
+        fn pace(&mut self, _declared_nanos: u64) -> f64 {
+            0.5
+        }
+    }
+
+    scratch();
+    let mut host = Slow(Headless::new());
+    let mut machine =
+        lego_legacy_core::machine::Machine::new(&TEST_TITLE, &mut host).expect("a machine");
+    machine.load_stub().expect("the stub loads");
+    // What a title's own `Flip` leaves for the machine to present.
+    machine.state.present = Some(lego_legacy_core::win32::Present {
+        pixels: stub::SURFACE,
+        width: 4,
+        height: 4,
+        pitch: 16,
+        depth: 32,
+    });
+    let mut log =
+        lego_legacy_core::runlog::RunLog::create("stub", Trace::Off).expect("a run directory");
+    assert_eq!(machine.tick(&mut host, &mut log), None);
+    let text = std::fs::read_to_string(log.dir().join("log")).expect("the log reads");
+    assert!(text.contains("flip 0 cursor 0 4x4x32"), "{text}");
+    assert!(text.contains("pace 0.50x"), "{text}");
+}

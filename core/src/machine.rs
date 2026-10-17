@@ -249,16 +249,21 @@ impl Machine {
             self.flips,
             self.clock.cursor()
         ));
-        // What pace the host settled on, said out loud when it changes: a
-        // run in slow motion says so rather than looking broken (#75).
+        self.pace(host, log);
+
+        self.deliver_input(host, log);
+        self.flips += 1;
+    }
+
+    /// Hold the host to the declared clock, and say what pace it settled on
+    /// when that changes: a run in slow motion says so rather than looking
+    /// broken (#75). Every flip comes here, the stub's and a title's (#94).
+    fn pace(&mut self, host: &mut dyn Host, log: &mut RunLog) {
         let pace = host.pace(self.clock.nanos());
         if (pace - self.paced).abs() >= 0.05 {
             self.paced = pace;
             log.line(&format!("pace {pace:.2}x"));
         }
-
-        self.deliver_input(host, log);
-        self.flips += 1;
     }
 
     /// Hand the guest what a person did while the frame was on screen, at the
@@ -1580,7 +1585,7 @@ impl Machine {
             frame.height,
             frame.depth
         ));
-        host.pace(self.clock.nanos());
+        self.pace(host, log);
         // One pointer on the screen: the host stops drawing its own once the
         // title has said it draws one itself (ShowCursor's count).
         let shown = self.state.cursor_shown >= 0;
