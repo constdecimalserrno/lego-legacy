@@ -934,6 +934,7 @@ fn get_system_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Declared values, every one: a run that read the host's own processor
     // count or page size would replay differently on another machine.
     let at = args[0];
+    let (kind, level) = system_processor(ctx.title.declared.processor);
     let fields: [(u32, u32); 9] = [
         (0x00, 0),           // x86, and no reserved word
         (0x04, 0x0000_1000), // a four kilobyte page
@@ -941,11 +942,9 @@ fn get_system_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         (0x0c, 0x7fff_ffff), // and the highest
         (0x10, 1),           // one processor, which is the mask of it
         (0x14, 1),           // and one of them
-        (0x18, 586),         // a Pentium II, as the declared machine says
+        (0x18, kind),        // what Windows calls the declared processor
         (0x1c, 0x0001_0000), // images are handed out this far apart
-        // Level 6 and revision 0x0502: family 6, model 5, stepping 2, which
-        // is what cpuid says the declared processor is (#93).
-        (0x20, 0x0502_0006),
+        (0x20, level),       // and its level, with the revision above it
     ];
     for (offset, value) in fields {
         ctx.mem
@@ -953,6 +952,24 @@ fn get_system_info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .map_err(Stop::Fault)?;
     }
     Ok(1)
+}
+
+/// The declared processor as SYSTEM_INFO names it, from what its own `cpuid`
+/// says it is (#93, #104): the type, and the level with the revision above it.
+///
+/// Windows calls every Pentium, the Pentium II among them,
+/// PROCESSOR_INTEL_PENTIUM. The level is the family, and the revision the
+/// model and the stepping. An Intel386 cannot be asked, and only the
+/// conformance corpus has one.
+fn system_processor(processor: crate::cpu::Processor) -> (u32, u32) {
+    use crate::cpu::Processor;
+    let kind = match processor {
+        Processor::I386 => 386,
+        Processor::Pentium | Processor::PentiumII => 586,
+    };
+    let [signature, ..] = crate::cpu::exec::cpuid(processor, 1);
+    let (family, model, stepping) = (signature >> 8 & 0xf, signature >> 4 & 0xf, signature & 0xf);
+    (kind, family | model << 24 | stepping << 16)
 }
 
 /// A process ending itself the hard way, which on this machine is the only
@@ -2702,9 +2719,18 @@ fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 #[cfg(test)]
 mod tests {
     use super::{
-        declared_file_time, declared_now, seek_to, short_date, time_without_seconds, weekday,
-        DECLARED_DAY,
+        declared_file_time, declared_now, seek_to, short_date, system_processor,
+        time_without_seconds, weekday, DECLARED_DAY,
     };
+    use crate::cpu::Processor;
+
+    #[test]
+    fn system_info_names_the_processor_cpuid_does() {
+        // A Pentium 166: family 5, model 2, stepping C.
+        assert_eq!(system_processor(Processor::Pentium), (586, 0x020c_0005));
+        // A Pentium II 450, as it always said: family 6, model 5, stepping 2.
+        assert_eq!(system_processor(Processor::PentiumII), (586, 0x0502_0006));
+    }
 
     /// 1999-10-29, three minutes and fourteen seconds past midnight, where
     /// Select Adventure saves (#87), with a weekday that is not its own (#91).
