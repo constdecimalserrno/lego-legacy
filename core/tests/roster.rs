@@ -130,10 +130,10 @@ fn an_image_inside_the_cabinet_is_found_and_hashed_like_any_other() {
     );
 }
 
-/// The same title pointed at an image the cabinet does not hold says where it
-/// looked rather than starting something else (#53).
+/// The same title pointed at an image the cabinet does not hold says what it
+/// looked for rather than starting something else (#53).
 #[test]
-fn an_image_the_cabinet_does_not_hold_is_absent() {
+fn an_image_the_cabinet_does_not_hold_is_named() {
     if !testkit::rips(&roster::ALPHA_TEAM.image) {
         return;
     }
@@ -147,11 +147,8 @@ fn an_image_the_cabinet_does_not_hold_is_absent() {
         red_book: None,
     };
     match roster::look_for(&absent) {
-        Found::Absent { looked_at } => assert!(
-            looked_at.contains("NoSuchThing.exe"),
-            "looked at {looked_at}"
-        ),
-        other => panic!("found {other} instead of saying where it looked"),
+        Found::Unreadable { why } => assert!(why.contains("NoSuchThing.exe"), "{why}"),
+        other => panic!("found {other} instead of naming what it looked for"),
     }
 }
 
@@ -187,5 +184,27 @@ fn a_damaged_rip_is_refused_by_name_rather_than_read_past() {
             err.contains(&path.display().to_string()) && err.contains("ripped again"),
             "names the image and says what to do: {err}"
         );
+    }
+}
+
+/// The launcher lists a damaged rip as damaged, not as missing.
+#[test]
+fn a_damaged_rip_is_listed_as_damaged() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("listed-damaged");
+    std::fs::create_dir_all(dir.join("x")).expect("the directory is made");
+    damaged_rip("listed-damaged/x/x.iso", 2048, &[20]);
+    let damaged = Entry {
+        red_book: None,
+        image: EntryImage {
+            // An absolute directory, which the game-data root joins as itself.
+            disc_dir: Box::leak(dir.display().to_string().into_boxed_str()),
+            pressing: "x",
+            ..roster::ROCK_RAIDERS.image
+        },
+        ..roster::ROCK_RAIDERS
+    };
+    match roster::look_for(&damaged) {
+        Found::Unreadable { why } => assert!(why.contains("ripped again"), "{why}"),
+        other => panic!("found {other} instead of saying the rip is damaged"),
     }
 }

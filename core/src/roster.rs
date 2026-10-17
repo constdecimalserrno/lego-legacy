@@ -97,6 +97,10 @@ pub enum Found {
     WrongBytes { pressing: String, found: String },
     /// No rip where one was expected, and where that was.
     Absent { looked_at: String },
+    /// The rip is there and its executable cannot be read out of it: the
+    /// image is damaged, is not an image, or does not hold it. Says which, as
+    /// the machine would on starting it.
+    Unreadable { why: String },
 }
 
 impl std::fmt::Display for Found {
@@ -114,6 +118,7 @@ impl std::fmt::Display for Found {
                 )
             }
             Self::Absent { looked_at } => write!(f, "no rip at {looked_at}"),
+            Self::Unreadable { why } => write!(f, "{why}"),
         }
     }
 }
@@ -124,18 +129,17 @@ pub fn look_for(entry: &Entry) -> Found {
     let path = crate::disc::pressing_path(entry.image.disc_dir, entry.image.pressing);
     let mut iso = match crate::disc::Iso::open(&path) {
         Ok(iso) => iso,
-        Err(_) => {
+        Err(crate::disc::DiscError::Missing(_)) => {
             return Found::Absent {
                 looked_at: path.display().to_string(),
             };
         }
+        Err(e) => return Found::Unreadable { why: e.to_string() },
     };
-    let Ok(bytes) = entry.image.read(&mut iso) else {
-        return Found::Absent {
-            looked_at: format!("{}!{}", path.display(), entry.image.path),
-        };
-    };
-    judge(&entry.image, &bytes)
+    match entry.image.read(&mut iso) {
+        Ok(bytes) => judge(&entry.image, &bytes),
+        Err(e) => Found::Unreadable { why: e.to_string() },
+    }
 }
 
 /// What an image's bytes are, asked the same way by the launcher and by the
