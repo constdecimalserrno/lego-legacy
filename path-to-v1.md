@@ -24,13 +24,13 @@ Every open ticket is on this path. Anything else was closed on 2026-10-04 (#40, 
 - **#87** (`1f2dddf`, `399d2fb`) `GetDateFormatA`/`GetTimeFormatA`: the wall was Select
   Adventure (main menu → *Adventure*) labelling a saved slot with its date.
 
-### Alpha Team's narration — before the sign-off play
+### Alpha Team's narration — done 2026-10-17
 
-- **#92** Every narration line loses every other second in the mix, because
-  `IDirectSoundBuffer::Lock` never hands out the half of a buffer that wraps.
-  #90 measured it: 41% of the training's narration reaches the mix, and the
-  device is not to blame (it runs dry at loads, not under the coach). The fix
-  re-takes `routes/first-mission.route`, whose steps follow the coach's voice.
+- **#92** (`5d3b8ac`) `IDirectSoundBuffer::Lock` hands out the part of a lock that runs past
+  a buffer's end. Every line the coach finishes is heard whole (#90 measured 41% of his
+  narration reaching the mix), the music streams play without a skip, and
+  `routes/first-mission.route` was re-taken at his pace: back at the main menu at flip 7990
+  (23.22 G instructions), with `m0010_020a` gated at least 310 flips after `m0010_010`.
 
 ### Cleanup before launch — nothing a title sees moves
 
