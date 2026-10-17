@@ -943,13 +943,18 @@ impl Machine {
 
     /// The regions of guest memory a snapshot carries, and the digest hashes:
     /// where the image and every binary the title ships were placed — whose
-    /// `.data` is where Alpha Team keeps most of itself (#55, #94) — how far
-    /// the heap has grown, the stack down to where it stands, and the surface.
+    /// `.data` is where Alpha Team keeps most of itself (#55, #94) — every
+    /// page the guest committed, the stack down to where it stands, and the
+    /// surface. What the guest committed is what it claimed from
+    /// `VirtualAlloc` by address and how far the heap has grown, and Alpha
+    /// Team's own loader puts its level images in both: the first at
+    /// `0x1000_0000`, and every one after it wherever the heap puts it (#98).
     ///
-    // ponytail: the declared regions rather than every page. A guest that
-    // wrote outside its own images, heap, stack and surface would resume with
-    // that writing lost. Upgrade path: a dirty-page map in the arena, which
-    // the engine's unchecked path would have to go through.
+    // ponytail: what the guest was handed rather than every page it wrote. A
+    // guest that wrote to the thread block, a file mapped into the arena, or a
+    // stack it is not standing on would resume with that writing lost.
+    // Upgrade path: a dirty-page map in the arena, which the engine's
+    // unchecked path would have to go through.
     fn snapshot_regions(&self) -> Vec<(u32, u32)> {
         let mut regions = Vec::new();
         if let Some(image) = &self.image {
@@ -957,6 +962,9 @@ impl Machine {
         }
         for module in self.modules.modules() {
             regions.push((module.base, module.size));
+        }
+        for (start, end) in &self.state.claimed {
+            regions.push((*start, end - start));
         }
         regions.push((crate::guest::heap::HEAP_BASE, self.state.heap.extent()));
         let esp = self.cpu.r[crate::cpu::ESP];
@@ -1629,8 +1637,10 @@ impl Machine {
     ///
     /// The image it loaded, every binary the title ships beside it, the
     /// loader's own program that attaches them and is where every run starts
-    /// (#55), and the boundary it calls across, are the only places a healthy
-    /// run ever executes. Anything else is a return address that was not one.
+    /// (#55), every page the guest committed — where Alpha Team's own loader
+    /// puts its level images (#98) — and the boundary it calls across, are
+    /// the only places a healthy run ever executes. Anything else is a return
+    /// address that was not one.
     #[must_use]
     pub fn is_wild(&self) -> bool {
         // The stub guest is its own small thing and is never wild.
@@ -1643,6 +1653,8 @@ impl Machine {
         !(crate::shim::Boundary::in_range(eip)
             || inside(image.base, image.size)
             || inside(crate::loader::ATTACH_PROGRAM, 0x1000)
-            || modules.iter().any(|m| inside(m.base, m.size)))
+            || modules.iter().any(|m| inside(m.base, m.size))
+            || self.state.claimed.iter().any(|(s, e)| inside(*s, e - s))
+            || inside(crate::guest::heap::HEAP_BASE, self.state.heap.extent()))
     }
 }

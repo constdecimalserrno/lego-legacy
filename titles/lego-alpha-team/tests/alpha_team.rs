@@ -213,9 +213,45 @@ fn the_digest_sees_inside_the_binaries_the_title_ships() {
     assert_ne!(machine.state_digest(), before, "{} is hashed", module.name);
 }
 
+/// Alpha Team's own loader puts the first level image it loads at
+/// `0x1000_0000`, in memory it claims from `VirtualAlloc` by that address,
+/// and the digest a determinism gate compares sees what is written there
+/// (#98).
+#[test]
+fn the_digest_sees_the_level_image_the_title_claimed_by_address() {
+    use lego_legacy_core::guest::GuestMem;
+    if !scratch() {
+        return;
+    }
+    let mut host = Headless::new();
+    let mut machine = Machine::new(&ALPHA_TEAM, &mut host).expect("a machine");
+    machine.load_title(&ALPHA_TEAM).expect("the title loads");
+    machine
+        .tree
+        .set_profile(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("claimed"));
+    let mut log =
+        lego_legacy_core::runlog::RunLog::create(ALPHA_TEAM.key, lego_legacy_core::cli::Trace::Off)
+            .expect("a run directory");
+    machine.run(&mut host, &mut log, 20_000_000);
+    let &(start, _) = machine
+        .state
+        .claimed
+        .first()
+        .expect("the title has claimed memory by its address");
+    assert_eq!(start, 0x1000_0000, "where the first level image asks to go");
+    let before = machine.state_digest();
+    let byte = machine.arena.slice(start, 1).expect("it is mapped")[0];
+    machine.arena.write(start, &[!byte]).expect("it is mapped");
+    assert_ne!(machine.state_digest(), before, "the claimed page is hashed");
+}
+
 /// The debugger's `until wild` stops where the guest first runs outside its
 /// own code. Every run starts in the loader's own program and goes from there
-/// into each binary's `DllMain`, and both are the title's own (#55, #94).
+/// into each binary's `DllMain`, and both are the title's own (#55, #94). So
+/// is every page it committed: the heap, where this machine writes the
+/// programs that call the title back, run from cursor 18,071,274, and the
+/// first level image the title's own loader claims, run from 18,512,878
+/// (#98).
 #[test]
 fn the_loader_and_the_binaries_it_attaches_are_not_wild() {
     if !scratch() {
@@ -230,7 +266,7 @@ fn the_loader_and_the_binaries_it_attaches_are_not_wild() {
     let mut log =
         lego_legacy_core::runlog::RunLog::create(ALPHA_TEAM.key, lego_legacy_core::cli::Trace::Off)
             .expect("a run directory");
-    while machine.clock.cursor() < 200_000 {
+    while machine.clock.cursor() < 20_000_000 {
         assert!(
             !machine.is_wild(),
             "wild at {:#010x} cursor {}",
