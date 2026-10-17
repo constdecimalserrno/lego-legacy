@@ -32,6 +32,11 @@ Every open ticket is on this path. Anything else was closed on 2026-10-04 (#40, 
   device is not to blame (it runs dry at loads, not under the coach). The fix
   re-takes `routes/first-mission.route`, whose steps follow the coach's voice.
 
+### Cleanup before launch — nothing a title sees moves
+
+- **#95** What nothing calls is gone, and each shim and method is one line.
+- **#96** Each title's declaration lives in its own crate, and its tests test that one.
+
 ### The sign-off play — needs the maintainer at a window
 
 - **#62** Play Alpha Team's first mission and say what is wrong. It closes these, which are
