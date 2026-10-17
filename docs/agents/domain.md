@@ -1,5 +1,7 @@
 # Domain Docs
 
+_These files configure the AI coding agents this project is developed with (the [mattpocock/skills](https://github.com/mattpocock/skills) set). People contributing by hand can ignore them._
+
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
 ## Before exploring, read these

@@ -1,5 +1,7 @@
 # Issue tracker: GitHub
 
+_These files configure the AI coding agents this project is developed with (the [mattpocock/skills](https://github.com/mattpocock/skills) set). People contributing by hand can ignore them._
+
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
 ## Conventions
