@@ -145,22 +145,6 @@ pub static DEVICE3: Interface = Interface {
     ],
 };
 
-/// `IDirect3D2`: DirectX 5's Direct3D object.
-pub static D3D2: Interface = Interface {
-    name: "IDirect3D2",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        wall("EnumDevices", 2),
-        wall("CreateLight", 2),
-        wall("CreateMaterial", 2),
-        wall("CreateViewport", 2),
-        wall("FindDevice", 2),
-        wall("CreateDevice", 3),
-    ],
-};
-
 /// `IDirect3D3`: DirectX 6's Direct3D object: what makes materials, lights and viewports for a device.
 pub static D3D3: Interface = Interface {
     name: "IDirect3D3",
@@ -445,7 +429,6 @@ pub static INTERFACES: &[&Interface] = &[
     &DEVICE2,
     &DEVICE3,
     &DEVICE7,
-    &D3D2,
     &D3D3,
     &D3D7,
     &VERTEX_BUFFER7,
@@ -1276,9 +1259,6 @@ fn clear_on(
     }
     if let Some(buffer) = depth {
         device_of(ctx.state, device).depth = buffer;
-    }
-    if colour.is_some() {
-        ctx.state.cleared += 1;
     }
     Ok(S_OK)
 }

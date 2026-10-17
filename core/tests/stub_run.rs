@@ -152,10 +152,6 @@ impl Host for Heard {
         self.0.audio(samples);
     }
 
-    fn wall_nanos(&self) -> u64 {
-        self.0.wall_nanos()
-    }
-
     fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
         self.0.map(len)
     }
@@ -210,9 +206,6 @@ fn a_title_s_frame_on_a_slow_host_logs_its_pace() {
         }
         fn audio(&mut self, samples: &[i16]) {
             self.0.audio(samples);
-        }
-        fn wall_nanos(&self) -> u64 {
-            self.0.wall_nanos()
         }
         fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
             self.0.map(len)

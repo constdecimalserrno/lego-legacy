@@ -5,7 +5,6 @@
 //! headless run is a function of that route alone.
 
 use super::{sys, Frame, Host, HostError, Input, Mapping};
-use std::time::Instant;
 
 /// One frame this host was asked to present.
 pub struct Presented {
@@ -38,7 +37,6 @@ impl Presented {
 
 /// A host that records instead of showing.
 pub struct Headless {
-    started: Instant,
     flips: u64,
     /// Every frame presented, in order.
     pub frames: Vec<Presented>,
@@ -58,7 +56,6 @@ impl Headless {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            started: Instant::now(),
             flips: 0,
             frames: Vec::new(),
             audio_blocks: Vec::new(),
@@ -141,10 +138,6 @@ impl Host for Headless {
     fn audio(&mut self, samples: &[i16]) {
         self.audio_blocks.push(samples.to_vec());
         self.audio_flips.push(self.flips);
-    }
-
-    fn wall_nanos(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
     fn map(&mut self, len: usize) -> Result<Mapping, HostError> {

@@ -717,13 +717,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "KERNEL32",
-        name: "GetFileSize",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: get_file_size,
-    },
-    Shim {
-        dll: "KERNEL32",
         name: "WriteFile",
         args: 5,
         convention: Convention::Stdcall,
@@ -2598,13 +2591,6 @@ fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// file the machine would then try to make that long.
 fn seek_to(base: u32, distance: i32) -> Option<u32> {
     u32::try_from(i64::from(base) + i64::from(distance)).ok()
-}
-
-fn get_file_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    match ctx.state.object(args[0]) {
-        Some(Object::File { bytes, .. }) => Ok(u32::try_from(bytes.len()).unwrap_or(0)),
-        _ => Ok(INVALID_HANDLE),
-    }
 }
 
 fn get_file_attributes(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

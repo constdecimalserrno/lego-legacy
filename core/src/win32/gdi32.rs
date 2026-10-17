@@ -16,13 +16,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "GDI32",
-        name: "DeleteObject",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "GDI32",
         name: "GetStockObject",
         args: 1,
         convention: Convention::Stdcall,
@@ -57,10 +50,6 @@ const REGION: u32 = 0x0002_0010;
 
 fn region(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(REGION)
-}
-
-fn succeed(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(1)
 }
 
 fn stock_object(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

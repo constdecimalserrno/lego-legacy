@@ -297,17 +297,17 @@ pub static FRAME3: Interface = Interface {
         wall("SetSceneBackgroundDepth", 1),
         wall("SetSceneBackgroundImage", 1),
         method("SetSceneFogEnable", 1, set_scene_fog_enable),
-        method("SetSceneFogColor", 1, set_scene_fog_color),
+        method("SetSceneFogColor", 1, frame_setting),
         method("SetSceneFogMode", 1, set_scene_fog_mode),
-        method("SetSceneFogParams", 3, set_scene_fog_params),
+        method("SetSceneFogParams", 3, frame_setting),
         method("SetColor", 1, set_color),
         method("SetColorRGB", 3, set_color_rgb),
         method("GetZbufferMode", 0, get_zbuffer_mode),
-        method("SetMaterialMode", 1, set_material_mode),
+        method("SetMaterialMode", 1, frame_setting),
         method("SetOrientation", 7, set_orientation),
         method("SetPosition", 4, set_position),
         wall("SetRotation", 5),
-        method("SetSortMode", 1, set_sort_mode),
+        method("SetSortMode", 1, frame_setting),
         wall("SetTexture", 1),
         wall("SetVelocity", 5),
         method("SetZbufferMode", 1, set_zbuffer_mode),
@@ -330,7 +330,7 @@ pub static FRAME3: Interface = Interface {
         wall("InverseTransformVectors", 4),
         wall("SetTraversalOptions", 1),
         wall("GetTraversalOptions", 1),
-        method("SetSceneFogMethod", 1, set_scene_fog_method),
+        method("SetSceneFogMethod", 1, frame_setting),
         wall("GetSceneFogMethod", 1),
         wall("SetMaterialOverride", 1),
         wall("GetMaterialOverride", 1),
@@ -1169,7 +1169,7 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         .scene
         .root(scene)
         .and_then(|r| ctx.state.scene.frame(r));
-    if root.is_some_and(|f| f.fog.enabled) {
+    if root.is_some_and(|f| f.fog) {
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a scene with its fog on".to_owned(),
             caller: 0,
@@ -1421,8 +1421,10 @@ fn with_frame(
     }
 }
 
-fn set_sort_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    with_frame(ctx, this, |f| f.sort_mode = args[0])
+/// A frame's setting that nothing here draws by: answered as a frame answers
+/// it, and kept nowhere.
+fn frame_setting(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    with_frame(ctx, this, |_| {})
 }
 
 /// Where a reference frame the guest passed puts things in the scene.
@@ -1820,11 +1822,7 @@ fn vector_random(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn set_scene_fog_enable(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    with_frame(ctx, this, |f| f.fog.enabled = args[0] != 0)
-}
-
-fn set_scene_fog_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    with_frame(ctx, this, |f| f.fog.color = args[0])
+    with_frame(ctx, this, |f| f.fog = args[0] != 0)
 }
 
 fn set_scene_fog_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1832,23 +1830,7 @@ fn set_scene_fog_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32,
     if args[0] > 2 {
         return Ok(D3DRMERR_BADVALUE);
     }
-    with_frame(ctx, this, |f| f.fog.mode = args[0])
-}
-
-fn set_scene_fog_params(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // SetSceneFogParams(start, end, density).
-    let (start, end, density) = (value(args[0]), value(args[1]), value(args[2]));
-    with_frame(ctx, this, |f| {
-        f.fog.start = start;
-        f.fog.end = end;
-        f.fog.density = density;
-    })
-}
-
-fn set_scene_fog_method(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // D3DRMFOGMETHOD_VERTEX, _TABLE or _ANY: where a card computes fog. Kept
-    // for reading back; a scene that turns its fog on stops at Render.
-    with_frame(ctx, this, |f| f.fog.method = args[0])
+    with_frame(ctx, this, |_| {})
 }
 
 fn set_scene_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1930,10 +1912,6 @@ fn get_zbuffer_mode(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, 
         .scene
         .frame(ctx.state.identity(this))
         .map_or(0, |f| f.zbuffer_mode))
-}
-
-fn set_material_mode(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    with_frame(ctx, this, |f| f.material_mode = args[0])
 }
 
 fn set_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {

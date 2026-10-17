@@ -996,6 +996,12 @@ impl MacWindow {
         // settled every time the window system is asked what happened.
         self.draw_pointer_where_it_belongs();
     }
+
+    /// The host's own clock, in nanoseconds since the window opened. The guest
+    /// cannot reach this: it paces presentation.
+    fn wall_nanos(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
 }
 
 impl Drop for MacWindow {
@@ -1104,10 +1110,6 @@ impl Host for MacWindow {
         self.audio
             .as_ref()
             .map(super::mac_audio::MacAudio::underruns)
-    }
-
-    fn wall_nanos(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
     fn map(&mut self, len: usize) -> Result<Mapping, HostError> {

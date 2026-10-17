@@ -23,13 +23,9 @@ impl std::error::Error for Error {}
 pub struct Stream {
     /// `vids` or `auds`.
     pub kind: [u8; 4],
-    /// The codec, as the stream header names it.
-    pub handler: [u8; 4],
     /// Time per unit is `scale / rate` seconds.
     pub scale: u32,
     pub rate: u32,
-    /// How many units the stream holds: frames for video, blocks for audio.
-    pub length: u32,
     /// The stream's format block: a `BITMAPINFOHEADER` for video, a
     /// `WAVEFORMATEX` for audio.
     pub format: Vec<u8>,
@@ -70,8 +66,6 @@ impl Stream {
 /// A parsed movie.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Avi {
-    /// Microseconds per frame, as the main header declares it.
-    pub micros_per_frame: u32,
     pub streams: Vec<Stream>,
 }
 
@@ -113,7 +107,6 @@ fn walk(bytes: &[u8], mut at: usize, end: usize, avi: &mut Avi) -> Result<(), Er
                 // `movi` and `rec ` hold chunks; everything else holds headers.
                 walk(bytes, body + 4, body_end, avi)?;
             }
-            b"avih" => avi.micros_per_frame = u32_at(bytes, body).unwrap_or(0),
             b"strh" => {
                 let stream = avi
                     .streams
@@ -124,10 +117,8 @@ fn walk(bytes: &[u8], mut at: usize, end: usize, avi: &mut Avi) -> Result<(), Er
                     return Err(Error("a short stream header".to_owned()));
                 }
                 stream.kind.copy_from_slice(&h[0..4]);
-                stream.handler.copy_from_slice(&h[4..8]);
                 stream.scale = u32_at(h, 20).unwrap_or(0);
                 stream.rate = u32_at(h, 24).unwrap_or(0);
-                stream.length = u32_at(h, 32).unwrap_or(0);
             }
             b"strf" => {
                 let stream = avi
@@ -200,11 +191,9 @@ mod tests {
         let file = chunk(b"RIFF", &riff);
 
         let avi = parse(&file).expect("a well-formed file");
-        assert_eq!(avi.micros_per_frame, 66_666);
         assert_eq!(avi.streams.len(), 1);
         let video = &avi.streams[0];
         assert!(video.is_video());
-        assert_eq!(&video.handler, b"IV50");
         assert_eq!((video.scale, video.rate), (1, 15));
         let bodies: Vec<&[u8]> = video
             .chunks

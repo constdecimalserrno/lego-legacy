@@ -136,11 +136,6 @@ pub trait Host {
     /// samples reach a device is the backend's business.
     fn audio(&mut self, samples: &[i16]);
 
-    /// The host's own clock, in nanoseconds since the run began. The guest
-    /// cannot reach this: it exists to pace presentation and to time the
-    /// emulator itself.
-    fn wall_nanos(&self) -> u64;
-
     /// Map `len` bytes of anonymous memory for the guest's arena.
     ///
     /// # Errors

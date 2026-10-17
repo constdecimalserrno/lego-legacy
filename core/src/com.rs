@@ -123,11 +123,6 @@ const FACES: &[(&str, &str, &str)] = &[
         "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
         "IDirectDraw4",
     ),
-    (
-        "IDirectDraw4",
-        "9c59509a-39bd-11d1-8c4a-00c04fd930c5",
-        "IDirectDraw4",
-    ),
     // DirectX 7's DirectDraw, which Alpha Team asks its DirectDraw object for
     // before it will draw at all (#57). The same object underneath; its table
     // agrees with DirectX 6's slot for slot and adds two at the end.
@@ -158,23 +153,6 @@ const FACES: &[(&str, &str, &str)] = &[
         "f5049e77-4861-11d2-a407-00a0c90629a8",
         "IDirect3D7",
     ),
-    // Its surfaces, which agree with DirectX 6's as far as that one goes and
-    // add four for texture management.
-    (
-        "IDirectDrawSurface",
-        "06675a80-3b9b-11d2-b92f-00609797ea5b",
-        "IDirectDrawSurface7",
-    ),
-    (
-        "IDirectDrawSurface4",
-        "06675a80-3b9b-11d2-b92f-00609797ea5b",
-        "IDirectDrawSurface7",
-    ),
-    (
-        "IDirectDrawSurface7",
-        "06675a80-3b9b-11d2-b92f-00609797ea5b",
-        "IDirectDrawSurface7",
-    ),
     // DirectX 3's DirectDraw, which a title's movie player asks for: the same
     // slots as the newer one as far as it goes (#9).
     (
@@ -202,11 +180,6 @@ const FACES: &[(&str, &str, &str)] = &[
         "4516ec83-8f20-11d0-9b6d-0000c0781bc3",
         "IDirect3DRM3",
     ),
-    (
-        "IDirect3DRM3",
-        "4516ec83-8f20-11d0-9b6d-0000c0781bc3",
-        "IDirect3DRM3",
-    ),
     // Its surfaces. DirectX 2's surface and DirectX 6's agree slot for slot as
     // far as the older one goes, so one table answers both: everything through
     // PageUnlock is in the same place, and the newer one only adds after it.
@@ -216,18 +189,8 @@ const FACES: &[(&str, &str, &str)] = &[
         "IDirectDrawSurface4",
     ),
     (
-        "IDirectDrawSurface",
-        "6c14db81-a733-11ce-a521-0020af0be560",
-        "IDirectDrawSurface4",
-    ),
-    (
         "IDirectDrawSurface4",
         "6c14db81-a733-11ce-a521-0020af0be560",
-        "IDirectDrawSurface4",
-    ),
-    (
-        "IDirectDrawSurface4",
-        "0b2b8630-ad35-11d0-8ea6-00609797ea5b",
         "IDirectDrawSurface4",
     ),
     // The device underneath retained mode, asked for as DirectX 6's device,
@@ -236,17 +199,6 @@ const FACES: &[(&str, &str, &str)] = &[
         "IDirect3DDevice2",
         "b0ab3b60-33d7-11d1-a981-00c04fd7b174",
         "IDirect3DDevice3",
-    ),
-    (
-        "IDirect3DDevice3",
-        "b0ab3b60-33d7-11d1-a981-00c04fd7b174",
-        "IDirect3DDevice3",
-    ),
-    // A movie's video stream, asked for as the DirectDraw stream it is (#9).
-    (
-        "IDirectDrawMediaStream",
-        "f4104fce-9a70-11d0-8fde-00c04fd9189d",
-        "IDirectDrawMediaStream",
     ),
     // A frame's older face, which a frame array holds, asked for as the frame
     // it is, and the other way (#11).
@@ -303,7 +255,6 @@ const OWN: &[(&str, &str)] = &[
         "IAMMultiMediaStream",
         "bebe595c-9a6f-11d0-8fde-00c04fd9189d",
     ),
-    ("IDirect3D2", "6aae1ec1-662a-11d0-889d-00aa00bbb76a"),
     ("IDirect3D3", "bb223240-e72b-11d0-a9b4-00aa00c0993e"),
     ("IDirect3DDevice2", "93281501-8cf8-11d0-89ab-00a0c9054129"),
     ("IDirect3DDevice3", "b0ab3b60-33d7-11d1-a981-00c04fd7b174"),

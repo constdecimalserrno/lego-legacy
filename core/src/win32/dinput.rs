@@ -95,12 +95,12 @@ pub static DIRECT_INPUT_DEVICE: Interface = Interface {
         Method {
             name: "Acquire",
             args: 0,
-            run: acquire,
+            run: ok,
         },
         Method {
             name: "Unacquire",
             args: 0,
-            run: unacquire,
+            run: ok,
         },
         Method {
             name: "GetDeviceState",
@@ -178,15 +178,8 @@ fn create_device(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
         ));
         return Ok(0x8004_0154);
     }
-    let object = State::make_com(
-        ctx,
-        &DIRECT_INPUT_DEVICE,
-        ComState::Device {
-            keyboard,
-            acquired: false,
-        },
-    )
-    .map_err(Stop::Fault)?;
+    let object = State::make_com(ctx, &DIRECT_INPUT_DEVICE, ComState::Device { keyboard })
+        .map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "dinput {} at {object:#010x}",
@@ -205,30 +198,12 @@ fn device_status(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, S
     Ok(DI_OK)
 }
 
-fn acquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Device { acquired, .. } = &mut object.state {
-            *acquired = true;
-        }
-    }
-    Ok(DI_OK)
-}
-
-fn unacquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    if let Some(object) = ctx.state.com_mut(this) {
-        if let ComState::Device { acquired, .. } = &mut object.state {
-            *acquired = false;
-        }
-    }
-    Ok(DI_OK)
-}
-
 fn device_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetDeviceState(size, out). The run's own input decides what is in it.
     let (size, out) = (args[0], args[1]);
     let keyboard = matches!(
         ctx.state.com(this).map(|o| &o.state),
-        Some(ComState::Device { keyboard: true, .. })
+        Some(ComState::Device { keyboard: true })
     );
     let state = if keyboard {
         ctx.state.keyboard_state()
@@ -250,7 +225,7 @@ fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     let (size, out, count_at, flags) = (args[0], args[1], args[2], args[3]);
     let keyboard = matches!(
         ctx.state.com(this).map(|o| &o.state),
-        Some(ComState::Device { keyboard: true, .. })
+        Some(ComState::Device { keyboard: true })
     );
     let asked = if count_at == 0 {
         0

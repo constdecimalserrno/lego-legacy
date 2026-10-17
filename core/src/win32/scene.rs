@@ -28,27 +28,12 @@ pub struct Frame {
     pub lights: Vec<u32>,
     /// Where this frame is relative to its parent.
     pub local: Matrix,
-    pub sort_mode: u32,
     pub zbuffer_mode: u32,
-    pub material_mode: u32,
     pub color: u32,
     /// The scene's background colour, when this frame is a scene's root.
     pub background: u32,
-    pub fog: Fog,
-}
-
-/// A scene's fog: whether it is on, its colour, how it thickens (linear,
-/// exponential or exponential squared) and over what distances, and where
-/// the title asked for it to be computed.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Fog {
-    pub enabled: bool,
-    pub color: u32,
-    pub mode: u32,
-    pub start: f32,
-    pub end: f32,
-    pub density: f32,
-    pub method: u32,
+    /// Whether the scene's fog is on, when this frame is a scene's root.
+    pub fog: bool,
 }
 
 impl Default for Frame {
@@ -59,18 +44,15 @@ impl Default for Frame {
             visuals: Vec::new(),
             lights: Vec::new(),
             local: IDENTITY,
-            // D3DRMSORT_FROMPARENT, D3DRMZBUFFER_FROMPARENT and
-            // D3DRMMATERIAL_FROMMESH: what a new frame is documented to start
+            // D3DRMZBUFFER_FROMPARENT: what a new frame is documented to start
             // with.
-            sort_mode: 0,
             zbuffer_mode: 0,
-            material_mode: 0,
             // A frame's own colour starts opaque white.
             color: 0xffff_ffff,
             // A scene's background starts opaque black, as Wine's tests hold
             // native retained mode to.
             background: 0xff00_0000,
-            fog: Fog::default(),
+            fog: false,
         }
     }
 }

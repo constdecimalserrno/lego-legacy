@@ -54,13 +54,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "SetForegroundWindow",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "USER32",
         name: "TranslateAcceleratorA",
         args: 3,
         convention: Convention::Stdcall,
@@ -93,13 +86,6 @@ pub const SHIMS: &[Shim] = &[
         args: 5,
         convention: Convention::Stdcall,
         run: peek_message,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetMessageA",
-        args: 4,
-        convention: Convention::Stdcall,
-        run: get_message,
     },
     Shim {
         dll: "USER32",
@@ -352,20 +338,6 @@ pub const SHIMS: &[Shim] = &[
     },
     Shim {
         dll: "USER32",
-        name: "BeginPaint",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
-    },
-    Shim {
-        dll: "USER32",
-        name: "EndPaint",
-        args: 2,
-        convention: Convention::Stdcall,
-        run: succeed,
-    },
-    Shim {
-        dll: "USER32",
         name: "SetWindowTextA",
         args: 2,
         convention: Convention::Stdcall,
@@ -377,13 +349,6 @@ pub const SHIMS: &[Shim] = &[
         args: 1,
         convention: Convention::Stdcall,
         run: succeed,
-    },
-    Shim {
-        dll: "USER32",
-        name: "GetParent",
-        args: 1,
-        convention: Convention::Stdcall,
-        run: succeed_zero,
     },
     Shim {
         dll: "USER32",
@@ -1061,27 +1026,9 @@ fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
-fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GetMessageA(msg, window, first, last). A message waiting is taken. A
-    // title that waits for one on an empty queue would wait forever on a
-    // machine that only takes input at a flip, so it is given the one message
-    // that ends a loop: quit.
-    if take_message(ctx, args, true)? {
-        return Ok(1);
-    }
-    let msg = args[0];
-    if msg != 0 {
-        ctx.mem.write_u32(msg, 0).map_err(Stop::Fault)?;
-        // WM_QUIT.
-        ctx.mem.write_u32(msg + 4, 0x0012).map_err(Stop::Fault)?;
-    }
-    Ok(0)
-}
-
 fn post_quit(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.log
         .line(&format!("guest asked to quit with {}", args[0]));
-    ctx.state.quit_asked = true;
     Ok(0)
 }
 
@@ -1141,10 +1088,6 @@ fn message_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
-/// Keep the module's own use of `Object` honest: a window is a handle this
-/// machine hands out rather than an object it keeps.
-const _: Option<Object> = None;
-
 /// A modal dialog a title has up: its procedure, and what its controls hold.
 ///
 /// Nothing is drawn. The title's own procedure is run, so it fills its
@@ -1161,7 +1104,6 @@ pub struct Dialog {
     pub ended: Option<u32>,
     lists: BTreeMap<u32, List>,
     checks: BTreeMap<u32, u32>,
-    texts: BTreeMap<u32, String>,
     /// Controls the procedure has disabled, which nobody can press.
     pub disabled: std::collections::BTreeSet<u32>,
 }
@@ -1211,7 +1153,6 @@ fn dialog_box(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ended: None,
         lists: BTreeMap::new(),
         checks: BTreeMap::new(),
-        texts: BTreeMap::new(),
         disabled: std::collections::BTreeSet::new(),
     });
     // WM_INITDIALOG, with the parameter the title passed.
@@ -1272,10 +1213,7 @@ fn send_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let list = dialog.lists.entry(id).or_default();
     let answer = match message {
         // WM_SETTEXT.
-        0x000c => {
-            dialog.texts.insert(id, text);
-            1
-        }
+        0x000c => 1,
         // BM_SETCHECK, BM_GETCHECK.
         0x00f1 => {
             dialog.checks.insert(id, wparam);

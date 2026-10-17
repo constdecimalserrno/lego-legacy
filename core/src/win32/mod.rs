@@ -204,8 +204,6 @@ pub struct State {
     pub window_procedure: u32,
     /// Whether the guest has made its window.
     pub window_made: bool,
-    /// Whether the guest has asked to stop.
-    pub quit_asked: bool,
     /// Where the pointer is, in the guest's own coordinates.
     pub pointer: (i32, i32),
     /// Where a person last put the pointer, which is what the mouse moved
@@ -224,8 +222,6 @@ pub struct State {
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
     pub present: Option<Present>,
-    /// How many times a viewport has been cleared.
-    pub cleared: u64,
     /// Every sound playing, mixed on the declared clock.
     pub mixer: crate::sound::Mixer,
     /// DirectSound's buffers and listener.
@@ -341,7 +337,6 @@ impl State {
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
-            quit_asked: false,
             // The middle of the screen: where Windows leaves the pointer when
             // a mode is set, and so where a title that draws its own starts
             // it. The first thing the mouse does is measured from here, and
@@ -356,7 +351,6 @@ impl State {
             clip_lists: BTreeMap::new(),
             palette: 0,
             present: None,
-            cleared: 0,
             keys_down: Vec::new(),
             mouse_delta: (0, 0),
             mouse_data: VecDeque::new(),
@@ -698,7 +692,7 @@ pub enum ComState {
     #[default]
     None,
     /// An input device, and which one.
-    Device { keyboard: bool, acquired: bool },
+    Device { keyboard: bool },
     /// A sound buffer, whose bytes and playing state DirectSound keeps
     /// (`dsound::Sounds`).
     Sound,
@@ -995,7 +989,6 @@ pub fn fill(
             .write(pixels + y * pitch + x0 * bytes, &row)
             .map_err(Stop::Fault)?;
     }
-    ctx.state.cleared += 1;
     Ok(())
 }
 

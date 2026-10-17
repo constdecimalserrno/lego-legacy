@@ -47,10 +47,15 @@ pub struct Module {
 }
 
 /// Everything the title shipped, in the order it has to attach.
-#[derive(Default)]
 pub struct Modules {
     list: Vec<Module>,
     next: u32,
+}
+
+impl Default for Modules {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Modules {

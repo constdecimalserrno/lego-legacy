@@ -158,7 +158,6 @@ fn a_version_6_header_names_its_files_their_sizes_and_their_volumes() {
     let Some(mut iso) = alpha() else { return };
     let header = iso.read("DATA1.HDR").expect("the header reads");
     let cabinet = Cabinet::open(&header).expect("this is a cabinet");
-    assert_eq!(cabinet.major_version(), 6);
     assert_eq!(cabinet.entries().len(), 64);
 
     // The title's own entry image, which is not on the disc as a file at all.

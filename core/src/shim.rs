@@ -45,13 +45,18 @@ pub enum Entry {
 }
 
 /// The addresses a title's imports were bound to, and what stands behind each.
-#[derive(Default)]
 pub struct Boundary {
     slots: Vec<Entry>,
 }
 
 /// Where guest code returns to when the machine called it.
 pub const RETURN_TO_MACHINE: u32 = THUNK_BASE;
+
+impl Default for Boundary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Boundary {
     #[must_use]

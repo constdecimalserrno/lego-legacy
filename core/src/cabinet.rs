@@ -118,7 +118,6 @@ impl Entry {
 /// A cabinet's header, read.
 pub struct Cabinet {
     entries: Vec<Entry>,
-    major: u32,
 }
 
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
@@ -147,9 +146,6 @@ fn u64_at(b: &[u8], at: usize) -> Option<u32> {
         None
     }
 }
-
-/// How far apart two file descriptors are.
-const DESCRIPTOR: usize = 58;
 
 /// How far apart two version 6 file descriptors are, which is how that version
 /// finds them at all: they are an array rather than a table of offsets.
@@ -219,7 +215,6 @@ impl Cabinet {
                         // volume it was not told about.
                         volume: 1,
                     });
-                    let _ = DESCRIPTOR;
                 }
             }
             // Version 6 drops the per-file offsets and lays the descriptors out
@@ -249,13 +244,7 @@ impl Cabinet {
             }
             _ => return Err(CabinetError::UnknownVersion(major)),
         }
-        Ok(Self { entries, major })
-    }
-
-    /// Which version of the format this header is written in.
-    #[must_use]
-    pub fn major_version(&self) -> u32 {
-        self.major
+        Ok(Self { entries })
     }
 
     #[must_use]

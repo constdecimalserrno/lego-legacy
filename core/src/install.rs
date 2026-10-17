@@ -64,8 +64,6 @@ pub struct Tree {
     /// Where what the guest writes lands, so that a save outlives the run that
     /// made it. Without one the guest's disc is read-only.
     profile: Option<PathBuf>,
-    /// Every path the guest asked for and did not find, in the order it asked.
-    pub missing: Vec<String>,
 }
 
 impl Default for Tree {
@@ -82,7 +80,6 @@ impl Tree {
             files: BTreeMap::new(),
             iso: None,
             profile: None,
-            missing: Vec::new(),
         }
     }
 
@@ -251,8 +248,7 @@ impl Tree {
                 .is_some_and(|path| path.exists())
     }
 
-    /// Read a file the guest named, recording a miss so the tree can be told
-    /// about it.
+    /// Read a file the guest named.
     pub fn read(&mut self, guest_path: &str) -> Option<Vec<u8>> {
         let key = Self::key(guest_path);
         // What the guest wrote stands in front of what the pressing holds:
@@ -274,24 +270,9 @@ impl Tree {
                     .read_range(&data_path, entry.offset, entry.compressed as usize)
                     .ok()?;
                 let (cabinet, _) = self.cabinet.as_ref()?;
-                match cabinet.unpack(&entry, &span) {
-                    Ok(bytes) => Some(bytes),
-                    Err(_) => {
-                        self.missing.push(guest_path.to_owned());
-                        None
-                    }
-                }
+                cabinet.unpack(&entry, &span).ok()
             }
-            Some(Source::Disc(path)) => {
-                let iso = self.iso.as_mut()?;
-                match iso.read(&path) {
-                    Ok(bytes) => Some(bytes),
-                    Err(_) => {
-                        self.missing.push(guest_path.to_owned());
-                        None
-                    }
-                }
-            }
+            Some(Source::Disc(path)) => self.iso.as_mut()?.read(&path).ok(),
             None => {
                 // The declared machine has the pressing in its CD drive, so a
                 // path on D: is a path on the disc, spelled the way the disc
@@ -304,7 +285,6 @@ impl Tree {
                         }
                     }
                 }
-                self.missing.push(guest_path.to_owned());
                 None
             }
         }

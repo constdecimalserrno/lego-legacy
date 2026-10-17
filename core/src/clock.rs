@@ -24,8 +24,6 @@ pub enum FlipCost {
     /// Drawing is instantaneous on this declared machine. Unmeasured, or
     /// deliberately uncapped for a headless run.
     Free,
-    /// Drawing costs this many declared cycles per presented frame.
-    Cycles(u64),
     /// A presented frame waits for the declared display's next refresh, at
     /// this many per second: what a flip does by default on real hardware.
     Refresh(u64),
@@ -53,11 +51,6 @@ impl Default for Clock {
 }
 
 impl Clock {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// A clock on a declared processor of this frequency.
     #[must_use]
     pub fn at(hz: u64) -> Self {
@@ -111,7 +104,6 @@ impl Clock {
     pub fn present(&mut self, cost: FlipCost) {
         match cost {
             FlipCost::Free => {}
-            FlipCost::Cycles(c) => self.charged_cycles += c,
             // The next refresh strictly after now, so no two flips share one.
             FlipCost::Refresh(hz) => {
                 let period = self.hz / hz.max(1);
@@ -154,7 +146,7 @@ mod tests {
 
     #[test]
     fn a_second_of_declared_time_is_one_frequency_of_instructions() {
-        let mut c = Clock::new();
+        let mut c = Clock::default();
         for _ in 0..1000 {
             c.retire();
         }
@@ -176,19 +168,15 @@ mod tests {
     }
 
     #[test]
-    fn a_free_flip_costs_the_clock_nothing_and_a_priced_one_costs_its_cycles() {
-        let mut free = Clock::new();
+    fn a_free_flip_costs_the_clock_nothing() {
+        let mut free = Clock::default();
         free.present(FlipCost::Free);
         assert_eq!(free.cycles(), 0);
-
-        let mut priced = Clock::new();
-        priced.present(FlipCost::Cycles(4_500_000));
-        assert_eq!(priced.millis(), 10);
     }
 
     #[test]
     fn a_frame_waiting_for_the_refresh_lands_on_the_next_one() {
-        let mut clock = Clock::new();
+        let mut clock = Clock::default();
         for _ in 0..1000 {
             clock.retire();
         }
