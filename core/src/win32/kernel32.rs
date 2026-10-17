@@ -965,10 +965,10 @@ fn get_module_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(ctx.state.module(&name).unwrap_or(0))
 }
 
-fn get_module_file_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // Where the guest believes it was started from. A declared value: the
-    // install tree's own path, and the title's own image, not the host's and
-    // not the first title this machine ever ran (#58).
+/// Where the guest believes it was started from. A declared value: the
+/// install tree's own path, and the title's own image, not the host's and
+/// not the first title this machine ever ran (#58).
+fn image_path(ctx: &Ctx<'_>) -> String {
     let image = ctx
         .title
         .image
@@ -976,7 +976,11 @@ fn get_module_file_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or("game.exe");
-    let path = format!("{}\\{image}", ctx.title.install_dir);
+    format!("{}\\{image}", ctx.title.install_dir)
+}
+
+fn get_module_file_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let path = image_path(ctx);
     let written = ctx
         .write_string(args[1], args[2], &path)
         .map_err(Stop::Fault)?;
@@ -988,8 +992,9 @@ fn get_command_line(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
         return Ok(addr);
     }
     // The launch quotes the program's own path and passes nothing else: what
-    // a player double-clicking the game would produce.
-    let line = format!("\"{}\\LegoRR.exe\"", ctx.title.install_dir);
+    // a player double-clicking the game would produce. The path is the one
+    // GetModuleFileNameA gives, the running title's own (#93).
+    let line = format!("\"{}\"", image_path(ctx));
     let addr = ctx.intern(&line).map_err(Stop::Fault)?;
     ctx.state.command_line = Some(addr);
     Ok(addr)

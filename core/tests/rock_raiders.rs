@@ -17,7 +17,7 @@ const ROCK_RAIDERS: Title = Title {
     image: EntryImage {
         disc_dir: "rock-raiders",
         pressing: "masterpiece-rock-raiders",
-        path: "EXE/LEGORR.EXE",
+        path: "EXE/LegoRR.exe",
         packed: false,
         sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
         why: "the Masterpiece pressing ships the game unwrapped (ADR-0006)",

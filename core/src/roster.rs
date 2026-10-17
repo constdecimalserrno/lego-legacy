@@ -25,7 +25,11 @@ pub const ROCK_RAIDERS: Entry = Entry {
     image: EntryImage {
         disc_dir: "rock-raiders",
         pressing: "masterpiece-rock-raiders",
-        path: "EXE/LEGORR.EXE",
+        // Spelled as the cabinet's header names it, which is the name the
+        // installer gives it and the one the title takes its own name, its
+        // archives' and its window class's from (#93). The disc spells it in
+        // capitals and is read without regard to case, as Windows reads one.
+        path: "EXE/LegoRR.exe",
         packed: false,
         sha256: "62b67f5ba656c71412764d343c6a955d218e3b61f0e0f4758ad6086e971e64d4",
         why: "the original pressing's EXE/LEGORR.EXE is a 280 KB SafeDisc wrapper beside a \
