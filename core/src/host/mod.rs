@@ -7,11 +7,14 @@
 //! for itself, and [`sys`] declares the loader's entry points. A new operating
 //! system is one backend here, implementing [`Host`].
 
+pub mod feed;
 pub mod headless;
 #[cfg(target_os = "macos")]
 pub mod mac;
 #[cfg(target_os = "macos")]
 pub mod mac_audio;
+pub mod pace;
+pub mod pointer;
 pub mod stretch;
 pub mod sys;
 
