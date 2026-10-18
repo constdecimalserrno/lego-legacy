@@ -4,32 +4,32 @@ version = 4
 
 [[package]]
 name = "hotwheels-stunt-track-driver"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lego-legacy-core",
 ]
 
 [[package]]
 name = "lego-alpha-team"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lego-legacy-core",
 ]
 
 [[package]]
 name = "lego-legacy-core"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "lego-legacy-launcher"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lego-legacy-core",
 ]
 
 [[package]]
 name = "lego-rock-raiders"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lego-legacy-core",
 ]

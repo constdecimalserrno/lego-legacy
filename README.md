@@ -87,6 +87,9 @@ Tests that need a disc or the corpus skip when it is absent; the two variables t
 a failure. The disc tests replay the committed routes and check that every replay reaches the
 same machine.
 
+Each crate's version is in its own `Cargo.toml` and what changed is in the `CHANGELOG.md` beside
+it; a crate that changed since its tag without moving its version fails the suite ([ADR-0007](docs/adr/0007-every-crate-carries-its-own-version.md)).
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT),

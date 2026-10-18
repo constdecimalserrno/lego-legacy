@@ -11,8 +11,10 @@ members = [
 # ADR-0001: zero external crates, forever. Nothing may appear here or in any
 # member's [dependencies] but path entries to workspace members, and
 # `core/tests/zero_crates.rs` holds Cargo.lock to exactly that.
+#
+# ADR-0007: every member carries its own version in its own manifest, and a
+# title or the launcher pins core exactly, so nothing shares a version here.
 [workspace.package]
-version = "0.1.0"
 edition = "2021"
 rust-version = "1.98"
 publish = false
