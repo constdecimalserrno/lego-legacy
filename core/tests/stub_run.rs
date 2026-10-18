@@ -87,6 +87,7 @@ fn the_run_directory_holds_an_append_only_log_that_names_its_format() {
     let mut lines = ran.log.lines();
     assert_eq!(lines.next(), Some(lego_legacy_core::runlog::MAGIC));
     assert_eq!(lines.next(), Some("title stub"));
+    assert!(lines.next().is_some_and(|l| l.starts_with("version ")));
     assert_eq!(
         ran.log
             .lines()
@@ -94,6 +95,26 @@ fn the_run_directory_holds_an_append_only_log_that_names_its_format() {
             .count(),
         stub::RETIRED as usize,
         "--trace insns records every instruction retired"
+    );
+}
+
+#[test]
+fn the_run_log_names_the_title_crate_and_core_versions_that_made_it() {
+    scratch();
+    const VERSIONED: Title = Title {
+        version: "9.8.7",
+        ..Title::STUB
+    };
+    let cli = Cli {
+        stub: true,
+        ..Cli::default()
+    };
+    let ran = testkit::run_headless(&VERSIONED, &cli, 1_000);
+    let core = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        ran.log.lines().nth(2),
+        Some(format!("version 9.8.7 core {core}").as_str()),
+        "the header's third line names the title's crate, then core"
     );
 }
 

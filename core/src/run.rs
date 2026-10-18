@@ -63,6 +63,13 @@ pub(crate) fn setup(
     host: &mut dyn Host,
 ) -> Result<(Machine, RunLog), Box<dyn std::error::Error>> {
     let mut log = RunLog::create(title.key, cli.trace)?;
+    // Which versions made this run: the title's crate and core's, which is
+    // everything it runs, since a title pins core exactly (ADR-0007).
+    log.line(&format!(
+        "version {} core {}",
+        title.version,
+        env!("CARGO_PKG_VERSION")
+    ));
     log.line(&format!("headless {}", cli.headless));
     // Whether a device was listening. Mixing runs either way, so without this
     // a log cannot be told apart from one of a run nobody could hear — and

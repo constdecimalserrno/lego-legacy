@@ -12,6 +12,7 @@ use lego_legacy_core::Title;
 /// its reason, never measured from the host.
 pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     key: ENTRY.key,
+    version: env!("CARGO_PKG_VERSION"),
     // A flip waits for the declared display's next refresh, as DirectDraw's
     // Flip does unless a title asks otherwise. Sixty a second is the roster's
     // baseline; this title has not yet been seen to ask for anything else.

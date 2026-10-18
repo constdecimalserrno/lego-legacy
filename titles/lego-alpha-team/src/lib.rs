@@ -12,6 +12,7 @@ use lego_legacy_core::Title;
 /// its reason, never measured from the host.
 pub const LEGO_ALPHA_TEAM: Title = Title {
     key: ENTRY.key,
+    version: env!("CARGO_PKG_VERSION"),
     // A flip waits for the declared display's next refresh, as DirectDraw's
     // Flip does unless a title asks otherwise — and this title does not ask:
     // it calls `SetDisplayMode(640, 480, 16, 0, 0)`, a zero refresh being

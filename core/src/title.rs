@@ -104,6 +104,10 @@ pub enum Installed {
 pub struct Title {
     /// Roster key, e.g. `lego-rock-raiders`.
     pub key: &'static str,
+    /// The version of the crate that declares this title, which is
+    /// `env!("CARGO_PKG_VERSION")` written there. A run's log names it beside
+    /// core's, so a run directory says what produced it (ADR-0007).
+    pub version: &'static str,
     /// What the declared machine charges its clock for presenting one frame.
     pub flip_cost: FlipCost,
     /// The executable this title runs.
@@ -166,6 +170,8 @@ impl Title {
     /// a game.
     pub const STUB: Self = Self {
         key: "stub",
+        // The stub guest is core's own, so its version is core's.
+        version: env!("CARGO_PKG_VERSION"),
         flip_cost: FlipCost::Free,
         image: EntryImage {
             disc_dir: "",

@@ -12,6 +12,7 @@ use lego_legacy_core::Title;
 /// its reason, never measured from the host.
 pub const ROCK_RAIDERS: Title = Title {
     key: ENTRY.key,
+    version: env!("CARGO_PKG_VERSION"),
     // A flip waits for the declared display's next refresh, which is what
     // DirectDraw's Flip does unless a title asks otherwise, and this one does
     // not (#9). Sixty a second is what GetMonitorFrequency declares. Its movies
