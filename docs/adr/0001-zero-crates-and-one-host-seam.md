@@ -10,6 +10,18 @@ module, and the one function in `run.rs` that opens its window. What the standar
 carries to every OS stays outside the module: files, the rasteriser's threads, and the second a run
 directory is named by.
 
+## Windows: user32, gdi32 and waveOut (#107)
+
+The Windows backend reaches the oldest, plainest layer of Windows that does the job: user32 for
+the window, its messages and the pointer, gdi32's `StretchDIBits` to put the frame in it, and
+winmm's `waveOut` for the sound, each loaded from Windows' own System32 with `LoadLibraryExW` and
+read with `GetProcAddress`, and kernel32, which std links already, declared by hand. Every
+Windows has them with the same entry points, they are flat C calls with no COM and nothing to
+install (ADR-0002), and they are all the declared machine needs: the frame is already finished
+in guest memory and only has to be scaled, and `waveOut` is the simplest device a machine clock
+can pace. Direct3D or DXGI would buy nothing a finished frame needs; WASAPI is the way past
+`waveOut` if its latency is ever too long to hold.
+
 ## Considered options
 
 - **dlopen SDL3**, as an earlier, unpublished emulator for these titles did: one Homebrew dylib

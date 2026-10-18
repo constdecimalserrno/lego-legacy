@@ -41,8 +41,14 @@ lego-legacy is a preservation effort, and eight rules outrank everything else in
 ## What you need
 
 - A Mac, for now. The window, sound and input have a macOS backend (AppKit, Core Graphics and
-  AudioToolbox, reached at run time); Windows (#107) and Linux (#108) backends are next.
-  `--headless` needs no window and may build elsewhere; that is untested.
+  AudioToolbox, reached at run time); a Linux backend (#108) is next. `--headless` needs no
+  window and may build elsewhere; that is untested.
+- Windows 10 or 11, x86-64 or Arm64, is **untested**. A Windows backend (user32, gdi32 and
+  winmm's `waveOut`, reached at run time from Windows' own System32) is written and compiles,
+  but has not been run on real Windows, and stays untested until
+  [#107](https://github.com/constdecimalserrno/lego-legacy/issues/107)'s remaining items are
+  done. The suite there needs Git for Windows, for `git` and the Git Bash that runs
+  `scripts/ci.sh`.
 - Rust. `rust-toolchain.toml` pins 1.98.0 and rustup picks it up on its own. There are no
   dependencies: the workspace uses zero external crates, by design ([ADR-0001](docs/adr/0001-zero-crates-and-one-host-seam.md)).
 - Your own discs. No game data is in this repository and none ever will be.
