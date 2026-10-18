@@ -2,7 +2,8 @@
 
 A zero-crate Rust emulator that runs the original retail binaries of three late-90s Win32/DirectX
 titles, with a fourth to come. Not a reimplementation, and not a general PC emulator: the machine
-it presents is tailored to each title it supports.
+it presents is tailored to each title it supports. OS-agnostic by design: each host operating
+system is one backend behind one seam (ADR-0001), and macOS is the first.
 
 **The [golden rules](GOLDEN-RULES.md) come first.** They outrank this glossary, the ADRs and every
 other doc here.

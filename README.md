@@ -1,7 +1,10 @@
 # lego-legacy
 
-An emulator that runs the original Windows releases of three late-90s games on a modern Mac,
-from your own discs:
+An emulator that runs the original Windows releases of three late-90s games on any computer,
+from your own discs. It is OS-agnostic by design: everything it touches on the host sits behind
+one seam, and each operating system is one backend. macOS has its backend today; Windows
+([#107](https://github.com/constdecimalserrno/lego-legacy/issues/107)) and Linux
+([#108](https://github.com/constdecimalserrno/lego-legacy/issues/108)) are next.
 
 | Title | Status |
 |---|---|
@@ -37,8 +40,9 @@ lego-legacy is a preservation effort, and eight rules outrank everything else in
 
 ## What you need
 
-- A Mac. The window, sound and input are macOS only (AppKit, Core Graphics and AudioToolbox,
-  reached at run time). `--headless` needs no window and may build elsewhere; that is untested.
+- A Mac, for now. The window, sound and input have a macOS backend (AppKit, Core Graphics and
+  AudioToolbox, reached at run time); Windows (#107) and Linux (#108) backends are next.
+  `--headless` needs no window and may build elsewhere; that is untested.
 - Rust. `rust-toolchain.toml` pins 1.98.0 and rustup picks it up on its own. There are no
   dependencies: the workspace uses zero external crates, by design ([ADR-0001](docs/adr/0001-zero-crates-and-one-host-seam.md)).
 - Your own discs. No game data is in this repository and none ever will be.
