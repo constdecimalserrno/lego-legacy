@@ -6,12 +6,20 @@
 //! The wall clock and dynamic loading are not in it: a backend reads the clock
 //! for itself, and [`sys`] declares the loader's entry points. A new operating
 //! system is one backend here, implementing [`Host`].
+//!
+//! What a backend works out without asking its operating system is kept
+//! apart from it, with no `cfg`, so that every host's tests hold it: the
+//! pointer a title is handed ([`pointer`]), the pace ([`pace`]), the feed to
+//! an audio device ([`feed`]) and the stretch of the mix ([`stretch`]).
 
+pub mod feed;
 pub mod headless;
 #[cfg(target_os = "macos")]
 pub mod mac;
 #[cfg(target_os = "macos")]
 pub mod mac_audio;
+pub mod pace;
+pub mod pointer;
 pub mod stretch;
 pub mod sys;
 

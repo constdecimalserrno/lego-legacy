@@ -154,7 +154,7 @@ pub struct Title {
     /// line up (#86).
     ///
     /// It is only ever used where the title draws its own pointer and the host
-    /// is steering by how far the mouse went ([`crate::host::mac::Steer`]);
+    /// is steering by how far the mouse went ([`crate::host::pointer::Steer`]);
     /// where the pointer is the person's own, its place is its own and there
     /// is nothing to scale.
     pub pointer_speed: (f64, f64),
