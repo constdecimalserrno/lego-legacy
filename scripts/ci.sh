@@ -3,6 +3,11 @@
 #
 # Everything a change must pass, in the order that fails fastest. No lane has a
 # second definition: if it is not checked here, it is not checked.
+#
+# On Windows this runs under Git Bash (`sh scripts/ci.sh`), which Git for
+# Windows installs beside the `git` the suite needs anyway (core/tests/
+# versions.rs). A PowerShell copy of these steps would be a second definition
+# of correct, which is the one thing this script exists not to have (#107).
 set -eu
 cd "$(dirname "$0")/.."
 

@@ -26,7 +26,6 @@ use lego_legacy_core::cpu::{interp::Interp, Cpu, CpuEngine, Mode, Stop};
 use lego_legacy_core::guest::{Arena, GuestMem};
 use lego_legacy_core::host::headless::Headless;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Where the vectors live under the fetched corpus.
 const CORPUS: &str = "vendor/singlesteptests/80386/v1_ex_real_mode";
@@ -516,14 +515,44 @@ struct Score {
     tests_run: usize,
 }
 
+/// A gzip file's one member, decompressed by core's own inflate, so that the
+/// test needs no `gunzip` on the host, which Windows does not have (#107).
+///
+/// RFC 1952: ten bytes of header, then whatever its flags say follows them
+/// (an extra field, a name, a comment, a checksum of the header), then the
+/// DEFLATE stream, then its CRC and its length. The length is checked; the
+/// CRC is not, and a file damaged inside the stream is refused by the parse,
+/// which reads every record.
+fn gunzip(path: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("a vector file can be read");
+    let name = path.display();
+    assert!(bytes.starts_with(&[0x1f, 0x8b, 8]), "{name} is not gzip");
+    let flags = bytes[3];
+    let mut at = 10;
+    if flags & 0x04 != 0 {
+        at += 2 + usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
+    }
+    for string in [0x08, 0x10] {
+        if flags & string != 0 {
+            at += bytes[at..].iter().position(|&b| b == 0).expect("a NUL") + 1;
+        }
+    }
+    if flags & 0x02 != 0 {
+        at += 2;
+    }
+    let out = lego_legacy_core::inflate::inflate(&bytes[at..])
+        .unwrap_or_else(|e| panic!("{name} does not inflate: {e}"));
+    let length = bytes[bytes.len() - 4..].try_into().expect("a length");
+    assert_eq!(
+        u32::from_le_bytes(length),
+        out.len() as u32,
+        "{name} inflates to its length"
+    );
+    out
+}
+
 fn run_file(path: &Path, score: &mut Score) {
-    let out = Command::new("gunzip")
-        .arg("-c")
-        .arg(path)
-        .output()
-        .expect("the host has gunzip");
-    assert!(out.status.success(), "gunzip refused {}", path.display());
-    let file = moo::parse(&out.stdout);
+    let file = moo::parse(&gunzip(path));
     assert_eq!(
         &file.cpu_id,
         b"386E",
