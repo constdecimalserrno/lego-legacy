@@ -99,10 +99,11 @@ fn list() -> Vec<Found> {
 /// Start a title's own binary, passing on whatever we were given.
 fn start(key: &str, flags: &[String]) -> ExitCode {
     // The title's binary sits beside this one, which is where cargo puts it
-    // and where an install would too.
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(key)));
+    // and where an install would too; on Windows it is `<title>.exe` (#107).
+    let beside = std::env::current_exe().ok().and_then(|p| {
+        p.parent()
+            .map(|d| d.join(format!("{key}{}", std::env::consts::EXE_SUFFIX)))
+    });
     let program = match beside {
         Some(path) if path.is_file() => path,
         _ => std::path::PathBuf::from(key),
