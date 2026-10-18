@@ -5,7 +5,7 @@ One heading per version, newest first. What each part of the launcher's version 
 
 ## 1.1.0 — 2026-10-18
 
-Took core 1.1.0, which the Windows backend joined, written but untested on Windows (#107), and finds a title's `<title>.exe` beside itself there.
+Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems, and finds a title's `<title>.exe` beside itself on Windows.
 
 ## 1.0.0 — 2026-10-18
 

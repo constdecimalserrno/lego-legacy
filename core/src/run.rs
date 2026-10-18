@@ -289,8 +289,12 @@ fn status(finish: &Finish) -> ExitCode {
 ///
 /// The window stays open after the guest has finished, because a frame that
 /// flashes past is not something a person can look at.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
+    // One window backend per operating system (ADR-0001), each opened, fed
+    // and closed the same way.
+    #[cfg(target_os = "linux")]
+    use crate::host::linux::LinuxWindow as Window;
     #[cfg(target_os = "macos")]
     use crate::host::mac::MacWindow as Window;
     #[cfg(windows)]
@@ -334,7 +338,7 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn windowed(_title: &'static Title, _cli: &Cli) -> ExitCode {
     eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
     ExitCode::FAILURE

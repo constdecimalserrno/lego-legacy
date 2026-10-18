@@ -5,7 +5,16 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.1.0 — 2026-10-18
 
-The Windows backend joined (#107): a window through user32 and gdi32, the pointer by macOS's rules, and sound through winmm's `waveOut`, loaded from System32 at run time, with kernel32's `VirtualAlloc` and `LoadLibraryExW` beside `mmap` and `dlopen`. It is written and compiles for x86-64 and Arm64 Windows, and is untested on Windows.
+Two backends joined, each written and compiled for its operating system and untested there:
+
+- Windows (#107): a window through user32 and gdi32, the pointer by macOS's rules, and sound
+  through winmm's `waveOut`, loaded from System32 at run time, with kernel32's `VirtualAlloc` and
+  `LoadLibraryExW` beside `mmap` and `dlopen`. Compiles for x86-64 and Arm64 Windows.
+- Linux (#108): an X11 window with the Mac's pointer rules and ALSA for sound, both reached by
+  `dlopen`. Compiles for x86-64 and aarch64 Linux.
+
+The pointer, pace and audio feed the backends share moved out of the Mac's into `host::pointer`,
+`host::pace` and `host::feed`.
 
 ## 1.0.0 — 2026-10-18
 

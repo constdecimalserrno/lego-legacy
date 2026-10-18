@@ -5,7 +5,7 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
-Took core 1.1.0, which the Windows backend joined, written but untested on Windows (#107). No route moved.
+Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems. No route moved.
 
 ## 1.0.0 — 2026-10-18
 
