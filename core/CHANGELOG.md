@@ -3,6 +3,12 @@
 One heading per version, newest first. What each part of core's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
+## 1.1.0 — 2026-10-18
+
+A Linux backend joined: an X11 window with the Mac's pointer rules and ALSA for sound, both reached
+by `dlopen`, with the pointer, pace and audio feed the two backends share moved out of the Mac's
+(#108). It is written and compiles for x86-64 and aarch64 Linux, but is untested on Linux.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

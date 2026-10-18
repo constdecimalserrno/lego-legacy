@@ -1,6 +1,6 @@
 [package]
 name = "lego-rock-raiders"
-version = "1.0.0"
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
@@ -15,4 +15,4 @@ name = "lego-rock-raiders"
 path = "src/main.rs"
 
 [dependencies]
-lego-legacy-core = { path = "../../core", version = "=1.0.0" }
+lego-legacy-core = { path = "../../core", version = "=1.1.0" }
