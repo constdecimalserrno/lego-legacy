@@ -30,6 +30,7 @@ use super::x11::{self, Held};
 use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_ushort, c_void, CString};
 use std::mem::{offset_of, size_of};
+use std::sync::OnceLock;
 
 /// An X connection, which only Xlib looks inside.
 type Display = c_void;
@@ -232,9 +233,23 @@ struct XColor {
     pad: c_char,
 }
 
+/// `XErrorEvent`, read for its error code.
+#[repr(C)]
+struct XErrorEvent {
+    kind: c_int,
+    display: *mut Display,
+    resourceid: Xid,
+    serial: c_ulong,
+    error_code: u8,
+    request_code: u8,
+    minor_code: u8,
+}
+
 // Xlib.h's layout on LP64, which a structure declared wrong here would read
 // as some other field: refused at compile time instead.
 const _: () = {
+    assert!(size_of::<XErrorEvent>() == 40);
+    assert!(offset_of!(XErrorEvent, error_code) == 32);
     assert!(size_of::<XAnyEvent>() == 40);
     assert!(size_of::<XEvent>() == 192);
     assert!(size_of::<XKeyEvent>() == 96);
@@ -325,6 +340,32 @@ const LSB_FIRST: c_int = 0;
 const RED: c_ulong = 0x00ff_0000;
 const GREEN: c_ulong = 0x0000_ff00;
 const BLUE: c_ulong = 0x0000_00ff;
+/// `BadWindow` and `BadDrawable`: the window a request named is not there.
+const BAD_WINDOW: u8 = 3;
+const BAD_DRAWABLE: u8 = 9;
+
+/// What Xlib calls with an error from the server.
+type ErrorHandler = unsafe extern "C" fn(*mut Display, *mut XErrorEvent) -> c_int;
+
+/// Xlib's own handler, which says what went wrong and ends the process.
+static XLIB_ON_ERROR: OnceLock<Option<ErrorHandler>> = OnceLock::new();
+
+/// An error from the X server, which ends the process as Xlib's own handler
+/// ends it, unless it is only that the window is gone. Another client can
+/// destroy the window at any time (`xdotool windowclose`), and the frame
+/// already on its way, and closing the window when the run ends, then name a
+/// window that is not there; the `DestroyNotify` that follows ends the run.
+unsafe extern "C" fn on_error(display: *mut Display, error: *mut XErrorEvent) -> c_int {
+    // Safety: Xlib hands over the error it is reporting.
+    if matches!(unsafe { (*error).error_code }, BAD_WINDOW | BAD_DRAWABLE) {
+        return 0;
+    }
+    match XLIB_ON_ERROR.get().copied().flatten() {
+        // Safety: the handler Xlib had, called as Xlib would call it.
+        Some(xlib) => unsafe { xlib(display, error) },
+        None => 0,
+    }
+}
 
 /// Xlib's entry points, by name, with the signatures `Xlib.h` and `XKBlib.h`
 /// give them.
@@ -373,6 +414,7 @@ xlib! {
     pending = "XPending": fn(*mut Display) -> c_int;
     next_event = "XNextEvent": fn(*mut Display, *mut XEvent) -> c_int;
     flush = "XFlush": fn(*mut Display) -> c_int;
+    set_error_handler = "XSetErrorHandler": fn(Option<ErrorHandler>) -> Option<ErrorHandler>;
     init_image = "XInitImage": fn(*mut XImage) -> c_int;
     put_image = "XPutImage": fn(
         *mut Display, Xid, Gc, *mut XImage, c_int, c_int, c_int, c_int, c_uint, c_uint
@@ -483,6 +525,9 @@ impl LinuxWindow {
         // Safety: each call is made through the signature Xlib gives it, on
         // the display it opened and the window it made.
         unsafe {
+            // Once a process: the handler Xlib had is the one to fall back
+            // on, never this one.
+            XLIB_ON_ERROR.get_or_init(|| (x.set_error_handler)(Some(on_error)));
             let display = (x.open_display)(std::ptr::null());
             if display.is_null() {
                 return Err(HostError::Unsupported(

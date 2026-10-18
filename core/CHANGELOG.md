@@ -21,6 +21,9 @@ Fixed once the Linux backend was first run, on x86-64 and aarch64 under Xvfb (#1
 - A resized window's bars kept pieces of the frame drawn just before the backend was told the new
   size, since the X server only paints the background where a window is uncovered. The bars are
   now cleared at every frame.
+- A window destroyed by another client (`xdotool windowclose`) ended the run, and then Xlib's own
+  error handler ended the process over the window that was gone. Errors that only say the window
+  is gone are now let pass; every other X error still ends the process as Xlib's handler does.
 
 ## 1.0.0 — 2026-10-18
 
