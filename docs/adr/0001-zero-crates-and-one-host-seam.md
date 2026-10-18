@@ -15,3 +15,19 @@ directory is named by.
 - **dlopen SDL3**, as an earlier, unpublished emulator for these titles did: one Homebrew dylib
   away from not running; rejected.
 - **Linking crates for windowing/audio**: rejected by the twenty-year rule.
+
+## Linux: X11 and ALSA
+
+Linux's backend (#108) reaches X11 through `libX11.so.6` for the window, input and pointer, and
+ALSA through `libasound.so.2` for sound, each opened by its soname so the loader finds it wherever
+the distribution put it. Each is one library with a C interface that has held still for decades,
+and nearly every desktop distribution installs both. X11 also serves a Wayland desktop, through
+XWayland, and ALSA's default output is served by PipeWire or PulseAudio wherever either runs, so
+one backend covers the desktops people have. Native Wayland is rejected for now:
+`libwayland-client` carries only the core protocol, and a window needs more (xdg-shell to be a
+window at all, pointer constraints and relative pointer motion to steer a pointer), whose interface
+tables a program normally generates from the protocols' XML and this one would declare by hand;
+the pointer protocols are also ones a compositor need not offer. A native Wayland backend can come
+later as its own ticket. PipeWire's and PulseAudio's own libraries are rejected for sound: a system
+with either has ALSA's plugin for it, and a system with neither still has ALSA.
+

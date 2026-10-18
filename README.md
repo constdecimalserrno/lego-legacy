@@ -43,6 +43,13 @@ lego-legacy is a preservation effort, and eight rules outrank everything else in
 - A Mac, for now. The window, sound and input have a macOS backend (AppKit, Core Graphics and
   AudioToolbox, reached at run time); Windows (#107) and Linux (#108) backends are next.
   `--headless` needs no window and may build elsewhere; that is untested.
+- On Linux, a backend is written but **untested**: it compiles for x86-64 and aarch64 Linux and
+  has never been run on Linux, so expect it not to work until #108's remaining items are done. It
+  reaches X11 for the window, input and pointer (on a Wayland desktop, through XWayland) and ALSA
+  for sound, at run time, and needs `libX11.so.6` and `libasound.so.2`, which a desktop install
+  almost always has: on Debian and Ubuntu the packages `libx11-6` and `libasound2`
+  (`libasound2t64` from Debian 13 and Ubuntu 24.04), on Fedora `libX11` and `alsa-lib`. On a
+  desktop, ALSA's default output is PipeWire's or PulseAudio's ALSA plugin (`pipewire-alsa`).
 - Rust. `rust-toolchain.toml` pins 1.98.0 and rustup picks it up on its own. There are no
   dependencies: the workspace uses zero external crates, by design ([ADR-0001](docs/adr/0001-zero-crates-and-one-host-seam.md)).
 - Your own discs. No game data is in this repository and none ever will be.
@@ -89,9 +96,11 @@ with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 | `--data-root <dir>` | keep saves in `<dir>/profile` instead of beside the rip |
 
 While the window is in front and the pointer is over the picture, a title that draws its own
-pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q or Cmd-W ends the run. In Hot Wheels,
-Space gets past the splash screens and Escape quits. If the host cannot keep up, the game runs
-in slow motion with its sound stretched to match, rather than skipping.
+pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q or Cmd-W ends the run. The Linux backend
+is written to do the same, giving the mouse back when another window takes the keyboard and
+ending the run on Ctrl-Q or the window's close button; it has not yet been run on Linux. In Hot
+Wheels, Space gets past the splash screens and Escape quits. If the host cannot keep up, the game
+runs in slow motion with its sound stretched to match, rather than skipping.
 
 ## Tests
 
