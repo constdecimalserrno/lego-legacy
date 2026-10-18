@@ -73,6 +73,7 @@ Nothing a title sees moved unless named here.
    `LEGO_LEGACY_REQUIRE_CORPUS=1` passes.~~ Done 2026-10-16.
 3. ~~On the build after the cleanup, the maintainer plays all three: #62, #88, #89. The Hot
    Wheels play is committed as its route.~~ Done 2026-10-18; Rock Raiders' route is #106.
-4. Tag the release commit `v1.0.0`, and each crate at its own (ADR-0007):
+4. ~~Tag the release commit `v1.0.0`, and each crate at its own (ADR-0007):
    `lego-legacy-core-v1.0.0`, `lego-legacy-launcher-v1.0.0`, `lego-rock-raiders-v1.0.0`,
-   `hotwheels-stunt-track-driver-v1.0.0` and `lego-alpha-team-v1.0.0`.
+   `hotwheels-stunt-track-driver-v1.0.0` and `lego-alpha-team-v1.0.0`.~~ Done 2026-10-18, on
+   `91fa6fb`, with the gate green (374 passed, disc and corpus required).
