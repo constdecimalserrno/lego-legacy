@@ -7,7 +7,7 @@ from your own discs:
 |---|---|
 | LEGO Rock Raiders | **Playable**: a person has played the first mission through |
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
-| LEGO Alpha Team | **Playable by route**: the Training Area plays to its end; a person's sign-off is pending |
+| LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
@@ -17,7 +17,7 @@ display, drives, install state) and the title cannot see the host. When a title 
 something the emulator does not have, the run stops at a named **wall** instead of guessing.
 
 The vocabulary is in [`CONTEXT.md`](CONTEXT.md), the decisions behind it are in
-[`docs/adr/`](docs/adr/), and what is left before v1 is in [`path-to-v1.md`](path-to-v1.md).
+[`docs/adr/`](docs/adr/), and what v1 is and what comes after it are in [`path-to-v1.md`](path-to-v1.md).
 A comment tagged `ponytail:` marks a deliberate simplification with a known ceiling, and says
 what the ceiling is and the way past it.
 

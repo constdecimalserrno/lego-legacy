@@ -5,33 +5,30 @@ route, and a person drove it and said so), signed off by the maintainer on the r
 
 | Title | Playable | Signed off |
 |---|---|---|
-| `lego-rock-raiders` | a person played the first mission through; `routes/first-mission.route` covers its first minute and is re-taken whole from #88's play | 2026-09-10, on an older build |
-| `hotwheels-stunt-track-driver` | a person drove the first race to the finish; `routes/first-race.route` covers its start and is re-taken whole from #89's play | 2026-09-11, on an older build |
-| `lego-alpha-team` | by route — the training mission by `routes/first-mission.route`; awaiting #62 | — |
+| `lego-rock-raiders` | a person played the first mission through (2026-09-10); `routes/first-mission.route` covers its first minute, and a route through the whole mission is #106 | 2026-10-18 |
+| `hotwheels-stunt-track-driver` | `routes/first-race.route`, the maintainer's play, drives the first race to the finish | 2026-10-18 |
+| `lego-alpha-team` | `routes/first-mission.route` plays the Training Area to its end | 2026-10-18 |
 
 Out of v1: `lego-racers`, the *complete* and *credits* milestones, goldens.
 
-## Open tickets
+## After v1
 
-Every open ticket is on this path, and each is a play at a window by the maintainer.
-
-### The sign-off plays
-
-Each is played with `--record`, and each keeps its run directory: a recorded play that reaches
-the end of its unit of play becomes that title's committed route.
-
-- **#62** Play Alpha Team's first mission and say what is wrong. #86 (the drawn pointer
-  matches the hand), #64 (the pointer is put back after the hand leaves the window), #65
-  (front-end pace, 0.86×) and #75 (a slow host stretches the mix, and a run ends with
-  `audio: the device ran dry N times`) are closed as fixed; this play is what confirms them.
-- **#88** Play Rock Raiders' first mission to its end.
-- **#89** Drive Hot Wheels' first race to the finish.
-
-Play with `cargo run --release -p <title> -- --audio --record`, which builds first. A
-`target/release/<title>` started by hand is stale whenever `CARGO_TARGET_DIR` sends builds
-elsewhere.
+- **#106** A route that plays Rock Raiders' first mission to its end. v1 ships with the
+  one-minute route, by the maintainer's choice.
 
 ## Done on the way
+
+### The sign-off plays — 2026-10-18
+
+The maintainer played all three on `c770a73`, the release build, and signed each off: #62, #88,
+#89. Hot Wheels' play, the first race to the finish, is its committed route (`0b682da`). Rock
+Raiders' reached the level select, so its route through the whole mission waits on #106.
+
+### Every crate versioned — 2026-10-18
+
+- **#105** (ADR-0007) Each crate carries its own version, 1.0.0 at v1, and a `CHANGELOG.md`; a
+  title and the launcher pin core exactly; the suite refuses a crate that changed since its tag
+  without moving its version; a run's log names the versions that made it.
 
 ### Alpha Team by route — 2026-10-04
 
@@ -74,8 +71,8 @@ Nothing a title sees moved unless named here.
 1. ~~#85, #61, #87 closed; `LEGO_LEGACY_REQUIRE_DISC=1 ./scripts/ci.sh` green.~~ Done 2026-10-04.
 2. ~~The conformance corpus is fetched (`scripts/fetch-corpus.sh`) and
    `LEGO_LEGACY_REQUIRE_CORPUS=1` passes.~~ Done 2026-10-16.
-3. On the build after the cleanup, the maintainer plays all three: #62, #88, #89. The Rock
-   Raiders and Hot Wheels plays are committed as their titles' routes.
+3. ~~On the build after the cleanup, the maintainer plays all three: #62, #88, #89. The Hot
+   Wheels play is committed as its route.~~ Done 2026-10-18; Rock Raiders' route is #106.
 4. Tag the release commit `v1.0.0`, and each crate at its own (ADR-0007):
    `lego-legacy-core-v1.0.0`, `lego-legacy-launcher-v1.0.0`, `lego-rock-raiders-v1.0.0`,
    `hotwheels-stunt-track-driver-v1.0.0` and `lego-alpha-team-v1.0.0`.

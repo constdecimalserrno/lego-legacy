@@ -9,4 +9,4 @@ Playable. A person played the first mission through on 2026-09-10, on an older b
 `routes/first-mission.route` covers its first minute.
 
 Signed off 2026-10-18 on `c770a73`, on the release build, played by the maintainer: to the level
-select.
+select. A route through the whole first mission is #106.
