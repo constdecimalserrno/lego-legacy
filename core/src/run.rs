@@ -289,22 +289,25 @@ fn status(finish: &Finish) -> ExitCode {
 ///
 /// The window stays open after the guest has finished, because a frame that
 /// flashes past is not something a person can look at.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
-    use crate::host::mac::MacWindow;
+    #[cfg(target_os = "macos")]
+    use crate::host::mac::MacWindow as Window;
+    #[cfg(windows)]
+    use crate::host::windows::WinWindow as Window;
 
     // The window opens at 640 by 480, the one screen every title on the roster
     // declares; the guest's frame is scaled into it, its aspect kept, and the
     // guest is never told.
-    let mut host = match MacWindow::open(title.key, 640, 480, title.pointer_speed) {
+    let mut host = match Window::open(title.key, 640, 480, title.pointer_speed) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("lego-legacy: no window: {e}");
             return ExitCode::FAILURE;
         }
     };
-    // The mix runs either way; `--audio` only lets it be heard, and a Mac with
-    // no output to open runs silent rather than not at all.
+    // The mix runs either way; `--audio` only lets it be heard, and a host
+    // with no output to open runs silent rather than not at all.
     if cli.audio {
         if let Err(e) = host.open_audio() {
             eprintln!("lego-legacy: --audio: running silent, no audio device: {e}");
@@ -331,7 +334,7 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn windowed(_title: &'static Title, _cli: &Cli) -> ExitCode {
     eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
     ExitCode::FAILURE

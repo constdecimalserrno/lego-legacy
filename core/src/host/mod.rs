@@ -10,7 +10,8 @@
 //! What a backend works out without asking its operating system is kept
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
 //! pointer a title is handed ([`pointer`]), the pace ([`pace`]), the feed to
-//! an audio device ([`feed`]) and the stretch of the mix ([`stretch`]).
+//! an audio device ([`feed`]) and the stretch of the mix ([`stretch`]), and
+//! Windows' keys and scaling ([`windows_input`]).
 
 pub mod feed;
 pub mod headless;
@@ -22,6 +23,11 @@ pub mod pace;
 pub mod pointer;
 pub mod stretch;
 pub mod sys;
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+pub mod windows_audio;
+pub mod windows_input;
 
 use std::fmt;
 

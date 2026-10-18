@@ -1032,15 +1032,30 @@ mod tests {
         );
     }
 
-    /// Every key this host can produce has a virtual key to be sent as, and
-    /// nothing else does (#59).
+    /// Every key a host can produce has a virtual key to be sent as, and
+    /// nothing else does (#59): every Mac key, and every key message Windows
+    /// can send (#107).
     #[test]
     fn every_key_the_host_can_send_has_a_virtual_key() {
+        #[cfg(target_os = "macos")]
         for code in 0..=0xffu64 {
             if let Some(key) = crate::host::mac::direct_input_key(code) {
                 assert!(
                     virtual_key(key).is_some(),
                     "key {key:#04x}, which mac key {code:#04x} is, has no virtual key"
+                );
+            }
+        }
+        // Except the Windows keys, which reach DirectInput and not the
+        // window, as they do from macOS, where they are Command and come as
+        // a modifier (`direct_input_modifier`), which this does not ask.
+        for scan in 0..=0x1ffu32 {
+            let lparam = ((scan & 0xff) << 16) | ((scan >> 8) << 24);
+            let key = crate::host::windows_input::direct_input_key(lparam);
+            if let Some(key) = key.filter(|k| !matches!(k, 0xdb | 0xdc)) {
+                assert!(
+                    virtual_key(key).is_some(),
+                    "key {key:#04x}, which Windows scan code {scan:#05x} is, has no virtual key"
                 );
             }
         }
