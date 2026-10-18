@@ -1,9 +1,11 @@
-//! The pointer a person steers, on any host with a window.
+//! The pointer a title is handed, worked out the same on every host.
 //!
-//! What a backend hands the guest as the pointer, once the window system has
-//! said where the person's own pointer is and how far the mouse went. Nothing
-//! here asks the operating system anything, so every backend shares it and the
-//! tests reach it on every host (#108).
+//! What a mouse's movement means to the guest is not a host's business: the
+//! window system only says how far the mouse went, or where the person's own
+//! pointer is, and the rules for turning that into the place the guest is
+//! handed were paid for one at a time on macOS (#40, #46, #64, #86). They
+//! live here, with no `cfg`, so every backend keeps them and every host's
+//! tests hold them (#107).
 
 /// How many points of the window's content one guest pixel covers.
 #[must_use]

@@ -349,7 +349,7 @@ pub struct MacWindow {
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
     cg_main_display: u32,
-    /// The host's clock against the declared one (ADR-0003).
+    /// Presentation held to real time, and the pace it came to (#75).
     pace: crate::host::pace::Pace,
     /// Carries the mix's own tail from one stretched block to the next.
     stretch: crate::host::stretch::Stretch,
@@ -497,7 +497,7 @@ impl MacWindow {
                     ),
                     pointer_speed,
                 ),
-                pace: crate::host::pace::Pace::default(),
+                pace: crate::host::pace::Pace::new(),
                 stretch: crate::host::stretch::Stretch::default(),
                 frame_size: (width, height),
             })
@@ -871,7 +871,7 @@ impl Host for MacWindow {
         // real time, so a host running slower than real time has to stretch
         // it or the device runs dry between blocks (#75). At a pace of 1.0
         // this hands the device the block byte for byte.
-        let stretched = self.stretch.block(samples, self.pace.now());
+        let stretched = self.stretch.block(samples, self.pace.current());
         if let Some(device) = &self.audio {
             device.play(&stretched);
         }
@@ -922,6 +922,7 @@ impl Host for MacWindow {
 mod tests {
     use super::{direct_input_key, direct_input_modifier, guest_point, Rect, PRESENT_BITMAP_INFO};
     use crate::host::{sys, Input};
+
     use std::ffi::{c_char, c_void};
 
     #[test]

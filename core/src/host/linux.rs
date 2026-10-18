@@ -572,7 +572,7 @@ impl LinuxWindow {
                     ),
                     pointer_speed,
                 ),
-                pace: Pace::default(),
+                pace: Pace::new(),
                 stretch: Stretch::default(),
             })
         }
@@ -897,7 +897,7 @@ impl Host for LinuxWindow {
 
     fn audio(&mut self, samples: &[i16]) {
         // Stretched to the pace the host keeps, as on the Mac (#75).
-        let stretched = self.stretch.block(samples, self.pace.now());
+        let stretched = self.stretch.block(samples, self.pace.current());
         if let Some(device) = &self.audio {
             device.play(&stretched);
         }

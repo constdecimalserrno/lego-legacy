@@ -4,7 +4,7 @@
 //! whether or not this exists; it only takes the blocks the mix hands the host
 //! and lets the queue pull them on its own thread.
 
-use super::feed::{add_waiting, fill_frames, Waiting, BUFFERS, BUFFER_FRAMES, FRAME_BYTES};
+use super::feed::{add_waiting, fill_frames, Waiting, FRAME_BYTES};
 use super::{sys, HostError};
 use crate::sound::RATE;
 use std::ffi::c_void;
@@ -15,6 +15,12 @@ const AUDIO_TOOLBOX: &str = "/System/Library/Frameworks/AudioToolbox.framework/A
 /// `kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked`, and no
 /// big-endian flag: the mix's own samples.
 const SIGNED_PACKED_LITTLE_ENDIAN: u32 = 0x4 | 0x8;
+
+/// Frames in one of the queue's buffers, about 23 ms at the mix's rate.
+const BUFFER_FRAMES: u32 = 512;
+
+/// Buffers the queue holds at once.
+const BUFFERS: usize = 3;
 
 /// `AudioQueueDispose`'s "stop now, not after what is queued".
 const IMMEDIATELY: u8 = 1;

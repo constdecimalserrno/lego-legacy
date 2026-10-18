@@ -10,7 +10,7 @@
 //!
 //! Compiled for x86-64 and aarch64 Linux, and not yet run on either (#108).
 
-use super::feed::{add_waiting, fill_frames, Waiting, BUFFERS, BUFFER_FRAMES, FRAME_BYTES};
+use super::feed::{add_waiting, fill_frames, Waiting, FRAME_BYTES};
 use super::{sys, HostError};
 use crate::sound::RATE;
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
@@ -24,6 +24,13 @@ use std::thread::JoinHandle;
 const PLAYBACK: c_int = 0;
 const S16_LE: c_int = 2;
 const RW_INTERLEAVED: c_int = 3;
+
+/// Frames handed to the device at a time, about 23 ms at the mix's rate, as
+/// the Mac's queue's buffers are.
+const BUFFER_FRAMES: u32 = 512;
+
+/// Buffers' worth the device holds, about 70 ms, as the Mac's queue does.
+const BUFFERS: u64 = 3;
 
 /// `-EPIPE`, which is how a write says the device ran dry before it came.
 const RAN_DRY: c_long = -32;
@@ -127,9 +134,9 @@ impl LinuxAudio {
         })?;
         // From here the PCM is closed if anything below fails.
         let device = Device { alsa, pcm };
-        // As much as the Mac's queue holds: its buffers, about 70 ms. ALSA
-        // may resample to what the card runs at.
-        let latency = u64::from(BUFFER_FRAMES) * BUFFERS as u64 * 1_000_000 / u64::from(RATE);
+        // In microseconds. ALSA may resample to what the card runs at.
+        let latency = u64::from(BUFFER_FRAMES) * BUFFERS * 1_000_000 / u64::from(RATE);
+
         // Safety: a PCM just opened, set up once.
         status("snd_pcm_set_params", unsafe {
             (device.alsa.set_params)(

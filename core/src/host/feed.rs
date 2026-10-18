@@ -1,21 +1,18 @@
-//! The samples waiting for an audio device, on any host that has one.
+//! Feeding an audio device the mix, the same on every host.
 //!
-//! The mix reaches the host a block at a time on the declared clock, and a
-//! device pulls a buffer at a time in real time. What waits between the two,
-//! and what a device is handed when nothing does, is the same on every host:
-//! every audio backend shares it, and the tests reach it on every host (#108).
+//! The mix reaches the host a block at a flip, on the declared clock, and a
+//! device pulls frames from its own thread in real time. What sits between
+//! them is the same whatever the device is: the samples waiting, a start that
+//! waits for enough of them, the oldest dropped when a stalled run catches
+//! up, and every time the device ran dry counted (#75). It was written for
+//! macOS's audio queue and lives here, with no `cfg`, so every backend feeds
+//! its device this way and every host's tests hold it (#107).
 
 use crate::sound::BLOCK_FRAMES;
 use std::collections::VecDeque;
 
 /// Bytes in one frame: two channels of sixteen-bit samples.
 pub const FRAME_BYTES: u32 = 4;
-
-/// Frames in one of the device's buffers, about 23 ms at the mix's rate.
-pub const BUFFER_FRAMES: u32 = 512;
-
-/// Buffers the device holds at once.
-pub const BUFFERS: usize = 3;
 
 /// Samples kept waiting before the oldest are dropped: eight of the mix's
 /// blocks, about 370 ms. The mix reaches the host a flip at a time, and a
@@ -32,12 +29,12 @@ pub const ENOUGH_TO_PLAY: usize = 3 * BLOCK_FRAMES * 2;
 /// The samples waiting to be heard, and whether enough have waited to play.
 #[derive(Debug, Default)]
 pub struct Waiting {
-    pub(crate) samples: VecDeque<i16>,
-    pub(crate) playing: bool,
+    pub samples: VecDeque<i16>,
+    pub playing: bool,
     /// How many times the device has asked for a frame and found nothing
     /// waiting, having been playing. Each one is a gap a person hears, and
     /// counting them is how a run says whether the mix is keeping up (#75).
-    pub(crate) underruns: u64,
+    pub underruns: u64,
 }
 
 /// Add samples to those waiting, dropping the oldest whole frames past
@@ -82,6 +79,9 @@ mod tests {
     use crate::host::stretch::Stretch;
     use crate::sound::{BLOCK_FRAMES, RATE};
 
+    /// Frames in one of the device's buffers: macOS's audio queue's.
+    const BUFFER_FRAMES: u32 = 512;
+
     /// The device against the mix, with no device: one wall minute of a host
     /// holding `pace`, the mix handing over blocks on the declared clock and
     /// the queue pulling buffers in real time. Answers how many times the
@@ -89,11 +89,11 @@ mod tests {
     fn a_minute_at(pace: f64, stretching: bool) -> u64 {
         let mut waiting = Waiting::default();
         let mut stretch = Stretch::default();
-        let mut bytes = vec![0u8; super::BUFFER_FRAMES as usize * 4];
+        let mut bytes = vec![0u8; BUFFER_FRAMES as usize * 4];
         // The device pulls one buffer at a time; a wall minute is this many.
-        let pulls = 60 * RATE as usize / super::BUFFER_FRAMES as usize;
+        let pulls = 60 * RATE as usize / BUFFER_FRAMES as usize;
         // Declared frames owed per device buffer pulled, at this pace.
-        let per_pull = f64::from(super::BUFFER_FRAMES) * pace;
+        let per_pull = f64::from(BUFFER_FRAMES) * pace;
         let mut owed = 0.0;
         let block: Vec<i16> = (0..BLOCK_FRAMES as i16 * 2).map(|i| i % 1000).collect();
         for _ in 0..pulls {
