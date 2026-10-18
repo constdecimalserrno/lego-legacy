@@ -1,5 +1,11 @@
 # lego-legacy
 
+## The golden rules come first
+
+They outrank everything below and every other doc in this repo. Check each change against them before anything else.
+
+@GOLDEN-RULES.md
+
 ## Agent skills
 
 ### Issue tracker

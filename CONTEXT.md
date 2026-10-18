@@ -4,6 +4,9 @@ A zero-crate Rust emulator that runs the original retail binaries of three late-
 titles, with a fourth to come. Not a reimplementation, and not a general PC emulator: the machine
 it presents is tailored to each title it supports.
 
+**The [golden rules](GOLDEN-RULES.md) come first.** They outrank this glossary, the ADRs and every
+other doc here.
+
 ## Language
 
 ### Titles

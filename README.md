@@ -21,6 +21,20 @@ The vocabulary is in [`CONTEXT.md`](CONTEXT.md), the decisions behind it are in
 A comment tagged `ponytail:` marks a deliberate simplification with a known ceiling, and says
 what the ceiling is and the way past it.
 
+## Golden rules
+
+lego-legacy is a preservation effort, and eight rules outrank everything else in it
+([the full text](GOLDEN-RULES.md)):
+
+1. Everything is deterministic, and the machine is a state machine we control completely.
+2. The game runs exactly as it shipped.
+3. Extras sit on top, never inside.
+4. A per-title emulator, true to Windows.
+5. Runs anywhere, depends on nothing.
+6. Bring your own disc.
+7. Nothing is released until it is proven three ways.
+8. Everything is written down so anyone can pick it up.
+
 ## What you need
 
 - A Mac. The window, sound and input are macOS only (AppKit, Core Graphics and AudioToolbox,
