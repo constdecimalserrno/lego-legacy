@@ -9,6 +9,10 @@
 
 pub mod feed;
 pub mod headless;
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod linux_audio;
 #[cfg(target_os = "macos")]
 pub mod mac;
 #[cfg(target_os = "macos")]
@@ -17,6 +21,7 @@ pub mod pace;
 pub mod pointer;
 pub mod stretch;
 pub mod sys;
+pub mod x11;
 
 use std::fmt;
 

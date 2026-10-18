@@ -337,8 +337,9 @@ const DOUBLE_CLICK_SLOP: i32 = 4;
 /// DirectInput numbers a key by where it sits — a PC's set-1 scan codes, with
 /// the ones after the grey prefix carrying `0x80`. A title reading its
 /// keyboard from its window sees the virtual key instead, and this is the map
-/// between them. Every number [`crate::host::mac::direct_input_key`] can
-/// produce is here; anything else reaches the window as nothing (#59).
+/// between them. Every number a host's key table can produce, the Mac's or
+/// X's ([`crate::host::x11::direct_input_key`]), is here; anything else
+/// reaches the window as nothing (#59).
 fn virtual_key(code: u32) -> Option<u32> {
     Some(match code {
         0x01 => 0x1b,                      // Escape
@@ -1036,11 +1037,24 @@ mod tests {
     /// nothing else does (#59).
     #[test]
     fn every_key_the_host_can_send_has_a_virtual_key() {
+        #[cfg(target_os = "macos")]
         for code in 0..=0xffu64 {
             if let Some(key) = crate::host::mac::direct_input_key(code) {
                 assert!(
                     virtual_key(key).is_some(),
                     "key {key:#04x}, which mac key {code:#04x} is, has no virtual key"
+                );
+            }
+        }
+        // X's table is reached on every host (#108). Its modifiers are keys
+        // like any other, and the Windows keys among them reach DirectInput
+        // alone, as the Mac's Command keys do.
+        for code in 0..=0xff {
+            let key = crate::host::x11::direct_input_key(code);
+            if let Some(key) = key.filter(|key| !matches!(key, 0xdb | 0xdc)) {
+                assert!(
+                    virtual_key(key).is_some(),
+                    "key {key:#04x}, which X keycode {code} is, has no virtual key"
                 );
             }
         }
