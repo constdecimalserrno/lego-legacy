@@ -1,6 +1,7 @@
 //! Hot Wheels Stunt Track Driver, run headless from the player's rip: its
 //! declared tree, its boot to first light replayed to the same machine every
-//! time, its quit key, and the committed route driven into a race.
+//! time, its quit key, and the committed route driven through its first race
+//! to the finish.
 //!
 //! Everything here goes through the run seam on the headless host: what the
 //! title presented, what it logged, and how the run ended.
@@ -170,21 +171,24 @@ fn escape_is_this_titles_quit() {
 }
 
 /// The flip the starting line is on the screen at, its lights still red.
-const RACE_STARTS: u64 = 7200;
+const RACE_STARTS: u64 = 980;
 
-/// Forty flips later, with the car away down the track.
-const RACE_RUNNING: u64 = 7240;
+/// Forty flips later, the lights green and the car away.
+const RACE_RUNNING: u64 = 1020;
 
-/// Enough to replay the committed route through the race's first frames.
-///
-/// Most of it is the boot and the menus; the race itself is the last half
-/// billion. It is the price of a gate on a title that only reaches its own
-/// play through seven thousand flips of a person's own clicking.
-const FIRST_RACE_BUDGET: u64 = 11_000_000_000;
+/// The flip the route presses Escape at, with the race's results up.
+const ESCAPE: u64 = 3900;
 
-/// The committed route to a race, replayed once.
-fn racing() -> Option<&'static testkit::Ran> {
-    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+/// Enough instructions for the committed route to race to the finish and
+/// quit: 13.46 billion is spent by the time the title has gone. The boot and
+/// the menus are under two billion of it; the race and its results cost
+/// nearly four million instructions a flip.
+const FIRST_RACE_BUDGET: u64 = 13_600_000_000;
+
+/// The committed route through the first race, replayed once into its slot.
+fn racing(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
     let cli = Cli {
         route: Some(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-race.route"),
@@ -192,7 +196,7 @@ fn racing() -> Option<&'static testkit::Ran> {
         ..Cli::default()
     };
     testkit::replay(
-        &RAN,
+        slot,
         scratch,
         &HOT_WHEELS,
         &cli,
@@ -201,9 +205,14 @@ fn racing() -> Option<&'static testkit::Ran> {
     )
 }
 
+static RACE_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static RACE_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
 #[test]
 fn the_route_reaches_a_race_and_the_race_is_a_moving_picture() {
-    let Some(ran) = racing() else { return };
+    let Some(ran) = racing(&RACE_FIRST) else {
+        return;
+    };
 
     let line = ran
         .host
@@ -223,4 +232,37 @@ fn the_route_reaches_a_race_and_the_race_is_a_moving_picture() {
         "a race that draws is a different picture forty flips later: the same one twice is \
          the title rendering into its own frame buffer and presenting none of it (#38)"
     );
+}
+
+/// The route drives the race to its finish and quits from its results, as
+/// the person did (#89).
+#[test]
+fn the_route_finishes_the_race_and_quits_on_escape() {
+    let Some(ran) = racing(&RACE_FIRST) else {
+        return;
+    };
+
+    // The title writes the race's best time as it puts up the results, after
+    // the finish.
+    ran.assert_logged(r"file written C:\Program Files\Mattel\Stunt Track Driver\saves\times.dat");
+    // And Escape is its quit (#68): the game is gone three flips after it.
+    ran.assert_exited(1).assert_flips(ESCAPE + 3);
+}
+
+/// The same route twice over is the same run, from the boot through the
+/// race to the quit (#89).
+#[test]
+fn the_first_race_route_replays_to_the_same_machine_every_time() {
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| racing(&RACE_SECOND));
+        (
+            racing(&RACE_FIRST),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
 }
