@@ -377,6 +377,9 @@ xlib! {
     put_image = "XPutImage": fn(
         *mut Display, Xid, Gc, *mut XImage, c_int, c_int, c_int, c_int, c_uint, c_uint
     ) -> c_int;
+    clear_area = "XClearArea": fn(
+        *mut Display, Xid, c_int, c_int, c_uint, c_uint, c_int
+    ) -> c_int;
     lookup_keysym = "XLookupKeysym": fn(*mut XKeyEvent, c_int) -> Xid;
     detectable_auto_repeat = "XkbSetDetectableAutoRepeat": fn(
         *mut Display, c_int, *mut c_int
@@ -600,8 +603,10 @@ impl LinuxWindow {
     }
 
     /// Show the last frame presented, scaled to the window, its aspect kept.
-    /// The bars either side are the window's own black background, which the
-    /// X server paints.
+    /// The bars either side are cleared to the window's black background
+    /// every time: a frame drawn just after the window changed size, before
+    /// this backend was told, lands where the picture used to be, and the X
+    /// server only paints the background where the window was uncovered.
     // ponytail: the scaled frame goes to the server through the socket,
     // every frame, which is about 1.2 MB at 640x480 and 5 MB at twice that.
     // MIT-SHM, or a server-side scale through XRender, if a large window
@@ -650,6 +655,20 @@ impl LinuxWindow {
         unsafe {
             if (self.x.init_image)(&raw mut image) == 0 {
                 return;
+            }
+            // Above, below, left and right of the picture. A width or height
+            // of nought is to the window's edge, wherever the server has it,
+            // so the bars above and to the left are only cleared when there
+            // is one.
+            let (right, below) = (p.x + width, p.y + height);
+            let bars = [
+                (p.y > 0, 0, 0, 0, p.y.unsigned_abs()),
+                (true, 0, below, 0, 0),
+                (p.x > 0, 0, p.y, p.x.unsigned_abs(), p.height),
+                (true, right, p.y, 0, p.height),
+            ];
+            for (_, x, y, w, h) in bars.into_iter().filter(|bar| bar.0) {
+                (self.x.clear_area)(self.display, self.window, x, y, w, h, 0);
             }
             (self.x.put_image)(
                 self.display,

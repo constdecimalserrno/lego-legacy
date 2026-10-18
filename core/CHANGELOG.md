@@ -16,6 +16,12 @@ Two backends joined, each written and compiled for its operating system and unte
 The pointer, pace and audio feed the backends share moved out of the Mac's into `host::pointer`,
 `host::pace` and `host::feed`.
 
+Fixed once the Linux backend was first run, on x86-64 and aarch64 under Xvfb (#108):
+
+- A resized window's bars kept pieces of the frame drawn just before the backend was told the new
+  size, since the X server only paints the background where a window is uncovered. The bars are
+  now cleared at every frame.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
