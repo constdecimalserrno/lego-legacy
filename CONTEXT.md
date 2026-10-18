@@ -159,3 +159,24 @@ _Avoid_: snapshot, baseline, fixture
 The maintainer's own act of accepting a captured golden as correct. Nobody else's, and no test's.
 Not built yet: there is no golden to bless.
 _Avoid_: approving, signing off, validating
+
+### Versions and releases
+
+**Version**:
+The number each crate carries on its own, so every title and core is tracked, patched and rolled
+back individually. A title's version names everything it runs, core included.
+_Avoid_: build number, the workspace version, revision
+
+**Changelog**:
+A crate's own log, one entry per version, saying what changed and, for a title, its sign-off.
+_Avoid_: release notes, history, git log
+
+**Release**:
+The commit that tags each crate whose version moved, and the workspace. A patch to one title is a
+release of its own.
+_Avoid_: deploy, ship, build
+
+**Sign-off**:
+The maintainer's word, after playing a title on one release build, that it plays right. Recorded
+in the title's changelog.
+_Avoid_: approval, blessing, QA
