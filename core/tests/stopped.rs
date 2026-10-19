@@ -66,7 +66,7 @@ fn a_run_stopped_by_a_signal_writes_its_end_line_and_digest() {
     assert_eq!(finish.outcome, Outcome::Closed, "{text}");
     assert_eq!(finish.flips, 1, "{text}");
     let end = format!(
-        "end window closed cursor {} flips 1 declared-ms",
+        "end stopped by the person cursor {} flips 1 declared-ms",
         finish.cursor
     );
     assert!(text.lines().any(|l| l.starts_with(&end)), "{text}");

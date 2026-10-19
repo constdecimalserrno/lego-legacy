@@ -51,7 +51,7 @@ impl fmt::Display for Outcome {
             Self::Exited { code } => write!(f, "exited {code}"),
             Self::Wall { what } => write!(f, "wall: {what}"),
             Self::BudgetExhausted => write!(f, "budget exhausted"),
-            Self::Closed => write!(f, "window closed"),
+            Self::Closed => write!(f, "stopped by the person"),
             Self::Quit => write!(f, "quit from the debugger"),
         }
     }

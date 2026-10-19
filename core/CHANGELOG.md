@@ -63,7 +63,9 @@ each ends the run as the window's close button does, with its `end` line and dig
 handler only asks for the close, which every host's `closed` answers; a second signal, with the
 run already ending, ends the process as before, putting the Mac's pointer back first. A signal
 the run was started ignoring, as `nohup` starts it ignoring `SIGHUP`, stays ignored. The
-debugger does not listen, so Ctrl-C there still ends it. No route moves.
+debugger does not listen, so Ctrl-C there still ends it. No route moves. Such a run's `end`
+line says `stopped by the person`, where it said `window closed`, since a run stopped from its
+terminal may have no window.
 
 ## 1.0.0 — 2026-10-18
 
