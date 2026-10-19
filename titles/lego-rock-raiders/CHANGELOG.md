@@ -7,6 +7,9 @@ One heading per version, newest first. What each part of a title's version means
 
 Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems. No route moved.
 
+The wrapped-pressing test looks for the image's name after the host's own path separator, so it
+passes on Windows too (#107).
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

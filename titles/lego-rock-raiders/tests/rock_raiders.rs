@@ -91,8 +91,9 @@ fn a_wrapped_image_is_named_and_never_run() {
         err.contains("SafeDisc"),
         "the refusal names the scheme: {err}"
     );
+    // The separator is the host's own: `\` on Windows (#107).
     assert!(
-        err.contains("/rock-raiders.iso"),
+        err.contains(&format!("{}rock-raiders.iso", std::path::MAIN_SEPARATOR)),
         "and the image it is in: {err}"
     );
     assert!(
