@@ -24,6 +24,12 @@ Fixed once the Linux backend was first run, on x86-64 and aarch64 under Xvfb (#1
 - A window destroyed by another client (`xdotool windowclose`) ended the run, and then Xlib's own
   error handler ended the process over the window that was gone. Errors that only say the window
   is gone are now let pass; every other X error still ends the process as Xlib's handler does.
+- An x87 operation with no answer, such as `0/0`, kept the NaN the host's own arithmetic made: the
+  unit's negative indefinite on an x86-64 host, a positive NaN on an Arm one. Rock Raiders stores
+  one at instruction 356,515,652 of its boot, so its longer runs ended with different digests on
+  macOS and on x86-64 Linux, breaking golden rule 1. Every x87 result now follows the unit's own
+  rule (`x87::answer`): a NaN operand comes through quieted, and a NaN made from numbers is the
+  indefinite. Seven of Rock Raiders' macOS digests move to the ones x86-64 Linux already gave.
 
 ## 1.0.0 — 2026-10-18
 

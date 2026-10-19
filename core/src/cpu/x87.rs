@@ -246,7 +246,7 @@ impl X87 {
     pub fn remainder(&mut self, nearest: bool) {
         let (value, divisor) = (self.st(0), self.st(1));
         let d = divisor.abs();
-        let mut rest = value % divisor;
+        let mut rest = answer(value % divisor, value, divisor);
         // What a reduction by eight divisors leaves, less what a reduction by
         // one does, is the quotient's low three bits in divisors.
         let mut low = if rest.is_finite() && (8.0 * d).is_finite() && d > 0.0 {
@@ -291,6 +291,37 @@ impl X87 {
             (true, false, false)
         }
     }
+}
+
+/// The NaN the unit makes when an operation has no answer, as `0/0` has
+/// none: the real indefinite, negative and quiet.
+pub const INDEFINITE: f64 = f64::from_bits(0xfff8_0000_0000_0000);
+
+/// An operation's answer as the unit gives it, when the answer is not a
+/// number.
+///
+/// The host's own arithmetic makes a NaN of its own choosing, and hosts do
+/// not agree: an x86 host makes the unit's indefinite, an Arm host a positive
+/// NaN, so a guest that stored one ran differently on each (#108). The unit's
+/// rule is the same everywhere: a NaN operand comes through quieted, the one
+/// with the larger significand when both are, and an answer made from two
+/// numbers is the indefinite.
+#[must_use]
+pub fn answer(result: f64, a: f64, b: f64) -> f64 {
+    if !result.is_nan() {
+        return result;
+    }
+    const QUIET: u64 = 0x0008_0000_0000_0000;
+    const SIGNIFICAND: u64 = 0x000f_ffff_ffff_ffff;
+    // A quiet NaN's significand is always the larger, its top bit being the
+    // one that makes it quiet.
+    let nan = match (a.is_nan(), b.is_nan()) {
+        (false, false) => return INDEFINITE,
+        (true, true) if b.to_bits() & SIGNIFICAND > a.to_bits() & SIGNIFICAND => b,
+        (true, _) => a,
+        (false, true) => b,
+    };
+    f64::from_bits(nan.to_bits() | QUIET)
 }
 
 /// How wide a floating-point value is in memory.
@@ -671,24 +702,24 @@ pub fn execute(
         // The transcendentals.
         (0xd9, 0xf0) => {
             let x = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::pow2(x) - 1.0);
+            cpu.fpu.set_st(0, answer(maths::pow2(x) - 1.0, x, x));
         }
         (0xd9, 0xf1) => {
             // y * log2(x), with x on top.
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, y * maths::log2(x));
+            cpu.fpu.set_st(0, answer(y * maths::log2(x), x, y));
         }
         (0xd9, 0xf2) => {
             // The tangent, and a one pushed after it.
             let x = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::tan(x));
+            cpu.fpu.set_st(0, answer(maths::tan(x), x, x));
             cpu.fpu.push(1.0);
         }
         (0xd9, 0xf3) => {
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::atan2(y, x));
+            cpu.fpu.set_st(0, answer(maths::atan2(y, x), x, y));
         }
         (0xd9, 0xf4) => {
             // Split into exponent and significand.
@@ -701,7 +732,7 @@ pub fn execute(
             let significand = if value == 0.0 {
                 0.0
             } else {
-                value / exp2(exponent as i32)
+                answer(value / exp2(exponent as i32), value, value)
             };
             cpu.fpu.set_st(0, exponent);
             cpu.fpu.push(significand);
@@ -714,13 +745,16 @@ pub fn execute(
             // y * log2(x + 1).
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, y * maths::log2(x + 1.0));
+            cpu.fpu.set_st(0, answer(y * maths::log2(x + 1.0), x, y));
         }
-        (0xd9, 0xfa) => cpu.fpu.set_st(0, cpu.fpu.st(0).sqrt()),
+        (0xd9, 0xfa) => {
+            let x = cpu.fpu.st(0);
+            cpu.fpu.set_st(0, answer(x.sqrt(), x, x));
+        }
         (0xd9, 0xfb) => {
             let x = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::sin(x));
-            cpu.fpu.push(maths::cos(x));
+            cpu.fpu.set_st(0, answer(maths::sin(x), x, x));
+            cpu.fpu.push(answer(maths::cos(x), x, x));
         }
         (0xd9, 0xfc) => {
             // Round to a whole number, the way the control word says.
@@ -732,15 +766,16 @@ pub fn execute(
             // Scale by two to the power in st(1).
             let scale = cpu.fpu.st(1).trunc();
             let value = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, value * exp2(scale as i32));
+            cpu.fpu
+                .set_st(0, answer(value * exp2(scale as i32), value, scale));
         }
         (0xd9, 0xfe) => {
             let x = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::sin(x));
+            cpu.fpu.set_st(0, answer(maths::sin(x), x, x));
         }
         (0xd9, 0xff) => {
             let x = cpu.fpu.st(0);
-            cpu.fpu.set_st(0, maths::cos(x));
+            cpu.fpu.set_st(0, answer(maths::cos(x), x, x));
         }
         (0xdb, 0xe2) => cpu.fpu.clear_exceptions(),
         (0xdb, 0xe3) => cpu.fpu.init(),
@@ -851,6 +886,7 @@ fn register_form_op(cpu: &mut super::Cpu, escape: u8, reg: u8, index: usize) -> 
                     })
                 }
             };
+            let result = answer(result, top, other);
             if to_top {
                 cpu.fpu.set_st(0, result);
             } else {
@@ -902,20 +938,22 @@ fn memory_form(
         (0xd8 | 0xdc | 0xda | 0xde, 0..=7) => {
             let value = load(mem)?;
             let top = cpu.fpu.st(0);
-            match reg {
-                0 => cpu.fpu.set_st(0, top + value),
-                1 => cpu.fpu.set_st(0, top * value),
+            let result = match reg {
+                0 => top + value,
+                1 => top * value,
                 2 | 3 => {
                     cpu.fpu.compare(top, value);
                     if reg == 3 {
                         cpu.fpu.pop();
                     }
+                    return Ok(());
                 }
-                4 => cpu.fpu.set_st(0, top - value),
-                5 => cpu.fpu.set_st(0, value - top),
-                6 => cpu.fpu.set_st(0, top / value),
-                _ => cpu.fpu.set_st(0, value / top),
-            }
+                4 => top - value,
+                5 => value - top,
+                6 => top / value,
+                _ => value / top,
+            };
+            cpu.fpu.set_st(0, answer(result, top, value));
         }
         // Load and store, in every format.
         (0xd9, 0) => {
@@ -1033,7 +1071,7 @@ pub fn round_half_to_even(x: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{maths, X87};
+    use super::{answer, maths, INDEFINITE, X87};
 
     #[test]
     fn a_remainder_is_complete_in_one_step_and_says_its_quotient() {
@@ -1111,6 +1149,26 @@ mod tests {
         fpu.push(f64::NAN);
         fpu.examine();
         assert_eq!(kind(&fpu) & 0x4500, 0x0100, "a NaN is C0");
+    }
+
+    #[test]
+    fn a_nan_is_the_units_own_on_every_host() {
+        let bits = |x: f64| x.to_bits();
+        let zero = std::hint::black_box(0.0f64);
+        assert_eq!(bits(answer(zero / zero, zero, zero)), bits(INDEFINITE));
+        assert_eq!(
+            bits(answer(f64::INFINITY - f64::INFINITY, 1.0, 1.0)),
+            bits(INDEFINITE)
+        );
+        // A NaN operand comes through, quieted, whatever the host made.
+        let signalling = f64::from_bits(0x7ff0_0000_0000_0001);
+        assert_eq!(
+            bits(answer(f64::NAN, signalling, 1.0)),
+            0x7ff8_0000_0000_0001
+        );
+        let larger = f64::from_bits(0xfff8_0000_0000_0002);
+        assert_eq!(bits(answer(f64::NAN, signalling, larger)), bits(larger));
+        assert_eq!(answer(1.5, 1.0, 0.5), 1.5);
     }
 
     #[test]
