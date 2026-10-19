@@ -8,8 +8,8 @@
 //!
 //! What can be worked out without Windows is in `windows_input`, `pointer`,
 //! `pace` and `feed`, which every host's tests hold, and what is here is the
-//! calls into Windows. It has been compiled for x86-64 and Arm64 Windows and
-//! never yet run on either (#107).
+//! calls into Windows. It has been compiled for x86-64 and Arm64 Windows, and
+//! run on x86-64 Windows in a VM with no sound device (#107).
 //!
 //! The window presents through `StretchDIBits` on purpose, as macOS presents
 //! through a layer: what the guest draws is already a finished frame in its
@@ -314,8 +314,9 @@ impl Gdi32 {
 /// made.
 static DEF_WINDOW_PROC: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether the person asked the window to close: the close button, or its
-/// system menu. The window is not destroyed; the run is ended (#107).
+/// Whether the person asked the window to close: the close button, its
+/// system menu, or the console's own close, Ctrl-C or Ctrl-Break
+/// ([`way_back`]). The window is not destroyed; the run is ended (#107).
 static CLOSE_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// What Windows calls with a message sent to the window rather than posted
@@ -368,7 +369,8 @@ pub struct WinWindow {
     held: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<super::windows_audio::WinAudio>,
-    /// Whether the person closed the window, or pressed Alt-F4.
+    /// Whether the person pressed Alt-F4. The close button and the console
+    /// say so in [`CLOSE_ASKED`].
     closed: bool,
     /// Whether the title asked for the host's pointer to be hidden.
     pointer_hidden: bool,
@@ -510,13 +512,17 @@ impl WinWindow {
         if registered == 0 {
             return Err(os("RegisterRawInputDevices"));
         }
+        way_back::listen();
         Ok(ours)
     }
 
-    /// Whether the person has closed the window.
+    /// Whether the person has closed the window, or the console. Read from
+    /// the console's own thread as it is asked, not at the next pump: a run
+    /// that is loading does not pump, and a closing console waits only five
+    /// seconds for the run to end.
     #[must_use]
     pub fn closed(&self) -> bool {
-        self.closed
+        self.closed || CLOSE_ASKED.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through Windows' default output from now on, or
@@ -820,9 +826,6 @@ impl WinWindow {
                 }
             }
         }
-        if CLOSE_ASKED.load(Ordering::Relaxed) {
-            self.closed = true;
-        }
         // A key let go while another window has the keyboard is never sent
         // here, so what was held is let go when this one loses it.
         // Safety: user32's own, which takes nothing.
@@ -915,7 +918,7 @@ impl Host for WinWindow {
     }
 
     fn closed(&self) -> bool {
-        self.closed
+        WinWindow::closed(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {
@@ -935,19 +938,27 @@ impl Host for WinWindow {
     }
 }
 
-/// The way back to a pointer, for a run that does not get to finish (#45).
+/// The way back to a pointer, and to the run's wrap-up, from the console a
+/// title is a program of (#45, #107).
 ///
-/// A hidden pointer is the thread's and goes with the process, but a clip is
-/// the whole desktop's. So Ctrl-C, Ctrl-Break and the console closing let go
-/// of it before Windows' own handler ends the process as it was going to.
-/// A process killed outright runs nothing, as a `SIGKILL` runs nothing on
-/// macOS.
+/// A title is a console program, so that what it says reaches the terminal it
+/// was started from, and the console it runs in can be closed, or sent Ctrl-C
+/// or Ctrl-Break, under the window. Each ends the run as the close button
+/// does, with its `end` line and digest. A hidden pointer is the thread's and
+/// goes with the process, but a clip is the whole desktop's, so that is let go
+/// of first, in case the run does not get to its own. A process killed
+/// outright runs nothing, as a `SIGKILL` runs nothing on macOS.
 mod way_back {
-    use super::{ClipCursor, Rect};
+    use super::{ClipCursor, Rect, CLOSE_ASKED};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     static CLIP: AtomicUsize = AtomicUsize::new(0);
     static ARMED: AtomicBool = AtomicBool::new(false);
+
+    /// The events a console sends, by wincon.h's numbers: Ctrl-C is 0,
+    /// Ctrl-Break 1, and its window closing 2. Logging off and shutting down
+    /// are not sent to a process with a window.
+    const CTRL_CLOSE_EVENT: u32 = 2;
 
     type Handler = unsafe extern "system" fn(u32) -> i32;
 
@@ -970,16 +981,38 @@ mod way_back {
         }
     }
 
-    /// Windows calls this on a thread of its own; answering false hands the
-    /// event on to the next handler, which ends the process.
-    unsafe extern "system" fn on_console(_event: u32) -> i32 {
+    /// Windows calls this on a thread of its own. Answering true is the
+    /// event handled, and false hands it on to the next handler, which ends
+    /// the process.
+    ///
+    /// Ctrl-C and Ctrl-Break are handled: the run sees the close at its next
+    /// burst and ends, and the process with it. A second press, with the run
+    /// already ending, is handed on, so a run that never gets there can still
+    /// be stopped. A console closing ends the process as soon as this returns,
+    /// or five seconds after it was sent if it does not, so this never
+    /// returns: the run writes its wrap-up meanwhile, and `main` returning
+    /// ends the process, this thread with it.
+    unsafe extern "system" fn on_console(event: u32) -> i32 {
         restore();
-        0
+        if event > CTRL_CLOSE_EVENT {
+            return 0;
+        }
+        let again = CLOSE_ASKED.swap(true, Ordering::Relaxed);
+        if event == CTRL_CLOSE_EVENT {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        i32::from(!again)
     }
 
-    /// Remember how to let go of the pointer, and arm the handler. Once.
+    /// Remember how to let go of the pointer.
     pub fn arm(clip: ClipCursor) {
         CLIP.store(clip as usize, Ordering::Relaxed);
+    }
+
+    /// Hear the console, from when a window opens. Once.
+    pub fn listen() {
         if ARMED.swap(true, Ordering::Relaxed) {
             return;
         }

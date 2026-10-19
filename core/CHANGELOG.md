@@ -45,6 +45,14 @@ from the operands it was made from. No route reaches one, so no digest moves. Th
 sound mix and every other float a shim only compares, or turns into a whole number, were audited
 and left alone: no NaN's bits reach the guest from them.
 
+Fixed once the Windows backend was first run, on x86-64 in a VM (#107):
+
+- A title is a console program, so that what it says reaches the terminal it was started from,
+  and closing its console, or Ctrl-C or Ctrl-Break in it, ended the process with no wrap-up: no
+  `end` line and no digest in the log. Each now ends the run as the window's close button does. A
+  closing console gives a process five seconds, and the handler holds it open while the run writes
+  up; a second Ctrl-C, with the run already ending, ends the process as before.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
