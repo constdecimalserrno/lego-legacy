@@ -36,6 +36,25 @@ pub mod windows_input;
 pub mod x11;
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the run was asked to end from outside it: Windows' close button,
+/// or what the operating system sends a process someone means to stop, which
+/// is Ctrl-C, `SIGTERM` and its terminal closing on Unix ([`sys::listen`]),
+/// and Ctrl-C, Ctrl-Break and its console closing on Windows (#107, #110).
+/// Every host's [`Host::closed`] answers it, so each ends the run as the
+/// window's close button does, with its `end` line and digest.
+pub(crate) static CLOSE_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// Hear the operating system ask a run to end, from now on. A title's `main`
+/// does, for a run headless or in a window; the debugger does not, so Ctrl-C
+/// there still ends the process. Once.
+pub fn listen() {
+    #[cfg(unix)]
+    sys::listen();
+    #[cfg(windows)]
+    windows::listen();
+}
 
 /// One presented frame, as the guest's own surface bytes.
 ///
@@ -202,9 +221,10 @@ pub trait Host {
     fn put_pointer(&mut self, _x: i32, _y: i32) {}
 
     /// Whether the person has ended the run from outside it, by closing the
-    /// window. A host with no window never has.
+    /// window or by what [`listen`] hears. A host with no window has only the
+    /// second.
     fn closed(&self) -> bool {
-        false
+        CLOSE_ASKED.load(Ordering::Relaxed)
     }
 
     /// How many times a device taking this run's audio ran dry mid-sound, or

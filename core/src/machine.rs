@@ -38,7 +38,8 @@ pub enum Outcome {
     Wall { what: String },
     /// The instruction budget ran out first.
     BudgetExhausted,
-    /// The person closed the window.
+    /// The person closed the window, or ended the run from its terminal or
+    /// console, as [`crate::host::listen`] hears (#110).
     Closed,
     /// The person quit the debugger before the guest stopped.
     Quit,

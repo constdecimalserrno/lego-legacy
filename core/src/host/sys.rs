@@ -3,7 +3,8 @@
 //! ADR-0001: no crate is linked, so the handful of libc and dynamic-loader
 //! symbols the emulator needs are declared here and nowhere else: `mmap` and
 //! `dlopen` on a POSIX host, and on Windows their kernel32 equivalents,
-//! `VirtualAlloc` and `LoadLibraryExW`, which std links already (#107).
+//! `VirtualAlloc` and `LoadLibraryExW`, which std links already (#107). The
+//! signals that end a run are heard here too, on a POSIX host (#110).
 
 use super::HostError;
 
@@ -54,6 +55,59 @@ extern "C" {
     #[cfg_attr(target_os = "macos", link_name = "__error")]
     #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
     fn errno_location() -> *mut i32;
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn raise(sig: i32) -> i32;
+}
+
+/// `SIG_DFL` and `SIG_IGN`, and the signals that end a run someone is
+/// watching: its terminal closing, Ctrl-C and `SIGTERM`, numbered alike on
+/// every Unix.
+#[cfg(unix)]
+const SIG_DFL: usize = 0;
+#[cfg(unix)]
+const SIG_IGN: usize = 1;
+#[cfg(unix)]
+const SIGNALS: [i32; 3] = [1, 2, 15];
+
+/// Hear the signals that end a run from outside it ([`super::listen`]).
+///
+/// A signal the run was started ignoring stays ignored: `nohup` is someone
+/// asking a run to outlive its terminal, and a shell starts what it runs in
+/// the background deaf to Ctrl-C.
+#[cfg(unix)]
+pub fn listen() {
+    for sig in SIGNALS {
+        // Safety: libc's own, with a handler of the shape it asks for.
+        // `signal` keeps the handler armed and restarts what it interrupts,
+        // on macOS and in glibc and musl alike.
+        unsafe {
+            if signal(sig, on_signal as *const () as usize) == SIG_IGN {
+                signal(sig, SIG_IGN);
+            }
+        }
+    }
+}
+
+/// Ask for the close, which is all a handler can safely do: the run sees it
+/// at its next burst and ends, writing its `end` line and digest, and gives
+/// the pointer back as it ends (#110).
+///
+/// A second signal, with the run already ending, is the signal let be what it
+/// was, so a run that never gets there can still be stopped. That one puts
+/// the Mac's pointer back first, since the process is going without its
+/// destructors (#45).
+#[cfg(unix)]
+extern "C" fn on_signal(sig: i32) {
+    if !super::CLOSE_ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    super::mac::way_back::restore();
+    // Safety: libc's own, and this process is on its way out.
+    unsafe {
+        signal(sig, SIG_DFL);
+        raise(sig);
+    }
 }
 
 #[cfg(windows)]

@@ -55,6 +55,16 @@ Fixed once the Windows backend was first run, on x86-64 in a VM (#107):
 - `close the window to end` was printed after a run the person had ended by closing the window.
   It is printed only when there is a window left to close, on every host.
 
+A run stopped from its terminal got no wrap-up either, on any other host (#110). On macOS, Ctrl-C,
+`SIGTERM` and the terminal closing (`SIGHUP`) put the pointer back and ended the process; on Linux
+nothing heard them; and a headless run ended on Ctrl-C, on Windows too, with no `end` line and no
+digest. A title's `main` now hears each of them, headless or in a window (`host::listen`), and
+each ends the run as the window's close button does, with its `end` line and digest. The signal
+handler only asks for the close, which every host's `closed` answers; a second signal, with the
+run already ending, ends the process as before, putting the Mac's pointer back first. A signal
+the run was started ignoring, as `nohup` starts it ignoring `SIGHUP`, stays ignored. The
+debugger does not listen, so Ctrl-C there still ends it. No route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

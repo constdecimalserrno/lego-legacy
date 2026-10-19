@@ -504,10 +504,11 @@ impl MacWindow {
         }
     }
 
-    /// Whether the person has closed the window.
+    /// Whether the person has closed the window, or asked the run to end
+    /// from its terminal ([`super::listen`], #110).
     #[must_use]
     pub fn closed(&self) -> bool {
-        self.closed
+        self.closed || super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Let the mix be heard through the Mac's output from now on, or say why
@@ -897,7 +898,7 @@ impl Host for MacWindow {
     }
 
     fn closed(&self) -> bool {
-        self.closed
+        MacWindow::closed(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {
@@ -1080,25 +1081,16 @@ mod tests {
 /// no destructor, and what is left behind is a machine with no pointer and
 /// nothing on screen saying why (#45).
 ///
-/// So the two calls that put it back are kept where a signal handler can reach
-/// them, and the handler puts the pointer back before letting the signal do
-/// what it was going to do anyway.
-mod way_back {
+/// A first signal ends the run, and `Drop` with it (#110). So the two calls
+/// that put it back are kept where the handler of a second can reach them
+/// ([`super::sys`]), and it puts the pointer back before letting the signal
+/// do what it was going to do anyway.
+pub(super) mod way_back {
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     static ASSOCIATE: AtomicUsize = AtomicUsize::new(0);
     static SHOW: AtomicUsize = AtomicUsize::new(0);
     static DISPLAY: AtomicU32 = AtomicU32::new(0);
-    static ARMED: AtomicUsize = AtomicUsize::new(0);
-
-    /// `SIG_DFL`, and the signals that end a run someone is watching.
-    const SIG_DFL: usize = 0;
-    const SIGNALS: [i32; 3] = [1, 2, 15];
-
-    extern "C" {
-        fn signal(sig: i32, handler: usize) -> usize;
-        fn raise(sig: i32) -> i32;
-    }
 
     /// Put the pointer back, from wherever this is called.
     ///
@@ -1122,35 +1114,15 @@ mod way_back {
         }
     }
 
-    extern "C" fn on_signal(sig: i32) {
-        restore();
-        // Then let the signal be what it was: the default for it, raised
-        // again, so the run ends the way whoever sent it meant it to.
-        // Safety: libc's own, and this process is on its way out.
-        unsafe {
-            signal(sig, SIG_DFL);
-            raise(sig);
-        }
-    }
-
-    /// Remember how to put the pointer back, and arm the signals. Once.
+    /// Remember how to put the pointer back.
     pub fn arm(associate: usize, show: usize, display: u32) {
         ASSOCIATE.store(associate, Ordering::Relaxed);
         SHOW.store(show, Ordering::Relaxed);
         DISPLAY.store(display, Ordering::Relaxed);
-        if ARMED.swap(1, Ordering::Relaxed) == 1 {
-            return;
-        }
-        for sig in SIGNALS {
-            // Safety: libc's own, with a handler of the shape it asks for.
-            unsafe {
-                signal(sig, on_signal as *const () as usize);
-            }
-        }
     }
 }
 
-/// Remember how to give the pointer back, and arm the signals that would
+/// Remember how to give the pointer back, for the signal that would
 /// otherwise take it away for good.
 fn arm_the_way_back(
     associate: unsafe extern "C" fn(bool) -> i32,

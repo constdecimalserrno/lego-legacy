@@ -248,6 +248,10 @@ pub fn main(title: &'static Title) -> ExitCode {
     if cli.repl {
         return debugger(title, &cli);
     }
+    // A run stopped from its terminal or console, by Ctrl-C, `SIGTERM` or
+    // closing it, ends as the window's close button ends it, with its `end`
+    // line and digest, headless or not (#107, #110).
+    crate::host::listen();
     if !cli.headless {
         return windowed(title, &cli);
     }

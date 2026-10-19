@@ -20,9 +20,9 @@ use super::pace::Pace;
 use super::pointer::{moved, Moved, Steer};
 use super::stretch::Stretch;
 use super::windows_input::{self as input, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
-use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
+use super::{sys, Button, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Handle = *mut c_void;
 type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -314,11 +314,6 @@ impl Gdi32 {
 /// made.
 static DEF_WINDOW_PROC: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether the person asked the window to close: the close button, its
-/// system menu, or the console's own close, Ctrl-C or Ctrl-Break
-/// ([`way_back`]). The window is not destroyed; the run is ended (#107).
-static CLOSE_ASKED: AtomicBool = AtomicBool::new(false);
-
 /// What Windows calls with a message sent to the window rather than posted
 /// to it. Everything a person does is posted, and taken from the queue in
 /// [`WinWindow::pump`]; all that is answered here is a close.
@@ -328,6 +323,8 @@ unsafe extern "system" fn window_proc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    // The close button, or the window's system menu. The window is not
+    // destroyed; the run is ended (#107).
     if message == WM_CLOSE {
         CLOSE_ASKED.store(true, Ordering::Relaxed);
         return 0;
@@ -512,7 +509,6 @@ impl WinWindow {
         if registered == 0 {
             return Err(os("RegisterRawInputDevices"));
         }
-        way_back::listen();
         Ok(ours)
     }
 
@@ -938,16 +934,18 @@ impl Host for WinWindow {
     }
 }
 
+pub(super) use way_back::listen;
+
 /// The way back to a pointer, and to the run's wrap-up, from the console a
-/// title is a program of (#45, #107).
+/// title is a program of (#45, #107, #110).
 ///
 /// A title is a console program, so that what it says reaches the terminal it
 /// was started from, and the console it runs in can be closed, or sent Ctrl-C
-/// or Ctrl-Break, under the window. Each ends the run as the close button
-/// does, with its `end` line and digest. A hidden pointer is the thread's and
-/// goes with the process, but a clip is the whole desktop's, so that is let go
-/// of first, in case the run does not get to its own. A process killed
-/// outright runs nothing, as a `SIGKILL` runs nothing on macOS.
+/// or Ctrl-Break, under the window or in a headless run. Each ends the run as
+/// the close button does, with its `end` line and digest. A hidden pointer is
+/// the thread's and goes with the process, but a clip is the whole desktop's,
+/// so that is let go of first, in case the run does not get to its own. A
+/// process killed outright runs nothing, as a `SIGKILL` runs nothing on macOS.
 mod way_back {
     use super::{ClipCursor, Rect, CLOSE_ASKED};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1011,7 +1009,8 @@ mod way_back {
         CLIP.store(clip as usize, Ordering::Relaxed);
     }
 
-    /// Hear the console, from when a window opens. Once.
+    /// Hear the console, for a run headless or in a window
+    /// ([`super::super::listen`], #110). Once.
     pub fn listen() {
         if ARMED.swap(true, Ordering::Relaxed) {
             return;

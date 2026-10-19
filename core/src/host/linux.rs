@@ -626,10 +626,11 @@ impl LinuxWindow {
         }
     }
 
-    /// Whether the person has closed the window.
+    /// Whether the person has closed the window, or asked the run to end
+    /// from its terminal ([`super::listen`], #110).
     #[must_use]
     pub fn closed(&self) -> bool {
-        self.closed
+        self.closed || super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Let the mix be heard through ALSA's default output from now on, or
@@ -985,7 +986,7 @@ impl Host for LinuxWindow {
     }
 
     fn closed(&self) -> bool {
-        self.closed
+        LinuxWindow::closed(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {
