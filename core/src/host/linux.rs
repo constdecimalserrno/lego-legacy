@@ -566,7 +566,7 @@ impl LinuxWindow {
 
             // A key held down repeats as presses alone, with no release
             // between them, so that a repeat can be told from a second press
-            // (`x11::key`). A server without it repeats as releases and
+            // (`host::key_change`). A server without it repeats as releases and
             // presses, which the guest would see as the key tapped.
             // ponytail: no fallback for a server without XKB; every server a
             // stock desktop runs has it.
@@ -771,13 +771,13 @@ impl LinuxWindow {
                     let down = event.kind == KEY_PRESS;
                     let (state, keycode) = (event.key.state, event.key.keycode);
                     // Control-Q is how a person quits, as Command-Q is on the
-                    // Mac, and the Q goes no further.
+                    // Mac, and the Q goes no further, pressed or let go.
                     if down && x11::quits((self.x.lookup_keysym)(&raw mut event.key, 0), state) {
                         self.closed = true;
                         return;
                     }
                     if let Some(input) = x11::direct_input_key(keycode)
-                        .and_then(|code| x11::key(&mut self.keys, code, down))
+                        .and_then(|code| super::key_change(&mut self.keys, code, down))
                     {
                         self.pending.push(input);
                     }

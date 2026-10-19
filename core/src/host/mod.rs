@@ -9,9 +9,10 @@
 //!
 //! What a backend works out without asking its operating system is kept
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
-//! pointer a title is handed ([`pointer`]), the pace ([`pace`]), the feed to
-//! an audio device ([`feed`]) and the stretch of the mix ([`stretch`]),
-//! Windows' keys and scaling ([`windows_input`]), and X's ([`x11`]).
+//! pointer a title is handed ([`pointer`]), the keys it is told of
+//! ([`key_change`]), the pace ([`pace`]), the feed to an audio device
+//! ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys and
+//! scaling ([`windows_input`]), and X's ([`x11`]).
 
 pub mod feed;
 pub mod headless;
@@ -76,6 +77,26 @@ pub enum Input {
 pub enum Button {
     Left,
     Right,
+}
+
+/// A key pressed or let go, as the guest is told it, where `held` is the keys
+/// it has been told are down. Every backend's keys pass through here.
+///
+/// A key already held that is pressed again is the key repeating, and is
+/// still the one press. A key let go that the guest was never told was
+/// pressed goes no further: the key that ends a run with a modifier, the Q of
+/// Control-Q and Command-Q, the W of Command-W and the F4 of Alt-F4, is the
+/// host's, and so is its release, which reached the guest and the route as
+/// the key let go (#108).
+pub fn key_change(held: &mut Vec<u32>, code: u32, down: bool) -> Option<Input> {
+    if held.contains(&code) == down {
+        return None;
+    }
+    held.retain(|k| *k != code);
+    if down {
+        held.push(code);
+    }
+    Some(Input::Key { code, down })
 }
 
 /// A region of host memory the guest's arena lives in.
@@ -206,5 +227,48 @@ pub trait Host {
     /// headless host does nothing here, runs uncapped, and has no pace.
     fn pace(&mut self, _declared_nanos: u64) -> f64 {
         1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{key_change, Input};
+
+    fn down(code: u32) -> Option<Input> {
+        Some(Input::Key { code, down: true })
+    }
+
+    fn up(code: u32) -> Option<Input> {
+        Some(Input::Key { code, down: false })
+    }
+
+    /// A key held down repeating is still the one press, and it is let go
+    /// once.
+    #[test]
+    fn a_held_key_pressed_again_is_the_one_press() {
+        let mut held = Vec::new();
+        assert_eq!(key_change(&mut held, 0x1e, true), down(0x1e));
+        assert_eq!(key_change(&mut held, 0x1e, true), None, "a repeat");
+        assert_eq!(key_change(&mut held, 0x2a, true), down(0x2a));
+        assert_eq!(key_change(&mut held, 0x1e, false), up(0x1e));
+        assert_eq!(held, [0x2a]);
+        assert_eq!(
+            key_change(&mut held, 0x1e, true),
+            down(0x1e),
+            "pressed again"
+        );
+    }
+
+    /// Control-Q: the guest is told of Control pressed and let go, and of
+    /// nothing of the Q. The Q pressed ends the run before it gets here, and
+    /// the Q let go is the host's too (#108).
+    #[test]
+    fn the_key_that_ends_a_run_is_not_let_go_in_the_guest() {
+        let (control, q) = (0x1d, 0x10);
+        let mut held = Vec::new();
+        assert_eq!(key_change(&mut held, control, true), down(control));
+        assert_eq!(key_change(&mut held, q, false), None, "the Q let go");
+        assert_eq!(key_change(&mut held, control, false), up(control));
+        assert_eq!(key_change(&mut held, control, false), None, "let go twice");
     }
 }

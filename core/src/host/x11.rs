@@ -9,7 +9,6 @@
 //! the window moved.
 
 use super::pointer::content_scale;
-use super::Input;
 
 /// The DirectInput key number for an X key, by where the key sits on the
 /// keyboard rather than what it types, as on the Mac.
@@ -75,22 +74,6 @@ const CONTROL: u32 = 1 << 2;
 #[must_use]
 pub fn quits(keysym: u64, state: u32) -> bool {
     state & CONTROL != 0 && KEYSYM_Q.contains(&keysym)
-}
-
-/// A key pressed or let go, as the guest is told it.
-///
-/// A key already held that is pressed again is the key repeating, and is
-/// still the one press, as on the Mac. The backend asks X for repeats that
-/// come as presses alone, so this is all a repeat is.
-pub fn key(held: &mut Vec<u32>, code: u32, down: bool) -> Option<Input> {
-    if down && held.contains(&code) {
-        return None;
-    }
-    held.retain(|k| *k != code);
-    if down {
-        held.push(code);
-    }
-    Some(Input::Key { code, down })
 }
 
 /// Where the guest's frame is shown in the window, in the window's pixels:
@@ -239,8 +222,7 @@ impl Held {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, guest_point, key, picture, quits, scale, Held, Picture};
-    use crate::host::Input;
+    use super::{direct_input_key, guest_point, picture, quits, scale, Held, Picture};
 
     #[test]
     fn an_x_key_reaches_the_guest_as_the_key_in_the_same_place() {
@@ -283,21 +265,6 @@ mod tests {
         assert!(quits(0x51, control));
         assert!(!quits(0x71, 0), "Q alone is the title's");
         assert!(!quits(0x77, control), "Control-W is the title's");
-    }
-
-    /// A key held down repeating is still the one press, and it is let go
-    /// once.
-    #[test]
-    fn a_held_key_pressed_again_is_the_one_press() {
-        let mut held = Vec::new();
-        let down = |code| Some(Input::Key { code, down: true });
-        let up = |code| Some(Input::Key { code, down: false });
-        assert_eq!(key(&mut held, 0x1e, true), down(0x1e));
-        assert_eq!(key(&mut held, 0x1e, true), None, "a repeat");
-        assert_eq!(key(&mut held, 0x2a, true), down(0x2a));
-        assert_eq!(key(&mut held, 0x1e, false), up(0x1e));
-        assert_eq!(held, [0x2a]);
-        assert_eq!(key(&mut held, 0x1e, true), down(0x1e), "pressed again");
     }
 
     #[test]

@@ -30,6 +30,11 @@ Fixed once the Linux backend was first run, on x86-64 and aarch64 under Xvfb (#1
   macOS and on x86-64 Linux, breaking golden rule 1. Every x87 result now follows the unit's own
   rule (`x87::answer`): a NaN operand comes through quieted, and a NaN made from numbers is the
   indefinite. Seven of Rock Raiders' macOS digests move to the ones x86-64 Linux already gave.
+- Control-Q ended the run without the guest seeing the Q pressed, but the Q let go still reached
+  the guest and a recorded route as `Q up`. The Mac's Command-Q and Command-W and Windows' Alt-F4
+  did the same with their Q, W and F4. Every backend's keys now pass through one rule
+  (`host::key_change`): a key let go that the guest was never told was pressed goes no further.
+  No route moves: a route replays what the guest was told, and none holds such a release.
 
 The same rule now holds for the floats the shims make on the host (#109). Retained mode's maths
 (`win32::scene`: matrices, vectors, rotations, inverses, the projection, and a viewport's

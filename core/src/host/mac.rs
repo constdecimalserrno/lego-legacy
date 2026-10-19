@@ -737,7 +737,9 @@ impl MacWindow {
                         }
                     }
                     // Key down, key up, and a modifier pressed or let go. A
-                    // key held down repeating is still the one press.
+                    // key held down repeating is still the one press, and
+                    // the Q or W of Command-Q or Command-W goes no further
+                    // let go than pressed (`host::key_change`).
                     10..=12 => {
                         let key: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("keyCode"));
                         let input = if kind == 12 {
@@ -755,11 +757,8 @@ impl MacWindow {
                                 })
                         };
                         if let Some(Input::Key { code, down }) = input {
-                            self.held.retain(|k| *k != code);
-                            if down {
-                                self.held.push(code);
-                            }
-                            self.pending.push(Input::Key { code, down });
+                            self.pending
+                                .extend(super::key_change(&mut self.held, code, down));
                         }
                     }
                     _ => {}

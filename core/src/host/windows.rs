@@ -750,16 +750,14 @@ impl WinWindow {
             // handed on: `DefWindowProcW` answers Alt and F10 by entering the
             // window menu, which holds the thread in a loop of its own and
             // the run with it. Alt-F4 is answered here instead, as macOS
-            // answers Cmd-Q.
+            // answers Cmd-Q, and its F4 goes no further let go than pressed
+            // (`host::key_change`).
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 if input::closes(msg.message, msg.wparam, lparam) {
                     self.closed = true;
                 } else if let Some(Input::Key { code, down }) = input::key(msg.message, lparam) {
-                    self.held.retain(|k| *k != code);
-                    if down {
-                        self.held.push(code);
-                    }
-                    self.pending.push(Input::Key { code, down });
+                    self.pending
+                        .extend(super::key_change(&mut self.held, code, down));
                 }
                 true
             }
