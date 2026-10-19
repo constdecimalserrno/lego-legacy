@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::cpu::x87::answer_single;
+
 /// A 4x4 matrix in Direct3D's row-vector convention: a point is a row, and it
 /// is multiplied on the left.
 pub type Matrix = [[f32; 4]; 4];
@@ -130,6 +132,12 @@ impl View {
             ],
             [0.0, 0.0, -n * q, 0.0],
         ]
+        .map(|row| settled(row, self.numbers()))
+    }
+
+    /// What the view is set up with, as operands.
+    fn numbers(&self) -> impl Iterator<Item = f32> + Clone {
+        self.plane.into_iter().chain([self.front, self.back])
     }
 
     /// Where a point in the scene lands on the device, seen from a camera
@@ -142,12 +150,16 @@ impl View {
         let clip_from_world = multiply(&invert(camera)?, &self.perspective());
         let [cx, cy, cz, cw] =
             super::pipeline::project(&clip_from_world, [point[0], point[1], point[2], 1.0]);
-        Some([
-            (x + width / 2.0) * cw + cx * width / 2.0,
-            (y + height / 2.0) * cw - cy * height / 2.0,
-            cz,
-            cw,
-        ])
+        let operands = self.numbers().chain(camera.iter().flatten().copied());
+        Some(settled(
+            [
+                (x + width / 2.0) * cw + cx * width / 2.0,
+                (y + height / 2.0) * cw - cy * height / 2.0,
+                cz,
+                cw,
+            ],
+            operands.chain(point),
+        ))
     }
 
     /// The point in the scene a place on the device is: [`View::to_screen`]
@@ -173,7 +185,8 @@ impl View {
             z * (up - p[2][1]) / p[1][1],
             z,
         ];
-        Some(transform(camera, eye))
+        let operands = self.numbers().chain(camera.iter().flatten().copied());
+        Some(settled(transform(camera, eye), operands.chain(screen)))
     }
 }
 
@@ -260,7 +273,10 @@ pub fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
     let mut out = [[0.0; 4]; 4];
     for (i, row) in out.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {
-            *cell = (0..4).map(|k| a[i][k] * b[k][j]).sum();
+            *cell = answer_single(
+                (0..4).map(|k| a[i][k] * b[k][j]).sum(),
+                (0..4).flat_map(|k| [a[i][k], b[k][j]]),
+            );
         }
     }
     out
@@ -299,42 +315,52 @@ pub fn rotation(axis: [f32; 3], theta: f32) -> Matrix {
         ],
         [0.0, 0.0, 0.0, 1.0],
     ]
+    .map(|row| settled(row, axis.into_iter().chain([theta])))
 }
 
 #[must_use]
 pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    settled(
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ],
+        a.into_iter().chain(b),
+    )
 }
 
 /// A vector scaled to length one, or `None` for one with no length.
 #[must_use]
 pub fn normalise(v: [f32; 3]) -> Option<[f32; 3]> {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    (length > 0.0).then(|| v.map(|c| c / length))
+    (length > 0.0).then(|| settled(v.map(|c| c / length), v))
 }
 
 /// A direction through a transform: turned and scaled, never moved.
 #[must_use]
 pub fn direct(m: &Matrix, [x, y, z]: [f32; 3]) -> [f32; 3] {
-    [
-        x * m[0][0] + y * m[1][0] + z * m[2][0],
-        x * m[0][1] + y * m[1][1] + z * m[2][1],
-        x * m[0][2] + y * m[1][2] + z * m[2][2],
-    ]
+    settled(
+        [
+            x * m[0][0] + y * m[1][0] + z * m[2][0],
+            x * m[0][1] + y * m[1][1] + z * m[2][1],
+            x * m[0][2] + y * m[1][2] + z * m[2][2],
+        ],
+        [x, y, z].into_iter().chain(m.iter().flatten().copied()),
+    )
 }
 
 /// A point through a transform.
 #[must_use]
 pub fn transform(m: &Matrix, [x, y, z]: [f32; 3]) -> [f32; 3] {
-    [
-        x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0],
-        x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1],
-        x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2],
-    ]
+    settled(
+        [
+            x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0],
+            x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1],
+            x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2],
+        ],
+        [x, y, z].into_iter().chain(m.iter().flatten().copied()),
+    )
 }
 
 /// The transform that undoes an affine one: the inverse of its linear part,
@@ -369,12 +395,43 @@ pub fn invert(m: &Matrix) -> Option<Matrix> {
     }
     let t = transform(&out, [m[3][0], m[3][1], m[3][2]]);
     out[3] = [-t[0], -t[1], -t[2], 1.0];
-    Some(out)
+    Some(out.map(|row| settled(row, m.iter().flatten().copied())))
+}
+
+/// A result's parts as a real x86 machine gives them where one is not a
+/// number: by [`answer_single`]'s rule, from the operands it was made from,
+/// never the NaN this host made (#109). What the guest reads back from
+/// retained mode is made here, so a run's state is the same on every host.
+// ponytail: every operand counts for every part, so two parts made from two
+// different NaNs both come out the larger; x86 doing these same sums would
+// give each its own. Only a guest passing two NaNs to one call would see it.
+fn settled<const N: usize>(
+    parts: [f32; N],
+    operands: impl IntoIterator<Item = f32> + Clone,
+) -> [f32; N] {
+    parts.map(|p| answer_single(p, operands.clone()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{invert, multiply, transform, Matrix, Scene, IDENTITY};
+    use super::{answer_single, invert, multiply, normalise, transform, Matrix, Scene, IDENTITY};
+
+    #[test]
+    fn a_nan_retained_mode_makes_is_the_same_bits_on_every_host() {
+        let bits = |v: [f32; 3]| v.map(f32::to_bits);
+        // An infinite part has no direction: infinity over infinity, which an
+        // x86 host makes negative and an Arm host positive.
+        let endless = std::hint::black_box([f32::INFINITY, 0.0, 0.0]);
+        assert_eq!(bits(normalise(endless).unwrap()), [0xffc0_0000, 0, 0]);
+        for made in [0x7fc0_0000, 0xffc0_0000] {
+            let answer = answer_single(f32::from_bits(made), [f32::INFINITY, 0.0]);
+            assert_eq!(answer.to_bits(), 0xffc0_0000, "whichever the host made");
+        }
+        // A NaN the guest passed comes through, quieted.
+        let signalling = std::hint::black_box(f32::from_bits(0x7f80_0001));
+        let moved = transform(&IDENTITY, [signalling, 1.0, 2.0]);
+        assert_eq!(bits(moved), [0x7fc0_0001; 3]);
+    }
 
     #[test]
     fn a_perspective_viewport_puts_its_front_plane_on_the_edges_of_the_screen() {

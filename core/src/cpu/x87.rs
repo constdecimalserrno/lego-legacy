@@ -324,6 +324,26 @@ pub fn answer(result: f64, a: f64, b: f64) -> f64 {
     f64::from_bits(nan.to_bits() | QUIET)
 }
 
+/// [`answer`] for a single-precision result a shim's own arithmetic made
+/// from any number of operands, as retained mode's maths makes them (#109):
+/// the NaN a real x86 machine gives, never the one this host made.
+///
+/// The widths change as the unit's own loads and stores change them, which
+/// keep a NaN's sign and significand on every host.
+#[must_use]
+pub fn answer_single(result: f32, operands: impl IntoIterator<Item = f32>) -> f32 {
+    if !result.is_nan() {
+        return result;
+    }
+    let nan = operands
+        .into_iter()
+        .map(f64::from)
+        .filter(|x| x.is_nan())
+        .reduce(|a, b| answer(f64::NAN, a, b))
+        .unwrap_or(0.0);
+    answer(f64::NAN, nan, nan) as f32
+}
+
 /// How wide a floating-point value is in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {

@@ -2328,7 +2328,10 @@ fn viewport_get_back(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32,
 }
 
 fn viewport_get_field(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    answer_float(ctx, this, |v| (v.plane[1] - v.plane[0]) / 2.0)
+    answer_float(ctx, this, |v| {
+        let [left, right, ..] = v.plane;
+        crate::cpu::x87::answer_single((right - left) / 2.0, [left, right])
+    })
 }
 
 fn viewport_get_plane(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {

@@ -31,6 +31,15 @@ Fixed once the Linux backend was first run, on x86-64 and aarch64 under Xvfb (#1
   rule (`x87::answer`): a NaN operand comes through quieted, and a NaN made from numbers is the
   indefinite. Seven of Rock Raiders' macOS digests move to the ones x86-64 Linux already gave.
 
+The same rule now holds for the floats the shims make on the host (#109). Retained mode's maths
+(`win32::scene`: matrices, vectors, rotations, inverses, the projection, and a viewport's
+`Transform` and `InverseTransform`) and `IDirect3DRMViewport2::GetField` kept whatever NaN the host
+made when a title passed an infinity, or numbers large enough to overflow, and the guest reads
+those results back. Each now comes out by the unit's rule (`x87::answer_single`, beside `answer`),
+from the operands it was made from. No route reaches one, so no digest moves. The rasteriser, the
+sound mix and every other float a shim only compares, or turns into a whole number, were audited
+and left alone: no NaN's bits reach the guest from them.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
