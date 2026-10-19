@@ -212,6 +212,42 @@ fn a_run_a_device_heard_says_it_never_ran_dry_and_one_nobody_heard_says_nothing(
     );
 }
 
+/// A run that has ended gives the pointer back before anything else, so a
+/// window waiting to be closed holds nothing of it (#111).
+#[test]
+fn a_run_that_has_ended_gives_the_pointer_back() {
+    /// The headless host, with a window's record of whether the title has
+    /// the pointer hidden.
+    struct Held(Headless, bool);
+    impl Host for Held {
+        fn present(&mut self, frame: &Frame<'_>) {
+            self.0.present(frame);
+        }
+        fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+            self.0.poll_input(flip)
+        }
+        fn audio(&mut self, samples: &[i16]) {
+            self.0.audio(samples);
+        }
+        fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+            self.0.map(len)
+        }
+        fn show_pointer(&mut self, show: bool) {
+            self.1 = !show;
+        }
+    }
+
+    scratch();
+    let cli = Cli {
+        stub: true,
+        data_root: Some(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("held")),
+        ..Cli::default()
+    };
+    let mut host = Held(Headless::new(), true);
+    run::run(&TEST_TITLE, &cli, &mut host, 1_000).expect("the stub runs");
+    assert!(!host.1, "the pointer is still the run's after it ended");
+}
+
 /// A host that cannot keep pace says so, and the run says it back for a
 /// title's own frames as it does for the stub's: those are presented by
 /// another path, and it never asked (#75, #94).

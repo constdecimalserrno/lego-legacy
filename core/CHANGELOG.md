@@ -54,6 +54,11 @@ Fixed once the Windows backend was first run, on x86-64 in a VM (#107):
   up; a second Ctrl-C, with the run already ending, ends the process as before.
 - `close the window to end` was printed after a run the person had ended by closing the window.
   It is printed only when there is a window left to close, on every host.
+- A run that ended by itself, its route finished or its budget spent, kept the pointer while its
+  window waited to be closed, if the title had taken it: on Windows clipped to one pixel and
+  hidden, so a person had to Alt-Tab away to get it back. Every host now gives it back as soon as
+  the run ends, before `close the window to end`, the way losing focus does, and does not take it
+  again while the window waits, clicked or in front (#111).
 
 A run stopped from its terminal got no wrap-up either, on any other host (#110). On macOS, Ctrl-C,
 `SIGTERM` and the terminal closing (`SIGHUP`) put the pointer back and ended the process; on Linux

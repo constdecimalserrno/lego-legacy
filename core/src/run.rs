@@ -47,6 +47,10 @@ pub fn run_digested(
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
     let (mut machine, mut log) = setup(title, cli, host)?;
     let finish = machine.run(host, &mut log, budget);
+    // Nothing reads the pointer once the run has ended, so it is the
+    // person's again, by the way losing focus gives it back, and stays theirs
+    // while the window waits to be closed (#111).
+    host.show_pointer(true);
     let digest = wrap_up(title, &mut machine, host, &mut log, &finish);
     Ok((finish, log, digest))
 }
