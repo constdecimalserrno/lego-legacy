@@ -41,16 +41,18 @@ lego-legacy is a preservation effort, and eight rules outrank everything else in
 ## What you need
 
 - A Mac, for now. The window, sound and input have a macOS backend (AppKit, Core Graphics and
-  AudioToolbox, reached at run time); Windows (#107) and Linux (#108) backends are written and
-  untested. `--headless` needs no window and may build elsewhere; that is untested.
-- Windows 10 or 11, x86-64 or Arm64, is **untested**. A Windows backend (user32, gdi32 and
-  winmm's `waveOut`, reached at run time from Windows' own System32) is written and compiles,
-  but has not been run on real Windows, and stays untested until
-  [#107](https://github.com/constdecimalserrno/lego-legacy/issues/107)'s remaining items are
-  done. The suite there needs Git for Windows, for `git` and the Git Bash that runs
-  `scripts/ci.sh`.
-- On Linux, a backend is written but **untested**: it compiles for x86-64 and aarch64 Linux and
-  has never been run on Linux, so expect it not to work until #108's remaining items are done. It
+  AudioToolbox, reached at run time). Windows (#107) and Linux (#108) backends have been run by
+  machine but **not yet played by a person**, so neither is released (golden rule 7).
+- Windows 10 or 11. A Windows backend (user32, gdi32 and winmm's `waveOut`, reached at run time
+  from Windows' own System32) passes the full suite on x86-64 Windows Server 2022, and its
+  window, keys, pointer, console and launcher were checked on that machine's desktop. Sound
+  (that machine had no audio device), Arm64 and a person playing it are what
+  [#107](https://github.com/constdecimalserrno/lego-legacy/issues/107) still waits on. The suite
+  there needs Git for Windows, for `git` and the Git Bash that runs `scripts/ci.sh`.
+- Linux. A backend passes the full suite on x86-64 and aarch64 Ubuntu, and its window and keys
+  were checked under Xvfb. A real desktop (Xorg and Wayland), sound through PipeWire or
+  PulseAudio, the pointer's feel and a person playing it are what
+  [#108](https://github.com/constdecimalserrno/lego-legacy/issues/108) still waits on. It
   reaches X11 for the window, input and pointer (on a Wayland desktop, through XWayland) and ALSA
   for sound, at run time, and needs `libX11.so.6` and `libasound.so.2`, which a desktop install
   almost always has: on Debian and Ubuntu the packages `libx11-6` and `libasound2`
