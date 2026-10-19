@@ -322,7 +322,9 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     match ran {
         Ok((finish, log)) => {
             report(title, &finish, &log);
-            if finish.flips > 0 {
+            // A run the person ended by closing the window has none left to
+            // close (#107).
+            if finish.flips > 0 && !host.closed() {
                 println!("close the window to end");
                 while !host.closed() {
                     host.pump();

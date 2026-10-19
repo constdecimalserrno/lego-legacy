@@ -52,6 +52,8 @@ Fixed once the Windows backend was first run, on x86-64 in a VM (#107):
   `end` line and no digest in the log. Each now ends the run as the window's close button does. A
   closing console gives a process five seconds, and the handler holds it open while the run writes
   up; a second Ctrl-C, with the run already ending, ends the process as before.
+- `close the window to end` was printed after a run the person had ended by closing the window.
+  It is printed only when there is a window left to close, on every host.
 
 ## 1.0.0 — 2026-10-18
 
