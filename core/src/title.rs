@@ -59,8 +59,8 @@ impl EntryImage {
 /// the host's own processor or memory would replay differently on another
 /// machine.
 pub struct Declared {
-    /// What `GetVersion` answers with, packed as Windows packs it.
-    pub windows: u32,
+    /// Which Windows the machine runs, as its version calls answer.
+    pub windows: Windows,
     /// The processor this machine has, in cycles a second, one instruction to
     /// the cycle. It decides how much a declared second is worth in work,
     /// which is what a title that waits by reading the clock spends.
@@ -78,13 +78,47 @@ pub struct Declared {
     pub why: &'static str,
 }
 
-/// Windows 98 Second Edition: major 4, minor 10, build 2222, with the top bit
-/// clear to say it is not Windows NT.
-pub const WINDOWS_98_SE: u32 = 0x0a04 | (2222 << 16);
+/// A Windows, as `GetVersion` and `GetVersionExA` answer for it (#129).
+///
+/// Windows 9x packs these unlike Windows NT. `GetVersion`'s top bit is set,
+/// which is how a title tells it from NT, and the rest of its high word,
+/// where NT puts the build, Microsoft documents as reserved. `GetVersionExA`
+/// carries the build in the low word of `dwBuildNumber`, with the major and
+/// minor versions in its high word.
+pub struct Windows {
+    /// What `GetVersion` answers.
+    pub version: u32,
+    /// `OSVERSIONINFOA`'s `dwBuildNumber`.
+    pub build: u32,
+    /// `OSVERSIONINFOA`'s `szCSDVersion`.
+    pub csd: &'static str,
+}
 
-/// Windows 95 as it was sold in a box: major 4, minor 0, build 950, packed
-/// as [`WINDOWS_98_SE`] is.
-pub const WINDOWS_95: u32 = 0x0004 | (950 << 16);
+/// Windows 98 Second Edition, 4.10.2222: `0xC0000A04`, build `0x040A08AE`
+/// and `" A "`, from Wine's table for it (`dlls/ntdll/version.c`; its
+/// `misc/version.c` of 2003 gives the `GetVersion` word as a literal).
+/// AutoCAD 2000's crash dumps from real Windows 98 machines, posted online,
+/// record the same `WinVer=0xC0000A04`, and KernelEx, which runs on Windows
+/// 98, compares `GetVersion` against it. MSDN's `OSVERSIONINFO` documents the
+/// build's layout and an `A` for Second Edition.
+pub const WINDOWS_98_SE: Windows = Windows {
+    version: 0xc000_0a04,
+    build: 0x040a_08ae,
+    csd: " A ",
+};
+
+/// Windows 95 as it was sold in a box, 4.00.950: `0xC0000004`, build
+/// `0x040003B6` and no CSD string, from Wine's table for it as above, which
+/// has given that `GetVersion` word as a literal since 1998
+/// (`misc/version.c`, wine-980301). Microsoft's NT compatibility shim for
+/// Windows 95, as ReactOS reimplements and tests it, answers `0xC3B60004`
+/// with a bare build of 950 instead, a build that contradicts MSDN's layout;
+/// Wine's is the answer recorded as Windows 95's own.
+pub const WINDOWS_95: Windows = Windows {
+    version: 0xc000_0004,
+    build: 0x0400_03b6,
+    csd: "",
+};
 
 /// How a title's files reached the declared machine's disc.
 ///
@@ -203,4 +237,28 @@ impl Title {
         // The stub guest has no pointer of its own to draw.
         pointer_speed: (1.0, 1.0),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_declared_windows_answers_what_that_windows_answered() {
+        // #129: the words each Windows gave, from the sources beside them.
+        for (windows, version, build, csd) in [
+            (&WINDOWS_98_SE, 0xc000_0a04, 0x040a_08ae, " A "),
+            (&WINDOWS_95, 0xc000_0004, 0x0400_03b6, ""),
+        ] {
+            assert_eq!(
+                (windows.version, windows.build, windows.csd),
+                (version, build, csd)
+            );
+            assert_ne!(windows.version >> 31, 0, "a clear top bit says Windows NT");
+            // `GetVersion` packs minor over major; `dwBuildNumber`'s high word
+            // packs them the other way round.
+            let (major, minor) = (windows.version & 0xff, (windows.version >> 8) & 0xff);
+            assert_eq!(windows.build >> 16, major << 8 | minor);
+        }
+    }
 }

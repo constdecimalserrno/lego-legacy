@@ -244,19 +244,20 @@ fn set_thread_priority(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn get_version(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.title.declared.windows)
+    Ok(ctx.title.declared.windows.version)
 }
 
 fn get_version_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // OSVERSIONINFOA: size, major, minor, build, platform, then a 128-byte
     // string. Platform 1 is Windows 95 and its descendants.
     let at = args[0];
-    let windows = ctx.title.declared.windows;
-    let (major, minor, build) = (windows & 0xff, (windows >> 8) & 0xff, windows >> 16);
+    let windows = &ctx.title.declared.windows;
+    let (major, minor) = (windows.version & 0xff, (windows.version >> 8) & 0xff);
+    let (build, csd) = (windows.build, windows.csd);
     for (offset, value) in [(4, major), (8, minor), (12, build), (16, 1)] {
         ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
     }
-    ctx.write_string(at + 20, 128, "").map_err(Stop::Fault)?;
+    ctx.write_string(at + 20, 128, csd).map_err(Stop::Fault)?;
     Ok(1)
 }
 

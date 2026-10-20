@@ -439,17 +439,17 @@ fn what_the_machine_declares_is_what_the_guest_reads_back() {
     assert_eq!(ROCK_RAIDERS.declared.megabytes, 128);
     assert_eq!(ROCK_RAIDERS.declared.computer, "LEGO-LEGACY");
     assert_eq!(
-        ROCK_RAIDERS.declared.windows & 0xff,
+        ROCK_RAIDERS.declared.windows.version & 0xff,
         4,
         "Windows 98 is major version four"
     );
     assert_eq!(
-        (ROCK_RAIDERS.declared.windows >> 8) & 0xff,
+        (ROCK_RAIDERS.declared.windows.version >> 8) & 0xff,
         10,
         "and minor version ten"
     );
     assert_eq!(
-        ROCK_RAIDERS.declared.windows >> 16,
+        ROCK_RAIDERS.declared.windows.build & 0xffff,
         2222,
         "build 2222 is Second Edition"
     );
