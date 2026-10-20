@@ -82,6 +82,10 @@ pub struct Declared {
 /// clear to say it is not Windows NT.
 pub const WINDOWS_98_SE: u32 = 0x0a04 | (2222 << 16);
 
+/// Windows 95 as it was sold in a box: major 4, minor 0, build 950, packed
+/// as [`WINDOWS_98_SE`] is.
+pub const WINDOWS_95: u32 = 0x0004 | (950 << 16);
+
 /// How a title's files reached the declared machine's disc.
 ///
 /// A declared value like every other: which of these it is comes from the

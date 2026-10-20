@@ -81,10 +81,33 @@ pub const ALPHA_TEAM: Entry = Entry {
     red_book: None,
 };
 
-/// The roster's supported titles, three of its four, in the order they were
-/// taken. A title joins when its own crate does, so the launcher never offers
-/// something that cannot be started.
-pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS, &HOT_WHEELS, &ALPHA_TEAM];
+/// LEGO Island, the roster's fourth title, and the one in progress (#112).
+pub const LEGO_ISLAND: Entry = Entry {
+    key: "lego-island",
+    name: "LEGO Island",
+    image: EntryImage {
+        disc_dir: "lego-island",
+        pressing: "lego-island",
+        // The game itself, not `LEGOIsle.exe` beside it: that is the settings
+        // launcher, byte for byte the disc's `CONFIG.EXE`, and all it does
+        // once its dialog closes is start this one (#113).
+        path: "DATA/disk/ISLE.EXE",
+        in_cabinet: false,
+        sha256: "5cf57c284973fce9d14f5677a2e4435fd989c5e938970764d00c8932ed5128ca",
+        why: "this title has one pressing and its executable is on the disc unwrapped, beside \
+              the engine and data its Wise installer copies from the same directory; the \
+              settings launcher LEGOIsle.exe, which only starts this one, is not run",
+    },
+    // One data track and no audio tracks: this title's music is in its own
+    // scripts and in MIDI it plays itself.
+    red_book: None,
+};
+
+/// The roster's titles that have a crate, in the order they were taken: the
+/// three v1 titles and LEGO Island, the one in progress. A title joins when
+/// its own crate does, so the launcher never offers something that cannot be
+/// started.
+pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS, &HOT_WHEELS, &ALPHA_TEAM, &LEGO_ISLAND];
 
 /// What the launcher found when it went looking for a title.
 #[derive(Clone, Debug, PartialEq, Eq)]

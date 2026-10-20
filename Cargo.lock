@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lego-island"
+version = "0.1.0"
+dependencies = [
+ "lego-legacy-core",
+]
+
+[[package]]
 name = "lego-legacy-core"
 version = "1.1.0"
 

@@ -1,0 +1,18 @@
+[package]
+name = "lego-island"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lego-island"
+path = "src/main.rs"
+
+[dependencies]
+lego-legacy-core = { path = "../../core", version = "=1.1.0" }

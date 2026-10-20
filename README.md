@@ -11,6 +11,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | LEGO Rock Raiders | **Playable**: a person has played the first mission through |
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
+| LEGO Island | In progress ([#112](https://github.com/constdecimalserrno/lego-legacy/issues/112)): it starts, and stops at its first wall before its window opens |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
@@ -77,6 +78,7 @@ on an unmounted disc).
 | Rock Raiders original (tests only) | `game-data/rock-raiders/rock-raiders/rock-raiders.iso` | The original pressing's data track. Needed only by the tests that check its wrapped executable is named and refused; the game never runs from it. |
 | Hot Wheels Stunt Track Driver | `game-data/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver.iso` | |
 | Alpha Team | `game-data/alpha-team/alpha-team/alpha-team.iso` | The original pressing. |
+| LEGO Island | `game-data/lego-island/lego-island/lego-island.iso` | The original 1997 pressing. |
 
 Running the launcher with no arguments lists each title and says whether its image was found
 and is the right one. Saves land beside the rip, in `game-data/<disc>/profile/`.

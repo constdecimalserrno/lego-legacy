@@ -72,6 +72,10 @@ debugger does not listen, so Ctrl-C there still ends it. No route moves. Such a 
 line says `stopped by the person`, where it said `window closed`, since a run stopped from its
 terminal may have no window.
 
+LEGO Island joined the roster as its fourth entry, `roster::LEGO_ISLAND`, with its own crate and
+in progress (#113): `DATA/disk/ISLE.EXE`, one pressing, no Red Book audio. `title::WINDOWS_95`
+is the Windows it declares, packed as `WINDOWS_98_SE` is. No other title's route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

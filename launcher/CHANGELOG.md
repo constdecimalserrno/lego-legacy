@@ -7,6 +7,9 @@ One heading per version, newest first. What each part of the launcher's version 
 
 Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems, and finds a title's `<title>.exe` beside itself on Windows.
 
+Lists LEGO Island as the fourth title and starts it, as `lego-legacy lego-island`, when its rip is
+there (#113). It is in progress: it stops at a wall long before it is playable.
+
 ## 1.0.0 — 2026-10-18
 
 `lego-legacy`, the one front door. With no arguments it lists the three titles, says for each
