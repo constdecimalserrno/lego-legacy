@@ -10,20 +10,51 @@ pub mod heap;
 use crate::host::{Host, HostError, Mapping};
 use std::fmt;
 
-/// A guest address that is not in the arena.
+/// A guest address that is not in the arena, or is under its floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault {
     pub addr: u32,
     pub len: usize,
+    /// Whether it was a write, which is the first thing an access violation
+    /// tells the guest's handlers (#132).
+    pub write: bool,
 }
+
+/// The bottom of a Windows 9x process's address space, which is what every
+/// title declares (#132). Matt Pietrek, *Windows 95 System Programming
+/// Secrets* (1995): a Win32 program's data selector is expand-down, and
+/// "Windows 95 makes the lowest addresses in 4K of a virtual machine
+/// inaccessible" with it, so a null pointer faults rather than overwriting
+/// memory. Windows NT refuses the whole first 64 KiB instead, and no title
+/// declares NT.
+pub const NULL_PAGE: u32 = 0x0000_1000;
+
+/// The end of the MS-DOS memory every Win32 process on Windows 9x can see
+/// above the null page: the system virtual machine's first megabyte, "the
+/// memory image of MS-DOS" and the bottom of the 16-bit global heap, "almost
+/// completely unprotected" (Pietrek, the same book). Microsoft's KB 125691
+/// says a Win32 process is not to use it. This machine does not have it, so an
+/// access there stops the run rather than reading something it made up.
+pub const DOS_MEMORY: u32 = 0x0010_0000;
 
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "guest address {:#010x}+{} is outside the arena",
-            self.addr, self.len
-        )
+        let (addr, len) = (self.addr, self.len);
+        if addr < NULL_PAGE {
+            write!(
+                f,
+                "guest address {addr:#010x}+{len} is in the first 4 KiB, which Windows 9x \
+                 refuses a Win32 process"
+            )
+        } else if addr < DOS_MEMORY {
+            write!(
+                f,
+                "guest address {addr:#010x}+{len} is in the MS-DOS memory under the first \
+                 megabyte, which this machine does not have"
+            )
+        } else {
+            write!(f, "guest address {addr:#010x}+{len} is outside the arena")
+        }
     }
 }
 
@@ -32,6 +63,9 @@ impl std::error::Error for Fault {}
 /// The guest's whole address space.
 pub struct Arena {
     mapping: Mapping,
+    /// Below this, every access faults. Zero unless a machine sets it: the
+    /// conformance corpus is a 386 in real mode and lives at the bottom.
+    floor: u32,
     /// Which pages the engine has decoded instructions out of, one bit each
     /// (ADR-0004). A write to one of them means what is cached for it is no
     /// longer what is there.
@@ -66,7 +100,16 @@ impl Arena {
             written_code: Vec::new(),
             written_all: false,
             mapping: host.map(len)?,
+            floor: 0,
         })
+    }
+
+    /// Fault every access below `floor`, as Windows faults the pages it
+    /// never maps (#132).
+    #[must_use]
+    pub fn with_floor(mut self, floor: u32) -> Self {
+        self.floor = floor;
+        self
     }
 
     #[must_use]
@@ -79,10 +122,15 @@ impl Arena {
         self.mapping.is_empty()
     }
 
+    /// One subtraction ahead of the one compare this always was: an address
+    /// under the floor wraps round to far past the end (#132). No bytes at
+    /// all touch nothing there, which is what the rasteriser borrows at a
+    /// null pointer when no texture is set.
     fn in_bounds(&self, addr: u32, len: usize) -> bool {
-        (addr as usize)
+        (addr.wrapping_sub(self.floor) as usize)
             .checked_add(len)
-            .is_some_and(|end| end <= self.mapping.len())
+            .is_some_and(|end| end <= self.mapping.len() - self.floor as usize)
+            || (len == 0 && addr < self.floor)
     }
 }
 
@@ -140,6 +188,7 @@ impl GuestMem for Arena {
             return Err(Fault {
                 addr,
                 len: bytes.len(),
+                write: true,
             });
         }
         if self.wrote_over_code(addr, bytes.len()) {
@@ -159,7 +208,11 @@ impl GuestMem for Arena {
 
     fn slice(&self, addr: u32, len: usize) -> Result<&[u8], Fault> {
         if !self.in_bounds(addr, len) {
-            return Err(Fault { addr, len });
+            return Err(Fault {
+                addr,
+                len,
+                write: false,
+            });
         }
         // Safety: bounds checked directly above; the mapping is live and
         // readable for its whole length, and the borrow cannot outlive it.
@@ -173,7 +226,11 @@ impl GuestMem for Arena {
 
     fn slice_mut(&mut self, addr: u32, len: usize) -> Result<&mut [u8], Fault> {
         if !self.in_bounds(addr, len) {
-            return Err(Fault { addr, len });
+            return Err(Fault {
+                addr,
+                len,
+                write: true,
+            });
         }
         if self.wrote_over_code(addr, len) {
             self.note_written(addr, len);
@@ -261,9 +318,9 @@ impl Arena {
         (read, read_len): (u32, usize),
         (write, write_len): (u32, usize),
     ) -> Result<(&[u8], &mut [u8]), Fault> {
-        for (addr, len) in [(read, read_len), (write, write_len)] {
+        for (addr, len, write) in [(read, read_len, false), (write, write_len, true)] {
             if !self.in_bounds(addr, len) {
-                return Err(Fault { addr, len });
+                return Err(Fault { addr, len, write });
             }
         }
         let (r, w) = (read as usize, write as usize);
@@ -271,6 +328,7 @@ impl Arena {
             return Err(Fault {
                 addr: write,
                 len: write_len,
+                write: true,
             });
         }
         // Handing out a run to change is writing it, as `slice_mut` is.
@@ -306,5 +364,24 @@ mod tests {
             .expect("in the arena, and apart");
         assert!(mem.code_written);
         assert_eq!(mem.written_code, [2]);
+    }
+
+    /// Under the floor every byte faults, a read or a write, and the first
+    /// byte above it does not; no bytes at all is never refused (#132).
+    #[test]
+    fn the_floor_faults_every_byte_under_it_and_none_above() {
+        use super::{GuestMem, DOS_MEMORY};
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 21)
+            .expect("an arena")
+            .with_floor(DOS_MEMORY);
+        assert!(mem.slice(8, 4).is_err_and(|f| !f.write));
+        assert!(mem.write(DOS_MEMORY - 4, &[0; 4]).is_err_and(|f| f.write));
+        assert!(mem.slice(DOS_MEMORY - 2, 4).is_err());
+        assert!(mem.slice(0, 0).is_ok());
+        assert!(mem.write(DOS_MEMORY, &[1; 4]).is_ok());
+        assert!(
+            mem.slice((1 << 21) - 4, 5).is_err(),
+            "and the end is where it was"
+        );
     }
 }

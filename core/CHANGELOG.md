@@ -274,6 +274,27 @@ about 39.7 million instructions in, moves:
 The run to 100,000 does not reach the dialog and does not move. No other title's route moves.
 Accepted by the maintainer on 2026-10-20.
 
+The bottom of a title's address space answers as Windows 9x's does, rather than reading as zero
+(#132). LEGO Island read through a null pointer at address 8 and carried on with a 0 (#114).
+
+- A read or a write in the first 4 KiB is an access violation (`0xC0000005`): Windows 9x's
+  Win32 data selector refuses those addresses so that a null pointer faults (Pietrek, *Windows 95
+  System Programming Secrets*). The record says whether it was a write and which address, as
+  `EXCEPTION_RECORD`'s documentation has it. It goes to the guest's own handler chain through the
+  dispatch `RaiseException` already used (`kernel32::dispatch`).
+- A handler that carries on (`ExceptionContinueExecution`) gets the processor back as the context
+  now says, every register and the flags, at its `Eip`. If nothing on the chain takes it, the run
+  stops at a wall naming the access, the address and where it faulted.
+- The rest of the first megabyte is MS-DOS's memory, which Windows 9x lets a Win32 process read
+  and write, and code run from the bottom is not refused there either. This machine has neither,
+  so each is a wall that names the address.
+- A shim handed a pointer down there stops at a wall that says so, where it read or wrote
+  whatever was there. A borrow of no bytes is always allowed, since Alpha Team's rasteriser
+  borrows none at a null texture. The arena's bounds check is one subtraction longer
+  (`Arena::with_floor`). The conformance corpus's arena, a 386 in real mode, has no floor.
+
+`core/tests/access_violation.rs` proves it on hand-assembled guests, handled and unhandled.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

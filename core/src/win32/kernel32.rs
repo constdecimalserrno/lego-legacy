@@ -2400,7 +2400,34 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // RaiseException(code, flags, argument count, arguments).
     let (code, flags, count, values) = (args[0], args[1], args[2].min(15), args[3]);
     let raised_at = ctx.cpu.eip;
+    let params = (0..count)
+        .map(|i| ctx.mem.read_u32(values + i * 4).map_err(Stop::Fault))
+        .collect::<Result<Vec<_>, _>>()?;
+    let what = format!("an exception of {code:#010x} was raised");
+    let at = dispatch(ctx, code, flags, &params, raised_at, what, false)?;
+    ctx.call_guest = Some((at, Vec::new()));
+    Ok(0)
+}
 
+/// Offer an exception to the guest's own handlers: the record, the context,
+/// and a program that calls each handler on the chain in turn, written into
+/// the guest. Where that program starts is the answer.
+///
+/// `RaiseException` comes here (#54), and so does a fault the processor took
+/// (#132). The two differ in what a handler that says to carry on is carrying
+/// on from: a call to `RaiseException` returns to its caller, and a fault puts
+/// the processor back as the context now says, which is how a handler that
+/// has mended the context retries or skips the instruction. If nothing takes
+/// it, the run stops at a wall that says `what`.
+pub fn dispatch(
+    ctx: &mut Ctx<'_>,
+    code: u32,
+    flags: u32,
+    params: &[u32],
+    raised_at: u32,
+    what: String,
+    fault: bool,
+) -> Result<u32, Stop> {
     // EXCEPTION_RECORD: what was raised, where, and what was passed with it.
     let record = ctx.state.heap.alloc(0x50);
     ctx.mem.write(record, &[0u8; 0x50]).map_err(Stop::Fault)?;
@@ -2409,12 +2436,10 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.mem
         .write_u32(record + 12, raised_at)
         .map_err(Stop::Fault)?;
+    let count = u32::try_from(params.len()).unwrap_or(0);
     ctx.mem.write_u32(record + 16, count).map_err(Stop::Fault)?;
-    for i in 0..count {
-        let value = ctx.mem.read_u32(values + i * 4).map_err(Stop::Fault)?;
-        ctx.mem
-            .write_u32(record + 20 + i * 4, value)
-            .map_err(Stop::Fault)?;
+    for (at, value) in (record + 20..).step_by(4).zip(params) {
+        ctx.mem.write_u32(at, *value).map_err(Stop::Fault)?;
     }
 
     // CONTEXT: where the processor stood. A handler that unwinds reads the
@@ -2438,8 +2463,14 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     put(ctx, 0xb0, r[EAX])?;
     put(ctx, 0xb4, r[EBP])?;
     put(ctx, 0xb8, raised_at)?;
-    put(ctx, 0xc4, ctx.cpu.flags.to_eflags())?;
-    put(ctx, 0xc8, r[ESP])?;
+    // ponytail: `RaiseException`'s context has EFlags and Esp one field late,
+    // at 0xc4 and 0xc8 where `winnt.h` has 0xc0 and 0xc4. A fault's are where
+    // `winnt.h` puts them, because the program below puts the processor back
+    // from there. Putting `RaiseException`'s right moves the digest of every
+    // route that throws, so it waits for the maintainer's blessing (#133).
+    let (eflags_at, esp_at) = if fault { (0xc0, 0xc4) } else { (0xc4, 0xc8) };
+    put(ctx, eflags_at, ctx.cpu.flags.to_eflags())?;
+    put(ctx, esp_at, r[ESP])?;
 
     // The chain, walked here so that the program below has every handler on
     // it: a frame is the next frame and the handler, in that order.
@@ -2483,7 +2514,7 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         code_bytes.extend_from_slice(&[0, 0, 0, 0]);
     }
     // Nothing took it.
-    let unhandled = ctx.boundary.bind_unhandled(code);
+    let unhandled = ctx.boundary.bind_unhandled(what);
     code_bytes.push(0xb8);
     code_bytes.extend_from_slice(&unhandled.to_le_bytes());
     code_bytes.extend_from_slice(&[0xff, 0xe0]); // jmp eax
@@ -2492,7 +2523,28 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         let rel = u32::try_from(done - (hole + 4)).unwrap_or(0);
         code_bytes[hole..hole + 4].copy_from_slice(&rel.to_le_bytes());
     }
-    code_bytes.push(0xc3); // ret: a handler said to carry on where it was
+    if fault {
+        // ExceptionContinueExecution: every register back from the context,
+        // the flags by way of a `popfd` with the stack pointed at them, and on
+        // to its Eip, as `NtContinue` does.
+        for (op, field) in [
+            (&[0x8b, 0x3d][..], 0x9c),   // mov edi, [Edi]
+            (&[0x8b, 0x35], 0xa0),       // mov esi, [Esi]
+            (&[0x8b, 0x1d], 0xa4),       // mov ebx, [Ebx]
+            (&[0x8b, 0x15], 0xa8),       // mov edx, [Edx]
+            (&[0x8b, 0x0d], 0xac),       // mov ecx, [Ecx]
+            (&[0x8b, 0x2d], 0xb4),       // mov ebp, [Ebp]
+            (&[0xbc], 0xc0),             // mov esp, &EFlags
+            (&[0x9d, 0x8b, 0x25], 0xc4), // popfd; mov esp, [Esp]
+            (&[0xa1], 0xb0),             // mov eax, [Eax]
+            (&[0xff, 0x25], 0xb8),       // jmp [Eip]
+        ] {
+            code_bytes.extend_from_slice(op);
+            code_bytes.extend_from_slice(&(context + field).to_le_bytes());
+        }
+    } else {
+        code_bytes.push(0xc3); // ret: a handler said to carry on where it was
+    }
 
     let at = ctx
         .state
@@ -2502,8 +2554,7 @@ fn raise_exception(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         code_bytes[hole..hole + 4].copy_from_slice(&at.to_le_bytes());
     }
     ctx.mem.write(at, &code_bytes).map_err(Stop::Fault)?;
-    ctx.call_guest = Some((at + KEEP_LOOKING.len() as u32, Vec::new()));
-    Ok(0)
+    Ok(at + KEEP_LOOKING.len() as u32)
 }
 
 /// Unwind the guest's handler chain as far as a frame, telling every handler

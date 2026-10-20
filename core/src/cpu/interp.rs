@@ -306,6 +306,7 @@ fn decode_at(lin: u32, mem: &Arena, mode: Mode) -> Result<Insn, Stop> {
         return Err(Stop::Fault(crate::guest::Fault {
             addr: lin,
             len: usize::from(insn.len),
+            write: false,
         }));
     }
     Ok(insn)

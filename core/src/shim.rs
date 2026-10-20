@@ -37,8 +37,9 @@ pub enum Entry {
     /// not attach (#55). Reaching it is a wall naming the module.
     Attach { module: String },
     /// Where the exception walk jumps when no handler on the chain took the
-    /// exception (#54): reaching it is a wall naming what was raised.
-    Unhandled { code: u32 },
+    /// exception (#54): reaching it is a wall naming what was raised, and
+    /// where, for a fault (#132).
+    Unhandled { what: String },
     /// Where a guest thread returns to when its own function is done
     /// (ADR-0005): reaching it ends that thread rather than the run.
     ThreadEnd,
@@ -117,15 +118,12 @@ impl Boundary {
     }
 
     /// A place for the exception walk to end at when nothing took it.
-    pub fn bind_unhandled(&mut self, code: u32) -> u32 {
-        if let Some(slot) = self
-            .slots
-            .iter()
-            .position(|e| *e == Entry::Unhandled { code })
-        {
+    pub fn bind_unhandled(&mut self, what: String) -> u32 {
+        let entry = Entry::Unhandled { what };
+        if let Some(slot) = self.slots.iter().position(|e| *e == entry) {
             return address(slot);
         }
-        self.push(Entry::Unhandled { code })
+        self.push(entry)
     }
 
     /// A place for one name of a library this emulator writes, asked for by

@@ -4,7 +4,7 @@
 use crate::cli::Trace;
 use crate::clock::{Clock, FlipCost};
 use crate::cpu::{interp::Interp, Cpu, CpuEngine, Mode, Stop, EAX, REG_NAMES};
-use crate::guest::{Arena, GuestMem};
+use crate::guest::{Arena, Fault, GuestMem, DOS_MEMORY, NULL_PAGE};
 use crate::host::{Frame, Host};
 use crate::runlog::RunLog;
 use crate::shim::Boundary;
@@ -161,7 +161,7 @@ impl Machine {
     /// When the host cannot map the arena.
     pub fn new(title: &'static Title, host: &mut dyn Host) -> Result<Self, crate::host::HostError> {
         Ok(Self {
-            arena: Arena::new(host, ARENA_BYTES)?,
+            arena: Arena::new(host, ARENA_BYTES)?.with_floor(DOS_MEMORY),
             cpu: Cpu::default(),
             clock: Clock::at(title.declared.hz),
             engine: Box::new(Interp::new(Mode {
@@ -422,6 +422,59 @@ impl Machine {
                         what: format!("int {n:#04x}"),
                     }),
                 }
+            }
+            Err(Stop::Fault(fault)) if fault.addr < DOS_MEMORY => self.access_violation(fault, log),
+            Err(stop) => Some(Outcome::Wall {
+                what: stop.to_string(),
+            }),
+        }
+    }
+
+    /// The guest touched the bottom megabyte (#132). A read or a write in the
+    /// first 4 KiB is an access violation, offered to the guest's own
+    /// handlers as Windows offers one. The record says whether it was a write
+    /// and which address, as `EXCEPTION_RECORD`'s documentation has it. The
+    /// instruction that faulted has not happened, so a handler that carries
+    /// on runs it again unless it moved the context past it.
+    ///
+    /// Anything else there is a wall. The rest of the megabyte is MS-DOS's
+    /// memory, which Windows 9x lets a Win32 process read and write and this
+    /// machine does not have. Code fetched from the bottom is not refused
+    /// either: the code selector is flat, so "memory at address 0 is
+    /// accessible, but it's certainly not code", and a call through a null
+    /// pointer runs the real-mode interrupt table until it faults a few bytes
+    /// on (Pietrek, *Microsoft Systems Journal*, June 1998).
+    fn access_violation(&mut self, fault: Fault, log: &mut RunLog) -> Option<Outcome> {
+        const EXCEPTION_ACCESS_VIOLATION: u32 = 0xc000_0005;
+        let at = self.cpu.eip;
+        if fault.addr >= NULL_PAGE || at < DOS_MEMORY {
+            let what = if at < DOS_MEMORY {
+                format!("the guest ran into {at:#010x}, which on Windows 9x is MS-DOS's own memory")
+            } else {
+                format!("{fault}, at {at:#010x}")
+            };
+            return Some(Outcome::Wall { what });
+        }
+        let what = format!(
+            "an access violation {} {:#010x} at {at:#010x}",
+            if fault.write { "writing" } else { "reading" },
+            fault.addr
+        );
+        log.line(&what);
+        let params = [u32::from(fault.write), fault.addr];
+        let mut ctx = self.ctx(log);
+        match win32::kernel32::dispatch(
+            &mut ctx,
+            EXCEPTION_ACCESS_VIOLATION,
+            0,
+            &params,
+            at,
+            what,
+            true,
+        ) {
+            Ok(program) => {
+                self.cpu.eip = program;
+                None
             }
             Err(stop) => Some(Outcome::Wall {
                 what: stop.to_string(),
@@ -863,11 +916,10 @@ impl Machine {
                         return Err(Stop::ThreadEnded);
                     }
                     // The exception walk ran out of handlers (#54).
-                    Some(Entry::Unhandled { code }) => {
+                    Some(Entry::Unhandled { what }) => {
                         return Err(Stop::NotWritten {
                             what: format!(
-                                "an exception of {code:#010x} was raised and nothing on the \
-                                 guest's own handler chain took it"
+                                "{what}: nothing on the guest's own handler chain took it"
                             ),
                             caller: self.cpu.eip,
                         })
@@ -1387,6 +1439,7 @@ impl Machine {
             Err(Stop::Interrupt(n)) => Some(Outcome::Wall {
                 what: format!("int {n:#04x}"),
             }),
+            Err(Stop::Fault(fault)) if fault.addr < DOS_MEMORY => self.access_violation(fault, log),
             Err(stop) => Some(Outcome::Wall {
                 what: stop.to_string(),
             }),
