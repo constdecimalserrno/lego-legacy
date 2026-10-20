@@ -11,7 +11,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | LEGO Rock Raiders | **Playable**: a person has played the first mission through |
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
-| LEGO Island | In progress ([#112](https://github.com/constdecimalserrno/lego-legacy/issues/112)): it starts, and stops at its first wall before its window opens |
+| LEGO Island | In progress ([#112](https://github.com/constdecimalserrno/lego-legacy/issues/112)): it plays its intro and reaches the Information Center, headless; not yet playable by hand |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
