@@ -1,5 +1,6 @@
 //! Guest threads, without a title: counted semaphores, waits that park and
-//! are woken, and `Sleep(0)` giving the turn away (ADR-0005, #115).
+//! are woken, on any of several handles, on all of them or on a thread's end,
+//! and `Sleep(0)` giving the turn away (ADR-0005, #115, #130).
 //!
 //! Each guest is a few hand-assembled instructions a thread, as the stub's
 //! are, calling KERNEL32 through the boundary the way a title's imports do,
@@ -255,6 +256,177 @@ fn a_wait_on_a_semaphore_parks_until_another_thread_releases_it() {
         "the waiter stayed down until the releaser's hour"
     );
     assert_eq!(guest.read(word(14)), 0, "and the wait took the count");
+}
+
+#[test]
+fn a_wait_for_any_is_woken_by_its_second_handle_and_answers_its_place() {
+    let (first, second) = (word(0), word(1));
+    let mut guest = Guest::new();
+    guest
+        .thread(MAIN)
+        .call("CreateEventA", &[Imm(0), Imm(0), Imm(0), Imm(0)])
+        .store(first)
+        .call("CreateEventA", &[Imm(0), Imm(0), Imm(0), Imm(0)])
+        .store(second)
+        .spawn(FIRST, 0)
+        .call("GetTickCount", &[])
+        .store(word(10))
+        .call(
+            "WaitForMultipleObjects",
+            &[Imm(2), Imm(first), Imm(0), Imm(1000)],
+        )
+        .store(word(11))
+        .call("GetTickCount", &[])
+        .store(word(12))
+        .call("WaitForSingleObject", &[At(second), Imm(0)])
+        .store(word(13))
+        .call("ExitProcess", &[Imm(0)])
+        .thread(FIRST)
+        .call("Sleep", &[Imm(5)])
+        .call("SetEvent", &[At(second)])
+        .emit(&[0xc3]);
+    assert_eq!(guest.run().outcome, Outcome::Exited { code: 0 });
+
+    assert_eq!(guest.read(word(11)), 1, "WAIT_OBJECT_0 + 1, the second");
+    let waited = guest.read(word(12)) - guest.read(word(10));
+    assert!(
+        (5..1000).contains(&waited),
+        "woken at the setter's hour, not the timeout's: {waited} ms"
+    );
+    assert_eq!(
+        guest.read(word(13)),
+        WAIT_TIMEOUT,
+        "and the wait took the automatic event"
+    );
+}
+
+#[test]
+fn a_wait_for_all_takes_none_of_them_until_it_can_take_every_one() {
+    let (sem, event, twice) = (word(0), word(1), word(2));
+    let mut guest = Guest::new();
+    guest
+        .thread(MAIN)
+        // The semaphore is there from the start, the event is not.
+        .call("CreateSemaphoreA", &[Imm(0), Imm(1), Imm(2), Imm(0)])
+        .store(sem)
+        .store(twice)
+        .store(twice + 4)
+        .call("CreateEventA", &[Imm(0), Imm(0), Imm(0), Imm(0)])
+        .store(event)
+        .spawn(FIRST, 0)
+        .call(
+            "WaitForMultipleObjects",
+            &[Imm(2), Imm(sem), Imm(1), Imm(0)],
+        )
+        .store(word(10))
+        .call(
+            "WaitForMultipleObjects",
+            &[Imm(2), Imm(twice), Imm(1), Imm(0)],
+        )
+        .store(word(11))
+        .call("GetLastError", &[])
+        .store(word(12))
+        .call("GetTickCount", &[])
+        .store(word(13))
+        .call(
+            "WaitForMultipleObjects",
+            &[Imm(2), Imm(sem), Imm(1), Imm(1000)],
+        )
+        .store(word(14))
+        .call("GetTickCount", &[])
+        .store(word(15))
+        .call("WaitForSingleObject", &[At(sem), Imm(0)])
+        .store(word(16))
+        .call("WaitForSingleObject", &[At(sem), Imm(0)])
+        .store(word(17))
+        .call("WaitForSingleObject", &[At(event), Imm(0)])
+        .store(word(18))
+        .call("ExitProcess", &[Imm(0)])
+        // The release wakes the waiter with the event still down, and it goes
+        // back down until the event is set.
+        .thread(FIRST)
+        .call("Sleep", &[Imm(5)])
+        .call("ReleaseSemaphore", &[At(sem), Imm(1), Imm(word(20))])
+        .call("Sleep", &[Imm(5)])
+        .call("SetEvent", &[At(event)])
+        .emit(&[0xc3]);
+    assert_eq!(guest.run().outcome, Outcome::Exited { code: 0 });
+
+    assert_eq!(guest.read(word(10)), WAIT_TIMEOUT, "one of two is not all");
+    assert_eq!(guest.read(word(11)), 0xffff_ffff, "one handle twice fails");
+    assert_eq!(guest.read(word(12)), 87, "ERROR_INVALID_PARAMETER");
+    assert_eq!(
+        guest.read(word(14)),
+        0,
+        "WAIT_OBJECT_0, once both were there"
+    );
+    let waited = guest.read(word(15)) - guest.read(word(13));
+    assert!(
+        (10..1000).contains(&waited),
+        "woken by the event, not the release or the timeout: {waited} ms"
+    );
+    assert_eq!(
+        guest.read(word(20)),
+        1,
+        "nothing was taken from the semaphore while the event was down"
+    );
+    assert_eq!(
+        (guest.read(word(16)), guest.read(word(17))),
+        (0, WAIT_TIMEOUT),
+        "the wait took one of its two"
+    );
+    assert_eq!(guest.read(word(18)), WAIT_TIMEOUT, "and the event");
+}
+
+#[test]
+fn a_wait_on_a_thread_is_over_when_it_ends_and_its_exit_code_is_kept() {
+    let (first, second, mark) = (word(0), word(1), word(2));
+    let mut guest = Guest::new();
+    guest
+        .thread(MAIN)
+        .spawn(FIRST, 0)
+        .store(first)
+        .spawn(SECOND, 0)
+        .store(second)
+        .call("GetExitCodeThread", &[At(first), Imm(word(10))])
+        .call("WaitForSingleObject", &[At(first), Imm(1000)])
+        .store(word(11))
+        .load(mark)
+        .store(word(12))
+        .call("GetExitCodeThread", &[At(first), Imm(word(13))])
+        .store(word(14))
+        .call("WaitForSingleObject", &[At(second), Imm(1000)])
+        .store(word(15))
+        .call("GetExitCodeThread", &[At(second), Imm(word(16))])
+        .call("WaitForSingleObject", &[At(first), Imm(0)])
+        .store(word(17))
+        .call("ExitProcess", &[Imm(0)])
+        // One returns from its function, the other calls ExitThread.
+        .thread(FIRST)
+        .call("Sleep", &[Imm(5)])
+        .set(mark, 1)
+        .emit32(&[0xb8], 7) // mov eax, 7
+        .emit(&[0xc3])
+        .thread(SECOND)
+        .call("Sleep", &[Imm(10)])
+        .call("ExitThread", &[Imm(42)]);
+    assert_eq!(guest.run().outcome, Outcome::Exited { code: 0 });
+
+    assert_eq!(guest.read(word(10)), 259, "STILL_ACTIVE while it runs");
+    assert_eq!(guest.read(word(11)), 0, "the wait was answered");
+    assert_eq!(guest.read(word(12)), 1, "after the thread's last work");
+    assert_eq!(
+        (guest.read(word(14)), guest.read(word(13))),
+        (1, 7),
+        "what it returned"
+    );
+    assert_eq!(guest.read(word(15)), 0, "the wait on the other");
+    assert_eq!(guest.read(word(16)), 42, "what it gave ExitThread");
+    assert_eq!(
+        guest.read(word(17)),
+        0,
+        "a thread that has ended stays signalled"
+    );
 }
 
 /// Two waiters parked on one semaphore. One release wakes both, and the one

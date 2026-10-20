@@ -757,12 +757,7 @@ impl Machine {
                     // A thread's own function returned (ADR-0005). Its exit
                     // code is what it answered with.
                     Some(Entry::ThreadEnd) => {
-                        let code = self.cpu.r[EAX];
-                        let running = self.state.thread;
-                        if let Some(thread) = self.state.threads.get_mut(running) {
-                            thread.ended = true;
-                            thread.code = code;
-                        }
+                        win32::kernel32::end_thread(&mut self.state, self.cpu.r[EAX]);
                         return Err(Stop::ThreadEnded);
                     }
                     // The exception walk ran out of handlers (#54).
@@ -1383,7 +1378,14 @@ impl Machine {
                     if t.suspended {
                         "suspended".to_owned()
                     } else {
-                        format!("on handle {:#x}", t.waiting_on)
+                        format!(
+                            "on handle {}",
+                            t.waiting_on
+                                .iter()
+                                .map(|h| format!("{h:#x}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                 ))
                 .collect::<Vec<_>>()

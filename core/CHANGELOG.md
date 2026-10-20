@@ -122,6 +122,21 @@ They are faces over the handles `CreateFileA` makes, which `ReadFile`, `SetFileP
   Island's scripts are 534 MB, and `Isle\ISLE.SI` alone is 157 MB. What a title writes is held
   and reaches its profile as before.
 
+Waits on several handles and on threads, as Win32 documents them, for LEGO Island's engine (#130):
+
+- `WaitForMultipleObjects` waiting for any of its handles parks on all of them, and is woken by
+  whichever is signalled, answering `WAIT_OBJECT_0` plus its place. It was parked on the first
+  only, so a signal to any other never woke it.
+- Waiting for all of them, which was a wall, takes none until it can take every one together, and
+  then answers `WAIT_OBJECT_0`. A handle named twice is `ERROR_INVALID_PARAMETER`.
+- A wait with a timeout that was woken and could not take what it waited for goes back down until
+  its hour, as an endless one already did. It answered `WAIT_TIMEOUT` early.
+- A thread's handle is signalled when the thread ends, by returning or by `ExitThread`, so a wait
+  on it is over. `GetExitCodeThread` is written: `STILL_ACTIVE` until then, and what it ended with
+  after.
+
+`core/tests/threads.rs` proves each on hand-assembled guests, without a title. No route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

@@ -8,9 +8,11 @@ input script would stop being a replay.
 
 ## Waiting is parking, not asking again
 
-A thread that cannot go on is put down, not left runnable. It says what it is waiting for and, when
-it asked for a timeout, the declared millisecond it may be woken at; whoever signals that thing —
-`SetEvent`, `ReleaseMutex`, `ReleaseSemaphore`, `LeaveCriticalSection` — picks the waiters back up.
+A thread that cannot go on is put down, not left runnable. It says what it is waiting for, one thing
+or several, and, when it asked for a timeout, the declared millisecond it may be woken at; whoever
+signals any of them — `SetEvent`, `ReleaseMutex`, `ReleaseSemaphore`, `LeaveCriticalSection`, or a
+thread ending — picks the waiters back up, and a waiter that finds it cannot take what it waited
+for, or not all of it, goes back down until its hour (#130).
 Nothing else can run it in between, so when every thread is down the machine moves the declared
 clock to the earliest hour any of them asked for rather than spinning between them. A thread that
 sleeps for no time at all, `Sleep(0)`, gives the rest of its turn to the next thread in the

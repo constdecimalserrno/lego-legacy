@@ -226,6 +226,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "ResumeThread", 1, resume_thread),
     stdcall("KERNEL32", "SetThreadPriority", 2, set_thread_priority),
     stdcall("KERNEL32", "ExitThread", 1, exit_thread),
+    stdcall("KERNEL32", "GetExitCodeThread", 2, get_exit_code_thread),
     stdcall("KERNEL32", "OutputDebugStringA", 1, output_debug_string),
 ];
 
@@ -1035,7 +1036,7 @@ fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
             // A thread already holding one may take it again, and has to
             // leave it as many times as it took it.
             *depth += 1;
-            park(ctx, 0, 0);
+            park(ctx, &[], 0);
             Ok(0)
         }
         Some(_) => {
@@ -1045,12 +1046,12 @@ fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
             // moves, so whoever holds the section never reaches its hour
             // either — the machine spins with every thread alive and nothing
             // happening (#60).
-            park(ctx, args[0], u64::MAX);
+            park(ctx, &[args[0]], u64::MAX);
             Err(Stop::Blocked)
         }
         None => {
             ctx.state.sections.insert(args[0], (me, 1));
-            park(ctx, 0, 0);
+            park(ctx, &[], 0);
             Ok(0)
         }
     }
@@ -1063,7 +1064,7 @@ fn leave_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
             *depth -= 1;
             if *depth == 0 {
                 ctx.state.sections.remove(&args[0]);
-                wake_waiters(ctx, args[0]);
+                wake_waiters(ctx.state, args[0]);
             }
         }
     }
@@ -1334,7 +1335,7 @@ fn release_mutex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             if *depth == 0 {
                 *held = None;
                 *signalled = true;
-                wake_waiters(ctx, args[0]);
+                wake_waiters(ctx.state, args[0]);
             }
             Ok(1)
         }
@@ -1370,7 +1371,7 @@ fn set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Whoever is parked on it may run now rather than when its timeout runs
     // out: an event nobody remembers having set is an event nobody can be
     // woken by, which is what kept A3D's threads spinning (#60).
-    wake_waiters(ctx, args[0]);
+    wake_waiters(ctx.state, args[0]);
     Ok(1)
 }
 
@@ -1429,7 +1430,7 @@ fn release_semaphore(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if args[2] != 0 {
         ctx.mem.write_u32(args[2], was).map_err(Stop::Fault)?;
     }
-    wake_waiters(ctx, args[0]);
+    wake_waiters(ctx.state, args[0]);
     Ok(1)
 }
 
@@ -1437,11 +1438,28 @@ fn release_semaphore(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 ///
 /// It does not hand the object to any of them: each makes its wait again when
 /// the machine comes back round to it, and whoever gets there first takes it.
-fn wake_waiters(ctx: &mut Ctx<'_>, handle: u32) {
-    for thread in &mut ctx.state.threads {
-        if thread.waiting_on == handle {
+fn wake_waiters(state: &mut super::State, handle: u32) {
+    for thread in &mut state.threads {
+        if thread.waiting_on.contains(&handle) {
             thread.wake_at = 0;
         }
+    }
+}
+
+/// Whether the running thread could take the object now, without taking it.
+///
+/// An event or a thread is there while it is signalled, a semaphore while it
+/// has any of its count, and a mutex while nobody else holds it.
+fn ready(ctx: &Ctx<'_>, handle: u32) -> bool {
+    match ctx.state.object(handle) {
+        Some(Object::Semaphore { count, .. }) => *count > 0,
+        Some(Object::Named {
+            kind: "mutex",
+            held,
+            ..
+        }) => held.is_none_or(|(owner, _)| owner == running_thread(ctx)),
+        Some(Object::Named { signalled, .. }) => *signalled,
+        _ => false,
     }
 }
 
@@ -1450,44 +1468,30 @@ fn wake_waiters(ctx: &mut Ctx<'_>, handle: u32) {
 /// An automatic event goes back down as its waiter takes it; a manual one
 /// stays up. A mutex is taken by the thread that waited, and a thread that
 /// already holds one takes it again. A semaphore gives one of its count.
-fn claim(ctx: &mut Ctx<'_>, handle: u32) -> Option<bool> {
+fn claim(ctx: &mut Ctx<'_>, handle: u32) -> bool {
+    if !ready(ctx, handle) {
+        return false;
+    }
     let me = running_thread(ctx);
-    if let Some(Object::Semaphore { count, .. }) = ctx.state.object_mut(handle) {
-        let some = *count > 0;
-        *count -= u32::from(some);
-        return Some(some);
+    match ctx.state.object_mut(handle) {
+        Some(Object::Semaphore { count, .. }) => *count -= 1,
+        Some(Object::Named {
+            kind: "mutex",
+            signalled,
+            held,
+            ..
+        }) => {
+            *held = Some((me, held.map_or(1, |(_, depth)| depth + 1)));
+            *signalled = false;
+        }
+        Some(Object::Named {
+            signalled,
+            manual: false,
+            ..
+        }) => *signalled = false,
+        _ => {}
     }
-    let Some(Object::Named {
-        kind,
-        signalled,
-        manual,
-        held,
-        ..
-    }) = ctx.state.object_mut(handle)
-    else {
-        return None;
-    };
-    if *kind == "mutex" {
-        return Some(match held {
-            Some((owner, depth)) if *owner == me => {
-                *depth += 1;
-                true
-            }
-            Some(_) => false,
-            None => {
-                *held = Some((me, 1));
-                *signalled = false;
-                true
-            }
-        });
-    }
-    if !*signalled {
-        return Some(false);
-    }
-    if !*manual {
-        *signalled = false;
-    }
-    Some(true)
+    true
 }
 
 /// WAIT_TIMEOUT: the wait ran out before what it waited for happened.
@@ -1498,18 +1502,11 @@ const WAIT_FAILED: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
 
 fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    wait_for(ctx, &[args[0]], args[1])
+    wait_for(ctx, &[args[0]], false, args[1])
 }
 
 fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // WaitForMultipleObjects(count, handles, all of them, timeout). No title
-    // on the roster waits for all of them at once.
-    if args[2] != 0 {
-        return Err(Stop::NotWritten {
-            what: "KERNEL32.dll!WaitForMultipleObjects: a wait for all of them".to_owned(),
-            caller: 0,
-        });
-    }
+    // WaitForMultipleObjects(count, handles, all of them, timeout).
     let count = args[0] as usize;
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
@@ -1519,28 +1516,46 @@ fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Sto
                 .map_err(Stop::Fault)?,
         );
     }
-    wait_for(ctx, &handles, args[3])
+    let all = args[2] != 0;
+    // A wait for all of them may not name one twice, as Windows refuses it: a
+    // semaphore's last one or an automatic event's signal cannot be taken twice.
+    if all && (1..count).any(|i| handles[..i].contains(&handles[i])) {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        park(ctx, &[], 0);
+        return Ok(WAIT_FAILED);
+    }
+    wait_for(ctx, &handles, all, args[3])
 }
 
-/// Wait for any one of these objects, until the timeout.
+/// Wait for any one of these objects, or for all of them, until the timeout.
 ///
 /// The thread is parked rather than answered at once: a wait that is over the
 /// moment it is asked for turns a paced loop into a spin. Each object keeps
 /// whether it is signalled, which is what wakes a waiter (#60). The call itself
 /// is left where it is — `Stop::Blocked` brings this thread back to it when
 /// the machine comes round again, so the wait costs nothing while it waits.
-fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
+///
+/// A wait for any answers the first in the list it can take, by its place. A
+/// wait for all takes none of them until it can take every one, as Windows
+/// does, and then answers the first place (#130).
+fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Result<u32, Stop> {
     if handles.is_empty() || handles.iter().any(|h| ctx.state.object(*h).is_none()) {
         // ERROR_INVALID_HANDLE.
         ctx.state.last_error = 6;
-        park(ctx, 0, 0);
+        park(ctx, &[], 0);
         return Ok(WAIT_FAILED);
     }
-    for (i, handle) in handles.iter().enumerate() {
-        if claim(ctx, *handle) == Some(true) {
-            park(ctx, 0, 0);
-            return Ok(u32::try_from(i).unwrap_or(0));
+    if all {
+        if handles.iter().all(|h| ready(ctx, *h)) {
+            for handle in handles {
+                claim(ctx, *handle);
+            }
+            park(ctx, &[], 0);
+            return Ok(0);
         }
+    } else if let Some(i) = handles.iter().position(|h| claim(ctx, *h)) {
+        park(ctx, &[], 0);
+        return Ok(u32::try_from(i).unwrap_or(0));
     }
     // Not available. Whether this thread can be woken at all decides what a
     // wait means: with nobody else to run, waiting is only spending time.
@@ -1550,7 +1565,7 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Sto
         .state
         .threads
         .get(running)
-        .is_some_and(|t| t.waiting_on != 0);
+        .is_some_and(|t| !t.waiting_on.is_empty());
     if ctx.state.threads.len() < 2 {
         // There is nobody to be waiting for. A title with one thread waits on
         // an event a device would have signalled, or a mutex nothing else
@@ -1568,34 +1583,36 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Sto
         } else {
             now + u64::from(timeout)
         };
-        park(ctx, handles[0], until);
+        park(ctx, handles, until);
         return Err(Stop::Blocked);
     }
     // Parked already: back for another look.
     if ctx.state.threads[running].wake_at > now {
         return Err(Stop::Blocked);
     }
-    // Woken, and another waiter took it first: a semaphore released once
-    // wakes everyone parked on it, and only one of them gets the count. A
-    // wait with no timeout has not run out, so it goes back down (#115).
-    // ponytail: a finite wait that loses the same way still answers
-    // WAIT_TIMEOUT early, since waking it forgot its hour; keep the hour
-    // apart from `wake_at` if a title is ever seen losing one.
-    if timeout == INFINITE {
-        park(ctx, handles[0], u64::MAX);
+    // Woken, and not by enough: another waiter took what woke it first (a
+    // semaphore released once wakes everyone parked on it, and only one of
+    // them gets the count), or one of a wait for all was signalled and not
+    // the rest. A wait whose hour has not come goes back down until it does
+    // (#115, #130).
+    let until = ctx.state.threads[running].gives_up_at;
+    if until > now {
+        park(ctx, handles, until);
         return Err(Stop::Blocked);
     }
-    park(ctx, 0, 0);
+    park(ctx, &[], 0);
     Ok(WAIT_TIMEOUT)
 }
 
-/// Put the running thread down on an object until an hour, or pick it back up
-/// again with a handle of zero.
-fn park(ctx: &mut Ctx<'_>, handle: u32, until: u64) {
+/// Put the running thread down on these objects until an hour, or pick it
+/// back up again with none.
+fn park(ctx: &mut Ctx<'_>, handles: &[u32], until: u64) {
     let running = ctx.state.thread;
     if let Some(thread) = ctx.state.threads.get_mut(running) {
-        thread.waiting_on = handle;
-        thread.wake_at = if handle == 0 { 0 } else { until };
+        thread.waiting_on.clear();
+        thread.waiting_on.extend_from_slice(handles);
+        thread.wake_at = if handles.is_empty() { 0 } else { until };
+        thread.gives_up_at = thread.wake_at;
     }
 }
 
@@ -2997,7 +3014,8 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         code: 0,
         tls: Vec::new(),
         wake_at: 0,
-        waiting_on: 0,
+        gives_up_at: 0,
+        waiting_on: Vec::new(),
     });
     if args[5] != 0 {
         ctx.mem.write_u32(args[5], id).map_err(Stop::Fault)?;
@@ -3030,12 +3048,39 @@ fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// The thread that is running says it is done. The machine takes it out of the
 /// rotation at the next switch.
 fn exit_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let running = ctx.state.thread;
-    if let Some(thread) = ctx.state.threads.get_mut(running) {
-        thread.ended = true;
-        thread.code = args[0];
-    }
+    end_thread(ctx.state, args[0]);
     Err(Stop::ThreadEnded)
+}
+
+/// The running thread is done, by `ExitThread` or by returning: it is not run
+/// again, and its handle is signalled, as Windows signals it, so a wait on it
+/// is over and `GetExitCodeThread` gives what it ended with (#130).
+pub(crate) fn end_thread(state: &mut super::State, code: u32) {
+    let running = state.thread;
+    let Some(thread) = state.threads.get_mut(running) else {
+        return;
+    };
+    thread.ended = true;
+    thread.code = code;
+    let handle = thread.handle;
+    // The thread a title starts on has no handle of its own to signal.
+    if let Some(Object::Named { signalled, .. }) = state.object_mut(handle) {
+        *signalled = true;
+        wake_waiters(state, handle);
+    }
+}
+
+fn get_exit_code_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetExitCodeThread(handle, out code): STILL_ACTIVE until it has ended.
+    // A handle closed, or never given out, is no thread's.
+    let thread = ctx.state.threads.iter().find(|t| t.handle == args[0]);
+    let Some(thread) = thread.filter(|_| ctx.state.object(args[0]).is_some()) else {
+        ctx.state.last_error = 6; // ERROR_INVALID_HANDLE
+        return Ok(0);
+    };
+    let code = if thread.ended { thread.code } else { 259 };
+    ctx.mem.write_u32(args[1], code).map_err(Stop::Fault)?;
+    Ok(1)
 }
 
 fn output_debug_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

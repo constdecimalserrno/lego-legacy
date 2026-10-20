@@ -202,9 +202,13 @@ pub struct GuestThread {
     /// sleeping or waiting. Until then the machine runs somebody else.
     /// `u64::MAX` is a wait with no timeout: only a signal lifts it.
     pub wake_at: u64,
-    /// The handle it is parked on, while it waits for one. Signalling that
-    /// object is what wakes it before its timeout runs out (#60).
-    pub waiting_on: u32,
+    /// The hour its wait runs out at, kept apart from `wake_at`, which a
+    /// signal clears: a wait woken by something it could not take goes back
+    /// down until then (#130).
+    pub gives_up_at: u64,
+    /// The handles it is parked on, while it waits for them. Signalling any
+    /// of them is what wakes it before its timeout runs out (#60, #130).
+    pub waiting_on: Vec<u32>,
 }
 
 /// Everything the guest holds that is not memory.
@@ -384,7 +388,8 @@ impl State {
                 code: 0,
                 tls: Vec::new(),
                 wake_at: 0,
-                waiting_on: 0,
+                gives_up_at: 0,
+                waiting_on: Vec::new(),
             }],
             thread: 0,
             next_thread_id: crate::machine::THREAD_ID,
