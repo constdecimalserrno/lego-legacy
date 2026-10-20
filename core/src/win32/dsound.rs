@@ -387,7 +387,13 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
         wall("SetAllParameters", 2),
         wall("SetConeAngles", 3),
         wall("SetConeOrientation", 4),
-        wall("SetConeOutsideVolume", 2),
+        // How loud the sound is outside its cone. A cone starts all the way
+        // round (DS3D_DEFAULTCONEANGLE, 360 degrees) and nothing here narrows
+        // one, as SetConeAngles is a wall, so every listener is inside it and
+        // this is never heard. LEGO Island sets it to DSBVOLUME_MIN (#119).
+        method("SetConeOutsideVolume", 2, |ctx, this, _args| {
+            with_place(ctx, this, |_| {})
+        }),
         method("SetMaxDistance", 2, |ctx, this, args| {
             with_place(ctx, this, |p| p.max_distance = float(args[0]))
         }),

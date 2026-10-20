@@ -15,11 +15,18 @@ use lego_legacy_core::Title;
 
 /// Enough instructions for both C runtimes to start, the game to read its
 /// settings back and open its window (#114), its engine to make its Direct3D
-/// 2 device and hand it to retained mode (#117), and the game to count two
+/// 2 device and hand it to retained mode (#117), the game to count two
 /// hundred frames down, open its scripts and start building its world out of
-/// `WORLD.WDB` (#118), and no more: at 5,560,671 it asks retained mode for its
-/// first mesh, which is #119's.
-const BOOT_BUDGET: u64 = 5_560_600;
+/// `WORLD.WDB` (#118), and retained mode to keep its first two meshes (#119).
+/// The boot is traced, call by call, and a trace of the whole world costs
+/// ten times any other run's log, so the world is [`WORLD_BUDGET`]'s.
+const BOOT_BUDGET: u64 = 5_571_000;
+
+/// Enough instructions for the game to build its world, about four hundred
+/// meshes, out of `WORLD.WDB` (#119), and play its intro, and no more: at
+/// 3,770,493,606 its retained mode clears its viewport to draw the island,
+/// which is #120's.
+const WORLD_BUDGET: u64 = 3_770_493_500;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -210,17 +217,61 @@ fn the_game_counts_its_frames_down_to_its_scripts_and_starts_its_world() {
     assert_eq!(ran.finish.flips, 203);
 }
 
+/// The first meshes of the world (#119): fourteen vertices and twelve
+/// triangles in one group, then a mesh of two groups, the second numbered as
+/// retained mode numbered it.
 #[test]
-fn the_boot_replays_to_the_same_machine_every_time() {
-    let Some(first) = boot() else { return };
-    let Some(second) = ({
-        static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
-        let cli = Cli {
-            trace: Trace::Shims,
-            ..Cli::default()
-        };
-        testkit::replay(&AGAIN, scratch, &ISLAND, &cli, &[], BOOT_BUDGET)
-    }) else {
+fn retained_mode_keeps_the_meshes_the_world_is_built_of() {
+    let Some(ran) = boot() else { return };
+    ran.assert_logged("call IDirect3DRM2::CreateMesh(")
+        .assert_logged("call IDirect3DRMMesh::AddGroup(0xe, 0xc, 0x3, ")
+        .assert_logged("call IDirect3DRMMesh::SetVertices(0x0, 0x0, 0xe, ")
+        .assert_logged("call IDirect3DRMMesh::SetGroupQuality(0x0, 0x88)")
+        .assert_logged("call IDirect3DRMMesh::SetVertices(0x1, 0x0, 0x15, ");
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted
+    );
+}
+
+/// The world, built and its intro played, replayed: once for the tests, and
+/// once more beside it for the determinism gate.
+fn world(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    testkit::replay(slot, scratch, &ISLAND, &Cli::default(), &[], WORLD_BUDGET)
+}
+
+static WORLD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// Its four hundred meshes kept, its 3D sounds placed (their cones' outside
+/// volume set) and its viewport forced to update, the game's world is built
+/// and its intro plays on the screen, and nothing stops it on the way to
+/// drawing the island (#119).
+#[test]
+fn the_game_builds_its_world_and_plays_its_intro() {
+    let Some(ran) = world(&WORLD) else { return };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing stops the run before it draws the island"
+    );
+    assert_eq!(ran.finish.flips, 3200);
+    assert!(
+        ran.host.frames.iter().any(|f| !f.is_uniform()),
+        "the intro is on the screen"
+    );
+}
+
+#[test]
+fn the_world_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| world(&AGAIN));
+        (world(&WORLD), second.join().expect("the second replay ran"))
+    });
+    let (Some(first), Some(second)) = (first, second) else {
         return;
     };
     first.assert_same_machine(second);

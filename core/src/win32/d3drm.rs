@@ -99,7 +99,7 @@ pub static D3DRM2: Interface = Interface {
         RELEASE,
         wall("CreateObject", 4),
         method("CreateFrame", 2, create_frame2),
-        wall("CreateMesh", 1),
+        method("CreateMesh", 1, create_mesh),
         wall("CreateMeshBuilder", 1),
         wall("CreateFace", 1),
         wall("CreateAnimation", 1),
@@ -299,7 +299,7 @@ const VIEWPORT2_METHODS: [crate::com::Method; 41] = [
     method("Transform", 2, viewport_transform),
     method("InverseTransform", 2, viewport_inverse_transform),
     wall("Configure", 4),
-    wall("ForceUpdate", 4),
+    method("ForceUpdate", 4, viewport_force_update),
     method("SetPlane", 4, viewport_set_plane),
     method("GetCamera", 1, viewport_get_camera),
     method("GetDevice", 1, viewport_get_device),
@@ -492,14 +492,17 @@ pub static MESH_BUILDER3: Interface = Interface {
     ],
 };
 
-/// `IDirect3DRMMesh`: geometry in groups, ready to draw.
+/// `IDirect3DRMMesh`: geometry in groups, ready to draw. DirectX 5's
+/// retained mode makes the same mesh as DirectX 6's, and LEGO Island builds
+/// its world out of them (#119). What a group is made of and drawn with is
+/// kept in the scene; what reads it back is written when a title asks.
 pub static MESH: Interface = Interface {
     name: "IDirect3DRMMesh",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        wall("Clone", 3),
+        method("Clone", 3, mesh_clone),
         wall("AddDestroyCallback", 2),
         wall("DeleteDestroyCallback", 2),
         method("SetAppData", 1, set_app_data),
@@ -509,15 +512,15 @@ pub static MESH: Interface = Interface {
         method("GetClassName", 2, get_class_name),
         wall("Scale", 3),
         wall("Translate", 3),
-        wall("GetBox", 1),
-        wall("AddGroup", 5),
-        wall("SetVertices", 4),
-        wall("SetGroupColor", 2),
-        wall("SetGroupColorRGB", 4),
-        wall("SetGroupMapping", 2),
-        wall("SetGroupQuality", 2),
-        wall("SetGroupMaterial", 2),
-        wall("SetGroupTexture", 2),
+        method("GetBox", 1, mesh_box),
+        method("AddGroup", 5, add_group),
+        method("SetVertices", 4, set_vertices),
+        method("SetGroupColor", 2, set_group_color),
+        method("SetGroupColorRGB", 4, set_group_color_rgb),
+        method("SetGroupMapping", 2, set_group_mapping),
+        method("SetGroupQuality", 2, set_group_quality),
+        method("SetGroupMaterial", 2, set_group_material),
+        method("SetGroupTexture", 2, set_group_texture),
         wall("GetGroupCount", 0),
         wall("GetGroup", 6),
         wall("GetVertices", 4),
@@ -879,7 +882,256 @@ fn frame(ctx: &mut Ctx<'_>, face: &'static Interface, args: &[u32]) -> Result<u3
 }
 
 fn create_mesh(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make(ctx, &MESH, args[0])
+    // CreateMesh(out): a mesh with no groups.
+    let answer = make(ctx, &MESH, args[0])?;
+    if answer == S_OK {
+        let object = ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?;
+        ctx.state
+            .scene
+            .meshes
+            .insert(object, super::scene::Mesh::default());
+    }
+    Ok(answer)
+}
+
+/// The size of a `D3DRMVERTEX`: nine four-byte values.
+const VERTEX_BYTES: usize = 36;
+
+/// One group of a mesh the guest holds, to be changed.
+///
+/// A group the mesh does not have is a value that makes no sense for the
+/// call. `D3DRMGROUP_ALLGROUPS`, every group at once, is a wall: no title
+/// has asked for it.
+fn with_group(
+    state: &mut State,
+    this: u32,
+    id: u32,
+    method: &str,
+    change: impl FnOnce(&mut super::scene::Group) -> Result<u32, Stop>,
+) -> Result<u32, Stop> {
+    let identity = state.identity(this);
+    let Some(mesh) = state.scene.meshes.get_mut(&identity) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if id == u32::MAX {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DRMMesh::{method}: every group at once"),
+            caller: 0,
+        });
+    }
+    match mesh.groups.get_mut(id as usize) {
+        Some(group) => change(group),
+        None => Ok(D3DRMERR_BADVALUE),
+    }
+}
+
+fn add_group(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // AddGroup(vertices, faces, vertices a face, face data, out): a group of
+    // that many vertices, none of them set yet, and the faces' vertex
+    // indices, copied. Its number is how many groups the mesh had before it.
+    let (vertices, faces, per_face, data, out) = (args[0], args[1], args[2], args[3], args[4]);
+    let identity = ctx.state.identity(this);
+    let Some(mesh) = ctx.state.scene.meshes.get_mut(&identity) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if per_face == 0 {
+        // Faces of differing sizes, each its own count and then its indices.
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMMesh::AddGroup: faces of differing sizes".to_owned(),
+            caller: 0,
+        });
+    }
+    if data == 0 || out == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let count = faces as usize * per_face as usize;
+    let indices = words(ctx.mem.slice(data, count * 4).map_err(Stop::Fault)?);
+    let id = u32::try_from(mesh.groups.len()).unwrap_or(u32::MAX);
+    mesh.groups.push(super::scene::Group {
+        vertices: vec![None; vertices as usize],
+        per_face,
+        indices,
+        ..super::scene::Group::default()
+    });
+    ctx.mem.write_u32(out, id).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+fn set_vertices(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetVertices(group, first, count, vertices): that many of the group's
+    // vertices from the first, copied out of the title's array.
+    let (first, count, values) = (args[1] as usize, args[2] as usize, args[3]);
+    with_group(ctx.state, this, args[0], "SetVertices", |group| {
+        if values == 0 || first + count > group.vertices.len() {
+            return Ok(D3DRMERR_BADVALUE);
+        }
+        let given = words(
+            ctx.mem
+                .slice(values, count * VERTEX_BYTES)
+                .map_err(Stop::Fault)?,
+        );
+        for (slot, vertex) in group.vertices[first..]
+            .iter_mut()
+            .zip(given.as_chunks::<9>().0)
+        {
+            *slot = Some(*vertex);
+        }
+        Ok(S_OK)
+    })
+}
+
+/// Guest bytes as the four-byte values they hold.
+fn words(bytes: &[u8]) -> Vec<u32> {
+    let (words, _) = bytes.as_chunks::<4>();
+    words.iter().map(|b| u32::from_le_bytes(*b)).collect()
+}
+
+fn set_group_color(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetGroupColor(group, colour), and SetGroupColorRGB(group, red, green,
+    // blue): one colour, the later call's.
+    with_group(ctx.state, this, args[0], "SetGroupColor", |g| {
+        g.colour = Some(args[1]);
+        Ok(S_OK)
+    })
+}
+
+fn set_group_color_rgb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let colour = rgb(args[1], args[2], args[3]);
+    with_group(ctx.state, this, args[0], "SetGroupColorRGB", |g| {
+        g.colour = Some(colour);
+        Ok(S_OK)
+    })
+}
+
+fn set_group_mapping(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetGroupMapping(group, D3DRMMAPPING): whether its texture wraps across
+    // and down, and is corrected for perspective. Kept as given.
+    with_group(ctx.state, this, args[0], "SetGroupMapping", |g| {
+        g.mapping = Some(args[1]);
+        Ok(S_OK)
+    })
+}
+
+fn set_group_quality(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetGroupQuality(group, D3DRMRENDERQUALITY): how it is shaded, lit and
+    // filled. Kept as given.
+    with_group(ctx.state, this, args[0], "SetGroupQuality", |g| {
+        g.quality = Some(args[1]);
+        Ok(S_OK)
+    })
+}
+
+/// SetGroupMaterial and SetGroupTexture(group, object): the group holds a
+/// reference to what it is now drawn with, and lets go of what it was.
+fn set_group_object(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    args: &[u32],
+    method: &str,
+    which: fn(&mut super::scene::Group) -> &mut u32,
+) -> Result<u32, Stop> {
+    let mut was = 0;
+    let answer = with_group(ctx.state, this, args[0], method, |g| {
+        was = std::mem::replace(which(g), args[1]);
+        Ok(S_OK)
+    })?;
+    if answer == S_OK {
+        ctx.state.com_ref(args[1], 1);
+        ctx.state.com_ref(was, -1);
+    }
+    Ok(answer)
+}
+
+fn set_group_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    set_group_object(ctx, this, args, "SetGroupMaterial", |g| &mut g.material)
+}
+
+fn set_group_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    set_group_object(ctx, this, args, "SetGroupTexture", |g| &mut g.texture)
+}
+
+fn mesh_box(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetBox(box): the least and the greatest corner of the box, along the
+    // mesh's own axes, that holds every vertex of every group. A vertex never
+    // set, or a mesh with none, has no place to be held, and what retained
+    // mode answers for either has not been measured.
+    let Some(mesh) = ctx.state.scene.meshes.get(&ctx.state.identity(this)) else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if args[0] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let mut corners: Option<([f32; 3], [f32; 3])> = None;
+    for vertex in mesh.groups.iter().flat_map(|g| &g.vertices) {
+        let Some(vertex) = vertex else {
+            return Err(Stop::NotWritten {
+                what: "IDirect3DRMMesh::GetBox: a vertex that was never set".to_owned(),
+                caller: 0,
+            });
+        };
+        let at = [0, 1, 2].map(|i| value(vertex[i]));
+        // Picked by comparing, never worked out, so each corner is the bits
+        // of a vertex the guest gave.
+        let (mut least, mut most) = corners.unwrap_or((at, at));
+        for i in 0..3 {
+            if at[i] < least[i] {
+                least[i] = at[i];
+            }
+            if at[i] > most[i] {
+                most[i] = at[i];
+            }
+        }
+        corners = Some((least, most));
+    }
+    let Some((least, most)) = corners else {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMMesh::GetBox: a mesh with no vertices".to_owned(),
+            caller: 0,
+        });
+    };
+    write_vector(ctx, args[0], least)?;
+    write_vector(ctx, args[0] + 12, most)?;
+    Ok(S_OK)
+}
+
+fn mesh_clone(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Clone(outer, interface, out): a new mesh with this one's groups, each
+    // holding its own reference to what it is drawn with.
+    // ponytail: the copy starts with no name and no app data of its own;
+    // whether retained mode copies those has not been measured, and a title
+    // that reads them off a clone is where it would show.
+    let interface = crate::com::iid_text(&crate::com::read_iid(ctx, args[1])?);
+    // IID_IDirect3DRMMesh, from Wine's d3drmobj.h.
+    if args[0] != 0 || interface != "a3a80d01-6e12-11cf-ac4a-0000c03825a1" {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMMesh::Clone: outer {:#x}, as {interface}, where a mesh has only \
+                 been asked for as itself",
+                args[0]
+            ),
+            caller: 0,
+        });
+    }
+    let Some(mesh) = ctx
+        .state
+        .scene
+        .meshes
+        .get(&ctx.state.identity(this))
+        .cloned()
+    else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    if args[2] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let object = State::make_com(ctx, &MESH, ComState::None).map_err(Stop::Fault)?;
+    for group in &mesh.groups {
+        ctx.state.com_ref(group.material, 1);
+        ctx.state.com_ref(group.texture, 1);
+    }
+    ctx.state.scene.meshes.insert(object, mesh);
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    Ok(S_OK)
 }
 
 fn create_mesh_builder(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1210,6 +1462,41 @@ fn preferred_texture_format(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Resu
             caller: 0,
         }),
     }
+}
+
+fn viewport_force_update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // ForceUpdate(left, top, right, bottom): that much of the device is to be
+    // copied to the screen at the device's next Update. Here a viewport draws
+    // straight into the device's surface and the title presents it itself,
+    // so an Update has nothing to copy, and neither has this. LEGO Island
+    // asks it for its whole viewport (#119).
+    let Some(ComState::Viewport {
+        x,
+        y,
+        width,
+        height,
+        ..
+    }) = viewport_state(ctx, this)
+    else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let [left, top, right, bottom] = [args[0], args[1], args[2], args[3]];
+    if left < x
+        || top < y
+        || right > x + width
+        || bottom > y + height
+        || left > right
+        || top > bottom
+    {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "IDirect3DRMViewport::ForceUpdate: {left},{top} to {right},{bottom}, which is \
+                 not inside the viewport"
+            ),
+            caller: 0,
+        });
+    }
+    Ok(S_OK)
 }
 
 fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {

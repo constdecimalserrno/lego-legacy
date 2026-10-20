@@ -1,7 +1,7 @@
 //! What KERNEL32, USER32 and retained mode answer, called as a title calls
 //! them but without one: each shim or method run on the stub's machine with
 //! the arguments a title would push, and what it wrote and answered read back
-//! (#114, #117, #118).
+//! (#114, #117, #118, #119).
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
@@ -447,4 +447,211 @@ fn a_colour_from_four_fractions_puts_alpha_on_top() {
     };
     assert_eq!(colour([1.0, 0.5, 0.0, 0.25]), Ok(0x3fff_7f00));
     assert_eq!(colour([-1.0, 2.0, 0.999, 1.0]), Ok(0xff00_fffe));
+}
+
+/// A mesh LEGO Island builds its world from (#119), made through DirectX 5's
+/// retained mode, with `groups` groups of four vertices and two triangles.
+fn mesh(m: &mut Machine, groups: u32) -> u32 {
+    // IDirect3DRM2::CreateMesh(out), at 5.
+    assert_eq!(com(m, "IDirect3DRM2", 5, 0, &[OUT]), Ok(0));
+    let mesh = m.arena.read_u32(OUT).expect("in the arena");
+    for (at, index) in [0, 1, 2, 2, 1, 3].into_iter().enumerate() {
+        m.arena
+            .write_u32(DATA + 4 * at as u32, index)
+            .expect("in the arena");
+    }
+    for id in 0..groups {
+        // AddGroup(vertices, faces, vertices a face, face data, out), at 14.
+        assert_eq!(
+            com(m, "IDirect3DRMMesh", 14, mesh, &[4, 2, 3, DATA, OUT]),
+            Ok(0)
+        );
+        assert_eq!(m.arena.read_u32(OUT), Ok(id), "groups are numbered in turn");
+    }
+    mesh
+}
+
+/// Four `D3DRMVERTEX`es at `at`, each placed at `corner` times its number
+/// and with its number in every other field.
+fn vertices(m: &mut Machine, at: u32, corner: [f32; 3]) -> Vec<[u32; 9]> {
+    (0..4u32)
+        .map(|n| {
+            let mut v = [n; 9];
+            for i in 0..3 {
+                v[i] = (corner[i] * n as f32).to_bits();
+            }
+            for (i, word) in v.iter().enumerate() {
+                m.arena
+                    .write_u32(at + 36 * n + 4 * i as u32, *word)
+                    .expect("in the arena");
+            }
+            v
+        })
+        .collect()
+}
+
+/// What retained mode keeps of a mesh (#119): each group's faces and
+/// vertices copied as they were given, so a title that reuses its scratch
+/// for the next group changes nothing, and what each group is drawn with.
+#[test]
+fn a_mesh_keeps_its_groups_as_they_were_given() {
+    let mut m = machine();
+    let mesh = mesh(&mut m, 2);
+    let given = vertices(&mut m, DATA + 0x100, [1.0, 2.0, 3.0]);
+    // SetVertices(group, first, count, vertices), at 15: all four, then the
+    // scratch is written over.
+    let set = |m: &mut Machine, args: [u32; 4]| com(m, "IDirect3DRMMesh", 15, mesh, &args);
+    assert_eq!(set(&mut m, [0, 0, 4, DATA + 0x100]), Ok(0));
+    vertices(&mut m, DATA + 0x100, [9.0, 9.0, 9.0]);
+    m.arena.write_u32(DATA, 7).expect("in the arena");
+    let group = |m: &Machine, id: usize| m.state.scene.meshes[&mesh].groups[id].clone();
+    let kept = group(&m, 0);
+    assert_eq!(
+        kept.vertices,
+        given.into_iter().map(Some).collect::<Vec<_>>()
+    );
+    assert_eq!((kept.per_face, kept.indices), (3, vec![0, 1, 2, 2, 1, 3]));
+    // Only the vertices it names are set. Past the group's end, or a group
+    // the mesh does not have, is a bad value.
+    assert_eq!(set(&mut m, [1, 3, 1, DATA + 0x100]), Ok(0));
+    assert_eq!(group(&m, 1).vertices.iter().flatten().count(), 1);
+    assert_eq!(group(&m, 1).vertices[3].map(|v| v[3]), Some(0));
+    assert_eq!(set(&mut m, [1, 3, 2, DATA + 0x100]), Ok(0x8876_0316));
+    assert_eq!(set(&mut m, [2, 0, 1, DATA + 0x100]), Ok(0x8876_0316));
+
+    // SetGroupColor and SetGroupColorRGB, at 16 and 17, set one colour;
+    // SetGroupMapping and SetGroupQuality, at 18 and 19, are kept as given.
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 16, mesh, &[0, 0x80ff_0000]),
+        Ok(0)
+    );
+    let [r, g, b] = [0.0, 1.0, 0.0f32].map(f32::to_bits);
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 17, mesh, &[1, r, g, b]),
+        Ok(0)
+    );
+    assert_eq!(com(&mut m, "IDirect3DRMMesh", 18, mesh, &[0, 4]), Ok(0));
+    assert_eq!(com(&mut m, "IDirect3DRMMesh", 19, mesh, &[0, 0x88]), Ok(0));
+    let (first, second) = (group(&m, 0), group(&m, 1));
+    assert_eq!(
+        (first.colour, first.mapping, first.quality),
+        (Some(0x80ff_0000), Some(4), Some(0x88))
+    );
+    assert_eq!(
+        (second.colour, second.mapping, second.quality),
+        (Some(0xff00_ff00), None, None)
+    );
+    // Every group at once has not been asked for.
+    assert!(matches!(
+        com(&mut m, "IDirect3DRMMesh", 16, mesh, &[u32::MAX, 0]),
+        Err(Stop::NotWritten { .. })
+    ));
+
+    // SetGroupMaterial and SetGroupTexture, at 20 and 21: the group holds a
+    // reference to each, and lets go of one it is no longer drawn with.
+    assert_eq!(
+        com(&mut m, "IDirect3DRM2", 13, 0, &[1.0f32.to_bits(), OUT]),
+        Ok(0)
+    );
+    let material = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(com(&mut m, "IDirect3DRM2", 18, 0, &[0, OUT]), Ok(0));
+    let texture = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 20, mesh, &[0, material]),
+        Ok(0)
+    );
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 21, mesh, &[1, texture]),
+        Ok(0)
+    );
+    assert_eq!(
+        (group(&m, 0).material, group(&m, 1).texture),
+        (material, texture)
+    );
+    // AddRef, at 1, answers how many references there are now.
+    assert_eq!(com(&mut m, "IDirect3DRMMaterial", 1, material, &[]), Ok(3));
+    assert_eq!(com(&mut m, "IDirect3DRMMesh", 20, mesh, &[0, 0]), Ok(0));
+    assert_eq!(com(&mut m, "IDirect3DRMMaterial", 1, material, &[]), Ok(3));
+    assert_eq!(group(&m, 0).material, 0);
+}
+
+/// A mesh's box holds every vertex of every group, and a clone is a mesh of
+/// its own with the same groups (#119).
+#[test]
+fn a_mesh_has_a_box_round_its_vertices_and_clones_to_a_mesh_of_its_own() {
+    let mut m = machine();
+    let mesh = mesh(&mut m, 2);
+    // GetBox(box), at 13: not while a vertex has nowhere to be.
+    let bounds = |m: &mut Machine, of: u32| com(m, "IDirect3DRMMesh", 13, of, &[OUT]);
+    assert!(matches!(bounds(&mut m, mesh), Err(Stop::NotWritten { .. })));
+    vertices(&mut m, DATA + 0x100, [1.0, -2.0, 0.5]);
+    vertices(&mut m, DATA + 0x200, [-1.0, 4.0, 0.25]);
+    for (id, at) in [(0, DATA + 0x100), (1, DATA + 0x200)] {
+        assert_eq!(
+            com(&mut m, "IDirect3DRMMesh", 15, mesh, &[id, 0, 4, at]),
+            Ok(0)
+        );
+    }
+    assert_eq!(bounds(&mut m, mesh), Ok(0));
+    assert_eq!(vector(&m, OUT), [-3.0, -6.0, 0.0]);
+    assert_eq!(vector(&m, OUT + 12), [3.0, 12.0, 1.5]);
+
+    // Clone(outer, interface, out), at 3, as IID_IDirect3DRMMesh.
+    let iid = [
+        0x01, 0x0d, 0xa8, 0xa3, 0x12, 0x6e, 0xcf, 0x11, 0xac, 0x4a, 0x00, 0x00, 0xc0, 0x38, 0x25,
+        0xa1,
+    ];
+    m.arena.write(DATA, &iid).expect("in the arena");
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 3, mesh, &[0, DATA, OUT]),
+        Ok(0)
+    );
+    let clone = m.arena.read_u32(OUT).expect("in the arena");
+    assert_ne!(clone, mesh);
+    assert_eq!(m.state.interface_of(clone), Some("IDirect3DRMMesh"));
+    assert_eq!(
+        com(&mut m, "IDirect3DRMMesh", 16, clone, &[0, 0xff12_3456]),
+        Ok(0)
+    );
+    let colour = |m: &Machine, of: u32| m.state.scene.meshes[&of].groups[0].colour;
+    assert_eq!(
+        (colour(&m, mesh), colour(&m, clone)),
+        (None, Some(0xff12_3456))
+    );
+    assert_eq!(bounds(&mut m, clone), Ok(0));
+    assert_eq!(vector(&m, OUT + 12), [3.0, 12.0, 1.5]);
+    // As an aggregate, or as anything else, is a wall.
+    assert!(matches!(
+        com(&mut m, "IDirect3DRMMesh", 3, mesh, &[OUT, DATA, OUT]),
+        Err(Stop::NotWritten { .. })
+    ));
+    m.arena.write(DATA, &[0; 16]).expect("in the arena");
+    assert!(matches!(
+        com(&mut m, "IDirect3DRMMesh", 3, mesh, &[0, DATA, OUT]),
+        Err(Stop::NotWritten { .. })
+    ));
+}
+
+/// IDirect3DRMViewport::ForceUpdate (#119): what retained mode draws here is
+/// in the device's surface already, so a part of the viewport to copy to the
+/// screen has nothing to do, and a part outside it is a wall.
+#[test]
+fn a_viewport_forced_to_update_has_nothing_to_copy() {
+    let mut m = machine();
+    // IDirect3DRM2::CreateViewport(device, camera, x, y, width, height, out),
+    // at 20.
+    assert_eq!(
+        com(&mut m, "IDirect3DRM2", 20, 0, &[0, 0, 0, 0, 640, 480, OUT]),
+        Ok(0)
+    );
+    let viewport = m.arena.read_u32(OUT).expect("in the arena");
+    // ForceUpdate(left, top, right, bottom), at 23.
+    let force =
+        |m: &mut Machine, area: [u32; 4]| com(m, "IDirect3DRMViewport", 23, viewport, &area);
+    assert_eq!(force(&mut m, [0, 0, 640, 480]), Ok(0));
+    assert_eq!(force(&mut m, [301, 12, 400, 90]), Ok(0));
+    assert!(matches!(
+        force(&mut m, [0, 0, 641, 480]),
+        Err(Stop::NotWritten { .. })
+    ));
 }

@@ -74,6 +74,33 @@ pub struct Light {
     pub enable_frame: u32,
 }
 
+/// A mesh's geometry, in the groups a title added it in (#119).
+#[derive(Clone, Debug, Default)]
+pub struct Mesh {
+    pub groups: Vec<Group>,
+}
+
+/// One group of a mesh: its vertices and faces, and what it is drawn with.
+/// What a title has not set is `None`.
+#[derive(Clone, Debug, Default)]
+pub struct Group {
+    /// Each vertex as a `D3DRMVERTEX` lays it out, in the guest's own bits:
+    /// position, normal, the two texture coordinates, then its colour. Copied
+    /// in, because LEGO Island fills every group's from the same scratch.
+    pub vertices: Vec<Option<[u32; 9]>>,
+    /// How many vertices make a face, and every face's vertex indices, one
+    /// face after another.
+    pub per_face: u32,
+    pub indices: Vec<u32>,
+    pub colour: Option<u32>,
+    pub mapping: Option<u32>,
+    pub quality: Option<u32>,
+    /// The material and the texture it is drawn with, each as the guest
+    /// handed it over, or zero for none.
+    pub material: u32,
+    pub texture: u32,
+}
+
 /// A viewport's rectangle on its device: across, down, wide and high, in
 /// pixels.
 pub type Rect = (u32, u32, u32, u32);
@@ -190,12 +217,13 @@ impl View {
     }
 }
 
-/// Every frame the guest has made, by the pointer it holds; every light and
-/// every viewport.
+/// Every frame the guest has made, by the pointer it holds; every light,
+/// every mesh and every viewport.
 #[derive(Default)]
 pub struct Scene {
     pub frames: BTreeMap<u32, Frame>,
     pub lights: BTreeMap<u32, Light>,
+    pub meshes: BTreeMap<u32, Mesh>,
     pub viewports: BTreeMap<u32, View>,
     /// Where `D3DRMVectorRandom`'s sequence has got to, once it has started.
     pub random: Option<u32>,

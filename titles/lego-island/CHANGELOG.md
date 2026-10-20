@@ -29,3 +29,10 @@ it opens its scripts where they lie on the disc, then `WORLD.WDB`, and makes its
 first material through DirectX 5's retained mode. Every frame so far is black. At 5,560,671 it
 asks retained mode for its first mesh, which is #119's; first light is past the world it builds.
 The boot tests run to 5,560,600.
+
+Its world is built and its intro plays (#119). Retained mode keeps the 400 meshes it makes out of
+`WORLD.WDB`, with their 1,280 groups, and their boxes and clones. Past them, its 3D sounds set the
+volume outside their cones (flip 368), and its viewport is forced to update (flip 455). Then the
+bricks fade up and the intro plays, until 3,770,493,606, flip 3200, where retained mode clears its
+viewport to draw the island, which is #120's. The traced boot tests run to 5,571,000, past its
+first two meshes. The world runs untraced to 3,770,493,500, twice, for the determinism gate.

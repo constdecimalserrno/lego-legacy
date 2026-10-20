@@ -295,6 +295,35 @@ The bottom of a title's address space answers as Windows 9x's does, rather than 
 
 `core/tests/access_violation.rs` proves it on hand-assembled guests, handled and unhandled.
 
+Retained mode keeps the meshes LEGO Island builds its world from (#119), about four hundred of
+them out of `WORLD.WDB`, each written when its run stopped there:
+
+- `IDirect3DRM2::CreateMesh` makes the same `IDirect3DRMMesh` as DirectX 6's. The scene keeps
+  each mesh's groups (`scene::Mesh`, `scene::Group`).
+- `AddGroup` copies a group's faces and numbers it in turn. `SetVertices` copies its
+  `D3DRMVERTEX`es, as the guest's bits, out of the guest's array, which Island reuses for the
+  next group. Faces of differing sizes, a vertex past the group's end, or a group the mesh lacks
+  are a wall or `D3DRMERR_BADVALUE`; every group at once (`D3DRMGROUP_ALLGROUPS`) is a wall.
+- `SetGroupColor`, `SetGroupColorRGB`, `SetGroupMapping` and `SetGroupQuality` keep what they are
+  given. `SetGroupMaterial` and `SetGroupTexture` keep a reference to what the group is drawn
+  with and let go of what it was drawn with before.
+- `GetBox` answers the least and greatest corner of every vertex in the mesh, picked by
+  comparing. A vertex never set, or a mesh with none, is a wall.
+- `Clone`, as `IID_IDirect3DRMMesh` and nothing else, makes a mesh of its own with the same
+  groups.
+- Nothing reads a group back yet: Island never calls `GetGroup`, `GetVertices`, `GetGroupCount`
+  or a group's getters, and they stay walls.
+
+Past the meshes, the same run stopped at two more:
+
+- `IDirectSound3DBuffer::SetConeOutsideVolume` answers as done. A cone starts all the way round
+  and nothing narrows one (`SetConeAngles` is a wall), so the volume outside it is never heard.
+- `IDirect3DRMViewport::ForceUpdate` has nothing to copy, since a viewport here draws straight
+  into its device's surface. Part of a viewport outside it is a wall.
+
+Island now runs to 3,770,493,606, flip 3200, where its viewport's `Clear` is #120's.
+`core/tests/shims.rs` builds meshes and forces an update. No other title's route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
