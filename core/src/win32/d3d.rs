@@ -56,7 +56,8 @@ struct Device {
     depth: Vec<f32>,
 }
 
-/// `IDirect3DDevice2`: DirectX 5's face of the device underneath retained mode, which is what retained mode hands a title.
+/// `IDirect3DDevice2`: DirectX 5's face of the device underneath retained mode, which is what retained mode hands a title,
+/// and what LEGO Island makes itself to hand to retained mode (#117).
 pub static DEVICE2: Interface = Interface {
     name: "IDirect3DDevice2",
     methods: &[
@@ -162,6 +163,23 @@ pub static D3D3: Interface = Interface {
         method("CreateVertexBuffer", 3, create_vertex_buffer),
         method("EnumZBufferFormats", 3, enum_z_buffer_formats),
         wall("EvictManagedTextures", 0),
+    ],
+};
+
+/// `IDirect3D2`: DirectX 5's Direct3D object, which comes off the DirectDraw
+/// object as LEGO Island asks for it (#117).
+pub static D3D2: Interface = Interface {
+    name: "IDirect3D2",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("EnumDevices", 2, enum_devices2),
+        wall("CreateLight", 2),
+        wall("CreateMaterial", 2),
+        wall("CreateViewport", 2),
+        wall("FindDevice", 2),
+        method("CreateDevice", 3, create_device2),
     ],
 };
 
@@ -450,6 +468,7 @@ pub static INTERFACES: &[&Interface] = &[
     &DEVICE2,
     &DEVICE3,
     &DEVICE7,
+    &D3D2,
     &D3D3,
     &D3D7,
     &VERTEX_BUFFER7,
@@ -509,24 +528,9 @@ fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
     // Both capability blocks say how big they are, which is how a caller knows
     // which version of them it is looking at.
     put(0x04, 0x38)?;
-    put(0x3c, 0x38)?;
-    // The triangle block: what the rasteriser does. Z comparison against a
-    // depth buffer, flat and Gouraud shading, textures with modulation and
-    // alpha, and the blends the pipeline already mixes with.
-    put(0x3c + 0x04, 0x0000_0072)?; // dwMiscCaps: a depth mask, and culling either way round
-    put(0x3c + 0x08, 0x0000_0030)?; // dwRasterCaps: depth testing, at subpixel accuracy
-    put(0x3c + 0x0c, 0x0000_008a)?; // dwZCmpCaps: less, less-or-equal, always
-    put(0x3c + 0x10, 0x0000_0033)?; // dwSrcBlendCaps: zero, one, source alpha and its inverse
-    put(0x3c + 0x14, 0x0000_0033)?; // dwDestBlendCaps: the same
-    put(0x3c + 0x18, 0x0000_0080)?; // dwAlphaCmpCaps: always, which is no alpha test
-    put(0x3c + 0x1c, 0x0000_440a)?; // dwShadeCaps: flat and Gouraud in colour, with alpha
-    put(0x3c + 0x20, 0x0000_0001)?; // dwTextureCaps: perspective correction
-    put(0x3c + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
-    put(0x3c + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate
-    put(0x3c + 0x2c, 0x0000_0001)?; // dwTextureAddressCaps: wrap
+    write_triangle_caps(&mut put, 0x3c)?;
 
     // The screen this machine declares, and a depth buffer to match.
-    const DDBD_16: u32 = 0x0000_0400;
     put(0x74, DDBD_16)?;
     put(0x78, DDBD_16)?;
     // Textures: one pixel up to a thousand a side, which is every texture
@@ -546,6 +550,102 @@ fn write_device_desc7(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
         .write(desc + 0xc4, &HAL_DEVICE)
         .map_err(Stop::Fault)?;
     Ok(())
+}
+
+/// The declared screen's depth, and the depth buffer's.
+const DDBD_16: u32 = 0x0000_0400;
+
+/// The triangle block of a device's description, a `D3DPRIMCAPS` at `at`:
+/// what the rasteriser does. Z comparison against a depth buffer, flat and
+/// Gouraud shading, textures with modulation and alpha, and the blends the
+/// pipeline already mixes with.
+fn write_triangle_caps(
+    put: &mut impl FnMut(u32, u32) -> Result<(), Stop>,
+    at: u32,
+) -> Result<(), Stop> {
+    put(at, 0x38)?; // dwSize
+    put(at + 0x04, 0x0000_0072)?; // dwMiscCaps: a depth mask, and culling either way round
+    put(at + 0x08, 0x0000_0030)?; // dwRasterCaps: depth testing, at subpixel accuracy
+    put(at + 0x0c, 0x0000_008a)?; // dwZCmpCaps: less, less-or-equal, always
+    put(at + 0x10, 0x0000_0033)?; // dwSrcBlendCaps: zero, one, source alpha and its inverse
+    put(at + 0x14, 0x0000_0033)?; // dwDestBlendCaps: the same
+    put(at + 0x18, 0x0000_0080)?; // dwAlphaCmpCaps: always, which is no alpha test
+    put(at + 0x1c, 0x0000_440a)?; // dwShadeCaps: flat and Gouraud in colour, with alpha
+    put(at + 0x20, 0x0000_0001)?; // dwTextureCaps: perspective correction
+    put(at + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
+    put(at + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate
+    put(at + 0x2c, 0x0000_0001) // dwTextureAddressCaps: wrap
+}
+
+/// How big DirectX 5's `D3DDEVICEDESC` is: through the stipple sizes, before
+/// what DirectX 6 added. LEGO Island copies exactly this much of each one
+/// it is handed (`LEGO1.DLL` RVA 0x9be90).
+const DEVICE_DESC_BYTES: u32 = 0xcc;
+
+/// DirectX 5's enumeration of the declared machine's one device (#117).
+///
+/// The same device DirectX 7's enumeration offers, described the way
+/// DirectX 5 describes one: its identifier, a description and a name, then
+/// what the hardware does and what is emulated. A device whose hardware
+/// description has a colour model is a hardware device, and nothing of this
+/// one is emulated, so its emulated description is empty.
+fn enum_devices2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumDevices(callback, context). One device, so one call.
+    let (callback, context) = (args[0], args[1]);
+    let guid = ctx.state.heap.alloc(16);
+    ctx.mem.write(guid, &HAL_DEVICE).map_err(Stop::Fault)?;
+    let hardware = ctx.state.heap.alloc(DEVICE_DESC_BYTES);
+    write_device_desc(ctx, hardware)?;
+    let emulated = ctx.state.heap.alloc(DEVICE_DESC_BYTES);
+    ctx.mem
+        .write(emulated, &[0; DEVICE_DESC_BYTES as usize])
+        .map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(emulated, DEVICE_DESC_BYTES)
+        .map_err(Stop::Fault)?;
+    let description = ctx.intern("lego-legacy rasteriser").map_err(Stop::Fault)?;
+    let name = ctx.intern("Direct3D HAL").map_err(Stop::Fault)?;
+    ctx.log
+        .line("d3d2 enumerate: one device, and it rasterises");
+    if callback != 0 {
+        ctx.call_guest = Some((
+            callback,
+            vec![guid, description, name, hardware, emulated, context],
+        ));
+    }
+    Ok(S_OK)
+}
+
+/// Write the declared device's DirectX 5 description where the guest asked
+/// for it: every field it fills says so in `dwFlags`.
+fn write_device_desc(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
+    ctx.mem
+        .write(desc, &[0; DEVICE_DESC_BYTES as usize])
+        .map_err(Stop::Fault)?;
+    let mut put = |at: u32, value: u32| ctx.mem.write_u32(desc + at, value).map_err(Stop::Fault);
+    put(0x00, DEVICE_DESC_BYTES)?;
+    // D3DDD_COLORMODEL through D3DDD_DEVICEZBUFFERBITDEPTH: no execute
+    // buffer, so neither of its limits.
+    put(0x04, 0x0000_01ff)?;
+    put(0x08, 2)?; // D3DCOLOR_RGB, which is what makes it a hardware device
+                   // dtcTransformCaps and bClipping: the pipeline clips to the view volume
+                   // as it transforms.
+    put(0x10, 8)?;
+    put(0x14, 1)?;
+    put(0x18, 1)?;
+    put(0x1c, 0x10)?; // dlcLightingCaps' size
+    put(0x1c + 0x04, 0x7)?; // point, spot and directional lights
+    put(0x1c + 0x08, 1)?; // D3DLIGHTINGMODEL_RGB
+    put(0x1c + 0x0c, 8)?; // lights lit at once, as DirectX 7's says
+    put(0x2c, 0x38)?; // dpcLineCaps: its size, and no lines
+    write_triangle_caps(&mut put, 0x64)?;
+    put(0x9c, DDBD_16)?;
+    put(0xa0, DDBD_16)?;
+    // Textures: one pixel up to a thousand a side, as DirectX 7's says.
+    put(0xac, 1)?;
+    put(0xb0, 1)?;
+    put(0xb4, 1024)?;
+    put(0xb8, 1024)
 }
 
 /// The depth buffers the declared machine offers, which is one: sixteen bits
@@ -616,6 +716,27 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
 const HAL_DEVICE: [u8; 16] = [
     0xe0, 0x3d, 0xe6, 0x84, 0xaa, 0x46, 0xcf, 0x11, 0x81, 0x6f, 0x00, 0x00, 0xc0, 0x20, 0x15, 0x6e,
 ];
+
+/// DirectX 5's device, over the back buffer a title made for it: the one
+/// device `EnumDevices` offered, or a wall naming the one asked for (#117).
+fn create_device2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateDevice(guid, surface, out).
+    let asked = crate::com::read_iid(ctx, args[0])?;
+    if asked != HAL_DEVICE {
+        return Err(unwritten(format!(
+            "IDirect3D2::CreateDevice: device {}, which was never offered",
+            crate::com::iid_text(&asked)
+        )));
+    }
+    let surface = args[1];
+    let object =
+        State::make_com(ctx, &DEVICE2, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3d2 device at {object:#010x} drawing into surface {surface:#010x}"
+    ));
+    Ok(S_OK)
+}
 
 /// The device a title draws through, over a surface of its own.
 fn create_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {

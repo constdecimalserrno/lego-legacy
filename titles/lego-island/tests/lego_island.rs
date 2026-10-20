@@ -14,10 +14,11 @@ use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::Title;
 
 /// Enough instructions for both C runtimes to start, the game to read its
-/// settings back and open its window, and its engine to ask DirectDraw for
-/// Direct3D 2 (#114), and no more: what the engine does without it is not
-/// the path it takes on Windows, and Direct3D 2 is the next ticket's (#117).
-const BOOT_BUDGET: u64 = 435_000;
+/// settings back and open its window (#114), and its engine to make its
+/// Direct3D 2 device and hand it to retained mode (#117), and no more: at
+/// 478,302 it asks its window for the instance it was made with, which is
+/// the next ticket's (#118).
+const BOOT_BUDGET: u64 = 478_000;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -133,13 +134,32 @@ fn the_game_opens_its_window_and_its_engine_asks_for_direct3d_2() {
         // with Direct3D, and asks for it by the second interface's name.
         .assert_logged("dsound primary format 11025 Hz, 2 channels, 16 bits")
         .assert_logged("ddraw modes: 640x480x16, the only one declared")
-        .assert_logged(
-            "com IDirectDraw was asked for 6aae1ec1-662a-11d0-889d-00aa00bbb76a and refused",
-        );
+        .assert_logged("com IDirectDraw handed back IDirect3D2");
+}
+
+#[test]
+fn the_engine_makes_its_own_direct3d_2_device_and_hands_it_to_retained_mode() {
+    let Some(ran) = boot() else { return };
+
+    // Immediate mode first, made by the engine itself (#117): the declared
+    // machine's one device, the screen's own mode, and the device over the
+    // back buffer.
+    ran.assert_logged("d3d2 enumerate: one device, and it rasterises")
+        .assert_logged("display mode 640x480x16")
+        .assert_logged("d3d2 device at")
+        // Then DirectX 5's retained mode over it, and a viewport the size of
+        // the screen.
+        .assert_logged("com IDirect3DRM handed back IDirect3DRM2")
+        .assert_logged("d3drm device at")
+        .assert_logged("d3drm viewport 640x480 at 0,0");
+    assert!(
+        !ran.log.contains("and refused"),
+        "every face the engine asks for is one it is given"
+    );
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
-        "nothing before Direct3D stops the run"
+        "nothing in Direct3D or retained mode stops the run"
     );
 }
 

@@ -142,6 +142,13 @@ const FACES: &[(&str, &str, &str)] = &[
         "f5049e77-4861-11d2-a407-00a0c90629a8",
         "IDirect3D7",
     ),
+    // DirectX 5's Direct3D, which comes off the DirectDraw object the same
+    // way, and which LEGO Island asks its DirectDraw object for (#117).
+    (
+        "IDirectDraw",
+        "6aae1ec1-662a-11d0-889d-00aa00bbb76a",
+        "IDirect3D2",
+    ),
     // DirectX 3's DirectDraw, which a title's movie player asks for: the same
     // slots as the newer one as far as it goes (#9).
     (
@@ -168,6 +175,12 @@ const FACES: &[(&str, &str, &str)] = &[
         "IDirect3DRM",
         "4516ec83-8f20-11d0-9b6d-0000c0781bc3",
         "IDirect3DRM3",
+    ),
+    // DirectX 5's, which LEGO Island asks for (#117).
+    (
+        "IDirect3DRM",
+        "4516ecc8-8f20-11d0-9b6d-0000c0781bc3",
+        "IDirect3DRM2",
     ),
     // Its surfaces. DirectX 2's surface and DirectX 6's agree slot for slot as
     // far as the older one goes, so one table answers both: everything through
@@ -244,15 +257,19 @@ const OWN: &[(&str, &str)] = &[
         "IAMMultiMediaStream",
         "bebe595c-9a6f-11d0-8fde-00c04fd9189d",
     ),
+    ("IDirect3D2", "6aae1ec1-662a-11d0-889d-00aa00bbb76a"),
     ("IDirect3D3", "bb223240-e72b-11d0-a9b4-00aa00c0993e"),
     ("IDirect3DDevice2", "93281501-8cf8-11d0-89ab-00a0c9054129"),
     ("IDirect3DDevice3", "b0ab3b60-33d7-11d1-a981-00c04fd7b174"),
     ("IDirect3DLight", "4417c142-33ad-11cf-816f-0000c020156e"),
     ("IDirect3DMaterial3", "ca9c46f4-d3c5-11d1-b75a-00600852b312"),
     ("IDirect3DRM", "2bc49361-8327-11cf-ac4a-0000c03825a1"),
+    ("IDirect3DRM2", "4516ecc8-8f20-11d0-9b6d-0000c0781bc3"),
     ("IDirect3DRM3", "4516ec83-8f20-11d0-9b6d-0000c0781bc3"),
+    ("IDirect3DRMDevice2", "4516ec78-8f20-11d0-9b6d-0000c0781bc3"),
     ("IDirect3DRMDevice3", "549f498b-bfeb-11d1-8ed8-00a0c967a482"),
     ("IDirect3DRMFrame", "eb16cb03-d271-11ce-ac48-0000c03825a1"),
+    ("IDirect3DRMFrame2", "c3dfbd60-3988-11d0-9ec2-0000c0291ac3"),
     ("IDirect3DRMFrame3", "ff6b7f70-a40e-11d1-91f9-0000f8758e66"),
     (
         "IDirect3DRMFrameArray",
@@ -275,6 +292,10 @@ const OWN: &[(&str, &str)] = &[
     (
         "IDirect3DRMUserVisual",
         "59163de0-6d43-11cf-ac4a-0000c03825a1",
+    ),
+    (
+        "IDirect3DRMViewport",
+        "eb16cb02-d271-11ce-ac48-0000c03825a1",
     ),
     (
         "IDirect3DRMViewport2",
@@ -332,8 +353,11 @@ fn is_itself(interface: &str, asked: &str) -> bool {
     let retained = matches!(
         interface,
         "IDirect3DRMFrame"
+            | "IDirect3DRMFrame2"
             | "IDirect3DRMFrame3"
+            | "IDirect3DRMDevice2"
             | "IDirect3DRMDevice3"
+            | "IDirect3DRMViewport"
             | "IDirect3DRMViewport2"
             | "IDirect3DRMMesh"
             | "IDirect3DRMMeshBuilder3"
@@ -345,6 +369,7 @@ fn is_itself(interface: &str, asked: &str) -> bool {
     let visual = matches!(
         interface,
         "IDirect3DRMFrame"
+            | "IDirect3DRMFrame2"
             | "IDirect3DRMFrame3"
             | "IDirect3DRMMesh"
             | "IDirect3DRMMeshBuilder3"
@@ -403,6 +428,23 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
             });
             return Ok(S_OK);
         }
+    }
+
+    // DirectX 5's own faces, which only LEGO Island holds: a face it asks one
+    // of them for that is not here yet stops the run by name, rather than
+    // sending the title down a path it would not take on Windows (#117).
+    if matches!(
+        have,
+        "IDirect3D2"
+            | "IDirect3DRM2"
+            | "IDirect3DRMDevice2"
+            | "IDirect3DRMFrame2"
+            | "IDirect3DRMViewport"
+    ) {
+        return Err(Stop::NotWritten {
+            what: format!("{have}::QueryInterface: {asked}"),
+            caller: 0,
+        });
     }
 
     // A guest asking an object for a face nobody wrote. Answering with the

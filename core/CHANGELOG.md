@@ -166,6 +166,34 @@ snapshot can fall between any two instructions. `Machine::tick` is one instructi
 schedule. `core/tests/threads.rs` runs two threads past the quantum plainly, traced and stepped,
 and finds the same switches, cursor for cursor, and the same finish and digest. No route moves.
 
+DirectX 5's Direct3D and retained mode, which LEGO Island builds the other way round from Rock
+Raiders: immediate mode first, by itself, then retained mode over it (#117). Each was written
+when its run stopped there, and every identifier is from Wine's `d3d.h` and `d3drm.h`:
+
+- `IDirect3D2` comes off the DirectDraw object (`QueryInterface` for `{6aae1ec1-…}`).
+  `EnumDevices` offers the declared machine's one device, the same one DirectX 7's offers, in
+  DirectX 5's 0xcc-byte `D3DDEVICEDESC`: a hardware device by its colour model, with nothing
+  emulated. `CreateDevice` makes an `IDirect3DDevice2` over the back buffer for that device; any
+  other is a wall that names it.
+- `IDirectDrawClipper::SetHWnd` clips to the part of the screen the window shows, which is all of
+  it, as `GetClientRect` already said, so the engine's primary surface takes its clipper.
+- `IDirect3DRM2` comes off the retained-mode object (`{4516ecc8-…}`). `CreateFrame` makes an
+  `IDirect3DRMFrame2`; `CreateDeviceFromD3D` an `IDirect3DRMDevice2` over the device the title
+  made, which it holds; `CreateViewport` an `IDirect3DRMViewport`; `CreateLightRGB` a light as
+  DirectX 6's does. `SetDefaultTextureColors` and `SetDefaultTextureShades` are kept.
+- `IDirect3DRMDevice2` is DirectX 6's device's first 39 slots, and the frame array's
+  `IDirect3DRMFrame` is DirectX 5's frame's first 69, each sharing its table. The v1 viewport is
+  DirectX 6's but for `Clear`, which takes no flags, and is a wall.
+- `IDirect3DRMFrame2` is a table of its own, mapped by name: DirectX 6's frame drops
+  `GetTextureTopology`, `SetTextureTopology` and `AddMoveCallback2`, so from slot 33 up the two
+  sit one, two and then three places apart, where the old tree had measured only the first.
+- A face DirectX 5's own faces are asked for that is not here is a wall naming the face and the
+  identifier, rather than `E_NOINTERFACE`. Only LEGO Island holds them.
+- `D3DRMCreateColorRGBA` is written.
+
+`core/tests/shims.rs` places a frame through DirectX 5's slots and reads it back, and makes
+colours. No other title's route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

@@ -5,9 +5,9 @@
 //! emulator's own rasteriser, into the guest's own surface.
 //!
 //! Every table is the interface's full width, named and sized from its own
-//! header. A slot is written when Rock Raiders, the one title on the roster
-//! that drives retained mode, has called it; the rest stop the run and name
-//! the method (#11).
+//! header. A slot is written when a title that drives retained mode has
+//! called it: DirectX 6's by Rock Raiders, DirectX 5's by LEGO Island (#117).
+//! The rest stop the run and name the method (#11).
 
 use super::scene::Matrix;
 use super::{stdcall, ComState, Ctx, Shim, State};
@@ -19,7 +19,16 @@ pub const SHIMS: &[Shim] = &[
     stdcall("d3drm", "Direct3DRMCreate", 1, create),
     stdcall("d3drm", "D3DRMVectorRotate", 4, vector_rotate),
     stdcall("d3drm", "D3DRMVectorRandom", 1, vector_random),
+    stdcall("d3drm", "D3DRMCreateColorRGBA", 4, create_color_rgba),
 ];
+
+/// D3DRMCreateColorRGBA(red, green, blue, alpha): the `D3DCOLOR` four
+/// fractions make, alpha in the top byte, each truncated to a byte as
+/// Direct3D does. LEGO Island's engine imports it (#117).
+fn create_color_rgba(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let byte = |arg: u32| super::component(value(arg));
+    Ok(byte(args[3]) << 24 | byte(args[0]) << 16 | byte(args[1]) << 8 | byte(args[2]))
+}
 
 /// An object this machine never made, or made as something else.
 const D3DRMERR_BADOBJECT: u32 = 0x8876_030d;
@@ -78,6 +87,63 @@ pub static D3DRM: Interface = Interface {
     ],
 };
 
+/// `IDirect3DRM2`: DirectX 5's retained mode, which LEGO Island asks for and
+/// drives (#117). Its slots are where DirectX 6's are as far as
+/// `CreateProgressiveMesh`, but `CreateDeviceFromSurface` takes no flags, and
+/// what its methods make are DirectX 5's objects, not DirectX 6's.
+pub static D3DRM2: Interface = Interface {
+    name: "IDirect3DRM2",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        wall("CreateObject", 4),
+        method("CreateFrame", 2, create_frame2),
+        wall("CreateMesh", 1),
+        wall("CreateMeshBuilder", 1),
+        wall("CreateFace", 1),
+        wall("CreateAnimation", 1),
+        wall("CreateAnimationSet", 1),
+        wall("CreateTexture", 2),
+        wall("CreateLight", 3),
+        method("CreateLightRGB", 5, create_light_rgb),
+        wall("CreateMaterial", 2),
+        wall("CreateDevice", 3),
+        wall("CreateDeviceFromSurface", 4),
+        method("CreateDeviceFromD3D", 3, device_from_d3d),
+        wall("CreateDeviceFromClipper", 5),
+        wall("CreateTextureFromSurface", 2),
+        wall("CreateShadow", 9),
+        method("CreateViewport", 7, create_viewport1),
+        wall("CreateWrap", 16),
+        wall("CreateUserVisual", 3),
+        wall("LoadTexture", 2),
+        wall("LoadTextureFromResource", 4),
+        wall("SetSearchPath", 1),
+        wall("AddSearchPath", 1),
+        wall("GetSearchPath", 2),
+        method("SetDefaultTextureColors", 1, default_texture_colors),
+        method("SetDefaultTextureShades", 1, default_texture_shades),
+        wall("GetDevices", 1),
+        wall("GetNamedObject", 2),
+        wall("EnumerateObjects", 2),
+        wall("Load", 10),
+        wall("Tick", 1),
+        wall("CreateProgressiveMesh", 1),
+    ],
+};
+
+/// How many colours, and how many shades of each, a texture retained mode
+/// makes from here on starts with. Kept, for the texture that reads them; no
+/// texture is made yet (#117).
+fn default_texture_colors(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "texture colours", args[0])
+}
+
+fn default_texture_shades(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    keep(ctx, this, "texture shades", args[0])
+}
+
 /// `IDirect3DRM3`: DirectX 6's retained mode, which Rock Raiders drives.
 pub static D3DRM3: Interface = Interface {
     name: "IDirect3DRM3",
@@ -129,101 +195,129 @@ pub static D3DRM3: Interface = Interface {
 /// `IDirect3DRMDevice3`: the device retained mode draws with, on a DirectDraw surface.
 pub static DEVICE3: Interface = Interface {
     name: "IDirect3DRMDevice3",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        wall("Clone", 3),
-        wall("AddDestroyCallback", 2),
-        wall("DeleteDestroyCallback", 2),
-        method("SetAppData", 1, set_app_data),
-        method("GetAppData", 0, get_app_data),
-        method("SetName", 1, set_name),
-        method("GetName", 2, get_name),
-        method("GetClassName", 2, get_class_name),
-        wall("Init", 2),
-        wall("InitFromD3D", 2),
-        wall("InitFromClipper", 4),
-        method("Update", 0, update),
-        wall("AddUpdateCallback", 2),
-        wall("DeleteUpdateCallback", 2),
-        method("SetBufferCount", 1, set_buffer_count),
-        method("GetBufferCount", 0, get_buffer_count),
-        method("SetDither", 1, device_set_dither),
-        method("SetShades", 1, device_set_shades),
-        method("SetQuality", 1, device_set_quality),
-        method("SetTextureQuality", 1, device_set_texture_quality),
-        wall("GetViewports", 1),
-        method("GetDither", 0, device_get_dither),
-        method("GetShades", 0, device_get_shades),
-        method("GetHeight", 0, device_height),
-        method("GetWidth", 0, device_width),
-        wall("GetTrianglesDrawn", 0),
-        wall("GetWireframeOptions", 0),
-        method("GetQuality", 0, device_get_quality),
-        wall("GetColorModel", 0),
-        method("GetTextureQuality", 0, device_get_texture_quality),
-        wall("GetDirect3DDevice", 1),
-        wall("InitFromD3D2", 2),
-        wall("InitFromSurface", 3),
-        method("SetRenderMode", 1, device_set_render_mode),
-        method("GetRenderMode", 0, device_get_render_mode),
-        method("GetDirect3DDevice2", 1, direct3d_device2),
-        method("FindPreferredTextureFormat", 3, preferred_texture_format),
-        wall("RenderStateChange", 3),
-        wall("LightStateChange", 3),
-        wall("GetStateChangeOptions", 3),
-        wall("SetStateChangeOptions", 3),
-    ],
+    methods: DEVICE3_METHODS,
 };
+
+/// `IDirect3DRMDevice2`: DirectX 5's face of the same device, which LEGO
+/// Island makes over the immediate-mode device it made itself (#117). It is
+/// DirectX 6's as far as `GetDirect3DDevice2`, which is where DirectX 6's
+/// own additions start.
+pub static DEVICE2: Interface = Interface {
+    name: "IDirect3DRMDevice2",
+    methods: DEVICE3_METHODS.split_at(39).0,
+};
+
+const DEVICE3_METHODS: &[crate::com::Method] = &[
+    QUERY_INTERFACE,
+    ADD_REF,
+    RELEASE,
+    wall("Clone", 3),
+    wall("AddDestroyCallback", 2),
+    wall("DeleteDestroyCallback", 2),
+    method("SetAppData", 1, set_app_data),
+    method("GetAppData", 0, get_app_data),
+    method("SetName", 1, set_name),
+    method("GetName", 2, get_name),
+    method("GetClassName", 2, get_class_name),
+    wall("Init", 2),
+    wall("InitFromD3D", 2),
+    wall("InitFromClipper", 4),
+    method("Update", 0, update),
+    wall("AddUpdateCallback", 2),
+    wall("DeleteUpdateCallback", 2),
+    method("SetBufferCount", 1, set_buffer_count),
+    method("GetBufferCount", 0, get_buffer_count),
+    method("SetDither", 1, device_set_dither),
+    method("SetShades", 1, device_set_shades),
+    method("SetQuality", 1, device_set_quality),
+    method("SetTextureQuality", 1, device_set_texture_quality),
+    wall("GetViewports", 1),
+    method("GetDither", 0, device_get_dither),
+    method("GetShades", 0, device_get_shades),
+    method("GetHeight", 0, device_height),
+    method("GetWidth", 0, device_width),
+    wall("GetTrianglesDrawn", 0),
+    wall("GetWireframeOptions", 0),
+    method("GetQuality", 0, device_get_quality),
+    wall("GetColorModel", 0),
+    method("GetTextureQuality", 0, device_get_texture_quality),
+    wall("GetDirect3DDevice", 1),
+    wall("InitFromD3D2", 2),
+    wall("InitFromSurface", 3),
+    method("SetRenderMode", 1, device_set_render_mode),
+    method("GetRenderMode", 0, device_get_render_mode),
+    method("GetDirect3DDevice2", 1, direct3d_device2),
+    method("FindPreferredTextureFormat", 3, preferred_texture_format),
+    wall("RenderStateChange", 3),
+    wall("LightStateChange", 3),
+    wall("GetStateChangeOptions", 3),
+    wall("SetStateChangeOptions", 3),
+];
 
 /// `IDirect3DRMViewport2`: a camera's view onto part of a device.
 pub static VIEWPORT2: Interface = Interface {
     name: "IDirect3DRMViewport2",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        wall("Clone", 3),
-        wall("AddDestroyCallback", 2),
-        wall("DeleteDestroyCallback", 2),
-        method("SetAppData", 1, set_app_data),
-        method("GetAppData", 0, get_app_data),
-        method("SetName", 1, set_name),
-        method("GetName", 2, get_name),
-        method("GetClassName", 2, get_class_name),
-        wall("Init", 6),
-        method("Clear", 1, clear),
-        method("Render", 1, render),
-        method("SetFront", 1, viewport_set_front),
-        method("SetBack", 1, viewport_set_back),
-        method("SetField", 1, viewport_set_field),
-        method("SetUniformScaling", 1, viewport_set_uniform_scaling),
-        method("SetCamera", 1, viewport_set_camera),
-        method("SetProjection", 1, viewport_set_projection),
-        method("Transform", 2, viewport_transform),
-        method("InverseTransform", 2, viewport_inverse_transform),
-        wall("Configure", 4),
-        wall("ForceUpdate", 4),
-        method("SetPlane", 4, viewport_set_plane),
-        method("GetCamera", 1, viewport_get_camera),
-        method("GetDevice", 1, viewport_get_device),
-        method("GetPlane", 4, viewport_get_plane),
-        wall("Pick", 3),
-        wall("GetUniformScaling", 0),
-        method("GetX", 0, viewport_get_x),
-        method("GetY", 0, viewport_get_y),
-        method("GetWidth", 0, viewport_get_width),
-        method("GetHeight", 0, viewport_get_height),
-        method("GetField", 0, viewport_get_field),
-        method("GetBack", 0, viewport_get_back),
-        method("GetFront", 0, viewport_get_front),
-        method("GetProjection", 0, viewport_get_projection),
-        method("GetDirect3DViewport", 1, direct3d_viewport),
-        wall("TransformVectors", 3),
-        wall("InverseTransformVectors", 3),
-    ],
+    methods: &VIEWPORT2_METHODS,
 };
+
+/// `IDirect3DRMViewport`: DirectX 5's face of the same viewport, which LEGO
+/// Island's retained mode makes (#117). DirectX 6's as far as
+/// `GetDirect3DViewport`, but for `Clear`, which takes no flags: it clears
+/// everything.
+pub static VIEWPORT: Interface = Interface {
+    name: "IDirect3DRMViewport",
+    methods: VIEWPORT_METHODS.split_at(39).0,
+};
+
+const VIEWPORT_METHODS: &[crate::com::Method] = &{
+    let mut methods = VIEWPORT2_METHODS;
+    methods[12] = wall("Clear", 0);
+    methods
+};
+
+const VIEWPORT2_METHODS: [crate::com::Method; 41] = [
+    QUERY_INTERFACE,
+    ADD_REF,
+    RELEASE,
+    wall("Clone", 3),
+    method("AddDestroyCallback", 2, destroy_callback),
+    wall("DeleteDestroyCallback", 2),
+    method("SetAppData", 1, set_app_data),
+    method("GetAppData", 0, get_app_data),
+    method("SetName", 1, set_name),
+    method("GetName", 2, get_name),
+    method("GetClassName", 2, get_class_name),
+    wall("Init", 6),
+    method("Clear", 1, clear),
+    method("Render", 1, render),
+    method("SetFront", 1, viewport_set_front),
+    method("SetBack", 1, viewport_set_back),
+    method("SetField", 1, viewport_set_field),
+    method("SetUniformScaling", 1, viewport_set_uniform_scaling),
+    method("SetCamera", 1, viewport_set_camera),
+    method("SetProjection", 1, viewport_set_projection),
+    method("Transform", 2, viewport_transform),
+    method("InverseTransform", 2, viewport_inverse_transform),
+    wall("Configure", 4),
+    wall("ForceUpdate", 4),
+    method("SetPlane", 4, viewport_set_plane),
+    method("GetCamera", 1, viewport_get_camera),
+    method("GetDevice", 1, viewport_get_device),
+    method("GetPlane", 4, viewport_get_plane),
+    wall("Pick", 3),
+    wall("GetUniformScaling", 0),
+    method("GetX", 0, viewport_get_x),
+    method("GetY", 0, viewport_get_y),
+    method("GetWidth", 0, viewport_get_width),
+    method("GetHeight", 0, viewport_get_height),
+    method("GetField", 0, viewport_get_field),
+    method("GetBack", 0, viewport_get_back),
+    method("GetFront", 0, viewport_get_front),
+    method("GetProjection", 0, viewport_get_projection),
+    method("GetDirect3DViewport", 1, direct3d_viewport),
+    wall("TransformVectors", 3),
+    wall("InverseTransformVectors", 3),
+];
 
 /// `IDirect3DRMFrame3`: a node in the scene a title builds.
 pub static FRAME3: Interface = Interface {
@@ -562,82 +656,115 @@ pub static USER_VISUAL: Interface = Interface {
     ],
 };
 
+/// `IDirect3DRMFrame2`: DirectX 5's face of a frame, which LEGO Island's
+/// retained mode makes (#117).
+///
+/// Not DirectX 6's frame with a slot taken out: DirectX 6 dropped
+/// `GetTextureTopology`, `SetTextureTopology` and `AddMoveCallback2`, and
+/// changed what `AddMoveCallback`, `GetTransform` and `GetVisuals` take. So
+/// the slots from 33 up sit one, then two, then three places apart in the
+/// two, and this table is written out by name from the header (Wine's
+/// `d3drmobj.h`): a method is the same under both faces only where it takes
+/// the same arguments.
+pub static FRAME2: Interface = Interface {
+    name: "IDirect3DRMFrame2",
+    methods: FRAME2_METHODS,
+};
+
 /// `IDirect3DRMFrame`: DirectX 3's face of a frame, which is what a frame array
-/// hands out; Rock Raiders only asks it for the newer face.
+/// hands out. It is DirectX 5's as far as `Transform`, which is where
+/// DirectX 5's own additions start.
 pub static FRAME: Interface = Interface {
     name: "IDirect3DRMFrame",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        wall("Clone", 3),
-        wall("AddDestroyCallback", 2),
-        wall("DeleteDestroyCallback", 2),
-        wall("SetAppData", 1),
-        wall("GetAppData", 0),
-        wall("SetName", 1),
-        wall("GetName", 2),
-        wall("GetClassName", 2),
-        wall("AddChild", 1),
-        wall("AddLight", 1),
-        wall("AddMoveCallback", 2),
-        wall("AddTransform", 2),
-        wall("AddTranslation", 4),
-        wall("AddScale", 4),
-        wall("AddRotation", 5),
-        wall("AddVisual", 1),
-        wall("GetChildren", 1),
-        wall("GetColor", 0),
-        wall("GetLights", 1),
-        wall("GetMaterialMode", 0),
-        wall("GetParent", 1),
-        wall("GetPosition", 2),
-        wall("GetRotation", 3),
-        wall("GetScene", 1),
-        wall("GetSortMode", 0),
-        wall("GetTexture", 1),
-        wall("GetTransform", 1),
-        wall("GetVelocity", 3),
-        wall("GetOrientation", 3),
-        wall("GetVisuals", 1),
-        wall("GetTextureTopology", 2),
-        wall("InverseTransform", 2),
-        wall("Load", 5),
-        wall("LookAt", 3),
-        wall("Move", 1),
-        wall("DeleteChild", 1),
-        wall("DeleteLight", 1),
-        wall("DeleteMoveCallback", 2),
-        wall("DeleteVisual", 1),
-        wall("GetSceneBackground", 0),
-        wall("GetSceneBackgroundDepth", 1),
-        wall("GetSceneFogColor", 0),
-        wall("GetSceneFogEnable", 0),
-        wall("GetSceneFogMode", 0),
-        wall("GetSceneFogParams", 3),
-        wall("SetSceneBackground", 1),
-        wall("SetSceneBackgroundRGB", 3),
-        wall("SetSceneBackgroundDepth", 1),
-        wall("SetSceneBackgroundImage", 1),
-        wall("SetSceneFogEnable", 1),
-        wall("SetSceneFogColor", 1),
-        wall("SetSceneFogMode", 1),
-        wall("SetSceneFogParams", 3),
-        wall("SetColor", 1),
-        wall("SetColorRGB", 3),
-        wall("GetZbufferMode", 0),
-        wall("SetMaterialMode", 1),
-        wall("SetOrientation", 7),
-        wall("SetPosition", 4),
-        wall("SetRotation", 5),
-        wall("SetSortMode", 1),
-        wall("SetTexture", 1),
-        wall("SetTextureTopology", 2),
-        wall("SetVelocity", 5),
-        wall("SetZbufferMode", 1),
-        wall("Transform", 2),
-    ],
+    methods: FRAME2_METHODS.split_at(69).0,
 };
+
+const FRAME2_METHODS: &[crate::com::Method] = &[
+    QUERY_INTERFACE,
+    ADD_REF,
+    RELEASE,
+    wall("Clone", 3),
+    method("AddDestroyCallback", 2, destroy_callback),
+    wall("DeleteDestroyCallback", 2),
+    method("SetAppData", 1, set_app_data),
+    method("GetAppData", 0, get_app_data),
+    method("SetName", 1, set_name),
+    method("GetName", 2, get_name),
+    method("GetClassName", 2, get_class_name),
+    method("AddChild", 1, add_child),
+    method("AddLight", 1, add_light),
+    wall("AddMoveCallback", 2),
+    method("AddTransform", 2, add_transform),
+    method("AddTranslation", 4, add_translation),
+    method("AddScale", 4, add_scale),
+    method("AddRotation", 5, add_rotation),
+    method("AddVisual", 1, add_visual),
+    method("GetChildren", 1, get_children),
+    method("GetColor", 0, get_color),
+    wall("GetLights", 1),
+    wall("GetMaterialMode", 0),
+    method("GetParent", 1, get_parent),
+    method("GetPosition", 2, get_position),
+    wall("GetRotation", 3),
+    method("GetScene", 1, get_scene),
+    wall("GetSortMode", 0),
+    wall("GetTexture", 1),
+    wall("GetTransform", 1),
+    wall("GetVelocity", 3),
+    method("GetOrientation", 3, get_orientation),
+    wall("GetVisuals", 1),
+    wall("GetTextureTopology", 2),
+    method("InverseTransform", 2, inverse_transform_vector),
+    wall("Load", 5),
+    wall("LookAt", 3),
+    wall("Move", 1),
+    method("DeleteChild", 1, delete_child),
+    method("DeleteLight", 1, delete_light),
+    wall("DeleteMoveCallback", 2),
+    method("DeleteVisual", 1, delete_visual),
+    method("GetSceneBackground", 0, get_scene_background),
+    wall("GetSceneBackgroundDepth", 1),
+    wall("GetSceneFogColor", 0),
+    wall("GetSceneFogEnable", 0),
+    wall("GetSceneFogMode", 0),
+    wall("GetSceneFogParams", 3),
+    method("SetSceneBackground", 1, set_scene_background),
+    method("SetSceneBackgroundRGB", 3, set_scene_background_rgb),
+    wall("SetSceneBackgroundDepth", 1),
+    wall("SetSceneBackgroundImage", 1),
+    method("SetSceneFogEnable", 1, set_scene_fog_enable),
+    method("SetSceneFogColor", 1, frame_setting),
+    method("SetSceneFogMode", 1, set_scene_fog_mode),
+    method("SetSceneFogParams", 3, frame_setting),
+    method("SetColor", 1, set_color),
+    method("SetColorRGB", 3, set_color_rgb),
+    method("GetZbufferMode", 0, get_zbuffer_mode),
+    method("SetMaterialMode", 1, frame_setting),
+    method("SetOrientation", 7, set_orientation),
+    method("SetPosition", 4, set_position),
+    wall("SetRotation", 5),
+    method("SetSortMode", 1, frame_setting),
+    wall("SetTexture", 1),
+    wall("SetTextureTopology", 2),
+    wall("SetVelocity", 5),
+    method("SetZbufferMode", 1, set_zbuffer_mode),
+    method("Transform", 2, transform_vector),
+    wall("AddMoveCallback2", 3),
+    wall("GetBox", 1),
+    wall("GetBoxEnable", 0),
+    wall("GetAxes", 2),
+    wall("GetMaterial", 1),
+    wall("GetInheritAxes", 0),
+    wall("GetHierarchyBox", 1),
+    wall("SetBox", 1),
+    wall("SetBoxEnable", 1),
+    wall("SetAxes", 6),
+    wall("SetInheritAxes", 1),
+    wall("SetMaterial", 1),
+    wall("SetQuaternion", 2),
+    wall("RayPick", 4),
+    wall("Save", 3),
+];
 
 /// `IDirect3DRMFrameArray`: a frame's children, as they were when it was asked.
 pub static FRAME_ARRAY: Interface = Interface {
@@ -653,8 +780,11 @@ pub static FRAME_ARRAY: Interface = Interface {
 
 pub static INTERFACES: &[&Interface] = &[
     &D3DRM,
+    &D3DRM2,
     &D3DRM3,
+    &DEVICE2,
     &DEVICE3,
+    &VIEWPORT,
     &VIEWPORT2,
     &FRAME3,
     &MESH_BUILDER3,
@@ -664,6 +794,7 @@ pub static INTERFACES: &[&Interface] = &[
     &MATERIAL2,
     &USER_VISUAL,
     &FRAME,
+    &FRAME2,
     &FRAME_ARRAY,
 ];
 
@@ -697,8 +828,17 @@ fn make(ctx: &mut Ctx<'_>, interface: &'static Interface, out: u32) -> Result<u3
 }
 
 fn create_frame(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    frame(ctx, &FRAME3, args)
+}
+
+/// DirectX 5's frame: the same frame, as the face DirectX 5 hands out.
+fn create_frame2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    frame(ctx, &FRAME2, args)
+}
+
+fn frame(ctx: &mut Ctx<'_>, face: &'static Interface, args: &[u32]) -> Result<u32, Stop> {
     // CreateFrame(parent, out).
-    let object = State::make_com(ctx, &FRAME3, ComState::None).map_err(Stop::Fault)?;
+    let object = State::make_com(ctx, face, ComState::None).map_err(Stop::Fault)?;
     let parent = ctx.state.identity(args[0]);
     ctx.state.scene.add(object, parent);
     if parent != 0 {
@@ -806,11 +946,48 @@ fn device_from_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u3
     Ok(S_OK)
 }
 
+fn device_from_d3d(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateDeviceFromD3D(direct3d, device, out): retained mode over the
+    // immediate-mode device a title made itself, drawing into that device's
+    // surface. It holds both for as long as it draws (#117).
+    let (direct3d, immediate) = (args[0], args[1]);
+    let Some(ComState::Device3D { surface }) = ctx.state.com(immediate).map(|o| o.state.clone())
+    else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    ctx.state.com_ref(direct3d, 1);
+    ctx.state.com_ref(immediate, 1);
+    let object = State::make_com(
+        ctx,
+        &DEVICE2,
+        ComState::RetainedDevice {
+            surface,
+            buffers: 1,
+            immediate,
+        },
+    )
+    .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3drm device at {object:#010x} over d3d device {immediate:#010x}"
+    ));
+    Ok(S_OK)
+}
+
 fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    viewport(ctx, &VIEWPORT2, args)
+}
+
+/// DirectX 5's viewport: the same viewport, as the face DirectX 5 hands out.
+fn create_viewport1(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    viewport(ctx, &VIEWPORT, args)
+}
+
+fn viewport(ctx: &mut Ctx<'_>, face: &'static Interface, args: &[u32]) -> Result<u32, Stop> {
     // CreateViewport(device, camera, x, y, width, height, out).
     let object = State::make_com(
         ctx,
-        &VIEWPORT2,
+        face,
         ComState::Viewport {
             device: args[0],
             camera: args[1],
@@ -2109,9 +2286,9 @@ fn get_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 fn get_class_name(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // What retained mode calls each of its kinds of object.
     let class = match ctx.state.interface_of(this).unwrap_or("") {
-        "IDirect3DRMFrame3" => "Frame",
-        "IDirect3DRMDevice3" => "Device",
-        "IDirect3DRMViewport2" => "Viewport",
+        "IDirect3DRMFrame" | "IDirect3DRMFrame2" | "IDirect3DRMFrame3" => "Frame",
+        "IDirect3DRMDevice2" | "IDirect3DRMDevice3" => "Device",
+        "IDirect3DRMViewport" | "IDirect3DRMViewport2" => "Viewport",
         "IDirect3DRMMeshBuilder3" => "Builder",
         "IDirect3DRMMesh" => "Mesh",
         "IDirect3DRMTexture3" => "Texture",

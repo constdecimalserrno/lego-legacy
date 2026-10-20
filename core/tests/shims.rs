@@ -1,6 +1,7 @@
-//! What KERNEL32 and USER32 answer, called as a title calls them but without
-//! one: each shim run on the stub's machine with the arguments a title would
-//! push, and what it wrote and answered read back (#114).
+//! What KERNEL32, USER32 and retained mode answer, called as a title calls
+//! them but without one: each shim or method run on the stub's machine with
+//! the arguments a title would push, and what it wrote and answered read back
+//! (#114, #117).
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
@@ -23,6 +24,33 @@ fn machine() -> Machine {
 /// Call `dll!name` with `args`, as the boundary would.
 fn call(machine: &mut Machine, dll: &str, name: &str, args: &[u32]) -> Result<u32, Stop> {
     let shim = win32::find(dll, name).unwrap_or_else(|| panic!("{dll}!{name} is written"));
+    with_ctx(machine, |ctx| (shim.run)(ctx, args))
+}
+
+/// Call the method in `slot` of `interface` on `this`, as a guest calling
+/// through the object's table would.
+fn com(
+    machine: &mut Machine,
+    interface: &str,
+    slot: usize,
+    this: u32,
+    args: &[u32],
+) -> Result<u32, Stop> {
+    let method = win32::com_method(interface, slot)
+        .unwrap_or_else(|| panic!("{interface} has a slot {slot}"));
+    assert_eq!(
+        method.args as usize,
+        args.len(),
+        "{interface}::{} at slot {slot}",
+        method.name
+    );
+    with_ctx(machine, |ctx| (method.run)(ctx, this, args))
+}
+
+fn with_ctx(
+    machine: &mut Machine,
+    run: impl FnOnce(&mut Ctx<'_>) -> Result<u32, Stop>,
+) -> Result<u32, Stop> {
     let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
     let mut ctx = Ctx {
         cpu: &mut machine.cpu,
@@ -38,7 +66,7 @@ fn call(machine: &mut Machine, dll: &str, name: &str, args: &[u32]) -> Result<u3
         float_answer: None,
         answer_is_the_call_s: false,
     };
-    (shim.run)(&mut ctx, args)
+    run(&mut ctx)
 }
 
 fn text(machine: &Machine, at: u32) -> String {
@@ -195,4 +223,89 @@ fn a_new_region_starts_on_the_allocation_granularity() {
         assert_ne!(at, 0, "{size:#x} bytes are reserved");
         assert_eq!(at % 0x1_0000, 0, "{at:#x} is not on a 64 KiB boundary");
     }
+}
+
+/// Three floats where `at` is.
+fn vector(machine: &Machine, at: u32) -> [f32; 3] {
+    [0, 4, 8].map(|o| f32::from_bits(machine.arena.read_u32(at + o).expect("in the arena")))
+}
+
+/// DirectX 5's frame is not DirectX 6's with a slot taken out (#117). From
+/// `GetTextureTopology` at 33 up its slots sit one place past DirectX 6's,
+/// from `SetTextureTopology` at 65 two places, and from `AddMoveCallback2`
+/// at 69 three: a frame made through DirectX 5's retained mode is placed and
+/// read back through the slots its own header gives those methods.
+#[test]
+fn a_directx_5_frame_answers_at_its_own_slots() {
+    let mut m = machine();
+    let frame3 = win32::interface_named("IDirect3DRMFrame3").expect("declared");
+    for gone in [
+        "GetTextureTopology",
+        "SetTextureTopology",
+        "AddMoveCallback2",
+    ] {
+        assert!(
+            frame3.methods.iter().all(|method| method.name != gone),
+            "DirectX 6's frame has no {gone}"
+        );
+    }
+
+    // IDirect3DRM2::CreateFrame(no parent, out).
+    assert_eq!(com(&mut m, "IDirect3DRM2", 4, 0, &[0, OUT]), Ok(0));
+    let frame = m.arena.read_u32(OUT).expect("in the arena");
+
+    // Slot 33 is GetTextureTopology, which is not written, and not
+    // InverseTransform, which is DirectX 6's slot 33.
+    assert_eq!(
+        win32::com_method("IDirect3DRMFrame2", 33).map(|m| m.name),
+        Some("GetTextureTopology")
+    );
+    assert!(com(&mut m, "IDirect3DRMFrame2", 33, frame, &[0, 0]).is_err());
+
+    // SetPosition at 61 (DirectX 6's 60), read back by GetPosition at 24,
+    // where both agree.
+    let [x, y, z] = [1.0f32, 2.0, 3.0].map(f32::to_bits);
+    assert_eq!(
+        com(&mut m, "IDirect3DRMFrame2", 61, frame, &[0, x, y, z]),
+        Ok(0)
+    );
+    assert_eq!(
+        com(&mut m, "IDirect3DRMFrame2", 24, frame, &[0, OUT]),
+        Ok(0)
+    );
+    assert_eq!(vector(&m, OUT), [1.0, 2.0, 3.0]);
+
+    // Transform at 68 (DirectX 6's 66): the frame's origin is where it was
+    // put.
+    m.arena.write(DATA, &[0; 12]).expect("in the arena");
+    assert_eq!(
+        com(&mut m, "IDirect3DRMFrame2", 68, frame, &[OUT, DATA]),
+        Ok(0)
+    );
+    assert_eq!(vector(&m, OUT), [1.0, 2.0, 3.0]);
+
+    // And InverseTransform at 34 (DirectX 6's 33) takes it back.
+    assert_eq!(
+        com(&mut m, "IDirect3DRMFrame2", 34, frame, &[OUT + 16, OUT]),
+        Ok(0)
+    );
+    assert_eq!(vector(&m, OUT + 16), [0.0, 0.0, 0.0]);
+}
+
+/// D3DRMCreateColorRGBA, which LEGO Island's engine imports (#117): alpha in
+/// the top byte, then red, green and blue, each fraction truncated to a byte
+/// and held between none and all.
+#[test]
+fn a_colour_from_four_fractions_puts_alpha_on_top() {
+    let mut m = machine();
+    let mut colour = |rgba: [f32; 4]| {
+        call(
+            &mut m,
+            "d3drm",
+            "D3DRMCreateColorRGBA",
+            &rgba.map(f32::to_bits),
+        )
+    };
+    assert_eq!(colour([1.0, 0.5, 0.0, 0.25]), Ok(0x3fff_7f00));
+    assert_eq!(colour([-1.0, 2.0, 0.999, 1.0]), Ok(0xff00_fffe));
 }

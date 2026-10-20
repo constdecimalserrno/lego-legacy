@@ -159,7 +159,7 @@ pub static DIRECT_DRAW_CLIPPER: Interface = Interface {
         method("Initialize", 2, ok),
         method("IsClipListChanged", 1, ok),
         method("SetClipList", 2, set_clip_list),
-        method("SetHWnd", 2, ok),
+        method("SetHWnd", 2, set_hwnd),
     ],
 };
 
@@ -960,6 +960,22 @@ fn set_clip_list(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     };
     let list = (edge(0)?, edge(4)?, edge(8)?, edge(12)?);
     ctx.state.clip_lists.insert(identity, list);
+    Ok(S_OK)
+}
+
+fn set_hwnd(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetHWnd(flags, window): the clipper clips to the part of the screen the
+    // window shows, which on this machine is all of it, as `GetClientRect`
+    // says (#117). No window, and it clips to nothing it was given.
+    let identity = ctx.state.identity(this);
+    if args[1] == 0 {
+        ctx.state.clip_lists.remove(&identity);
+        return Ok(S_OK);
+    }
+    let (width, height, _) = ctx.state.display_mode;
+    ctx.state
+        .clip_lists
+        .insert(identity, (0, 0, width as i32, height as i32));
     Ok(S_OK)
 }
 
