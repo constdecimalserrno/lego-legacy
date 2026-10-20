@@ -194,6 +194,40 @@ when its run stopped there, and every identifier is from Wine's `d3d.h` and `d3d
 `core/tests/shims.rs` places a frame through DirectX 5's slots and reads it back, and makes
 colours. No other title's route moves.
 
+`GetVersion` told every title it was on Windows NT (#129). The declared Windows was packed with
+its top bit clear, which Microsoft documents as NT, and with the build in the high word, where
+Windows 9x puts none: no real machine ever answered that, breaking golden rule 4.
+`title::Windows` now holds what each Windows answered to `GetVersion` and `GetVersionExA`, with
+the sources beside it: Windows 98 SE `0xC0000A04`, build `0x040A08AE` and `" A "`; Windows 95
+`0xC0000004`, build `0x040003B6` and no CSD string.
+
+No title takes a different turn, and every route's end line is unchanged. Each C runtime only
+stores a copy of the word: Rock Raiders', Hot Wheels' Watcom one, Island's two, and the
+`MSVCRT.DLL` and A3D that Alpha Team runs. The `GetVersionExA` callers, that `MSVCRT.DLL`, A3D
+and NetImmerse's `LoadComp.dll`, read only the platform and the version, which did not change.
+The one reader that branches on the top bit, SmartHeap's test for NT in `ISLE.EXE` and
+`LEGO1.DLL`, which picks where shared memory may lie, is not reached by Island's boot. The copies
+are guest memory, so the digest of every title's run moves, and no stub's:
+
+- Rock Raiders: `first-light.route` `856f27b3…` to `d0504186…`, `first-mission.route`
+  `e9edcf14…` to `5c74c51c…`, `level-select.route` `4fe12832…` to `82a0c841…`,
+  `click-the-intro.route` `0c754229…` to `e71381ad…`, `skip-the-intro.route` `b4fa40cc…` to
+  `ed8f2de4…`, and the runs with no route to 100,000 (`5bd29ec1…` to `6c54a6b2…`), 61,000,000
+  (`2222ff17…` to `f820fc34…`) and 400,000,000 (`179ce83e…` to `f0cc0561…`).
+- Hot Wheels: `first-race.route` `1f7255c4…` to `ca178965…`, the escape route `5e33fc05…` to
+  `920d063e…`, and the runs to 100,000 (`b388bc29…` to `c4eae7cb…`) and 2,200,000,000
+  (`7f753ad4…` to `62d6d90b…`).
+- Alpha Team: `first-mission.route` `5fe9a0f0…` to `8ca987d2…`, `menu.route` `5a9a6b3c…` to
+  `d237d472…`, `select-adventure.route` `3a6da532…` to `27585089…`, `click-the-intro-300.route`
+  `02fd93af…` to `2ca490be…`, `click-the-intro-600.route` `405fa26d…` to `d67fb670…`, and the runs
+  to 100,000 (`b37a2a14…` to `6bebf32f…`), 200,000 (`c0749233…` to `4f6172f6…`), 2,000,000
+  (`a799b066…` to `e37ef1e8…`), 600,000,000 (`da5f48ed…` to `7b40ea29…`) and 1,100,000,000
+  (`ff247d41…` to `920a2827…`).
+- LEGO Island: its boot (measured to 435,000 `92babebb…` to `dfd1ac5e…`, before #117 moved its
+  tests to 478,000), every call it logs the same, and the run to 1,000 `66dd6743…` to `20202003…`.
+
+Waiting on the maintainer's acceptance.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

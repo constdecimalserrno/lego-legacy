@@ -10,6 +10,11 @@ Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, writ
 The wrapped-pressing test looks for the image's name after the host's own path separator, so it
 passes on Windows too (#107).
 
+Core's `GetVersion` answers as Windows 98 SE did, with the top bit that says it is not NT (#129).
+The title's C runtime only stores the word, so no route takes a different turn, and every run's
+digest moves; core's changelog lists them. The declared-machine test reads the build from
+`dwBuildNumber`'s low word.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

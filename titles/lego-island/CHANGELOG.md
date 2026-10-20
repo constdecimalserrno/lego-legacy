@@ -17,3 +17,7 @@ declared machine's one device, sets the screen to 640x480x16, makes a device ove
 then DirectX 5's retained mode over that, with frames, a viewport the size of the screen and three
 lights. At instruction 478,302 it asks its window for the instance it was made with, which is
 #118's. The boot tests run to 478,000.
+
+Core's `GetVersion` answers as Windows 95 did, with the top bit that says it is not NT (#129).
+Both C runtimes only store the word, so the boot calls what it called, and its digest moves.
+SmartHeap's test for NT in `ISLE.EXE` and `LEGO1.DLL`, not yet reached, now finds Windows 95.
