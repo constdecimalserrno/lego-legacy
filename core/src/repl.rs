@@ -183,7 +183,10 @@ pub fn drive(
                     if outcome.is_some() {
                         break;
                     }
-                    outcome = machine.tick(host, &mut log);
+                    // An instruction at a time, by the schedule a route's run
+                    // keeps, so its threads switch where the route's do
+                    // (#131). A person's session has no budget.
+                    outcome = machine.step(host, &mut log, u64::MAX, true);
                 }
                 let _ = writeln!(output, "{}", where_it_is(&machine));
                 if let Some(o) = &outcome {
@@ -211,7 +214,7 @@ pub fn drive(
                         }
                         _ => {}
                     }
-                    outcome = machine.tick(host, &mut log);
+                    outcome = machine.step(host, &mut log, u64::MAX, true);
                 }
                 let _ = writeln!(output, "{}", where_it_is(&machine));
                 if let Some(o) = &outcome {

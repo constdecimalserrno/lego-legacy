@@ -136,13 +136,30 @@ impl Guest {
 
     /// Write the code in and run it from the main thread's first instruction.
     fn run(&mut self) -> Finish {
+        self.drive(Trace::Off, false).0
+    }
+
+    /// Run it traced this far, by the run loop or stepped one instruction at
+    /// a time as the debugger steps, and hand back its log as well.
+    fn drive(&mut self, trace: Trace, stepped: bool) -> (Finish, String) {
         for (at, bytes) in &self.code {
             self.machine.arena.write(*at, bytes).expect("the code fits");
         }
         self.machine.cpu.eip = self.code[0].0;
         self.machine.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
-        let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
-        self.machine.run(&mut self.host, &mut log, 50_000_000)
+        let mut log = RunLog::create("stub", trace).expect("a run directory");
+        let finish = if stepped {
+            let outcome = loop {
+                if let Some(outcome) = self.machine.step(&mut self.host, &mut log, u64::MAX, true) {
+                    break outcome;
+                }
+            };
+            self.machine.finish(outcome)
+        } else {
+            self.machine.run(&mut self.host, &mut log, 50_000_000)
+        };
+        let text = std::fs::read_to_string(log.dir().join("log")).expect("the log reads");
+        (finish, text)
     }
 
     fn read(&self, at: u32) -> u32 {
@@ -577,4 +594,92 @@ fn threads_take_their_turns_in_the_same_order_every_run() {
         runs[0].machine.state_digest(),
         runs[1].machine.state_digest()
     );
+}
+
+/// Two threads that each run three quanta's worth of their own code without a
+/// call, and write down whose turn it is each time it changes hands.
+fn spinning() -> Guest {
+    let (sem, last, at) = (word(0), word(1), word(2));
+    let letters = word(16);
+    let mut guest = Guest::new();
+    guest
+        .thread(MAIN)
+        .call("CreateSemaphoreA", &[Imm(0), Imm(0), Imm(1), Imm(0)])
+        .store(sem)
+        .spawn(FIRST, 0);
+    for (thread, letter, left) in [(MAIN, b'M', word(3)), (FIRST, b'T', word(4))] {
+        if thread != MAIN {
+            guest.thread(thread);
+        }
+        guest.set(left, 40_000);
+        let top = guest.here();
+        // mov eax, [last]; cmp eax, letter; je past the next four
+        guest
+            .load(last)
+            .emit32(&[0x3d], u32::from(letter))
+            .emit(&[0x74, 28])
+            .set(last, u32::from(letter))
+            // mov eax, [at]; mov byte [eax + letters], letter; inc dword [at]
+            .load(at)
+            .emit32(&[0xc6, 0x80], letters)
+            .emit(&[letter])
+            .inc(at)
+            .dec_and_loop(left, top);
+        if thread == MAIN {
+            guest
+                .call("WaitForSingleObject", &[At(sem), Imm(INFINITE)])
+                .call("ExitProcess", &[Imm(0)]);
+        } else {
+            guest
+                .call("ReleaseSemaphore", &[At(sem), Imm(1), Imm(0)])
+                .emit(&[0xc3]);
+        }
+    }
+    guest
+}
+
+/// A run traced to every instruction, and one stepped as the debugger steps,
+/// are the run a route makes: the same threads take over at the same
+/// instructions, and the machine ends the same (golden rule 1, #131).
+#[test]
+fn a_traced_or_stepped_run_switches_threads_where_the_plain_run_does() {
+    let mut runs = [spinning(), spinning(), spinning()];
+    let [plain, traced, stepped] = &mut runs;
+    let ran = [
+        plain.drive(Trace::Shims, false),
+        traced.drive(Trace::Insns, false),
+        stepped.drive(Trace::Shims, true),
+    ];
+    let switches = ran.each_ref().map(|(_, log)| {
+        log.lines()
+            .filter(|l| l.contains(" takes over at "))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let letters = runs.each_ref().map(|guest| {
+        let mut out = vec![0; guest.read(word(2)) as usize];
+        guest
+            .machine
+            .arena
+            .read(word(16), &mut out)
+            .expect("in the arena");
+        String::from_utf8(out).expect("letters")
+    });
+
+    assert_eq!(ran[0].0.outcome, Outcome::Exited { code: 0 });
+    assert!(
+        letters[0].len() >= 6,
+        "the quantum handed the turn over mid-loop: {}",
+        letters[0]
+    );
+    for (n, how) in [(1, "traced"), (2, "stepped")] {
+        assert_eq!(switches[n], switches[0], "{how}: the same switches");
+        assert_eq!(letters[n], letters[0], "{how}: the same turns");
+        assert_eq!(ran[n].0, ran[0].0, "{how}: the same finish");
+        assert_eq!(
+            runs[n].machine.state_digest(),
+            runs[0].machine.state_digest(),
+            "{how}: the same machine"
+        );
+    }
 }

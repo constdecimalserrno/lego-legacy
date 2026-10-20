@@ -4,7 +4,9 @@ Alpha Team creates three guest threads, two of them A3D's; Rock Raiders and Hot 
 none. Guest threads are scheduled cooperatively by the machine: one host thread runs them all,
 switching at a declared quantum of retired instructions and at blocking waits. A schedule that
 depends on the host's threads would make every run of a threaded title non-reproducible, and the
-input script would stop being a replay.
+input script would stop being a replay. So would one that depends on who is watching: a run traced
+to every instruction, or stepped in the debugger, keeps the schedule a route's run keeps and
+switches at the same instructions (#131).
 
 ## Waiting is parking, not asking again
 

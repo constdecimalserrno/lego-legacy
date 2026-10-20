@@ -153,6 +153,19 @@ What LEGO Island asks for before Direct3D (#114), each written when its run stop
 `core/tests/shims.rs` calls each one as a title would, without a title, and holds `VirtualAlloc`
 to Windows' 64 KiB granularity, which SmartHeap finds its blocks' headers by. No route moves.
 
+A traced or stepped run of a threaded title switches threads where its route's run does (#131),
+as golden rule 1 asks. Under `--trace insns` threads switched at every instruction, and in the
+debugger they never switched at the quantum, so what either showed was not what the route did.
+Every run now keeps one schedule, `Machine::step`: a burst to the 65,536-instruction quantum or
+the next call across the boundary, the switch, the call or instruction the next thread stands
+on, and the next burst. A traced run takes its bursts an instruction at a time to write each one
+down, and the debugger steps by the same schedule an instruction at a time, standing past any
+switch, so a break at a thread's next instruction is met. The stub still runs an instruction a
+turn: it has one thread and no boundary, so nothing is switched, and its `int`s are heard and a
+snapshot can fall between any two instructions. `Machine::tick` is one instruction or call with no
+schedule. `core/tests/threads.rs` runs two threads past the quantum plainly, traced and stepped,
+and finds the same switches, cursor for cursor, and the same finish and digest. No route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

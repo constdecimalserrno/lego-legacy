@@ -135,6 +135,23 @@ pub struct Machine {
     /// How many flips apart to write a snapshot into the run directory, if
     /// anyone asked for them.
     pub snapshot_every: Option<u64>,
+    /// The flip the next snapshot is due at, once a run has started.
+    next_snapshot: Option<u64>,
+    /// Where the machine is in its schedule (ADR-0005, #131).
+    turn: Turn,
+}
+
+/// Where the machine is in the one schedule every run keeps (#131).
+#[derive(Clone, Copy)]
+enum Turn {
+    /// A burst is about to begin.
+    Top,
+    /// A burst of the running thread's own code is under way, and it ends at
+    /// this cursor if no call across the boundary ends it first.
+    Burst(u64),
+    /// The burst is over and the switch made: the thread now running makes
+    /// the call, or retires the instruction, it stands on.
+    Switched,
 }
 
 impl Machine {
@@ -177,6 +194,8 @@ impl Machine {
             recording: None,
             screenshots: crate::cli::Screenshots::default(),
             snapshot_every: None,
+            next_snapshot: None,
+            turn: Turn::Top,
         })
     }
 
@@ -330,11 +349,12 @@ impl Machine {
         }
     }
 
-    /// Take the machine one instruction further, or say why it stopped.
+    /// Take the machine one instruction or one call further, or say why it
+    /// stopped, with no thread switched but by a call that waits or ends one.
     ///
-    /// Returns `None` while there is more to do. The debugger steps with this,
-    /// and the run loop comes back to it for every call across the boundary,
-    /// so what a person steps through is what a route replays.
+    /// Returns `None` while there is more to do. The schedule comes back to it
+    /// after every switch ([`Machine::step`]); stepping a threaded title by
+    /// this alone is not the run its route makes.
     pub fn tick(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
         // A person closing the window ends the run there and then, with the
         // log written up to the instruction it stopped on.
@@ -374,14 +394,7 @@ impl Machine {
                 }),
             };
         }
-        if log.trace() >= Trace::Insns {
-            log.line(&format!(
-                "insn cursor {} eip {:#010x} eax {:#010x}",
-                self.clock.cursor(),
-                self.cpu.eip,
-                self.cpu.r[EAX]
-            ));
-        }
+        self.trace_insn(log);
         // A frame the guest finished is presented before the next instruction
         // runs, so what the host shows is what the guest had when it flipped.
         if let Some(frame) = self.state.present.take() {
@@ -437,51 +450,9 @@ impl Machine {
     /// budget runs out.
     pub fn run(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Finish {
         log.line(&format!("engine {}", self.engine.name()));
-        // Snapshots are taken here, in the loop every run goes through, so a
-        // run that keeps them is the same machine as one that does not: the
-        // same bursts, thread switches and mixing (#94). They are off unless
-        // asked for, and they are for inspecting: only the stub resumes from
-        // one, because the Win32 state is not in it (`snap`).
-        let every = self.snapshot_every.map(|n| n.max(1));
-        let mut next_snapshot = every;
+        self.next_snapshot = self.snapshot_every.map(|n| n.max(1));
         let outcome = loop {
-            if self.clock.cursor() >= budget {
-                break Outcome::BudgetExhausted;
-            }
-            if let Some(at) = next_snapshot.filter(|at| self.flips >= *at) {
-                match self.snapshot() {
-                    Ok(bytes) => {
-                        let name = format!("flip-{}.snapshot", self.flips);
-                        match std::fs::write(log.dir().join(&name), bytes) {
-                            Ok(()) => {
-                                log.line(&format!("snapshot {name} cursor {}", self.clock.cursor()))
-                            }
-                            Err(e) => log.line(&format!("snapshot {name} not written: {e}")),
-                        }
-                    }
-                    Err(fault) => log.line(&format!("snapshot refused: {fault}")),
-                }
-                next_snapshot = every.map(|every| at + every);
-            }
-            if let Some(outcome) = self.run_guest(host, log, budget) {
-                break outcome;
-            }
-            if let Some(what) = self.deadlocked() {
-                break Outcome::Wall { what };
-            }
-            // A burst is the declared quantum: whoever ran it hands over to
-            // whoever is next (ADR-0005).
-            self.switch_thread(log);
-            // The mix reaches the host between flips as well as at them: a
-            // title that goes a long way without flipping — loading a level,
-            // or thinking hard about one — would otherwise hand over nothing
-            // for as long as that took, and the device would run dry and
-            // drop what came late.
-            self.mix(host);
-            if self.clock.cursor() >= budget {
-                break Outcome::BudgetExhausted;
-            }
-            if let Some(outcome) = self.tick(host, log) {
+            if let Some(outcome) = self.step(host, log, budget, false) {
                 break outcome;
             }
         };
@@ -507,6 +478,137 @@ impl Machine {
             finish.outcome, finish.cursor, finish.flips, finish.declared_millis
         ));
         finish
+    }
+
+    /// Take the machine on by the one schedule every run keeps, whoever is
+    /// driving it (ADR-0005, #131): a burst of the running thread's own code,
+    /// up to the declared quantum or its next call across the boundary; the
+    /// switch to whoever is next; the call or the instruction that thread
+    /// stands on; and the next burst.
+    ///
+    /// Without `one`, it goes on until the run is over. With it, it stops
+    /// after one instruction or one call, standing where the next is about to
+    /// be retired and past any switch before it, which is how the debugger
+    /// steps. A traced run takes its bursts an instruction at a time, to write
+    /// each one down. Either way a burst ends at the same instruction, so a
+    /// stepped or traced run switches threads where its route's run does.
+    pub fn step(
+        &mut self,
+        host: &mut dyn Host,
+        log: &mut RunLog,
+        budget: u64,
+        one: bool,
+    ) -> Option<Outcome> {
+        const BURST: u64 = 1 << 16;
+        let mut moved = false;
+        loop {
+            match self.turn {
+                Turn::Top => {
+                    if self.clock.cursor() >= budget {
+                        return Some(Outcome::BudgetExhausted);
+                    }
+                    self.snapshot_if_due(log);
+                    // A thread that gave its turn away runs none of the rest
+                    // of it: the switch after this is where the next one takes
+                    // over (#115). A frame the guest finished is presented
+                    // before anything else runs. And the stub runs alone, an
+                    // instruction a turn: it has one thread and no boundary,
+                    // so it is never switched, and what it gets from that is
+                    // its `int`s heard by `tick` and a snapshot between any
+                    // two of its instructions.
+                    let now = self.clock.cursor();
+                    let end = if std::mem::take(&mut self.state.yielded)
+                        || self.stub
+                        || self.state.present.is_some()
+                    {
+                        now
+                    } else {
+                        budget.min(now + BURST)
+                    };
+                    self.turn = Turn::Burst(end);
+                }
+                Turn::Burst(end)
+                    if self.clock.cursor() < end && !Boundary::in_range(self.cpu.eip) =>
+                {
+                    if one && moved {
+                        return None;
+                    }
+                    let count = if one || log.trace() >= Trace::Insns {
+                        1
+                    } else {
+                        end - self.clock.cursor()
+                    };
+                    if let Some(outcome) = self.run_guest(host, log, count) {
+                        return Some(outcome);
+                    }
+                    moved = true;
+                }
+                Turn::Burst(_) => {
+                    if let Some(what) = self.deadlocked() {
+                        return Some(Outcome::Wall { what });
+                    }
+                    // A burst is the declared quantum: whoever ran it hands
+                    // over to whoever is next (ADR-0005).
+                    self.switch_thread(log);
+                    // The mix reaches the host between flips as well as at
+                    // them: a title that goes a long way without flipping —
+                    // loading a level, or thinking hard about one — would
+                    // otherwise hand over nothing for as long as that took,
+                    // and the device would run dry and drop what came late.
+                    self.mix(host);
+                    self.turn = Turn::Switched;
+                }
+                Turn::Switched => {
+                    if one && moved {
+                        return None;
+                    }
+                    if self.clock.cursor() >= budget {
+                        return Some(Outcome::BudgetExhausted);
+                    }
+                    self.turn = Turn::Top;
+                    if let Some(outcome) = self.tick(host, log) {
+                        return Some(outcome);
+                    }
+                    moved = true;
+                }
+            }
+        }
+    }
+
+    /// Write a snapshot into the run directory, if one is due.
+    ///
+    /// Snapshots are taken at the top of a burst, in the schedule every run
+    /// keeps, so a run that keeps them is the same machine as one that does
+    /// not: the same bursts, thread switches and mixing (#94). They are off
+    /// unless asked for, and they are for inspecting: only the stub resumes
+    /// from one, because the Win32 state is not in it (`snap`).
+    fn snapshot_if_due(&mut self, log: &mut RunLog) {
+        let Some(at) = self.next_snapshot.filter(|at| self.flips >= *at) else {
+            return;
+        };
+        match self.snapshot() {
+            Ok(bytes) => {
+                let name = format!("flip-{}.snapshot", self.flips);
+                match std::fs::write(log.dir().join(&name), bytes) {
+                    Ok(()) => log.line(&format!("snapshot {name} cursor {}", self.clock.cursor())),
+                    Err(e) => log.line(&format!("snapshot {name} not written: {e}")),
+                }
+            }
+            Err(fault) => log.line(&format!("snapshot refused: {fault}")),
+        }
+        self.next_snapshot = self.snapshot_every.map(|every| at + every.max(1));
+    }
+
+    /// The instruction about to be retired, for a run traced that far.
+    fn trace_insn(&self, log: &mut RunLog) {
+        if log.trace() >= Trace::Insns {
+            log.line(&format!(
+                "insn cursor {} eip {:#010x} eax {:#010x}",
+                self.clock.cursor(),
+                self.cpu.eip,
+                self.cpu.r[EAX]
+            ));
+        }
     }
 }
 
@@ -1265,26 +1367,16 @@ impl Machine {
         Ok(())
     }
 
-    /// Run the guest's own code until it calls across the boundary, the budget
-    /// is spent, or a burst ends, without the checks `tick` makes before each
+    /// Run up to `count` of the guest's own instructions, stopping before a
+    /// call across the boundary, without the checks `tick` makes before each
     /// instruction.
     ///
     /// Nothing but the engine has anything to do between calls out: a frame to
     /// present only appears when a shim runs, and a window closed mid-burst is
     /// noticed at its end. What the guest does is the same either way; only
     /// the host's time is saved.
-    fn run_guest(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Option<Outcome> {
-        const BURST: u64 = 1 << 16;
-        // A thread that gave its turn away runs none of the rest of it: the
-        // switch after this is where the next one takes over (#115).
-        if std::mem::take(&mut self.state.yielded)
-            || self.stub
-            || log.trace() >= Trace::Insns
-            || self.state.present.is_some()
-        {
-            return None;
-        }
-        let count = budget.min(self.clock.cursor() + BURST) - self.clock.cursor().min(budget);
+    fn run_guest(&mut self, host: &mut dyn Host, log: &mut RunLog, count: u64) -> Option<Outcome> {
+        self.trace_insn(log);
         self.cpu.tsc = self.clock.cycles();
         let (retired, result) =
             self.engine
@@ -1308,7 +1400,8 @@ impl Machine {
     /// burst — the declared quantum — when a thread ends, waits or gives its
     /// turn away with `Sleep(0)`, and nowhere else: a schedule that depended
     /// on the host's own threads would make every run of this title a
-    /// different one (ADR-0005).
+    /// different one (ADR-0005), and one that depended on who is watching
+    /// would make a traced or stepped run a different one (#131).
     fn switch_thread(&mut self, log: &mut RunLog) {
         if self.state.threads.len() < 2 {
             return;
