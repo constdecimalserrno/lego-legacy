@@ -386,7 +386,7 @@ the digest hashes, so the digest of every Alpha Team run that throws moves:
 
 The runs to 100,000, 200,000 and 2,000,000 throw nothing and do not move, and no other title's
 run or stub's moves. `core/tests/access_violation.rs` reads both fields back from a handler
-`RaiseException` called. Waiting on the maintainer's acceptance.
+`RaiseException` called. Accepted by the maintainer on 2026-10-20.
 
 ## 1.0.0 — 2026-10-18
 
