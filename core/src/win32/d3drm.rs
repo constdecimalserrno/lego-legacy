@@ -1825,14 +1825,16 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     super::d3d::set_device_transform(ctx.state, immediate, VIEW, &camera_world);
-    super::d3d::set_device_transform(ctx.state, immediate, PROJECTION, &view.perspective());
+    let rect = viewport_rect(ctx, this);
+    let projection = view.perspective(rect.2, rect.3);
+    super::d3d::set_device_transform(ctx.state, immediate, PROJECTION, &projection);
     super::d3d::set_device_viewport(ctx.state, immediate, under);
     if !meshes.is_empty() {
         let count = meshes.len();
         ctx.log.at(crate::cli::Trace::Shims, || {
             format!("render {count} meshes")
         });
-        let clip_from_world = super::scene::multiply(&camera_world, &view.perspective());
+        let clip_from_world = super::scene::multiply(&camera_world, &projection);
         // The camera looks down its own z axis, so the viewer is back along
         // it.
         let back = super::scene::direct(
@@ -1846,7 +1848,7 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         let pass = MeshPass {
             device,
             immediate,
-            rect: viewport_rect(ctx, this),
+            rect,
             clip_from_world,
             viewer,
             lights: &lights,
@@ -3202,9 +3204,16 @@ fn viewport_set_projection(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result
     })
 }
 
-fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // SetUniformScaling(on): how the view is scaled when a viewport is
-    // resized, and a viewport here is never resized: nothing to keep.
+fn viewport_set_uniform_scaling(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetUniformScaling(TRUE) is how a viewport starts (`View::perspective`).
+    // FALSE scales the view "exactly into the window", across and up apart,
+    // which no title has asked for.
+    if args[0] == 0 {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::SetUniformScaling(FALSE)".to_owned(),
+            caller: 0,
+        });
+    }
     with_view(ctx, this, |_| S_OK)
 }
 

@@ -412,12 +412,13 @@ fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() 
     );
 
     // Before the Information Center, the screen is cleared black; in its
-    // first frame the plants either side of the stage are green, where the
-    // painted stage under them is grey: retained mode's own meshes.
+    // first frame the pots of the plants either side of the stage are green,
+    // where the painted room under them is not: retained mode's own meshes,
+    // standing where the game draws them on Windows (#134).
     let frame = |flip: u64| ran.host.frame(flip).expect("kept");
     assert!(frame(INFORMATION_CENTER - 1).is_uniform());
     let first = frame(INFORMATION_CENTER);
-    for (x, y) in [(177, 317), (470, 318)] {
+    for (x, y) in [(180, 342), (472, 343)] {
         let at = (y * first.width as usize + x) * 4;
         let [a, green, b] = [0, 1, 2].map(|i| first.pixels[at + i]);
         assert!(

@@ -150,30 +150,34 @@ impl Default for View {
 }
 
 impl View {
-    /// The projection a perspective viewport draws through, in Direct3D's
-    /// convention: the front plane's edges go to -1 and 1 across and up, and
-    /// depth from the front plane to the back one goes 0 to 1.
+    /// The projection a perspective viewport `width` by `height` draws
+    /// through, in Direct3D's convention: what reaches -1 and 1 across and up
+    /// is on the viewport's edges, and depth from the front plane to the back
+    /// one goes 0 to 1.
     ///
-    /// The plane goes to the viewport's own edges whatever its shape, so a
-    /// square field on a 640 by 480 viewport is wider than it is tall. That
-    /// is what Rock Raiders' levels are drawn for: cut to the viewport's
-    /// shape instead, as uniform scaling reads in retained mode's
-    /// documentation, a raider stands a third too tall and the level's edges
-    /// fall outside what the title works out it can see, and are left black.
-    // ponytail: measured against an earlier, unpublished emulator's frames of
-    // that mission, which a person played, not against native retained mode;
-    // a title drawn for the cut would show it.
+    /// Uniform scaling, which retained mode starts with, scales "the viewing
+    /// volume into the larger window dimension" (`GetUniformScaling`): the
+    /// plane reaches the edges of the viewport's longer side, and the shorter
+    /// side shows as much of it as the same scale fits, so a square stays
+    /// square. A field of 0.5 on 640 by 480 is half a unit across and 0.375
+    /// up. Native retained mode's own viewport underneath has one scale, the
+    /// longer side's half (Wine's tests), and in frames of the real games on
+    /// Windows, Rock Raiders' Chief and LEGO Island's plants stand where this
+    /// puts them (#134).
     #[must_use]
-    pub fn perspective(&self) -> Matrix {
+    pub fn perspective(&self, width: u32, height: u32) -> Matrix {
         let [left, right, bottom, top] = self.plane;
         let (n, f) = (self.front, self.back);
         let q = f / (f - n);
+        let longer = width.max(height).max(1) as f32;
+        let across = longer / width.max(1) as f32;
+        let up = longer / height.max(1) as f32;
         [
-            [2.0 * n / (right - left), 0.0, 0.0, 0.0],
-            [0.0, 2.0 * n / (top - bottom), 0.0, 0.0],
+            [across * 2.0 * n / (right - left), 0.0, 0.0, 0.0],
+            [0.0, up * 2.0 * n / (top - bottom), 0.0, 0.0],
             [
-                -(right + left) / (right - left),
-                -(top + bottom) / (top - bottom),
+                -across * (right + left) / (right - left),
+                -up * (top + bottom) / (top - bottom),
                 q,
                 1.0,
             ],
@@ -194,7 +198,7 @@ impl View {
     #[must_use]
     pub fn to_screen(&self, rect: Rect, camera: &Matrix, point: [f32; 3]) -> Option<[f32; 4]> {
         let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
-        let clip_from_world = multiply(&invert(camera)?, &self.perspective());
+        let clip_from_world = multiply(&invert(camera)?, &self.perspective(rect.2, rect.3));
         let [cx, cy, cz, cw] =
             super::pipeline::project(&clip_from_world, [point[0], point[1], point[2], 1.0]);
         let operands = self.numbers().chain(camera.iter().flatten().copied());
@@ -217,7 +221,7 @@ impl View {
         let (x, y, width, height) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
         let w = screen[3];
         let [sx, sy, depth] = [screen[0] / w, screen[1] / w, screen[2] / w];
-        let p = self.perspective();
+        let p = self.perspective(rect.2, rect.3);
         // Depth goes q(z - front)/z, with q the back over the distance
         // between the planes.
         let (q, front) = (p[2][2], self.front);
@@ -489,7 +493,7 @@ mod tests {
     #[test]
     fn a_perspective_viewport_puts_its_front_plane_on_the_edges_of_the_screen() {
         let view = super::View::default();
-        let m = view.perspective();
+        let m = view.perspective(640, 480);
         let clip = |[x, y, z]: [f32; 3]| {
             let w = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
             [
@@ -498,9 +502,10 @@ mod tests {
                 (x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2]) / w,
             ]
         };
-        // The front plane is half a unit either side, across and up alike.
-        assert_eq!(clip([0.5, 0.5, 1.0]), [1.0, 1.0, 0.0]);
-        assert_eq!(clip([-1.0, -1.0, 2.0]), [-1.0, -1.0, 0.5050505]);
+        // The front plane is half a unit either side across, the longer side,
+        // and up the shorter side as much of it as the same scale fits.
+        assert_eq!(clip([0.5, 0.375, 1.0]), [1.0, 1.0, 0.0]);
+        assert_eq!(clip([-1.0, -0.75, 2.0]), [-1.0, -1.0, 0.5050505]);
         let back = clip([0.0, 0.0, 100.0]);
         assert!(
             (back[2] - 1.0).abs() < 1e-6,
@@ -510,7 +515,8 @@ mod tests {
 
     /// A field is the half-width at the front plane, wherever that plane is:
     /// LEGO Island's is a tenth of a unit away, with a field of 0.06128 there
-    /// (#120), where Rock Raiders' plane a unit away hid the difference.
+    /// (#120), where Rock Raiders' plane a unit away hid the difference. On a
+    /// viewport taller than it is wide, it is the half-height.
     #[test]
     fn a_field_is_the_half_width_at_the_front_plane() {
         let field = f32::from_bits(0x3d7b_00d2);
@@ -520,11 +526,14 @@ mod tests {
             plane: [-field, field, -field, field],
             projection: 0,
         };
-        let m = view.perspective();
+        let m = view.perspective(640, 480);
         let across = |x: f32, z: f32| (x * m[0][0] + z * m[2][0]) / (z * m[2][3]);
         assert!((across(field, 0.1) - 1.0).abs() < 1e-6);
         // Ten times as far, the edge is ten times as far out.
         assert!((across(field * 10.0, 1.0) - 1.0).abs() < 1e-6);
+        let m = view.perspective(480, 640);
+        let up = |y: f32, z: f32| (y * m[1][1] + z * m[2][1]) / (z * m[2][3]);
+        assert!((up(field, 0.1) - 1.0).abs() < 1e-6);
     }
 
     fn translation(x: f32, y: f32, z: f32) -> Matrix {

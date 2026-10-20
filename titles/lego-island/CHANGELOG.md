@@ -59,3 +59,9 @@ touches it. The loop's first frame is the milestone. The world run is now this r
 3,965,000,000 and 5,254 flips, twice, for the determinism gate, and its test finds the loop come
 round a period later, without the frame before it. Nothing calls `SetTimer` on the way, nor by
 instruction 5,000,000,000.
+
+Its plants stand where the game draws them on Windows, in front of the stage's lip, now that core
+projects with uniform scaling as d3drm does (#134), and the Infomaniac is in proportion, where he
+was a third too wide for his height. The first-frame test looks for the plants' green pots there.
+`information-center.route`'s end line is unchanged and its digest moves, which core's changelog
+lists.

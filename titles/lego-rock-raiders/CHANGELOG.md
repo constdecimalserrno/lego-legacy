@@ -23,6 +23,12 @@ different turn, the frames compared are the same pictures, and every end line is
 move their digests: core's changelog lists them, and the maintainer accepted them. The
 screen-mode test also checks for the enumeration.
 
+Core's retained mode projects with uniform scaling, as d3drm does (#134). The level is drawn a
+third taller than the stretch drew it, showing less of it up and down, and the Chief stands as
+tall and as narrow as in the retail game's Mission Brief. No route takes a different turn and every
+end line is unchanged; `first-mission.route`'s digest moves, which core's changelog lists. It waits
+on the maintainer's acceptance, and on the first mission being played again.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

@@ -388,6 +388,35 @@ The runs to 100,000, 200,000 and 2,000,000 throw nothing and do not move, and no
 run or stub's moves. `core/tests/access_violation.rs` reads both fields back from a handler
 `RaiseException` called. Accepted by the maintainer on 2026-10-20.
 
+Retained mode projects with uniform scaling, as d3drm does by default (#134). A viewport's front
+plane, its field or `SetPlane`'s, reaches the edges of the viewport's longer side, and the shorter
+side shows as much of it as the same scale fits, so a square stays square: a field of 0.5 on 640
+by 480 is half a unit across and 0.375 up. Since #29 the plane was stretched to all four edges.
+
+- Retained mode's documentation: uniform scaling scales "the viewing volume into the larger
+  window dimension" (`GetUniformScaling`), and "the viewing angle is calculated using half the
+  height or half the width of the front clipping plane, whichever is larger" (Viewing Frustum).
+  Wine's tests hold native retained mode's own viewport underneath to one scale, the longer
+  side's half.
+- Frames of both titles on Windows agree. Rock Raiders' Chief in its retail Mission Brief is as
+  tall as this draws him, where the stretch drew him a quarter shorter, his head wider than tall. LEGO
+  Island's two plants stand on the same pixels as in the game on Windows 10 with its own d3drm,
+  in front of the stage's lip, where the stretch stood them eighteen pixels higher.
+- #29 fitted the stretch to an earlier emulator's frames, which stretched too. The dark walls
+  and black edges it saw were its spot lights' halved cones, fixed in the same change.
+- `SetUniformScaling(FALSE)`, which scales the view into the window across and up apart, is a
+  wall: no title asks for it. `core/tests/shims.rs` holds it to that.
+
+Every end line is unchanged. The digests of the runs that draw a viewport wider than it is tall
+move:
+
+- Rock Raiders' `first-mission.route` `74b1031b…` to `4888818a…`.
+- LEGO Island's `information-center.route`, `2f2d5411…` to `69bd9a2e…`.
+
+Rock Raiders' other runs, its menus and level select included, and every other title's, do not
+move. Waiting on the maintainer's acceptance, and on Rock Raiders' first mission being played
+again.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

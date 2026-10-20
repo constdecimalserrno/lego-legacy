@@ -657,6 +657,29 @@ fn a_viewport_forced_to_update_has_nothing_to_copy() {
     ));
 }
 
+/// IDirect3DRMViewport::SetUniformScaling (#134): uniform scaling is how a
+/// viewport starts, and scaling across and up apart is a wall.
+#[test]
+fn a_viewport_scales_uniformly_and_never_apart() {
+    let mut m = machine();
+    assert_eq!(
+        com(&mut m, "IDirect3DRM2", 20, 0, &[0, 0, 0, 0, 640, 480, OUT]),
+        Ok(0)
+    );
+    let viewport = m.arena.read_u32(OUT).expect("in the arena");
+    let scale = |m: &mut Machine, on: u32| {
+        method(
+            m,
+            "IDirect3DRMViewport",
+            "SetUniformScaling",
+            viewport,
+            &[on],
+        )
+    };
+    assert_eq!(scale(&mut m, 1), Ok(0));
+    assert!(matches!(scale(&mut m, 0), Err(Stop::NotWritten { .. })));
+}
+
 /// Call the method of `interface` called `name` on `this`.
 fn method(
     m: &mut Machine,
