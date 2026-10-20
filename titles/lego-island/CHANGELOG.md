@@ -36,3 +36,10 @@ volume outside their cones (flip 368), and its viewport is forced to update (fli
 bricks fade up and the intro plays, until 3,770,493,606, flip 3200, where retained mode clears its
 viewport to draw the island, which is #120's. The traced boot tests run to 5,571,000, past its
 first two meshes. The world runs untraced to 3,770,493,500, twice, for the determinism gate.
+
+First light is reached (#118). With nothing pressed, by the committed `first-light.route`, the
+game presents its first picture of its own at flip 460, instruction 97,000,222, 8,766 declared
+milliseconds in: the first instant of its LEGO bricks fading up out of black, four colours all
+within 8/255 of it. First light is the first frame that is not one colour; flip 0, the engine's
+cleared screen, and the loop's flips 1 to 459 are all black. The route runs to 98,000,000, twice,
+for the determinism gate.

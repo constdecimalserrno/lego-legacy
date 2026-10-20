@@ -1,0 +1,9 @@
+#lego-legacy-route 1
+# LEGO Island, from its boot to first light (#118).
+#
+# Nothing on the way is pressed. The engine clears the screen and lets go of
+# it at flip 0, outside the game's own loop. From flip 1 the loop copies its
+# back buffer onto the screen once a frame; after two hundred of them the game
+# opens its scripts and builds its world out of WORLD.WDB. At flip 460 the
+# LEGO bricks start to fade up out of black: the first frame that is not one
+# colour, and the first picture of the game's own.

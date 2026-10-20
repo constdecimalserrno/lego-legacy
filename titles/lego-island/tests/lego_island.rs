@@ -1,6 +1,7 @@
 //! LEGO Island, run headless from the player's rip: the launcher finding it
-//! or refusing it, its declared tree, and its boot as far as the machine
-//! carries it, replayed to the same machine every time.
+//! or refusing it, its declared tree, its committed route to first light, and
+//! its boot as far as the machine carries it, each replayed to the same
+//! machine every time.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -231,6 +232,105 @@ fn retained_mode_keeps_the_meshes_the_world_is_built_of() {
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted
+    );
+}
+
+/// First light (#118): the flip the game's own picture first reaches the
+/// screen at, the first instant of its LEGO bricks fading up out of black.
+///
+/// First is decided as every title's is: the first frame that is not one
+/// colour. Flip 0, the engine letting go of the screen it has just cleared, is
+/// a present, but it is black and outside `ISLE.EXE`'s loop; flips 1 to 459
+/// are the loop copying a back buffer that is still black. The loop's frames
+/// are numbered from flip 1, so this is its 460th whether flip 0 is counted or
+/// not.
+const FIRST_LIGHT: u64 = 460;
+
+/// Enough instructions for the game to build its world and present first
+/// light, at 97,000,222, and a frame more.
+const FIRST_LIGHT_BUDGET: u64 = 98_000_000;
+
+/// The committed route to first light, replayed, keeping first light and the
+/// frame before it. Two slots, so the determinism gate's two runs can go side
+/// by side.
+fn first_light(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-light.route"),
+        ),
+        ..Cli::default()
+    };
+    testkit::replay(
+        slot,
+        scratch,
+        &ISLAND,
+        &cli,
+        &[FIRST_LIGHT - 1, FIRST_LIGHT],
+        FIRST_LIGHT_BUDGET,
+    )
+}
+
+static LIT: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+#[test]
+fn the_route_reaches_first_light_as_the_bricks_start_to_fade_up() {
+    let Some(ran) = first_light(&LIT) else { return };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way to first light stops the run"
+    );
+    ran.assert_logged("flip 460 cursor 97000222 640x480x16");
+
+    let lit = ran
+        .host
+        .frames
+        .iter()
+        .find(|f| !f.is_uniform())
+        .expect("the game puts a picture on the screen");
+    assert_eq!(
+        lit.flip, FIRST_LIGHT,
+        "first light moved: it is now flip {}",
+        lit.flip
+    );
+    assert_eq!((lit.width, lit.height), (640, 480));
+    // The fade's first instant: every pixel within 8/255 of black.
+    assert!(
+        lit.pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[..3].iter().all(|c| *c <= 8)),
+        "first light is the bricks barely up out of black"
+    );
+    let before = ran
+        .host
+        .frame(FIRST_LIGHT - 1)
+        .expect("the frame before it is kept");
+    assert_eq!(before.pixels[..3], [0, 0, 0], "and before it, black");
+}
+
+#[test]
+fn the_first_light_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| first_light(&AGAIN));
+        (
+            first_light(&LIT),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    assert_eq!(
+        first.host.frame(FIRST_LIGHT).map(|f| &f.pixels),
+        second.host.frame(FIRST_LIGHT).map(|f| &f.pixels),
+        "including what it presented"
     );
 }
 
