@@ -1,7 +1,9 @@
 # A title's MIDI is heard in the machine's mix, and LEGO Island plays none
 
-**Status: Proposed** (#122). An agent drafted it; the maintainer chooses. Once they have, this
-line says **Accepted** with their choice, and #123 builds what it says.
+**Status: Accepted in part** (#122, 2026-10-20). The maintainer accepted part 1 of the
+recommendation: Island gets no MIDI code, and the twelve imports stay walls no route reaches. Part
+2, how the first title that does play MIDI is heard, is **left open** until a title stops at one
+of these walls; the options below stay the starting point for that decision.
 
 ## Context
 
@@ -235,16 +237,14 @@ is silent on Linux; 3 throws away music this machine could play.
 
 ## Consequences
 
-If this is accepted as proposed:
+With part 1 accepted:
 
 - No MIDI code is written until a title stops at one of these walls. Its wall report is where
   the next ticket starts: which call, which title, and its MIDI data.
 - #123 waits on nothing here, because Island's music is DirectSound's wave. Its music at
   11,025 Hz is taken to the mix's 22,050 Hz by `Pcm`, as every buffer's is.
-- #112 says Island's music is partly "in MIDI the game plays through WINMM's `midiStream*`
-  family". It is not, and the "MIDI parsing" #112 lists for testing has nothing to parse for this
-  title. The spec may want correcting.
-- When 1(a) is built:
+- #112 and #123 were corrected to say Island's music is wave and that there is no MIDI to test.
+- If part 2 is later decided as 1(a), then when it is built:
   - the device's caps are a declared value, with their reason, read from a real Windows' answer;
   - the bank is named the way a pressing is, in the README's table, with what it is for;
   - the voice engine is tested in core without a title.
