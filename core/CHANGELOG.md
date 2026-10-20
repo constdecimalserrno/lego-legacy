@@ -414,8 +414,8 @@ move:
 - LEGO Island's `information-center.route`, `2f2d5411…` to `69bd9a2e…`.
 
 Rock Raiders' other runs, its menus and level select included, and every other title's, do not
-move. Waiting on the maintainer's acceptance, and on Rock Raiders' first mission being played
-again.
+move. Accepted by the maintainer on 2026-10-20; Rock Raiders' first mission is played again by a
+person before its next release (golden rule 7).
 
 ## 1.0.0 — 2026-10-18
 
