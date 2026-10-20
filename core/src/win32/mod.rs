@@ -114,6 +114,9 @@ pub enum Object {
         /// take one it already holds, and has to release it as often.
         held: Option<(u32, u32)>,
     },
+    /// A counted semaphore: how many waits it can answer now, and the most it
+    /// may ever hold. Each wait it answers takes one (#115).
+    Semaphore { count: u32, max: u32 },
     /// A hook a title asked to put on the window system, by which hook it is.
     /// Nothing on this machine calls one (#60).
     Hook(u32),
@@ -227,6 +230,10 @@ pub struct State {
     /// or a blocking wait for a movie frame. The machine charges it to the
     /// declared clock when the call returns (ADR-0003).
     pub waited_millis: u64,
+    /// The running thread gave the rest of its turn away inside the last
+    /// call, by `Sleep(0)`: the machine switches before it runs any more of
+    /// it, rather than at its next call (ADR-0005, #115).
+    pub yielded: bool,
     /// How many files the declared install tree holds.
     pub installed_files: usize,
     /// The window procedure the guest registered, if it has.
@@ -360,6 +367,7 @@ impl State {
             current_directory: String::new(),
             volume_label: String::new(),
             waited_millis: 0,
+            yielded: false,
             players: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             mixer: crate::sound::Mixer::default(),

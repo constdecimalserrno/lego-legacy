@@ -8,11 +8,14 @@ input script would stop being a replay.
 
 ## Waiting is parking, not asking again
 
-A thread that cannot go on is put down, not left runnable. It says what it is waiting for and,
-when it asked for a timeout, the declared millisecond it may be woken at; whoever signals that
-thing — `SetEvent`, `ReleaseMutex`, `LeaveCriticalSection` — picks the waiters back up. Nothing
-else can run it in between, so when every thread is down the machine moves the declared clock to
-the earliest hour any of them asked for rather than spinning between them.
+A thread that cannot go on is put down, not left runnable. It says what it is waiting for and, when
+it asked for a timeout, the declared millisecond it may be woken at; whoever signals that thing —
+`SetEvent`, `ReleaseMutex`, `ReleaseSemaphore`, `LeaveCriticalSection` — picks the waiters back up.
+Nothing else can run it in between, so when every thread is down the machine moves the declared
+clock to the earliest hour any of them asked for rather than spinning between them. A thread that
+sleeps for no time at all, `Sleep(0)`, gives the rest of its turn to the next thread in the
+machine's order that can run, as Windows gives it to the next ready thread, and carries on at once
+when there is none (#115).
 
 This has to be so because of what the timebase is (ADR-0003): declared time comes from retired
 instructions, and a thread that answers a wait by asking again retires none. Alpha Team's A3D

@@ -169,6 +169,8 @@ pub const SHIMS: &[Shim] = &[
     ),
     stdcall("KERNEL32", "WaitForSingleObject", 2, wait_for_single_object),
     stdcall("KERNEL32", "ReleaseMutex", 1, release_mutex),
+    stdcall("KERNEL32", "CreateSemaphoreA", 4, create_semaphore),
+    stdcall("KERNEL32", "ReleaseSemaphore", 3, release_semaphore),
     stdcall("KERNEL32", "GetCurrentDirectoryA", 2, get_current_directory),
     stdcall("KERNEL32", "SetCurrentDirectoryA", 1, set_current_directory),
     stdcall("KERNEL32", "CreateFileA", 7, create_file),
@@ -1374,6 +1376,56 @@ fn reset_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+fn create_semaphore(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // CreateSemaphoreA(security, initial count, maximum count, name). LEGO
+    // Island's engine makes them unnamed, to hand work between its own
+    // threads (#115); a named one is a wall until a title asks for one.
+    if args[3] != 0 {
+        return Err(Stop::NotWritten {
+            what: "KERNEL32.dll!CreateSemaphoreA: a named semaphore".to_owned(),
+            caller: 0,
+        });
+    }
+    // Both counts are signed: the maximum must be above zero, and the
+    // initial count no less than zero and no more than the maximum.
+    let (initial, max) = (args[1] as i32, args[2] as i32);
+    if max <= 0 || initial < 0 || initial > max {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    ctx.state.last_error = 0;
+    Ok(ctx.state.give(Object::Semaphore {
+        count: args[1],
+        max: args[2],
+    }))
+}
+
+fn release_semaphore(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // ReleaseSemaphore(handle, by how many, out the count before).
+    let Some(Object::Semaphore { count, max }) = ctx.state.object_mut(args[0]) else {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    };
+    // The count to add is signed, and must be above zero.
+    if args[1] as i32 <= 0 {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    // A release past the maximum fails and changes nothing, the count before
+    // included.
+    let was = *count;
+    if args[1] > *max - was {
+        ctx.state.last_error = 298; // ERROR_TOO_MANY_POSTS
+        return Ok(0);
+    }
+    *count = was + args[1];
+    if args[2] != 0 {
+        ctx.mem.write_u32(args[2], was).map_err(Stop::Fault)?;
+    }
+    wake_waiters(ctx, args[0]);
+    Ok(1)
+}
+
 /// Let every thread parked on this object have its turn again.
 ///
 /// It does not hand the object to any of them: each makes its wait again when
@@ -1390,9 +1442,14 @@ fn wake_waiters(ctx: &mut Ctx<'_>, handle: u32) {
 ///
 /// An automatic event goes back down as its waiter takes it; a manual one
 /// stays up. A mutex is taken by the thread that waited, and a thread that
-/// already holds one takes it again.
+/// already holds one takes it again. A semaphore gives one of its count.
 fn claim(ctx: &mut Ctx<'_>, handle: u32) -> Option<bool> {
     let me = running_thread(ctx);
+    if let Some(Object::Semaphore { count, .. }) = ctx.state.object_mut(handle) {
+        let some = *count > 0;
+        *count -= u32::from(some);
+        return Some(some);
+    }
     let Some(Object::Named {
         kind,
         signalled,
@@ -1509,6 +1566,16 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Sto
     }
     // Parked already: back for another look.
     if ctx.state.threads[running].wake_at > now {
+        return Err(Stop::Blocked);
+    }
+    // Woken, and another waiter took it first: a semaphore released once
+    // wakes everyone parked on it, and only one of them gets the count. A
+    // wait with no timeout has not run out, so it goes back down (#115).
+    // ponytail: a finite wait that loses the same way still answers
+    // WAIT_TIMEOUT early, since waking it forgot its hour; keep the hour
+    // apart from `wake_at` if a title is ever seen losing one.
+    if timeout == INFINITE {
+        park(ctx, handles[0], u64::MAX);
         return Err(Stop::Blocked);
     }
     park(ctx, 0, 0);
@@ -2367,6 +2434,11 @@ fn sleep(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         thread.wake_at = until;
         return Err(Stop::Blocked);
     }
+    // Sleep(0) gives the rest of this thread's turn to the next thread that
+    // can run, in the machine's own order, never the host's (ADR-0005, #115):
+    // the call returns now and the machine switches before this thread runs
+    // on. With nobody else ready it runs on at once, as Windows' does.
+    ctx.state.yielded = true;
     Ok(0)
 }
 

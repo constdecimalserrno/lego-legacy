@@ -1280,7 +1280,13 @@ impl Machine {
     /// the host's time is saved.
     fn run_guest(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Option<Outcome> {
         const BURST: u64 = 1 << 16;
-        if self.stub || log.trace() >= Trace::Insns || self.state.present.is_some() {
+        // A thread that gave its turn away runs none of the rest of it: the
+        // switch after this is where the next one takes over (#115).
+        if std::mem::take(&mut self.state.yielded)
+            || self.stub
+            || log.trace() >= Trace::Insns
+            || self.state.present.is_some()
+        {
             return None;
         }
         let count = budget.min(self.clock.cursor() + BURST) - self.clock.cursor().min(budget);
@@ -1304,9 +1310,10 @@ impl Machine {
     ///
     /// One host thread runs them all, so switching is putting the registers
     /// back where the parked thread left them. It happens at the end of a
-    /// burst — the declared quantum — and when a thread ends, and nowhere
-    /// else: a schedule that depended on the host's own threads would make
-    /// every run of this title a different one (ADR-0005).
+    /// burst — the declared quantum — when a thread ends, waits or gives its
+    /// turn away with `Sleep(0)`, and nowhere else: a schedule that depended
+    /// on the host's own threads would make every run of this title a
+    /// different one (ADR-0005).
     fn switch_thread(&mut self, log: &mut RunLog) {
         if self.state.threads.len() < 2 {
             return;

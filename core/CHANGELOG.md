@@ -76,6 +76,24 @@ LEGO Island joined the roster as its fourth entry, `roster::LEGO_ISLAND`, with i
 in progress (#113): `DATA/disk/ISLE.EXE`, one pressing, no Red Book audio. `title::WINDOWS_95`
 is the Windows it declares, packed as `WINDOWS_98_SE` is. No other title's route moves.
 
+Counted semaphores and `Sleep(0)`, for LEGO Island's streamer threads (#115):
+
+- `CreateSemaphoreA` and `ReleaseSemaphore` are answered as Win32 documents them. A wait on one
+  takes one of its count. A release past its maximum fails with `ERROR_TOO_MANY_POSTS` and
+  changes nothing, and the count before is written back only when a release succeeds and it was
+  asked for. Counts out of range are `ERROR_INVALID_PARAMETER`, and a named semaphore is a wall
+  until a title asks for one.
+- A wait on a semaphore parks as one on an event or a mutex does (ADR-0005), and a release wakes
+  whoever is parked on it, the first in the machine's order taking the count.
+- A wait with no timeout that was woken and found another waiter had taken what woke it goes back
+  down. It answered `WAIT_TIMEOUT`, which an endless wait never does.
+- `Sleep(0)` with another thread ready gives that thread the rest of the turn, where the caller
+  ran on to its next call. The order is the scheduler's, never the host's, so every run
+  interleaves the same way.
+
+`core/tests/threads.rs` proves each of these on hand-assembled guests, without a title. No route
+moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
