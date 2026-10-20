@@ -144,6 +144,17 @@ impl Iso {
     /// # Errors
     /// When the image holds no such file.
     pub fn read(&mut self, path: &str) -> Result<Vec<u8>, DiscError> {
+        let (start, len) = self.lies(path)?;
+        self.read_at(start, len as usize)
+    }
+
+    /// Where a file lies in the image: its first byte, and how long it is.
+    /// What a file read where it lies is read through, rather than whole
+    /// (#116). A file the image records running past its own end is damaged.
+    ///
+    /// # Errors
+    /// When the image holds no such file, or the file runs past the image.
+    pub fn lies(&mut self, path: &str) -> Result<(u64, u32), DiscError> {
         let entry = self.entry(path)?;
         if entry.is_dir {
             return Err(DiscError::NoSuchFile {
@@ -151,7 +162,11 @@ impl Iso {
                 path: path.to_owned(),
             });
         }
-        self.extent(entry.sector, entry.len)
+        let start = u64::from(entry.sector) * SECTOR;
+        if start + u64::from(entry.len) > self.size {
+            return Err(DiscError::Damaged(self.path.clone()));
+        }
+        Ok((start, entry.len))
     }
 
     /// Read part of a file out of the image.
@@ -225,21 +240,24 @@ impl Iso {
         Ok((entry.sector, entry.len))
     }
 
-    /// The bytes of one run of sectors, refused when the image is too short
-    /// to hold them: a length read from a damaged image can be four gigabytes.
-    fn extent(&mut self, sector: u32, len: u32) -> Result<Vec<u8>, DiscError> {
-        let start = u64::from(sector) * SECTOR;
-        if start + u64::from(len) > self.size {
+    /// The bytes from one place in the image, refused when the image is too
+    /// short to hold them: a length read from a damaged image can be four
+    /// gigabytes.
+    ///
+    /// # Errors
+    /// When the image is too short, or cannot be read.
+    pub fn read_at(&mut self, start: u64, len: usize) -> Result<Vec<u8>, DiscError> {
+        if start + len as u64 > self.size {
             return Err(DiscError::Damaged(self.path.clone()));
         }
-        let mut bytes = vec![0u8; len as usize];
+        let mut bytes = vec![0u8; len];
         self.file.seek(SeekFrom::Start(start))?;
         self.file.read_exact(&mut bytes)?;
         Ok(bytes)
     }
 
     fn read_dir(&mut self, sector: u32, len: u32) -> Result<Vec<Entry>, DiscError> {
-        let data = self.extent(sector, len)?;
+        let data = self.read_at(u64::from(sector) * SECTOR, len as usize)?;
 
         let mut out = Vec::new();
         let mut at = 0usize;

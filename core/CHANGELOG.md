@@ -94,6 +94,34 @@ Counted semaphores and `Sleep(0)`, for LEGO Island's streamer threads (#115):
 `core/tests/threads.rs` proves each of these on hand-assembled guests, without a title. No route
 moves.
 
+The old file API LEGO Island reads its scripts and world through, for its `MxIOInfo` (#116):
+`OpenFile`, `_hread`, `_hwrite`, `_llseek` and `_lclose`, with `GetFileSize` and `SetEndOfFile`.
+They are faces over the handles `CreateFileA` makes, which `ReadFile`, `SetFilePointer` and
+`CloseHandle` take as well.
+
+- `OpenFile` reads, writes, makes (`OF_CREATE`, read and write as MS-DOS's create opens it) and
+  asks (`OF_EXIST`, answered TRUE with nothing left open), with each `OF_SHARE_*` mode as the
+  documentation maps it onto `CreateFileA`'s. It fills the `OFSTRUCT`: its length, whether the
+  file is on a fixed disk, the MS-DOS error, and the path. A bare name is looked for where the
+  title started, then where it is. A style that parses, deletes, verifies, prompts or reopens is a
+  wall.
+- `_hread` short-counts at the end of a file; `_hwrite` of nothing sets where the file ends, as
+  MS-DOS's write does; each fails with `HFILE_ERROR` and `GetLastError` as Windows does.
+- A second open of a file another handle does not share as it asks, through either door, is
+  refused with `ERROR_SHARING_VIOLATION`.
+- `SetFilePointer` past the end of a file opened only to read lands there, as Windows says, where
+  it stopped at the end; a read there finds nothing. A move method that is not one is
+  `ERROR_INVALID_PARAMETER`, where it was the end. A handle that is not a file is
+  `ERROR_INVALID_HANDLE`, where `GetLastError` kept whatever it last said, which is a failed seek
+  that reads as a success at `0xffffffff`. Hot Wheels' C runtime seeks its three standard streams
+  as it exits and keeps the error it reads, so the digests of its two routes that exit move, their
+  end lines unchanged: `first-race.route` from `189da6d5…` to `1f7255c4…`, and the escape route
+  from `c8f1a71e…` to `5e33fc05…`. The maintainer accepted the move.
+- A file on the pressing opened only to read is read where it lies on the image, a piece at a
+  time, rather than held whole when it is opened (`win32::Contents`, `Tree::lies`, `Iso::lies`):
+  Island's scripts are 534 MB, and `Isle\ISLE.SI` alone is 157 MB. What a title writes is held
+  and reaches its profile as before.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

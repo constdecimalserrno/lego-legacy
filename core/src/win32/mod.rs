@@ -91,11 +91,15 @@ pub enum Object {
     /// A file the guest opened, and where it is reading or writing.
     File {
         path: String,
-        bytes: Vec<u8>,
+        contents: Contents,
         at: u32,
-        /// Whether the guest asked to write through this handle. What it
-        /// writes reaches the profile when it closes the file.
-        writing: bool,
+        /// What the guest asked to do through this handle, as `CreateFileA`'s
+        /// `GENERIC_READ` and `GENERIC_WRITE` bits. What it writes reaches the
+        /// profile when it closes the file.
+        access: u32,
+        /// What it lets another handle on the same file do, as `CreateFileA`'s
+        /// `FILE_SHARE_*` bits: a second open is judged by it (#116).
+        share: u32,
         /// Whether it actually wrote anything. A file opened for writing and
         /// never written to is not one the profile keeps a copy of.
         wrote: bool,
@@ -139,6 +143,30 @@ pub enum Object {
         at: u32,
         owned: bool,
     },
+}
+
+/// Where an open file's bytes are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Contents {
+    /// Held by the machine: a file the guest can write through, or one the
+    /// tree unpacks, declares or keeps in the profile.
+    Held(Vec<u8>),
+    /// Where on the pressing's image a file opened only to read lies: its
+    /// first byte there and its length. What the guest reads is read from
+    /// there when it asks, so that LEGO Island's 157 MB script is not held
+    /// whole while the title reads it a piece at a time (#116).
+    Lies { start: u64, len: u32 },
+}
+
+impl Contents {
+    /// How many bytes the file holds.
+    #[must_use]
+    pub fn size(&self) -> u32 {
+        match self {
+            Self::Held(bytes) => u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+            Self::Lies { len, .. } => *len,
+        }
+    }
 }
 
 /// Where files mapped into the arena start.

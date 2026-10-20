@@ -252,21 +252,40 @@ impl Tree {
     /// a packed entry is there whether or not anyone unpacks it.
     pub fn readable(&mut self, guest_path: &str) -> bool {
         let key = Self::key(guest_path);
+        self.profile_path(&key).is_some_and(|p| p.is_file())
+            || matches!(
+                self.files.get(&key),
+                Some(Source::Declared(_) | Source::Packed(_))
+            )
+            || self.lies(&key).is_some()
+    }
+
+    /// Where a file the guest named lies on the pressing's image, for one
+    /// [`Tree::read`] would read from there: its first byte in the image and
+    /// how long it is. Nothing for a file the guest wrote, which stands in
+    /// front of the image, or one the tree unpacks or declares.
+    ///
+    /// What a file opened only to read is read through, a piece at a time,
+    /// rather than held whole: LEGO Island's scripts are 534 MB, and one of
+    /// them alone is 157 MB (#116).
+    pub fn lies(&mut self, guest_path: &str) -> Option<(u64, u32)> {
+        let key = Self::key(guest_path);
         if self.profile_path(&key).is_some_and(|p| p.is_file()) {
-            return true;
+            return None;
         }
         let on_disc = match self.files.get(&key) {
-            Some(Source::Declared(_) | Source::Packed(_)) => return true,
             Some(Source::Disc(path)) => path.clone(),
-            None => match key.strip_prefix("D:\\") {
-                Some(rest) => rest.replace('\\', "/"),
-                None => return false,
-            },
+            Some(_) => return None,
+            // The pressing is in the declared machine's CD drive.
+            None => key.strip_prefix("D:\\")?.replace('\\', "/"),
         };
-        self.iso
-            .as_mut()
-            .and_then(|iso| iso.entry(&on_disc).ok())
-            .is_some_and(|entry| !entry.is_dir)
+        self.iso.as_mut()?.lies(&on_disc).ok()
+    }
+
+    /// `len` bytes of the pressing's image from `start`, which is somewhere
+    /// [`Tree::lies`] said a file lies; nothing when the image cannot be read.
+    pub fn read_at(&mut self, start: u64, len: usize) -> Option<Vec<u8>> {
+        self.iso.as_mut()?.read_at(start, len).ok()
     }
 
     /// Read a file the guest named.

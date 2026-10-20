@@ -3,7 +3,7 @@
 //! Every value a shim hands back is a declared value: chosen for the machine
 //! we say we are, carried with the reason for that value and no other.
 
-use super::{stdcall, Ctx, Object, Shim};
+use super::{stdcall, Contents, Ctx, Object, Shim, State};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -177,6 +177,13 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "ReadFile", 5, read_file),
     stdcall("KERNEL32", "SetFilePointer", 4, set_file_pointer),
     stdcall("KERNEL32", "WriteFile", 5, write_file),
+    stdcall("KERNEL32", "GetFileSize", 2, get_file_size),
+    stdcall("KERNEL32", "SetEndOfFile", 1, set_end_of_file),
+    stdcall("KERNEL32", "OpenFile", 3, open_file),
+    stdcall("KERNEL32", "_hread", 3, hread),
+    stdcall("KERNEL32", "_hwrite", 3, hwrite),
+    stdcall("KERNEL32", "_llseek", 3, llseek),
+    stdcall("KERNEL32", "_lclose", 1, lclose),
     stdcall("KERNEL32", "GetFileAttributesA", 1, get_file_attributes),
     stdcall("KERNEL32", "GetDriveTypeA", 1, get_drive_type),
     stdcall("KERNEL32", "GetLogicalDrives", 0, get_logical_drives),
@@ -1597,8 +1604,7 @@ fn close_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // where the next run will read it back: a save outlives its run.
     if let Some(Object::File {
         path,
-        bytes,
-        writing: true,
+        contents: Contents::Held(bytes),
         wrote: true,
         ..
     }) = ctx.state.object_mut(args[0])
@@ -1643,12 +1649,18 @@ fn set_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 const INVALID_HANDLE: u32 = 0xffff_ffff;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 
-/// The access bit that makes a handle one the guest can write through.
+/// The access bits that make a handle one the guest can read and write
+/// through, and the sharing bits that let another handle on the same file do
+/// the same.
+const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ: u32 = 1;
+const FILE_SHARE_WRITE: u32 = 2;
 
 /// What a title says it wants done with a file that is or is not there.
 const CREATE_NEW: u32 = 1;
 const CREATE_ALWAYS: u32 = 2;
+const OPEN_EXISTING: u32 = 3;
 const OPEN_ALWAYS: u32 = 4;
 const TRUNCATE_EXISTING: u32 = 5;
 
@@ -1659,12 +1671,52 @@ const ERROR_WRITE_PROTECT: u32 = 19;
 const ERROR_NEGATIVE_SEEK: u32 = 131;
 /// A handle that cannot be written through.
 const ERROR_ACCESS_DENIED: u32 = 5;
+/// A handle that is not one, or not one of the kind asked about.
+const ERROR_INVALID_HANDLE: u32 = 6;
+/// A file another handle has open and does not share as this one asks.
+const ERROR_SHARING_VIOLATION: u32 = 32;
+const ERROR_INVALID_PARAMETER: u32 = 87;
 
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateFileA(path, access, share, security, disposition, flags, template).
     let named = ctx.string(args[0]).map_err(Stop::Fault)?;
     let path = ctx.absolute(&named);
-    let writing = args[1] & GENERIC_WRITE != 0;
+    open(ctx, path, args[1], args[2], args[4])
+}
+
+/// Whether a file can be opened again, for `access` and sharing as `share`
+/// says, while other handles have it open: each of them has to share what the
+/// new one does, and the new one has to share what each of them does.
+/// Windows' rule, both ways round.
+fn shared(state: &State, path: &str, access: u32, share: u32) -> bool {
+    let allows = |share: u32, access: u32| {
+        (access & GENERIC_READ == 0 || share & FILE_SHARE_READ != 0)
+            && (access & GENERIC_WRITE == 0 || share & FILE_SHARE_WRITE != 0)
+    };
+    let same = |open: &str| {
+        open.replace('/', "\\")
+            .eq_ignore_ascii_case(&path.replace('/', "\\"))
+    };
+    state.handles.values().all(|object| match object {
+        Object::File {
+            path: open,
+            access: theirs,
+            share: shares,
+            ..
+        } if same(open) => allows(*shares, access) && allows(share, *theirs),
+        _ => true,
+    })
+}
+
+/// Open a file for the guest: what `CreateFileA` does, and `OpenFile` too.
+fn open(
+    ctx: &mut Ctx<'_>,
+    path: String,
+    access: u32,
+    share: u32,
+    disposition: u32,
+) -> Result<u32, Stop> {
+    let writing = access & GENERIC_WRITE != 0;
 
     // The declared machine's D: is a CD-ROM, and a disc is not written to.
     if writing && path.to_ascii_uppercase().starts_with("D:") {
@@ -1674,18 +1726,29 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(INVALID_HANDLE);
     }
 
+    if !shared(ctx.state, &path, access, share) {
+        ctx.state.last_error = ERROR_SHARING_VIOLATION;
+        return Ok(INVALID_HANDLE);
+    }
+
     // A title about to make a file asks whether one is there already. That is
     // not the pressing failing to hold something, so it is asked without
     // logging a miss: the run log's `file missing` lines are how the tree
     // learns what it has to ship, and a player's own save is not something it
     // ships (#44). OPEN_ALWAYS keeps what is there, so it reads.
-    let making = writing && matches!(args[4], CREATE_NEW | CREATE_ALWAYS | TRUNCATE_EXISTING);
+    let making = writing && matches!(disposition, CREATE_NEW | CREATE_ALWAYS | TRUNCATE_EXISTING);
+    // A file only read is read where it lies on the pressing, as the guest
+    // asks for it, rather than held whole (#116).
+    let lies = if writing { None } else { ctx.tree.lies(&path) };
     let there = if making {
-        ctx.guest_file_is_there(&path).then(Vec::new)
+        ctx.guest_file_is_there(&path)
+            .then(|| Contents::Held(Vec::new()))
+    } else if let Some((start, len)) = lies {
+        Some(Contents::Lies { start, len })
     } else {
-        ctx.open_guest_file(&path)
+        ctx.open_guest_file(&path).map(Contents::Held)
     };
-    let bytes = match (there, args[4]) {
+    let contents = match (there, disposition) {
         // CREATE_NEW is a title asking for a file that is not there yet, and
         // it has to be told when one is.
         (Some(_), CREATE_NEW) if writing => {
@@ -1693,11 +1756,11 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             return Ok(INVALID_HANDLE);
         }
         // What was there is thrown away, whatever it was.
-        (Some(_), CREATE_ALWAYS | TRUNCATE_EXISTING) if writing => Vec::new(),
-        (Some(bytes), _) => bytes,
+        (Some(_), CREATE_ALWAYS | TRUNCATE_EXISTING) if writing => Contents::Held(Vec::new()),
+        (Some(contents), _) => contents,
         // Nothing there: only a title that says it is making one gets a
         // handle, which leaves TRUNCATE_EXISTING and OPEN_EXISTING refused.
-        (None, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS) if writing => Vec::new(),
+        (None, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS) if writing => Contents::Held(Vec::new()),
         (None, _) => {
             // Recorded rather than passed over: what a title opens is how the
             // declared install tree learns what it has to hold, and who asked
@@ -1718,30 +1781,62 @@ fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.state.last_error = 0;
     Ok(ctx.state.give(Object::File {
         path,
-        bytes,
+        contents,
         at: 0,
-        writing,
+        access,
+        share,
         wrote: false,
     }))
 }
 
-fn read_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let (handle, buffer, want, read_at) = (args[0], args[1], args[2], args[3]);
-    let Some(Object::File { bytes, at, .. }) = ctx.state.object(handle) else {
-        ctx.state.last_error = 6;
-        return Ok(0);
+/// `len` bytes of the pressing's image from `start`, for a file that lies
+/// there, or the wall a host that can no longer read the image is.
+fn lying(ctx: &mut Ctx<'_>, path: &str, start: u64, len: u32) -> Result<Vec<u8>, Stop> {
+    ctx.tree
+        .read_at(start, len as usize)
+        .ok_or_else(|| Stop::NotWritten {
+            what: format!("{path}: the pressing's image could not be read at byte {start}"),
+            caller: 0,
+        })
+}
+
+/// Read from an open file into the guest's buffer, from where the handle is
+/// up to and as much of `want` as the file holds from there, and move the
+/// handle on past it: what `ReadFile` and `_hread` both do. How much it read,
+/// or nothing when the handle is not a file.
+fn read(ctx: &mut Ctx<'_>, handle: u32, buffer: u32, want: u32) -> Result<Option<u32>, Stop> {
+    let Some(Object::File {
+        path, contents, at, ..
+    }) = ctx.state.object(handle)
+    else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        return Ok(None);
     };
-    let start = *at as usize;
-    let end = (start + want as usize).min(bytes.len());
-    let chunk = bytes.get(start..end).unwrap_or(&[]).to_vec();
+    // A handle past the end of its file reads nothing there.
+    let (from, n) = (*at, contents.size().saturating_sub(*at).min(want));
+    let chunk = match contents {
+        _ if n == 0 => Vec::new(),
+        Contents::Held(bytes) => bytes[from as usize..(from + n) as usize].to_vec(),
+        Contents::Lies { start, .. } => {
+            let (path, start) = (path.clone(), start + u64::from(from));
+            lying(ctx, &path, start, n)?
+        }
+    };
     ctx.mem.write(buffer, &chunk).map_err(Stop::Fault)?;
     if let Some(Object::File { at, .. }) = ctx.state.object_mut(handle) {
-        *at += u32::try_from(chunk.len()).unwrap_or(0);
+        *at += n;
     }
+    Ok(Some(n))
+}
+
+fn read_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // ReadFile(handle, buffer, want, read, overlapped).
+    let (handle, buffer, want, read_at) = (args[0], args[1], args[2], args[3]);
+    let Some(n) = read(ctx, handle, buffer, want)? else {
+        return Ok(0);
+    };
     if read_at != 0 {
-        ctx.mem
-            .write_u32(read_at, u32::try_from(chunk.len()).unwrap_or(0))
-            .map_err(Stop::Fault)?;
+        ctx.mem.write_u32(read_at, n).map_err(Stop::Fault)?;
     }
     Ok(1)
 }
@@ -1756,7 +1851,8 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // buffer would have ended the run at a wall naming memory rather than
     // answering the call the title actually made (#43).
     match ctx.state.object(handle) {
-        Some(Object::File { writing: true, .. } | Object::Std(_)) => {}
+        Some(Object::File { access, .. }) if access & GENERIC_WRITE != 0 => {}
+        Some(Object::Std(_)) => {}
         _ => {
             ctx.state.last_error = ERROR_ACCESS_DENIED;
             return Ok(0);
@@ -1768,10 +1864,10 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .map_err(Stop::Fault)?
         .to_vec();
     match ctx.state.object_mut(handle) {
+        // A handle that can write holds what it writes to.
         Some(Object::File {
-            bytes,
+            contents: Contents::Held(bytes),
             at,
-            writing: true,
             wrote,
             ..
         }) => {
@@ -1799,22 +1895,26 @@ fn write_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetFilePointer(handle, distance, high, method).
     let (handle, distance, method) = (args[0], args[1] as i32, args[3]);
-    let Some(Object::File {
-        bytes, at, writing, ..
-    }) = ctx.state.object(handle)
-    else {
+    let Some(Object::File { contents, at, .. }) = ctx.state.object(handle) else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
         return Ok(INVALID_HANDLE);
     };
-    let len = u32::try_from(bytes.len()).unwrap_or(0);
+    let (at, size) = (*at, contents.size());
     let base = match method {
         0 => 0,
-        1 => *at,
-        _ => len,
+        1 => at,
+        2 => size,
+        _ => {
+            ctx.state.last_error = ERROR_INVALID_PARAMETER;
+            return Ok(INVALID_HANDLE);
+        }
     };
-    // A title laying a file out seeks past the end of what it has written so
-    // far, and what it writes there is what makes the file that long. Reading
-    // cannot go past what is there.
+    // Past the end of a file is somewhere, whether the handle reads or
+    // writes: a read there finds nothing, and a write there makes the file
+    // that long. Windows says so of SetFilePointer, and LEGO Island seeks
+    // through its scripts by it (#116).
     //
     // Before the start of the file is nowhere, and a seek there moves nothing:
     // Windows refuses it, and letting it wrap would put the next write four
@@ -1823,11 +1923,180 @@ fn set_file_pointer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.state.last_error = ERROR_NEGATIVE_SEEK;
         return Ok(INVALID_HANDLE);
     };
-    let moved = if *writing { moved } else { moved.min(len) };
     if let Some(Object::File { at, .. }) = ctx.state.object_mut(handle) {
         *at = moved;
     }
     Ok(moved)
+}
+
+fn get_file_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetFileSize(file, high): the low half, and the high half where the
+    // guest asks for it. Nothing on the declared machine is four gigabytes.
+    let Some(Object::File { contents, .. }) = ctx.state.object(args[0]) else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        // INVALID_FILE_SIZE.
+        return Ok(0xffff_ffff);
+    };
+    let size = contents.size();
+    if args[1] != 0 {
+        ctx.mem.write_u32(args[1], 0).map_err(Stop::Fault)?;
+    }
+    Ok(size)
+}
+
+fn set_end_of_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetEndOfFile(file): the file ends where the handle is up to, cut short
+    // or made longer. Windows leaves what it is made longer by undefined; the
+    // declared machine makes it zeros.
+    match ctx.state.object_mut(args[0]) {
+        Some(Object::File {
+            contents: Contents::Held(bytes),
+            at,
+            access,
+            wrote,
+            ..
+        }) if *access & GENERIC_WRITE != 0 => {
+            bytes.resize(*at as usize, 0);
+            *wrote = true;
+            Ok(1)
+        }
+        Some(Object::File { .. }) => {
+            ctx.state.last_error = ERROR_ACCESS_DENIED;
+            Ok(0)
+        }
+        _ => {
+            ctx.state.last_error = ERROR_INVALID_HANDLE;
+            Ok(0)
+        }
+    }
+}
+
+/// What `OpenFile` and the 16-bit calls beside it answer when they fail.
+const HFILE_ERROR: u32 = 0xffff_ffff;
+
+/// `OpenFile`'s style: how the file is opened and shared, and what else is
+/// asked of it.
+const OF_WRITE: u32 = 0x0001;
+const OF_READWRITE: u32 = 0x0002;
+const OF_SHARE_EXCLUSIVE: u32 = 0x0010;
+const OF_SHARE_DENY_WRITE: u32 = 0x0020;
+const OF_SHARE_DENY_READ: u32 = 0x0030;
+const OF_SHARE_DENY_NONE: u32 = 0x0040;
+const OF_CANCEL: u32 = 0x0800;
+const OF_CREATE: u32 = 0x1000;
+const OF_EXIST: u32 = 0x4000;
+
+fn open_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // OpenFile(name, OFSTRUCT, style): Windows 3.1's door onto what
+    // CreateFileA opens, kept in Win32, and the one LEGO Island's scripts and
+    // world are read through (#116). Its handles are CreateFileA's.
+    let (named, record, style) = (ctx.string(args[0]).map_err(Stop::Fault)?, args[1], args[2]);
+    // Making a file is MS-DOS's create (function 3Ch), which opens what it
+    // makes to read and write it, whatever else the style says.
+    let access = match style & 3 {
+        _ if style & OF_CREATE != 0 => Some(GENERIC_READ | GENERIC_WRITE),
+        0 => Some(GENERIC_READ),
+        OF_WRITE => Some(GENERIC_WRITE),
+        OF_READWRITE => Some(GENERIC_READ | GENERIC_WRITE),
+        _ => None,
+    };
+    // Each sharing mode as the documentation maps it onto CreateFileA's.
+    let share = match style & 0x70 {
+        0 | OF_SHARE_DENY_NONE => Some(FILE_SHARE_READ | FILE_SHARE_WRITE),
+        OF_SHARE_EXCLUSIVE => Some(0),
+        OF_SHARE_DENY_WRITE => Some(FILE_SHARE_READ),
+        OF_SHARE_DENY_READ => Some(FILE_SHARE_WRITE),
+        _ => None,
+    };
+    // OF_CANCEL is documented as ignored. Parsing a name, deleting, verifying,
+    // prompting and reopening each do something other than open a file, and
+    // no title has asked for one: each is a wall, not a guess.
+    let answered = 0x73 | OF_CANCEL | OF_CREATE | OF_EXIST;
+    let (Some(access), Some(share), 0) = (access, share, style & !answered) else {
+        return Err(Stop::NotWritten {
+            what: format!("KERNEL32!OpenFile({named:?}) with style {style:#06x}"),
+            caller: 0,
+        });
+    };
+
+    let mut path = ctx.absolute(&named);
+    // A bare name is looked for first where the title was started from, then
+    // where it is: the system and Windows directories OpenFile looks in next
+    // hold nothing on the declared machine. One being made is made here.
+    if style & OF_CREATE == 0 && !named.contains(['\\', '/', ':']) {
+        let started = format!("{}\\{named}", ctx.title.install_dir);
+        if ctx.tree.readable(&started) {
+            path = started;
+        }
+    }
+    let disposition = if style & OF_CREATE == 0 {
+        OPEN_EXISTING
+    } else {
+        CREATE_ALWAYS
+    };
+    let handle = open(ctx, path.clone(), access, share, disposition)?;
+
+    if record != 0 {
+        // OFSTRUCT: its own length, whether the file is on a fixed disk, the
+        // MS-DOS error when the open failed, which has the same number as the
+        // Win32 one, two reserved words, and the path, in 136 bytes.
+        let error = if handle == INVALID_HANDLE {
+            ctx.state.last_error
+        } else {
+            0
+        };
+        let mut fields = [0u8; 8];
+        fields[0] = 136;
+        fields[1] = u8::from(path.get(..2).is_some_and(|d| d.eq_ignore_ascii_case("C:")));
+        fields[2..4].copy_from_slice(&u16::try_from(error).unwrap_or(0).to_le_bytes());
+        ctx.mem.write(record, &fields).map_err(Stop::Fault)?;
+        ctx.write_string(record + 8, 128, &path)
+            .map_err(Stop::Fault)?;
+    }
+    if handle == INVALID_HANDLE {
+        return Ok(HFILE_ERROR);
+    }
+    if style & OF_EXIST != 0 {
+        // Opened and closed again: a question, answered as Windows is
+        // observed to answer it, with TRUE rather than a handle that is no
+        // longer open.
+        close_handle(ctx, &[handle])?;
+        return Ok(1);
+    }
+    Ok(handle)
+}
+
+fn hread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // _hread(file, buffer, count): ReadFile, answering with how much it read,
+    // which is short of the count at the end of the file.
+    Ok(read(ctx, args[0], args[1], args[2])?.unwrap_or(HFILE_ERROR))
+}
+
+fn hwrite(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // _hwrite(file, buffer, count): WriteFile, answering with how much it
+    // wrote. It is MS-DOS's write (function 40h), where writing nothing sets
+    // the end of the file where the handle is up to.
+    let done = if args[2] == 0 {
+        set_end_of_file(ctx, &args[..1])?
+    } else {
+        write_file(ctx, &[args[0], args[1], args[2], 0, 0])?
+    };
+    Ok(if done == 0 { HFILE_ERROR } else { args[2] })
+}
+
+fn llseek(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // _llseek(file, offset, origin): SetFilePointer without its high half,
+    // whose failure is HFILE_ERROR too.
+    set_file_pointer(ctx, &[args[0], args[1], 0, args[2]])
+}
+
+fn lclose(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // _lclose(file): CloseHandle, answering zero when it closed something.
+    if close_handle(ctx, args)? == 0 {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        return Ok(HFILE_ERROR);
+    }
+    Ok(0)
 }
 
 /// Where a seek from here lands, and nothing when that is off the file.
@@ -1876,12 +2145,15 @@ fn get_logical_drives(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 /// address them, once, and stay there (#57).
 fn create_file_mapping(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateFileMappingA(file, security, protection, high, low, name).
-    let Some(Object::File { bytes, path, .. }) = ctx.state.object(args[0]) else {
-        // ERROR_INVALID_HANDLE.
-        ctx.state.last_error = 6;
+    let Some(Object::File { contents, path, .. }) = ctx.state.object(args[0]) else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
         return Ok(0);
     };
-    let (bytes, path) = (bytes.clone(), path.clone());
+    let (contents, path) = (contents.clone(), path.clone());
+    let bytes = match contents {
+        Contents::Held(bytes) => bytes,
+        Contents::Lies { start, len } => lying(ctx, &path, start, len)?,
+    };
     let len = u32::try_from(bytes.len()).unwrap_or(0);
     let at = ctx.state.next_mapping;
     let end = at
