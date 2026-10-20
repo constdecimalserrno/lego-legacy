@@ -12,6 +12,10 @@ The title's runtime only stores the word, and what it and its engine read of `Ge
 unchanged, so no route takes a different turn, and every run's digest moves; core's changelog
 lists them.
 
+Core's `RaiseException` puts `EFlags` and `Esp` in the context where `winnt.h` has them (#133).
+No handler on the title's chain reads its C++ throws' context, so no route takes a different
+turn, and the digest of every run that throws moves; core's changelog lists them.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

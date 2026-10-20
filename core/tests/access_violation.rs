@@ -3,6 +3,8 @@
 //! own handler chain, and a wall if nothing on it takes it. Code run from
 //! there, and the MS-DOS memory above it, are walls: Windows 9x lets a Win32
 //! process reach both, and this machine does not have what is there.
+//! `RaiseException` offers its exceptions through the same dispatch, with
+//! the same context (#133).
 //!
 //! Each guest is a few hand-assembled instructions, as the stub's are, given
 //! the thread block a title gets, and run by the loop every title runs on.
@@ -154,6 +156,54 @@ fn a_read_and_a_write_below_4_kib_are_access_violations_a_handler_can_take() {
             );
         }
     }
+}
+
+/// `RaiseException`'s context has the flags and the stack where `winnt.h`'s
+/// i386 `CONTEXT` has them: `EFlags` at 0xc0, `Esp` at 0xc4 (#133). The
+/// handler writes both down and carries on, and the call returns.
+#[test]
+fn raise_exception_s_context_has_eflags_and_esp_where_winnt_h_puts_them() {
+    let mut host = Headless::new();
+    let mut machine = machine(&mut host);
+    let raise = machine
+        .boundary
+        .bind_named("KERNEL32.dll", "RaiseException");
+    let mut code = frame(HANDLER);
+    code.push(0xf9); // stc: a flag that shows
+    code.extend([0x9c, 0x8f, 0x05]); // pushfd; pop [word 0]: the flags as raised
+    code.extend(le(word(0)));
+    // RaiseException(0xe0000001, 0, 0, null): nothing below changes a flag.
+    code.extend([0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68]);
+    code.extend(le(0xe000_0001));
+    code.push(0xb8);
+    code.extend(le(raise));
+    code.extend([0xff, 0xd0]); // call eax
+    code.extend(exit(&mut machine));
+
+    let mut handler = vec![0x8b, 0x44, 0x24, 0x0c]; // mov eax, [esp+12]: the context
+    for (field, to) in [(0xc0, 1), (0xc4, 2)] {
+        handler.extend([0x8b, 0x88]); // mov ecx, [eax+field]
+        handler.extend(le(field));
+        handler.extend([0x89, 0x0d]); // mov [word to], ecx
+        handler.extend(le(word(to)));
+    }
+    handler.extend([0x31, 0xc0, 0xc3]); // xor eax, eax: ExceptionContinueExecution
+
+    let outcome = run(
+        &mut machine,
+        &mut host,
+        &[(CODE, code), (HANDLER, handler)],
+        Trace::Off,
+    );
+    assert_eq!(outcome, Outcome::Exited { code: 0 });
+    let read = |n| machine.arena.read_u32(word(n)).expect("in the arena");
+    assert_eq!(read(0) & 1, 1, "the carry is set");
+    assert_eq!(read(1), read(0), "EFlags as they were when it was raised");
+    assert_eq!(
+        read(2),
+        STACK_TOP - 44,
+        "Esp at the call's return address, its four arguments and the frame above it"
+    );
 }
 
 /// A frame whose handler says to keep looking, and nothing after it: the run

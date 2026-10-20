@@ -2463,14 +2463,10 @@ pub fn dispatch(
     put(ctx, 0xb0, r[EAX])?;
     put(ctx, 0xb4, r[EBP])?;
     put(ctx, 0xb8, raised_at)?;
-    // ponytail: `RaiseException`'s context has EFlags and Esp one field late,
-    // at 0xc4 and 0xc8 where `winnt.h` has 0xc0 and 0xc4. A fault's are where
-    // `winnt.h` puts them, because the program below puts the processor back
-    // from there. Putting `RaiseException`'s right moves the digest of every
-    // route that throws, so it waits for the maintainer's blessing (#133).
-    let (eflags_at, esp_at) = if fault { (0xc0, 0xc4) } else { (0xc4, 0xc8) };
-    put(ctx, eflags_at, ctx.cpu.flags.to_eflags())?;
-    put(ctx, esp_at, r[ESP])?;
+    // EFlags and Esp where `winnt.h`'s i386 CONTEXT has them, after SegCs at
+    // 0xbc, for a fault and `RaiseException` alike (#133).
+    put(ctx, 0xc0, ctx.cpu.flags.to_eflags())?;
+    put(ctx, 0xc4, r[ESP])?;
 
     // The chain, walked here so that the program below has every handler on
     // it: a frame is the next frame and the handler, in that order.

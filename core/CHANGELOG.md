@@ -366,6 +366,28 @@ Island goes on into its Information Center and its idle loop, past 19 billion in
 wall. `core/tests/shims.rs` clears and draws a lit mesh, and a textured one whose surface changes,
 and puts a frame in the world through a null reference. No other title's route moves.
 
+`RaiseException`'s `CONTEXT` had `EFlags` and `Esp` one field late, at 0xc4 and 0xc8 (#133).
+`winnt.h`'s i386 `CONTEXT` (Wine's `include/winnt.h`) has `EFlags` at 0xc0, `Esp` at 0xc4 and
+`SegSs` at 0xc8, so a handler reading the stack pointer out of it read the flags, breaking golden
+rule 4. A fault's context already had them there. The one writer in `kernel32::dispatch` now puts
+them there for both.
+
+Only Alpha Team raises through `RaiseException`: its C++ throws, `0xe06d7363`, eight of them
+before its 20 millionth instruction. No handler on its chain reads or writes any byte of the
+context: watched on `menu.route` to 45.7 billion instructions, no guest instruction touches one.
+So no title takes a different turn and every end line is unchanged. The contexts are on the heap
+the digest hashes, so the digest of every Alpha Team run that throws moves:
+
+- `first-mission.route` `8ca987d2…` to `1b7d7349…`, `menu.route` `d237d472…` to `f34a24e8…`,
+  `select-adventure.route` `27585089…` to `87323b4d…`, `click-the-intro-300.route` `2ca490be…` to
+  `a71a75d7…`, `click-the-intro-600.route` `d67fb670…` to `00c2662d…`.
+- The runs with no route to 600,000,000 (`7b40ea29…` to `198706f8…`) and 1,100,000,000
+  (`920a2827…` to `1a08e772…`).
+
+The runs to 100,000, 200,000 and 2,000,000 throw nothing and do not move, and no other title's
+run or stub's moves. `core/tests/access_violation.rs` reads both fields back from a handler
+`RaiseException` called. Waiting on the maintainer's acceptance.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
