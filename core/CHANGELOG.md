@@ -226,7 +226,7 @@ are guest memory, so the digest of every title's run moves, and no stub's:
 - LEGO Island: its boot (measured to 435,000 `92babebb…` to `dfd1ac5e…`, before #117 moved its
   tests to 478,000), every call it logs the same, and the run to 1,000 `66dd6743…` to `20202003…`.
 
-Waiting on the maintainer's acceptance.
+Accepted by the maintainer on 2026-10-20, with Windows 95's word as Wine's `0xC0000004`.
 
 ## 1.0.0 — 2026-10-18
 
