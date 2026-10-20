@@ -13,10 +13,11 @@ use lego_legacy_core::testkit;
 use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::Title;
 
-/// Enough instructions for both C runtimes to start and the game to read
-/// its settings back, and no more: what the game asks for after that is the
-/// next ticket's (#114).
-const BOOT_BUDGET: u64 = 100_000;
+/// Enough instructions for both C runtimes to start, the game to read its
+/// settings back and open its window, and its engine to ask DirectDraw for
+/// Direct3D 2 (#114), and no more: what the engine does without it is not
+/// the path it takes on Windows, and Direct3D 2 is the next ticket's (#117).
+const BOOT_BUDGET: u64 = 435_000;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -116,6 +117,30 @@ fn the_game_finds_the_three_paths_its_installer_wrote_and_nothing_else() {
     for name in ["Full Screen", "Display Bit Depth", "3D Device ID"] {
         assert!(missing(name), "{name} is left to the game's default");
     }
+}
+
+#[test]
+fn the_game_opens_its_window_and_its_engine_asks_for_direct3d_2() {
+    let Some(ran) = boot() else { return };
+
+    // Mouse trails off, a window with a caption, and WIN.INI asked for a
+    // media path it does not have (#114).
+    ran.assert_logged("call USER32.dll!SystemParametersInfoA(0x5d, 0x0, 0x0, 0x0)")
+        .assert_logged("window class Lego Island MainNoM App procedure 0x00401d20")
+        .assert_logged("641x481 at 0,0")
+        .assert_logged("call KERNEL32.dll!GetProfileStringA(")
+        // The engine starts its sound, then looks for a display to draw on
+        // with Direct3D, and asks for it by the second interface's name.
+        .assert_logged("dsound primary format 11025 Hz, 2 channels, 16 bits")
+        .assert_logged("ddraw modes: 640x480x16, the only one declared")
+        .assert_logged(
+            "com IDirectDraw was asked for 6aae1ec1-662a-11d0-889d-00aa00bbb76a and refused",
+        );
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing before Direct3D stops the run"
+    );
 }
 
 #[test]

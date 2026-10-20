@@ -35,9 +35,15 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "LoadIconA", 2, load_resource),
     stdcall("USER32", "GetClientRect", 2, client_rect),
     stdcall("USER32", "GetWindowRect", 2, client_rect),
+    // A window's frame is its border, caption and menu, each as wide as
+    // `GetSystemMetrics` says, and the declared machine's are all zero: its
+    // window is the screen. So the rectangle a client area needs is the
+    // client area, whatever the style asks for (#114).
     stdcall("USER32", "AdjustWindowRect", 3, succeed),
+    stdcall("USER32", "AdjustWindowRectEx", 4, succeed),
     stdcall("USER32", "SetWindowPos", 7, succeed),
     stdcall("USER32", "SetWindowLongA", 3, succeed_zero),
+    stdcall("USER32", "GetWindowLongA", 2, window_long),
     stdcall("USER32", "MessageBoxA", 4, message_box),
     stdcall("USER32", "GetDC", 1, succeed_zero),
     stdcall("USER32", "ReleaseDC", 2, succeed),
@@ -65,6 +71,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "SetCapture", 1, succeed_zero),
     stdcall("USER32", "ReleaseCapture", 0, succeed),
     cdecl("USER32", "wsprintfA", 2, wsprintf),
+    stdcall("USER32", "SystemParametersInfoA", 4, system_parameters),
 ];
 
 /// The one window the declared machine has.
@@ -251,11 +258,36 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // sent.
     let first = !ctx.state.window_made;
     ctx.state.window_made = true;
+    ctx.state.window_style = args[3];
     if first {
         let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
         activate(ctx.state, time);
     }
     Ok(WINDOW)
+}
+
+/// A word of what the window system keeps about a window.
+///
+/// Only its style is answered: the one LEGO Island's engine reads, to see
+/// whether a person could drag its window's edges before it takes the screen
+/// (#114).
+// ponytail: the style as `CreateWindowExA` was given it. `SetWindowLongA`
+// keeps nothing, and the bits Windows adds itself (`WS_VISIBLE` once shown,
+// `WS_CLIPSIBLINGS` on a top-level window) are not added; answer them when a
+// title reads one back.
+fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetWindowLongA(window, index).
+    const GWL_STYLE: u32 = -16i32 as u32;
+    match (args[0], args[1]) {
+        (WINDOW, GWL_STYLE) if ctx.state.window_made => Ok(ctx.state.window_style),
+        (window, index) => Err(Stop::NotWritten {
+            what: format!(
+                "USER32.dll!GetWindowLongA: index {} of window {window:#x}",
+                index as i32
+            ),
+            caller: 0,
+        }),
+    }
 }
 
 /// What Windows tells a title when its own application becomes the active one.
@@ -738,6 +770,27 @@ fn system_metrics(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         // Everything else is a border or a caption this machine does not have.
         _ => 0,
     })
+}
+
+/// A system-wide setting, set or read.
+///
+/// Only what a title has been seen to ask is answered; any other action is a
+/// wall that names it, rather than a success the title would believe.
+fn system_parameters(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SystemParametersInfoA(action, uiParam, pvParam, fWinIni).
+    const SPI_SETMOUSETRAILS: u32 = 0x005d;
+    match (args[0], args[1]) {
+        // Mouse trails off, which Windows spells as a trail of 0 or of 1. This
+        // machine draws no trail, so there is nothing to turn off. LEGO Island
+        // turns them off before it makes its window (#114).
+        (SPI_SETMOUSETRAILS, 0 | 1) => Ok(1),
+        (action, param) => Err(Stop::NotWritten {
+            what: format!(
+                "USER32.dll!SystemParametersInfoA: action {action:#06x}, uiParam {param}"
+            ),
+            caller: 0,
+        }),
+    }
 }
 
 fn load_resource(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

@@ -222,6 +222,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "SetFileAttributesA", 2, set_file_attributes),
     stdcall("KERNEL32", "GlobalMemoryStatus", 1, global_memory_status),
     stdcall("KERNEL32", "GetComputerNameA", 2, get_computer_name),
+    stdcall("KERNEL32", "GetProfileStringA", 5, get_profile_string),
     stdcall("KERNEL32", "CreateThread", 6, create_thread),
     stdcall("KERNEL32", "ResumeThread", 1, resume_thread),
     stdcall("KERNEL32", "SetThreadPriority", 2, set_thread_priority),
@@ -2954,6 +2955,28 @@ fn get_computer_name(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], written).map_err(Stop::Fault)?;
     Ok(1)
+}
+
+/// A setting from `WIN.INI`, which the declared machine does not have.
+///
+/// So no section holds the key, and Windows' answer for a missing key is the
+/// caller's own default, cut to fit, with any trailing blanks left off. LEGO
+/// Island asks its own section for a `MediaPath` before it starts its engine
+/// (#114).
+fn get_profile_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetProfileStringA(section, key, default, out, room).
+    let (section, key, default, out, room) = (args[0], args[1], args[2], args[3], args[4]);
+    if section == 0 || key == 0 {
+        // A null section or key asks for the names in the file instead.
+        return Err(Stop::NotWritten {
+            what: "KERNEL32.dll!GetProfileStringA: listing WIN.INI's names".to_owned(),
+            caller: 0,
+        });
+    }
+    // A null default is an empty one.
+    let default = ctx.string(default).map_err(Stop::Fault)?;
+    ctx.write_string(out, room, default.trim_end_matches(' '))
+        .map_err(Stop::Fault)
 }
 
 /// A second thread, which the machine runs cooperatively (ADR-0005).

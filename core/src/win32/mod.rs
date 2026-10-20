@@ -272,6 +272,8 @@ pub struct State {
     pub window_procedure: u32,
     /// Whether the guest has made its window.
     pub window_made: bool,
+    /// The style its window was made with.
+    pub window_style: u32,
     /// Where the pointer is, in the guest's own coordinates.
     pub pointer: (i32, i32),
     /// Where a person last put the pointer, which is what the mouse moved
@@ -408,6 +410,7 @@ impl State {
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
+            window_style: 0,
             // The middle of the screen: where Windows leaves the pointer when
             // a mode is set, and so where a title that draws its own starts
             // it. The first thing the mouse does is measured from here, and

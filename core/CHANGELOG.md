@@ -137,6 +137,22 @@ Waits on several handles and on threads, as Win32 documents them, for LEGO Islan
 
 `core/tests/threads.rs` proves each on hand-assembled guests, without a title. No route moves.
 
+What LEGO Island asks for before Direct3D (#114), each written when its run stopped there:
+
+- `SystemParametersInfoA` turns mouse trails off (`SPI_SETMOUSETRAILS` with 0 or 1), which this
+  machine never draws. Any other action is a wall that names it.
+- `AdjustWindowRectEx` leaves the rectangle as it is, as `AdjustWindowRect` already did: a
+  frame is as wide as `GetSystemMetrics` says its border, caption and menu are, and the declared
+  machine's are all zero.
+- `GetProfileStringA` answers the caller's default, cut to fit and with trailing blanks left
+  off: the declared machine has no `WIN.INI`, so no section holds the key. A null section or key,
+  which lists names, is a wall.
+- `GetWindowLongA` answers `GWL_STYLE` with the style `CreateWindowExA` was given. Any other
+  index is a wall.
+
+`core/tests/shims.rs` calls each one as a title would, without a title, and holds `VirtualAlloc`
+to Windows' 64 KiB granularity, which SmartHeap finds its blocks' headers by. No route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
