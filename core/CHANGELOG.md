@@ -324,6 +324,48 @@ Past the meshes, the same run stopped at two more:
 Island now runs to 3,770,493,606, flip 3200, where its viewport's `Clear` is #120's.
 `core/tests/shims.rs` builds meshes and forces an update. No other title's route moves.
 
+Retained mode draws its own meshes, lit and textured (#120), which is how LEGO Island draws its
+Information Center's actors. Each was written when Island's run stopped there:
+
+- DirectX 5's `IDirect3DRMViewport::Clear` takes no flags and clears everything, as Wine's d3drm
+  forwards it (`D3DRMCLEAR_ALL`): the viewport's part of the surface to its camera's scene's
+  background, as DirectX 6's already did for Rock Raiders, and now the depth buffer under it too
+  (`d3d::clear_depth`).
+- `Render` draws a mesh hung on a frame itself, group by group, through the immediate-mode
+  device underneath, with the projection and the rasteriser Rock Raiders' user visuals already
+  draw through (`d3d::rasterise`, taken out of `DrawPrimitive` unchanged). The device's quality
+  is the most a group's is drawn with: flat or Gouraud, lit or not; points, wireframe and Phong
+  are walls. A face is in front when its corners go round clockwise, and one turned away is not
+  drawn. A lit vertex takes the group's colour from the scene's lights and the material's
+  emissive colour, and a material's highlight (Direct3D's specular term, with the viewer as far
+  away as can be) is added over the texture. A group's colour with alpha is blended over what is
+  behind it. A scene of both meshes and user visuals is a wall.
+- A frame can be a visual of another, which draws its tree again wherever that frame is: Island
+  hangs every model on a frame of its own and adds that frame to the one that places it.
+- `IDirect3DRM2::CreateTextureFromSurface` keeps the surface, with a reference to it, and a
+  texture's texels are read from the surface each time it is drawn, never copied. So
+  `IDirect3DRMTexture2::Changed` has nothing to do.
+- `CreateMaterial` keeps its power, and `SetSpecular` and `SetEmissive` their colours. A
+  material starts with a white highlight, as Wine's d3drm makes one (`scene::Material`).
+- `IDirect3DRMMesh::GetGroupTexture` hands back DirectX 3's `IDirect3DRMTexture`, as the header
+  has it, which Island asks for `{120f30c0-1629-11d0-941c-0080c80cfa7b}`: that is
+  `IID_IDirect3DRMTexture2` in Wine's `d3drmobj.h`, the same texture's DirectX 5 face.
+- A null reference frame is the world, whatever the frame hangs from. It was a wall for a frame
+  with a parent.
+
+`SetField` is the half-width of the view at the front plane, which the projection already was:
+Island's front plane is a tenth of a unit away, where Rock Raiders' a unit away hid it.
+
+The projection still stretches the field to the viewport's own edges, fitted to Rock Raiders
+(#29). Retained mode's documented default is uniform scaling, and Wine's tests hold a native
+viewport to one scale across and down; Island's minifigures look a third too wide without it.
+Rock Raiders never calls `SetUniformScaling`, so the two titles cannot be told apart, and uniform
+scaling would move every Rock Raiders route. That is left to the maintainer.
+
+Island goes on into its Information Center and its idle loop, past 19 billion instructions with no
+wall. `core/tests/shims.rs` clears and draws a lit mesh, and a textured one whose surface changes,
+and puts a frame in the world through a null reference. No other title's route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

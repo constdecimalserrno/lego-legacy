@@ -221,6 +221,13 @@ const FACES: &[(&str, &str, &str)] = &[
         "eb16cb03-d271-11ce-ac48-0000c03825a1",
         "IDirect3DRMFrame",
     ),
+    // A retained-mode texture asked for as DirectX 5's face of itself, as
+    // LEGO Island asks of a mesh group's texture (#120).
+    (
+        "IDirect3DRMTexture",
+        "120f30c0-1629-11d0-941c-0080c80cfa7b",
+        "IDirect3DRMTexture2",
+    ),
     // A surface asked for as the texture Direct3D draws it as (#11).
     (
         "IDirectDrawSurface",
@@ -291,6 +298,11 @@ const OWN: &[(&str, &str)] = &[
     (
         "IDirect3DRMMeshBuilder3",
         "4516ec82-8f20-11d0-9b6d-0000c0781bc3",
+    ),
+    ("IDirect3DRMTexture", "eb16cb09-d271-11ce-ac48-0000c03825a1"),
+    (
+        "IDirect3DRMTexture2",
+        "120f30c0-1629-11d0-941c-0080c80cfa7b",
     ),
     (
         "IDirect3DRMTexture3",
@@ -368,6 +380,8 @@ fn is_itself(interface: &str, asked: &str) -> bool {
             | "IDirect3DRMViewport2"
             | "IDirect3DRMMesh"
             | "IDirect3DRMMeshBuilder3"
+            | "IDirect3DRMTexture"
+            | "IDirect3DRMTexture2"
             | "IDirect3DRMTexture3"
             | "IDirect3DRMLight"
             | "IDirect3DRMMaterial2"
@@ -380,6 +394,8 @@ fn is_itself(interface: &str, asked: &str) -> bool {
             | "IDirect3DRMFrame3"
             | "IDirect3DRMMesh"
             | "IDirect3DRMMeshBuilder3"
+            | "IDirect3DRMTexture"
+            | "IDirect3DRMTexture2"
             | "IDirect3DRMTexture3"
             | "IDirect3DRMUserVisual"
     );

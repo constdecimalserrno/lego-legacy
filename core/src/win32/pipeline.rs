@@ -189,9 +189,45 @@ pub fn light(
     ambient: [f32; 3],
     lights: &[Light],
 ) -> [f32; 4] {
+    lit(position, normal, material, ambient, lights, None).0
+}
+
+/// [`light`]'s colour, and with `highlight` the highlight each light puts on
+/// the vertex too: Direct3D's specular term, with the viewer as far away as
+/// can be in the direction given and the material's power, which is how
+/// retained mode lights a mesh unless a title asks its device for highlights
+/// that depend on where the viewer is (#120).
+#[must_use]
+pub fn lit(
+    position: [f32; 3],
+    normal: [f32; 3],
+    material: &Material,
+    ambient: [f32; 3],
+    lights: &[Light],
+    viewer: Option<[f32; 3]>,
+) -> ([f32; 4], [f32; 3]) {
     let normal = normalise(normal).unwrap_or([0.0, 0.0, 0.0]);
     let mut ambient = ambient;
     let mut lit = [0.0f32; 3];
+    let mut shine = [0.0f32; 3];
+    // The highlight of a light towards `l` with this much of its strength
+    // reaching the vertex, on a side the light falls on.
+    let mut highlight = |colour: [f32; 3], l: [f32; 3], reaching: f32| {
+        let Some(h) = viewer.and_then(|v| normalise(std::array::from_fn(|i| l[i] + v[i]))) else {
+            return;
+        };
+        let along = dot(normal, h);
+        if dot(normal, l) <= 0.0 || along <= 0.0 {
+            return;
+        }
+        // The engine's own powers, never the host's.
+        let power = crate::cpu::x87::maths::pow2(
+            f64::from(material.power) * crate::cpu::x87::maths::log2(f64::from(along)),
+        ) as f32;
+        for (s, c) in shine.iter_mut().zip(colour) {
+            *s += c * power * reaching;
+        }
+    };
     let mut add = |colour: [f32; 3], strength: f32| {
         for (l, c) in lit.iter_mut().zip(colour) {
             *l += c * strength;
@@ -216,7 +252,9 @@ pub fn light(
             }
             Light::Directional { colour, direction } => {
                 if let Some(d) = normalise(direction) {
-                    add(colour, dot(normal, d.map(|c| -c)).max(0.0));
+                    let towards = d.map(|c| -c);
+                    add(colour, dot(normal, towards).max(0.0));
+                    highlight(colour, towards, 1.0);
                 }
             }
             Light::Point {
@@ -228,6 +266,7 @@ pub fn light(
                 let (Some(l), d) = toward(at) else { continue };
                 if d <= range {
                     add(colour, dot(normal, l).max(0.0) * falloff(d, attenuation));
+                    highlight(colour, l, falloff(d, attenuation));
                 }
             }
             Light::Spot {
@@ -258,6 +297,7 @@ pub fn light(
                     colour,
                     dot(normal, l).max(0.0) * falloff(d, attenuation) * cone,
                 );
+                highlight(colour, l, falloff(d, attenuation) * cone);
             }
         }
     }
@@ -265,12 +305,15 @@ pub fn light(
         (material.emissive[i] + ambient[i] * material.ambient[i] + lit[i] * material.diffuse[i])
             .clamp(0.0, 1.0)
     };
-    [
-        channel(0),
-        channel(1),
-        channel(2),
-        material.diffuse[3].clamp(0.0, 1.0),
-    ]
+    (
+        [
+            channel(0),
+            channel(1),
+            channel(2),
+            material.diffuse[3].clamp(0.0, 1.0),
+        ],
+        std::array::from_fn(|i| (shine[i] * material.specular[i]).clamp(0.0, 1.0)),
+    )
 }
 
 /// A vertex in clip space, with what it carries to the screen.
@@ -454,6 +497,38 @@ mod tests {
             &spot,
         );
         assert_eq!((under[0], aside[0]), (1.0, 0.0));
+    }
+
+    /// A highlight is brightest where the surface faces halfway between the
+    /// light and the viewer, and sharper the greater the material's power
+    /// (#120).
+    #[test]
+    fn a_highlight_is_where_the_surface_faces_between_light_and_viewer() {
+        let shiny = |power: f32| Material {
+            diffuse: [0.0, 0.0, 0.0, 1.0],
+            ambient: [0.0; 4],
+            specular: [1.0; 4],
+            emissive: [0.0; 4],
+            power,
+        };
+        // The light and the viewer both straight out from the surface.
+        let sun = [Light::Directional {
+            colour: [1.0; 3],
+            direction: [0.0, 0.0, 1.0],
+        }];
+        let up = [0.0, 0.0, -1.0];
+        let (_, square) = super::lit([0.0; 3], up, &shiny(10.0), [0.0; 3], &sun, Some(up));
+        assert!(square.iter().all(|s| (s - 1.0).abs() < 1e-6), "{square:?}");
+        // Tilted, less of it, and less again for a higher power.
+        let tilted = [0.0, 0.5, -1.0];
+        let shine =
+            |power: f32| super::lit([0.0; 3], tilted, &shiny(power), [0.0; 3], &sun, Some(up)).1[0];
+        assert!(shine(10.0) < 1.0 && shine(20.0) < shine(10.0));
+        // And none without a viewer to see it.
+        assert_eq!(
+            super::lit([0.0; 3], up, &shiny(10.0), [0.0; 3], &sun, None).1,
+            [0.0; 3]
+        );
     }
 
     #[test]

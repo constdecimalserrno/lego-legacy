@@ -1,13 +1,14 @@
 //! What KERNEL32, USER32 and retained mode answer, called as a title calls
 //! them but without one: each shim or method run on the stub's machine with
 //! the arguments a title would push, and what it wrote and answered read back
-//! (#114, #117, #118, #119).
+//! (#114, #117, #118, #119, #120).
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
 use lego_legacy_core::guest::GuestMem;
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::Machine;
+use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::win32::{self, user32::WINDOW, Ctx};
 use lego_legacy_core::Title;
@@ -654,4 +655,397 @@ fn a_viewport_forced_to_update_has_nothing_to_copy() {
         force(&mut m, [0, 0, 641, 480]),
         Err(Stop::NotWritten { .. })
     ));
+}
+
+/// Call the method of `interface` called `name` on `this`.
+fn method(
+    m: &mut Machine,
+    interface: &str,
+    name: &str,
+    this: u32,
+    args: &[u32],
+) -> Result<u32, Stop> {
+    let slot = win32::interface_named(interface)
+        .and_then(|i| i.methods.iter().position(|method| method.name == name))
+        .unwrap_or_else(|| panic!("{interface} has {name}"));
+    com(m, interface, slot, this, args)
+}
+
+/// Call a method that makes something, and hand back what it made.
+fn made(m: &mut Machine, interface: &str, name: &str, this: u32, args: &[u32]) -> u32 {
+    let mut args = args.to_vec();
+    args.push(OUT);
+    assert_eq!(method(m, interface, name, this, &args), Ok(0), "{name}");
+    m.arena.read_u32(OUT).expect("in the arena")
+}
+
+fn floats<const N: usize>(values: [f32; N]) -> [u32; N] {
+    values.map(f32::to_bits)
+}
+
+/// A drawing surface's pixels, 64 by 48 at sixteen bits, and a texture's.
+const PIXELS: u32 = 0x0052_0000;
+const TEXELS: u32 = 0x0052_8000;
+
+fn surface(m: &mut Machine, pixels: u32, width: u32, height: u32) -> u32 {
+    with_ctx(m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            &win32::ddraw::DIRECT_DRAW_SURFACE,
+            win32::ComState::Surface {
+                pixels,
+                width,
+                height,
+                pitch: width * 2,
+                format: PixelFormat::RGB565,
+                primary: false,
+                back: 0,
+                palette: 0,
+            },
+        )
+        .map_err(Stop::Fault)
+    })
+    .expect("a surface")
+}
+
+fn pixel(m: &Machine, x: u32, y: u32) -> u32 {
+    let at = PIXELS + y * 128 + x * 2;
+    let bytes = m.arena.slice(at, 2).expect("in the arena");
+    u32::from(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    PixelFormat::RGB565.encode([r, g, b, 255])
+}
+
+/// What LEGO Island draws its world through (#117, #120): an immediate-mode
+/// device it made on a surface of its own, 64 by 48 here, and DirectX 5's
+/// retained mode over that at `quality`; a scene, blue behind, and a camera
+/// at its middle looking down z, seen through a viewport over the whole
+/// device whose front plane is 0.1 away and whose field there is 0.05 either
+/// side: a half-width of a half at every unit of distance.
+fn stage(m: &mut Machine, quality: u32) -> (u32, u32) {
+    let surface = surface(m, PIXELS, 64, 48);
+    let immediate = with_ctx(m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            &win32::d3d::DEVICE2,
+            win32::ComState::Device3D { surface },
+        )
+        .map_err(Stop::Fault)
+    })
+    .expect("a device");
+    let device = made(m, "IDirect3DRM2", "CreateDeviceFromD3D", 0, &[0, immediate]);
+    assert_eq!(
+        method(m, "IDirect3DRMDevice2", "SetQuality", device, &[quality]),
+        Ok(0)
+    );
+    let scene = made(m, "IDirect3DRM2", "CreateFrame", 0, &[0]);
+    let camera = made(m, "IDirect3DRM2", "CreateFrame", 0, &[scene]);
+    let viewport = made(
+        m,
+        "IDirect3DRM2",
+        "CreateViewport",
+        0,
+        &[device, camera, 0, 0, 64, 48],
+    );
+    let view = |m: &mut Machine, name: &str, value: f32| {
+        assert_eq!(
+            method(m, "IDirect3DRMViewport", name, viewport, &[value.to_bits()]),
+            Ok(0)
+        );
+    };
+    view(m, "SetFront", 0.1);
+    view(m, "SetBack", 10.0);
+    view(m, "SetField", 0.05);
+    let blue = floats([0.0, 0.0, 1.0]);
+    assert_eq!(
+        method(
+            m,
+            "IDirect3DRMFrame2",
+            "SetSceneBackgroundRGB",
+            scene,
+            &blue
+        ),
+        Ok(0)
+    );
+    (viewport, scene)
+}
+
+/// A mesh of one group: a square a unit across, facing back down z at the
+/// camera, wound clockwise as the camera sees it, and white; textured left
+/// to right and top to bottom.
+fn square(m: &mut Machine, quality: u32) -> u32 {
+    let mesh = made(m, "IDirect3DRM2", "CreateMesh", 0, &[]);
+    for (at, index) in [2, 3, 1, 2, 1, 0].into_iter().enumerate() {
+        m.arena
+            .write_u32(DATA + 4 * at as u32, index)
+            .expect("in the arena");
+    }
+    assert_eq!(
+        made(m, "IDirect3DRMMesh", "AddGroup", mesh, &[4, 2, 3, DATA]),
+        0
+    );
+    for (n, [x, y, u, v]) in [
+        [-0.5, -0.5, 0.0, 1.0],
+        [0.5, -0.5, 1.0, 1.0],
+        [-0.5, 0.5, 0.0, 0.0],
+        [0.5, 0.5, 1.0, 0.0],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let vertex = floats([x, y, 0.0, 0.0, 0.0, -1.0, u, v]);
+        for (i, word) in vertex.into_iter().chain([0]).enumerate() {
+            m.arena
+                .write_u32(DATA + 0x100 + 36 * n as u32 + 4 * i as u32, word)
+                .expect("in the arena");
+        }
+    }
+    let group = |m: &mut Machine, name: &str, args: &[u32]| {
+        assert_eq!(
+            method(m, "IDirect3DRMMesh", name, mesh, args),
+            Ok(0),
+            "{name}"
+        );
+    };
+    group(m, "SetVertices", &[0, 0, 4, DATA + 0x100]);
+    group(m, "SetGroupQuality", &[0, quality]);
+    group(m, "SetGroupMapping", &[0, 4]);
+    let white = floats([1.0, 1.0, 1.0]);
+    group(m, "SetGroupColorRGB", &[0, white[0], white[1], white[2]]);
+    mesh
+}
+
+/// Hang a frame in the scene `distance` in front of the camera, and the
+/// mesh on a frame of its own that is that frame's visual, as LEGO Island
+/// shares its models between the places it puts them.
+fn hang(m: &mut Machine, scene: u32, mesh: u32, distance: f32) -> u32 {
+    let place = made(m, "IDirect3DRM2", "CreateFrame", 0, &[scene]);
+    let at = floats([0.0, 0.0, distance]);
+    assert_eq!(
+        method(
+            m,
+            "IDirect3DRMFrame2",
+            "SetPosition",
+            place,
+            &[scene, at[0], at[1], at[2]]
+        ),
+        Ok(0)
+    );
+    let model = made(m, "IDirect3DRM2", "CreateFrame", 0, &[0]);
+    assert_eq!(
+        method(m, "IDirect3DRMFrame2", "AddVisual", model, &[mesh]),
+        Ok(0)
+    );
+    assert_eq!(
+        method(m, "IDirect3DRMFrame2", "AddVisual", place, &[model]),
+        Ok(0)
+    );
+    place
+}
+
+fn draw(m: &mut Machine, viewport: u32, scene: u32) {
+    assert_eq!(
+        method(m, "IDirect3DRMViewport", "Clear", viewport, &[]),
+        Ok(0)
+    );
+    assert_eq!(
+        method(m, "IDirect3DRMViewport", "Render", viewport, &[scene]),
+        Ok(0)
+    );
+}
+
+/// What LEGO Island's retained mode does to draw its world (#120). DirectX
+/// 5's Clear takes no flags and clears the viewport to its scene's
+/// background and its depth buffer to as far as it goes; Render draws every
+/// mesh in the scene where its frame puts it, lit by the scene's lights.
+///
+/// The field is the half-width at the front plane, not at a unit away: with
+/// the front plane at 0.1 and a field of 0.05 there, a square a unit across
+/// two units away covers the middle half of the viewport. Read as the
+/// half-width at a unit away, it would be twenty times as wide and cover
+/// all of it.
+#[test]
+fn a_viewport_clears_to_its_scene_and_draws_its_meshes_lit_where_they_are() {
+    let mut m = machine();
+    // Flat, lit and solid: the device's quality and the group's.
+    let (viewport, scene) = stage(&mut m, 0x88);
+    let mesh = square(&mut m, 0x88);
+    let place = hang(&mut m, scene, mesh, 2.0);
+    // A quarter of white all round, and half of white shining down z, full
+    // on the square's face.
+    let quarter = floats([0.25; 3]);
+    let half = floats([0.5; 3]);
+    let ambient = made(
+        &mut m,
+        "IDirect3DRM2",
+        "CreateLightRGB",
+        0,
+        &[0, quarter[0], quarter[1], quarter[2]],
+    );
+    let sun = made(
+        &mut m,
+        "IDirect3DRM2",
+        "CreateLightRGB",
+        0,
+        &[3, half[0], half[1], half[2]],
+    );
+    assert_eq!(
+        method(&mut m, "IDirect3DRMFrame2", "AddLight", scene, &[ambient]),
+        Ok(0)
+    );
+    assert_eq!(
+        method(&mut m, "IDirect3DRMFrame2", "AddLight", scene, &[sun]),
+        Ok(0)
+    );
+
+    draw(&mut m, viewport, scene);
+    // A light's colour is kept in bytes: a quarter is 63 of 255 and a half
+    // 127, which together are 190.
+    let (lit, sky) = (rgb(190, 190, 190), rgb(0, 0, 255));
+    for x in [17, 32, 46] {
+        assert_eq!(pixel(&m, x, 24), lit, "{x} across is the square, lit");
+    }
+    for x in [14, 49] {
+        assert_eq!(
+            pixel(&m, x, 24),
+            sky,
+            "{x} across is the scene's background"
+        );
+    }
+    assert_eq!(pixel(&m, 32, 2), sky);
+
+    // Moved back, the square is smaller and farther than what was drawn
+    // before: drawn only because Clear took the depth buffer back too.
+    let at = floats([0.0, 0.0, 3.0]);
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DRMFrame2",
+            "SetPosition",
+            place,
+            &[scene, at[0], at[1], at[2]]
+        ),
+        Ok(0)
+    );
+    draw(&mut m, viewport, scene);
+    assert_eq!(pixel(&m, 32, 24), lit);
+    assert_eq!(pixel(&m, 17, 24), sky);
+}
+
+/// A group's texture is DirectX 3's face of it, which LEGO Island asks for
+/// DirectX 5's face, `{120f30c0-1629-11d0-941c-0080c80cfa7b}` as Wine's
+/// `d3drmobj.h` names `IID_IDirect3DRMTexture2`; and it is drawn from its
+/// surface as the surface is when it is drawn, so changing the surface's
+/// pixels changes it, and `Changed` has nothing to do (#120).
+#[test]
+fn a_texture_is_drawn_from_its_surface_as_the_surface_is_now() {
+    let mut m = machine();
+    // Unlit: each pixel is the texel under it.
+    let (viewport, scene) = stage(&mut m, 0x80);
+    let mesh = square(&mut m, 0x80);
+    hang(&mut m, scene, mesh, 2.0);
+    // Two texels: red, then green.
+    let (red, green, blue) = (rgb(255, 0, 0), rgb(0, 255, 0), rgb(0, 0, 255));
+    let texels = |m: &mut Machine, left: u32, right: u32| {
+        m.arena
+            .write_u32(TEXELS, right << 16 | left)
+            .expect("in the arena");
+    };
+    texels(&mut m, red, green);
+    let image = surface(&mut m, TEXELS, 2, 1);
+    let texture = made(
+        &mut m,
+        "IDirect3DRM2",
+        "CreateTextureFromSurface",
+        0,
+        &[image],
+    );
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DRMMesh",
+            "SetGroupTexture",
+            mesh,
+            &[0, texture]
+        ),
+        Ok(0)
+    );
+    draw(&mut m, viewport, scene);
+    assert_eq!((pixel(&m, 20, 24), pixel(&m, 44, 24)), (red, green));
+
+    // GetGroupTexture hands back DirectX 3's face of the same texture.
+    let older = made(&mut m, "IDirect3DRMMesh", "GetGroupTexture", mesh, &[0]);
+    assert_eq!(m.state.interface_of(older), Some("IDirect3DRMTexture"));
+    assert_eq!(m.state.identity(older), m.state.identity(texture));
+    let iid = [
+        0xc0, 0x30, 0x0f, 0x12, 0x29, 0x16, 0xd0, 0x11, 0x94, 0x1c, 0x00, 0x80, 0xc8, 0x0c, 0xfa,
+        0x7b,
+    ];
+    m.arena.write(DATA, &iid).expect("in the arena");
+    let newer = made(
+        &mut m,
+        "IDirect3DRMTexture",
+        "QueryInterface",
+        older,
+        &[DATA],
+    );
+    assert_eq!(m.state.interface_of(newer), Some("IDirect3DRMTexture2"));
+
+    texels(&mut m, blue, red);
+    assert_eq!(
+        method(&mut m, "IDirect3DRMTexture2", "Changed", newer, &[1, 0]),
+        Ok(0)
+    );
+    draw(&mut m, viewport, scene);
+    assert_eq!((pixel(&m, 20, 24), pixel(&m, 44, 24)), (blue, red));
+}
+
+/// A null reference frame is the world (#120): a frame hung from one moved
+/// ten across is put where it is asked to be in the world, and read back
+/// from there, whatever its parent.
+#[test]
+fn a_null_reference_frame_is_the_world() {
+    let mut m = machine();
+    let parent = made(&mut m, "IDirect3DRM2", "CreateFrame", 0, &[0]);
+    let moved = floats([10.0, 0.0, 0.0]);
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DRMFrame2",
+            "SetPosition",
+            parent,
+            &[0, moved[0], moved[1], moved[2]]
+        ),
+        Ok(0)
+    );
+    let child = made(&mut m, "IDirect3DRM2", "CreateFrame", 0, &[parent]);
+    let at = floats([1.0, 2.0, 3.0]);
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DRMFrame2",
+            "SetPosition",
+            child,
+            &[0, at[0], at[1], at[2]]
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        method(&mut m, "IDirect3DRMFrame2", "GetPosition", child, &[0, OUT]),
+        Ok(0)
+    );
+    assert_eq!(vector(&m, OUT), [1.0, 2.0, 3.0]);
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DRMFrame2",
+            "GetPosition",
+            child,
+            &[parent, OUT]
+        ),
+        Ok(0)
+    );
+    assert_eq!(vector(&m, OUT), [-9.0, 2.0, 3.0]);
 }

@@ -1667,7 +1667,7 @@ fn draw(
     flags: u32,
 ) -> Result<u32, Stop> {
     use super::pipeline::{self, fvf, Clipped};
-    use crate::raster::{self, Blend, Combine, Compare, States};
+    use crate::raster::{Blend, Combine, Compare, States};
 
     let Some(size) = pipeline::vertex_size(format) else {
         return Err(unwritten(format!("{method}: vertex format {format:#x}")));
@@ -1944,6 +1944,69 @@ fn draw(
         6 => (1..n.saturating_sub(1)).map(|t| [0, t, t + 1]).collect(),
         other => return Err(unwritten(format!("{method}: primitive type {other}"))),
     };
+    let triangles: Vec<[Clipped; 3]> = triangles
+        .into_iter()
+        .filter_map(|[i, j, k]| Some([corner(i)?, corner(j)?, corner(k)?]))
+        .collect();
+    let canvas = Canvas {
+        pixels,
+        width,
+        height,
+        pitch,
+        format: pixel_format,
+        place,
+    };
+    rasterise(
+        ctx,
+        method,
+        this,
+        &canvas,
+        &triangles,
+        untransformed,
+        cull,
+        (texture, clamp),
+        states,
+    )?;
+    Ok(S_OK)
+}
+
+/// Where a draw lands: a device's surface, and the viewport over it.
+pub struct Canvas {
+    pub pixels: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub format: crate::raster::PixelFormat,
+    pub place: super::pipeline::Viewport,
+}
+
+/// Triangles in clip space, or already on the screen, into a device's
+/// surface through its depth buffer: cut to the view volume, culled as `cull`
+/// says, and drawn with the texture surface `texture` addressed as `clamp`
+/// says. What immediate mode's draws and retained mode's meshes (#120) both
+/// come down to.
+#[allow(clippy::too_many_arguments)]
+pub fn rasterise(
+    ctx: &mut Ctx<'_>,
+    method: &str,
+    this: u32,
+    canvas: &Canvas,
+    triangles: &[[super::pipeline::Clipped; 3]],
+    untransformed: bool,
+    cull: u32,
+    (texture, clamp): (u32, [bool; 2]),
+    mut states: crate::raster::States,
+) -> Result<(), Stop> {
+    use super::pipeline;
+    use crate::raster::{self, Combine};
+    let Canvas {
+        pixels,
+        width,
+        height,
+        pitch,
+        format: pixel_format,
+        place,
+    } = *canvas;
 
     // The texture the first stage samples, in its own format.
     let texture_state = ctx.state.com(texture).map(|o| o.state.clone());
@@ -2033,10 +2096,7 @@ fn draw(
         first_row: 0,
     };
     let mut list = Vec::new();
-    for [i, j, k] in triangles {
-        let (Some(a), Some(mut b), Some(mut c)) = (corner(i), corner(j), corner(k)) else {
-            continue;
-        };
+    for &[a, mut b, mut c] in triangles {
         if states.flat {
             // A flat triangle is the first vertex's colour throughout, which
             // clipping must not blend away.
@@ -2074,7 +2134,20 @@ fn draw(
     }
     raster::triangles(&mut target, &list, texture.as_ref(), &states);
     device_of(ctx.state, this).depth = depth;
-    Ok(S_OK)
+    Ok(())
+}
+
+/// Part of a device's depth buffer to as far as it goes: left, top, right and
+/// bottom, on a surface so wide and high.
+pub fn clear_depth(state: &mut State, device: u32, edges: [u32; 4], (width, height): (u32, u32)) {
+    let [left, top, right, bottom] = edges;
+    let (right, bottom) = (right.min(width), bottom.min(height));
+    let mut depth = take_depth(state, device, width, height);
+    for y in top..bottom {
+        let row = (y * width) as usize;
+        depth[row + left.min(right) as usize..row + right as usize].fill(1.0);
+    }
+    device_of(state, device).depth = depth;
 }
 
 /// A device's depth buffer, taken out of the device for a draw to use and

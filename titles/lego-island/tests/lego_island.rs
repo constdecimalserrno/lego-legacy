@@ -24,10 +24,14 @@ use lego_legacy_core::Title;
 const BOOT_BUDGET: u64 = 5_571_000;
 
 /// Enough instructions for the game to build its world, about four hundred
-/// meshes, out of `WORLD.WDB` (#119), and play its intro, and no more: at
-/// 3,770,493,606 its retained mode clears its viewport to draw the island,
-/// which is #120's.
-const WORLD_BUDGET: u64 = 3_770_493_500;
+/// meshes, out of `WORLD.WDB` (#119), play its intro, and go into its
+/// Information Center, whose actors retained mode draws itself (#120): its
+/// first frame is flip 3200, and by flip 3437 the Infomaniac is walking about.
+const WORLD_BUDGET: u64 = 3_800_000_000;
+
+/// The Information Center's first frame: the stage painted, and the two
+/// plants on it drawn by retained mode.
+const INFORMATION_CENTER: u64 = 3200;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -339,28 +343,52 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
 fn world(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
 ) -> Option<&'static testkit::Ran> {
-    testkit::replay(slot, scratch, &ISLAND, &Cli::default(), &[], WORLD_BUDGET)
+    testkit::replay(
+        slot,
+        scratch,
+        &ISLAND,
+        &Cli::default(),
+        &[INFORMATION_CENTER - 1, INFORMATION_CENTER],
+        WORLD_BUDGET,
+    )
 }
 
 static WORLD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
 /// Its four hundred meshes kept, its 3D sounds placed (their cones' outside
 /// volume set) and its viewport forced to update, the game's world is built
-/// and its intro plays on the screen, and nothing stops it on the way to
-/// drawing the island (#119).
+/// and its intro plays on the screen (#119); and then its Information Center
+/// is drawn, its viewport cleared, the room painted over it, and its actors
+/// drawn in front by retained mode, lit and textured (#120).
 #[test]
-fn the_game_builds_its_world_and_plays_its_intro() {
+fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() {
     let Some(ran) = world(&WORLD) else { return };
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
-        "nothing stops the run before it draws the island"
+        "nothing stops the run in its Information Center"
     );
-    assert_eq!(ran.finish.flips, 3200);
+    assert_eq!(ran.finish.flips, 3437);
     assert!(
         ran.host.frames.iter().any(|f| !f.is_uniform()),
         "the intro is on the screen"
     );
+
+    // Before the Information Center, the screen is cleared black; in its
+    // first frame the plants either side of the stage are green, where the
+    // painted stage under them is grey: retained mode's own meshes.
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+    assert!(frame(INFORMATION_CENTER - 1).is_uniform());
+    let first = frame(INFORMATION_CENTER);
+    for (x, y) in [(177, 317), (470, 318)] {
+        let at = (y * first.width as usize + x) * 4;
+        let [a, green, b] = [0, 1, 2].map(|i| first.pixels[at + i]);
+        assert!(
+            green > a && green > b,
+            "a plant at {x},{y}: {:?}",
+            [a, green, b]
+        );
+    }
 }
 
 #[test]

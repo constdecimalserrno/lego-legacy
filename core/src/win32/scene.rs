@@ -101,6 +101,26 @@ pub struct Group {
     pub texture: u32,
 }
 
+/// How a material reflects light (#120): what a title has set, and otherwise
+/// what Wine's d3drm starts one with, a white highlight and nothing given off.
+#[derive(Clone, Copy, Debug)]
+pub struct Material {
+    pub power: f32,
+    pub specular: [f32; 3],
+    pub emissive: [f32; 3],
+}
+
+impl Material {
+    #[must_use]
+    pub fn new(power: f32) -> Self {
+        Self {
+            power,
+            specular: [1.0; 3],
+            emissive: [0.0; 3],
+        }
+    }
+}
+
 /// A viewport's rectangle on its device: across, down, wide and high, in
 /// pixels.
 pub type Rect = (u32, u32, u32, u32);
@@ -218,12 +238,17 @@ impl View {
 }
 
 /// Every frame the guest has made, by the pointer it holds; every light,
-/// every mesh and every viewport.
+/// every mesh, material and texture, and every viewport.
 #[derive(Default)]
 pub struct Scene {
     pub frames: BTreeMap<u32, Frame>,
     pub lights: BTreeMap<u32, Light>,
     pub meshes: BTreeMap<u32, Mesh>,
+    pub materials: BTreeMap<u32, Material>,
+    /// Each texture's surface, which its texels are read from as it is
+    /// drawn, never copied: a title that changes the surface's pixels has
+    /// changed the texture (#120).
+    pub textures: BTreeMap<u32, u32>,
     pub viewports: BTreeMap<u32, View>,
     /// Where `D3DRMVectorRandom`'s sequence has got to, once it has started.
     pub random: Option<u32>,
@@ -481,6 +506,25 @@ mod tests {
             (back[2] - 1.0).abs() < 1e-6,
             "the back plane is as deep as it goes"
         );
+    }
+
+    /// A field is the half-width at the front plane, wherever that plane is:
+    /// LEGO Island's is a tenth of a unit away, with a field of 0.06128 there
+    /// (#120), where Rock Raiders' plane a unit away hid the difference.
+    #[test]
+    fn a_field_is_the_half_width_at_the_front_plane() {
+        let field = f32::from_bits(0x3d7b_00d2);
+        let view = super::View {
+            front: 0.1,
+            back: 250.0,
+            plane: [-field, field, -field, field],
+            projection: 0,
+        };
+        let m = view.perspective();
+        let across = |x: f32, z: f32| (x * m[0][0] + z * m[2][0]) / (z * m[2][3]);
+        assert!((across(field, 0.1) - 1.0).abs() < 1e-6);
+        // Ten times as far, the edge is ten times as far out.
+        assert!((across(field * 10.0, 1.0) - 1.0).abs() < 1e-6);
     }
 
     fn translation(x: f32, y: f32, z: f32) -> Matrix {

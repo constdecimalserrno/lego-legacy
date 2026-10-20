@@ -271,7 +271,7 @@ pub static VIEWPORT: Interface = Interface {
 
 const VIEWPORT_METHODS: &[crate::com::Method] = &{
     let mut methods = VIEWPORT2_METHODS;
-    methods[12] = wall("Clear", 0);
+    methods[12] = method("Clear", 0, clear1);
     methods
 };
 
@@ -528,7 +528,7 @@ pub static MESH: Interface = Interface {
         wall("GetGroupMapping", 1),
         wall("GetGroupQuality", 1),
         wall("GetGroupMaterial", 2),
-        wall("GetGroupTexture", 2),
+        method("GetGroupTexture", 2, get_group_texture),
     ],
 };
 
@@ -547,9 +547,18 @@ pub static TEXTURE2: Interface = Interface {
     methods: TEXTURE2_METHODS.split_at(33).0,
 };
 
+/// `IDirect3DRMTexture`: DirectX 3's face of the same texture, which is
+/// what a mesh hands back as a group's texture (#120). DirectX 5's as far as
+/// `GetDecalTransparentColor`, which is where DirectX 5's own additions
+/// start.
+pub static TEXTURE: Interface = Interface {
+    name: "IDirect3DRMTexture",
+    methods: TEXTURE2_METHODS.split_at(30).0,
+};
+
 const TEXTURE2_METHODS: &[crate::com::Method] = &{
     let mut methods = TEXTURE3_METHODS;
-    methods[14] = wall("Changed", 2);
+    methods[14] = method("Changed", 2, texture_changed);
     methods
 };
 
@@ -647,8 +656,8 @@ pub static MATERIAL2: Interface = Interface {
         method("GetName", 2, get_name),
         method("GetClassName", 2, get_class_name),
         wall("SetPower", 1),
-        method("SetSpecular", 3, material_unread),
-        method("SetEmissive", 3, material_unread),
+        method("SetSpecular", 3, material_specular),
+        method("SetEmissive", 3, material_emissive),
         wall("GetPower", 0),
         wall("GetSpecular", 3),
         wall("GetEmissive", 3),
@@ -818,6 +827,7 @@ pub static INTERFACES: &[&Interface] = &[
     &MESH_BUILDER3,
     &MESH,
     &TEXTURE3,
+    &TEXTURE,
     &TEXTURE2,
     &LIGHT,
     &MATERIAL2,
@@ -1050,6 +1060,46 @@ fn set_group_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
     set_group_object(ctx, this, args, "SetGroupTexture", |g| &mut g.texture)
 }
 
+fn texture_changed(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // Changed(pixels, palette): the title has changed its texture's surface.
+    // A texture here keeps no copy of it, and reads its surface every time it
+    // is drawn, so the next draw sees the change with nothing done here
+    // (#120).
+    if ctx
+        .state
+        .scene
+        .textures
+        .contains_key(&ctx.state.identity(this))
+    {
+        Ok(S_OK)
+    } else {
+        Ok(D3DRMERR_BADOBJECT)
+    }
+}
+
+fn get_group_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetGroupTexture(group, out): the texture a group is drawn with, as
+    // DirectX 3's face of it, which is what the header hands back, with a
+    // reference for the caller; or null for a group drawn with none.
+    let mut texture = 0;
+    let answer = with_group(ctx.state, this, args[0], "GetGroupTexture", |g| {
+        texture = g.texture;
+        Ok(S_OK)
+    })?;
+    if answer != S_OK {
+        return Ok(answer);
+    }
+    if args[1] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let face = match texture {
+        0 => 0,
+        t => State::face(ctx, t, &TEXTURE).map_err(Stop::Fault)?,
+    };
+    ctx.mem.write_u32(args[1], face).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
 fn mesh_box(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetBox(box): the least and the greatest corner of the box, along the
     // mesh's own axes, that holds every vertex of every group. A vertex never
@@ -1145,8 +1195,16 @@ fn create_texture(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
 
 /// DirectX 5's texture: the same texture, as the face DirectX 5 hands out.
 fn create_texture2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateTextureFromSurface(surface, out).
-    make(ctx, &TEXTURE2, args[1])
+    // CreateTextureFromSurface(surface, out): a texture that draws from the
+    // surface, which it holds a reference to (#120).
+    let (surface, out) = (args[0], args[1]);
+    let answer = make(ctx, &TEXTURE2, out)?;
+    if answer == S_OK {
+        let object = ctx.mem.read_u32(out).map_err(Stop::Fault)?;
+        ctx.state.com_ref(surface, 1);
+        ctx.state.scene.textures.insert(object, surface);
+    }
+    Ok(answer)
 }
 
 fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1176,20 +1234,50 @@ fn light(ctx: &mut Ctx<'_>, kind: u32, colour: u32, out: u32) -> Result<u32, Sto
 }
 
 fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // CreateMaterial(power, out).
-    make(ctx, &MATERIAL2, args[1])
+    material(ctx, &MATERIAL2, args)
 }
 
 /// DirectX 5's material: the same material, as the face DirectX 5 hands out.
 fn create_material1(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    make(ctx, &MATERIAL, args[1])
+    material(ctx, &MATERIAL, args)
 }
 
-fn material_unread(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // SetSpecular and SetEmissive(red, green, blue). Only a retained-mode mesh
-    // is drawn with a retained-mode material, and Render stops at a mesh, so
-    // nothing here would read what they set.
-    Ok(S_OK)
+fn material(ctx: &mut Ctx<'_>, face: &'static Interface, args: &[u32]) -> Result<u32, Stop> {
+    // CreateMaterial(power, out): the power is how sharp its highlights are.
+    let answer = make(ctx, face, args[1])?;
+    if answer == S_OK {
+        let object = ctx.mem.read_u32(args[1]).map_err(Stop::Fault)?;
+        let made = super::scene::Material::new(value(args[0]));
+        ctx.state.scene.materials.insert(object, made);
+    }
+    Ok(answer)
+}
+
+/// SetSpecular and SetEmissive(red, green, blue): the colour of the
+/// material's highlights, and the colour it gives off.
+fn with_material(
+    ctx: &mut Ctx<'_>,
+    this: u32,
+    args: &[u32],
+    which: fn(&mut super::scene::Material) -> &mut [f32; 3],
+) -> Result<u32, Stop> {
+    let colour = [value(args[0]), value(args[1]), value(args[2])];
+    let identity = ctx.state.identity(this);
+    match ctx.state.scene.materials.get_mut(&identity) {
+        Some(material) => {
+            *which(material) = colour;
+            Ok(S_OK)
+        }
+        None => Ok(D3DRMERR_BADOBJECT),
+    }
+}
+
+fn material_specular(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_material(ctx, this, args, |m| &mut m.specular)
+}
+
+fn material_emissive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    with_material(ctx, this, args, |m| &mut m.emissive)
 }
 
 fn destroy_callback(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
@@ -1506,11 +1594,39 @@ fn update(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
+/// `D3DRMCLEAR_TARGET`, `_ZBUFFER` and `_DIRTYRECTS`.
+const D3DRMCLEAR_TARGET: u32 = 0x1;
+const D3DRMCLEAR_ZBUFFER: u32 = 0x2;
+const D3DRMCLEAR_DIRTYRECTS: u32 = 0x4;
+
 fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Clear(flags). The viewport's own part of the device's surface goes to
-    // the background colour of the scene its camera is in. A depth buffer or
-    // dirty rectangles are not here to clear.
-    const D3DRMCLEAR_TARGET: u32 = 0x1;
+    // Clear(flags): Rock Raiders clears its target alone, and asks nothing
+    // else of it.
+    if args[0] != D3DRMCLEAR_TARGET {
+        return Err(Stop::NotWritten {
+            what: format!("IDirect3DRMViewport2::Clear: flags {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    clear_viewport(ctx, this, args[0])
+}
+
+fn clear1(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    // DirectX 5's Clear() takes no flags and clears everything, as Wine's
+    // d3drm forwards it: D3DRMCLEAR_ALL. LEGO Island clears so before it
+    // draws its island (#120).
+    clear_viewport(
+        ctx,
+        this,
+        D3DRMCLEAR_TARGET | D3DRMCLEAR_ZBUFFER | D3DRMCLEAR_DIRTYRECTS,
+    )
+}
+
+/// The viewport's own part of the device's surface goes to the background
+/// colour of the scene its camera is in, and of its depth buffer to as far as
+/// it goes. A viewport here draws straight into the surface, so there are no
+/// dirty rectangles to clear.
+fn clear_viewport(ctx: &mut Ctx<'_>, this: u32, flags: u32) -> Result<u32, Stop> {
     let Some(ComState::Viewport {
         device,
         camera,
@@ -1523,12 +1639,6 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    if args[0] != D3DRMCLEAR_TARGET {
-        return Err(Stop::NotWritten {
-            what: format!("IDirect3DRMViewport2::Clear: flags {:#x}", args[0]),
-            caller: 0,
-        });
-    }
     let camera = ctx.state.identity(camera);
     let background = ctx
         .state
@@ -1547,13 +1657,23 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let depth = format.bits;
-    super::fill(
-        ctx,
-        (pixels, pitch, depth),
-        (x, y, (x + width).min(sw), (y + height).min(sh)),
-        super::pixel(background, depth),
-    )?;
+    let edges = (x, y, (x + width).min(sw), (y + height).min(sh));
+    if flags & D3DRMCLEAR_TARGET != 0 {
+        let depth = format.bits;
+        super::fill(
+            ctx,
+            (pixels, pitch, depth),
+            edges,
+            super::pixel(background, depth),
+        )?;
+    }
+    if flags & D3DRMCLEAR_ZBUFFER != 0 {
+        let Some(immediate) = immediate_device(ctx, device)? else {
+            return Ok(D3DRMERR_BADOBJECT);
+        };
+        let (left, top, right, bottom) = edges;
+        super::d3d::clear_depth(ctx.state, immediate, [left, top, right, bottom], (sw, sh));
+    }
     Ok(S_OK)
 }
 
@@ -1586,6 +1706,16 @@ pub fn current_lights(state: &State) -> Vec<super::pipeline::Light> {
         return Vec::new();
     };
     let frame = pass.visits.get(pass.next).map_or(0, |v| v.frame);
+    lights_on(state, &pass.lights, frame)
+}
+
+/// The lights on what hangs on a frame: every light in its scene, less those
+/// enabled only for a frame this one is not under.
+fn lights_on(
+    state: &State,
+    lights: &[(u32, super::pipeline::Light)],
+    frame: u32,
+) -> Vec<super::pipeline::Light> {
     let under = |only: u32| {
         let mut at = frame;
         for _ in 0..=state.scene.frames.len() {
@@ -1599,7 +1729,7 @@ pub fn current_lights(state: &State) -> Vec<super::pipeline::Light> {
         }
         false
     };
-    pass.lights
+    lights
         .iter()
         .filter(|(only, _)| *only == 0 || under(*only))
         .map(|(_, light)| *light)
@@ -1632,7 +1762,7 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(ComState::Viewport { device, camera, .. }) = viewport_state(ctx, this) else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let mut visits = Vec::new();
+    let (mut visits, mut meshes) = (Vec::new(), Vec::new());
     let scene = ctx.state.identity(args[0]);
     // Whether a scene's fog is on is kept when a title sets it, and nothing
     // here draws fog, so a scene with it on is a wall.
@@ -1647,7 +1777,17 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    collect_visits(ctx, scene, &mut visits, 0)?;
+    collect_visits(ctx, scene, &mut visits, &mut meshes, 0, None)?;
+    // What retained mode draws itself and what it calls a title to draw are
+    // drawn in the order of the tree; no title has hung both in one, so the
+    // order between the two has not been needed.
+    if !visits.is_empty() && !meshes.is_empty() {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Render: a scene of both meshes and user visuals"
+                .to_owned(),
+            caller: 0,
+        });
+    }
     let mut lights = Vec::new();
     collect_lights(ctx, scene, &mut lights, 0)?;
     let (Some(immediate), Some(under)) = (
@@ -1687,6 +1827,35 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     super::d3d::set_device_transform(ctx.state, immediate, VIEW, &camera_world);
     super::d3d::set_device_transform(ctx.state, immediate, PROJECTION, &view.perspective());
     super::d3d::set_device_viewport(ctx.state, immediate, under);
+    if !meshes.is_empty() {
+        let count = meshes.len();
+        ctx.log.at(crate::cli::Trace::Shims, || {
+            format!("render {count} meshes")
+        });
+        let clip_from_world = super::scene::multiply(&camera_world, &view.perspective());
+        // The camera looks down its own z axis, so the viewer is back along
+        // it.
+        let back = super::scene::direct(
+            &ctx.state
+                .scene
+                .world(ctx.state.identity(camera))
+                .unwrap_or(super::scene::IDENTITY),
+            [0.0, 0.0, -1.0],
+        );
+        let viewer = super::scene::normalise(back).unwrap_or([0.0, 0.0, -1.0]);
+        let pass = MeshPass {
+            device,
+            immediate,
+            rect: viewport_rect(ctx, this),
+            clip_from_world,
+            viewer,
+            lights: &lights,
+        };
+        for (world, frame, mesh) in meshes {
+            draw_mesh(ctx, &pass, &world, frame, mesh)?;
+        }
+        return Ok(S_OK);
+    }
     let visuals = visits.len();
     ctx.log.at(crate::cli::Trace::Shims, || {
         format!("render {visuals} user visuals")
@@ -1793,31 +1962,64 @@ fn collect_lights(
     Ok(())
 }
 
-/// Every user visual in a frame's tree: the frame's own, then its children's.
+/// Every visual in a frame's tree, the frame's own then its children's: the
+/// title's own user visuals, and the meshes retained mode draws itself, each
+/// where its frame puts it in the world, with the frame in the scene it is
+/// lit as hanging from, and the mesh.
+///
+/// A frame can be a visual itself, which draws its tree again wherever the
+/// frame it was added to is (#120): that frame's place in the world is
+/// `instance`'s, and the frame in the scene it is drawn on.
 fn collect_visits(
     ctx: &Ctx<'_>,
     frame: u32,
     visits: &mut Vec<Visit>,
+    meshes: &mut Vec<(Matrix, u32, u32)>,
     depth: usize,
+    instance: Option<(Matrix, u32)>,
 ) -> Result<(), Stop> {
     let Some(node) = ctx.state.scene.frame(frame) else {
         return Ok(());
     };
-    // A frame that is its own ancestor has no place in any scene.
-    if depth > ctx.state.scene.frames.len() || ctx.state.scene.world(frame).is_none() {
+    // A frame that is its own ancestor, or its own visual, has no place in
+    // any scene.
+    let world = match instance {
+        Some((world, _)) => Some(world),
+        None => ctx.state.scene.world(frame),
+    };
+    let Some(world) = world.filter(|_| depth <= ctx.state.scene.frames.len()) else {
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a frame that is its own ancestor".to_owned(),
             caller: 0,
         });
-    }
+    };
+    let lit_as = instance.map_or(frame, |(_, on)| on);
     for &visual in &node.visuals {
+        let identity = ctx.state.identity(visual);
         match ctx.state.com(visual).map(|o| &o.state) {
-            Some(&ComState::UserVisual { callback, argument }) => visits.push(Visit {
-                frame,
-                callback,
-                argument,
-                visual,
-            }),
+            Some(&ComState::UserVisual { callback, argument }) if instance.is_none() => {
+                visits.push(Visit {
+                    frame,
+                    callback,
+                    argument,
+                    visual,
+                });
+            }
+            _ if ctx.state.scene.meshes.contains_key(&identity) => {
+                meshes.push((world, lit_as, identity));
+            }
+            _ if ctx.state.scene.frames.contains_key(&identity) => {
+                let local = ctx.state.scene.frames[&identity].local;
+                let placed = super::scene::multiply(&local, &world);
+                collect_visits(
+                    ctx,
+                    identity,
+                    visits,
+                    meshes,
+                    depth + 1,
+                    Some((placed, lit_as)),
+                )?;
+            }
             _ => {
                 return Err(Stop::NotWritten {
                     what: format!(
@@ -1830,7 +2032,233 @@ fn collect_visits(
         }
     }
     for &child in &node.children {
-        collect_visits(ctx, child, visits, depth + 1)?;
+        let child_instance = instance.map(|(_, on)| {
+            let local = ctx
+                .state
+                .scene
+                .frames
+                .get(&child)
+                .map_or(super::scene::IDENTITY, |f| f.local);
+            (super::scene::multiply(&local, &world), on)
+        });
+        collect_visits(ctx, child, visits, meshes, depth + 1, child_instance)?;
+    }
+    Ok(())
+}
+
+/// What a viewport draws every mesh of a render with (#120).
+struct MeshPass<'a> {
+    /// The retained-mode device, whose quality is the most any group is
+    /// drawn with, and the immediate-mode device under it, which draws.
+    device: u32,
+    immediate: u32,
+    rect: super::scene::Rect,
+    clip_from_world: Matrix,
+    /// The direction back towards the camera.
+    viewer: [f32; 3],
+    lights: &'a [(u32, super::pipeline::Light)],
+}
+
+/// `D3DRMRENDERQUALITY`'s three parts: how a face is shaded, whether the
+/// lights light it, and how it is filled.
+const SHADE_MASK: u32 = 0x7;
+const SHADE_FLAT: u32 = 0;
+const SHADE_GOURAUD: u32 = 1;
+const LIGHT_MASK: u32 = 0x38;
+const FILL_MASK: u32 = 0x1c0;
+const FILL_SOLID: u32 = 0x80;
+/// `D3DRMMAP_PERSPCORRECT`: a texture corrected for perspective, which is
+/// how this machine's rasteriser always draws one, and wrapping neither way.
+const MAP_PERSPCORRECT: u32 = 0x4;
+
+/// One mesh hung on a frame, group by group: its faces put in the world by
+/// the frame and on the viewport by the camera; lit, as its quality says, by
+/// the scene's lights falling on its colour and material, or left its colour;
+/// and textured from its texture's surface as that surface is now.
+///
+/// Every face is in front when its corners go round clockwise as the camera
+/// sees it, as they are in Direct3D, and a face turned away is not drawn.
+// ponytail: a translucent group's colour is blended over what is behind it,
+// in the order the groups are drawn. DirectX 5's retained mode stipples
+// translucency unless a title asks its device for blending, which LEGO
+// Island does not, and stippling is a pattern each card made its own way.
+fn draw_mesh(
+    ctx: &mut Ctx<'_>,
+    pass: &MeshPass<'_>,
+    world: &Matrix,
+    frame: u32,
+    mesh: u32,
+) -> Result<(), Stop> {
+    use super::pipeline::{self, Clipped};
+    use crate::raster::{Blend, Combine, Compare, States};
+    const METHOD: &str = "IDirect3DRMViewport::Render";
+    let unwritten = |what: String| Stop::NotWritten {
+        what: format!("{METHOD}: {what}"),
+        caller: 0,
+    };
+    let setting = |name: &'static str| {
+        let device = ctx.state.identity(pass.device);
+        ctx.state.set_values.get(&(device, name)).copied()
+    };
+    let device_quality = setting("quality")
+        .ok_or_else(|| unwritten("a device whose quality was never set".to_owned()))?;
+    // A device's textures start nearest, as its documentation says.
+    let linear = match setting("texture quality") {
+        None | Some(0) => false,
+        Some(1) => true,
+        Some(other) => return Err(unwritten(format!("texture quality {other}"))),
+    };
+    let Some(ComState::Surface {
+        pixels,
+        width,
+        height,
+        pitch,
+        format,
+        ..
+    }) = device_surface(ctx, pass.device).and_then(|s| ctx.state.com(s).map(|o| o.state.clone()))
+    else {
+        return Ok(());
+    };
+    if format.masks == [0; 4] {
+        return Err(unwritten("into an indexed surface".to_owned()));
+    }
+    let (x, y, w, h) = pass.rect;
+    let canvas = super::d3d::Canvas {
+        pixels,
+        width,
+        height,
+        pitch,
+        format,
+        place: pipeline::Viewport::whole(x, y, w, h),
+    };
+    let Some(groups) = ctx.state.scene.meshes.get(&mesh).map(|m| m.groups.len()) else {
+        return Ok(());
+    };
+    let clip_from_model = super::scene::multiply(world, &pass.clip_from_world);
+    let lights = lights_on(ctx.state, pass.lights, frame);
+    for group in 0..groups {
+        let scene = &ctx.state.scene;
+        let g = &scene.meshes[&mesh].groups[group];
+        let quality = g
+            .quality
+            .ok_or_else(|| unwritten("a group whose quality was never set".to_owned()))?;
+        // The device's quality is the most any group is drawn with.
+        let part = |mask: u32| (quality & mask).min(device_quality & mask);
+        if part(FILL_MASK) != FILL_SOLID {
+            return Err(unwritten(format!(
+                "a group filled as {:#x}",
+                part(FILL_MASK)
+            )));
+        }
+        if part(SHADE_MASK) > SHADE_GOURAUD {
+            return Err(unwritten(format!("a group shaded as {}", part(SHADE_MASK))));
+        }
+        let lit = part(LIGHT_MASK) != 0;
+        let colour = pipeline::colour(
+            g.colour
+                .ok_or_else(|| unwritten("a group whose colour was never set".to_owned()))?,
+        );
+        let material = match g.material {
+            0 => None,
+            m => Some(
+                *scene
+                    .materials
+                    .get(&ctx.state.identity(m))
+                    .ok_or_else(|| unwritten(format!("a material at {m:#x} nothing here made")))?,
+            ),
+        };
+        let texture = match g.texture {
+            0 => 0,
+            t => *scene
+                .textures
+                .get(&ctx.state.identity(t))
+                .ok_or_else(|| unwritten(format!("a texture at {t:#x} nothing here made")))?,
+        };
+        if texture != 0 && g.mapping != Some(MAP_PERSPCORRECT) {
+            return Err(unwritten(format!("a texture mapped as {:?}", g.mapping)));
+        }
+        let surface = pipeline::Material {
+            diffuse: colour,
+            ambient: colour,
+            specular: material.map_or([0.0; 4], |m| {
+                [m.specular[0], m.specular[1], m.specular[2], 0.0]
+            }),
+            emissive: material.map_or([0.0; 4], |m| {
+                [m.emissive[0], m.emissive[1], m.emissive[2], 0.0]
+            }),
+            power: material.map_or(0.0, |m| m.power),
+        };
+        let highlights = surface.specular != [0.0; 4];
+        // Every vertex once, lit where it is in the world.
+        let vertices: Vec<Option<Clipped>> = g
+            .vertices
+            .iter()
+            .map(|vertex| {
+                let vertex = (*vertex)?;
+                let v = |i: usize| value(vertex[i]);
+                let position = [v(0), v(1), v(2), 1.0];
+                let (diffuse, specular) = if lit {
+                    let at = pipeline::project(world, position);
+                    pipeline::lit(
+                        [at[0], at[1], at[2]],
+                        super::scene::direct(world, [v(3), v(4), v(5)]),
+                        &surface,
+                        [0.0; 3],
+                        &lights,
+                        highlights.then_some(pass.viewer),
+                    )
+                } else {
+                    (colour, [0.0; 3])
+                };
+                Some(Clipped {
+                    clip: pipeline::project(&clip_from_model, position),
+                    diffuse,
+                    specular,
+                    uv: [v(6), v(7)],
+                    fog: 1.0,
+                })
+            })
+            .collect();
+        let corner = |index: u32| {
+            vertices
+                .get(index as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| unwritten(format!("a face's vertex {index}, never set")))
+        };
+        // Each face a fan of triangles from its first corner.
+        let mut triangles = Vec::new();
+        for face in g.indices.chunks_exact(g.per_face as usize) {
+            let first = corner(face[0])?;
+            for pair in face[1..].windows(2) {
+                triangles.push([first, corner(pair[0])?, corner(pair[1])?]);
+            }
+        }
+        let states = States {
+            depth_test: Some(Compare::LessEqual),
+            depth_write: true,
+            flat: part(SHADE_MASK) == SHADE_FLAT,
+            colour: Combine::Modulate,
+            alpha: Combine::Modulate,
+            linear,
+            colour_key: false,
+            alpha_test: None,
+            blend: (colour[3] < 1.0).then_some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+            specular: lit && highlights,
+            fog: None,
+        };
+        // D3DCULL_CCW.
+        super::d3d::rasterise(
+            ctx,
+            METHOD,
+            pass.immediate,
+            &canvas,
+            &triangles,
+            true,
+            3,
+            (texture, [false; 2]),
+            states,
+        )?;
     }
     Ok(())
 }
@@ -1901,21 +2329,13 @@ fn frame_setting(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Sto
 
 /// Where a reference frame the guest passed puts things in the scene.
 ///
-/// A null reference is what Rock Raiders passes for a frame with no parent,
-/// having asked the frame for its parent first; for a frame at the top of its
-/// scene, relative to nothing and relative to the scene are the same thing.
-/// What a null means for a frame that has a parent has not been measured.
-fn reference(ctx: &Ctx<'_>, method: &str, frame: u32, at: u32) -> Result<Matrix, Stop> {
+/// A null reference is the world itself, the space the scene's root is in,
+/// whatever the frame hangs from (#120). Rock Raiders passes one for a frame
+/// with no parent, where relative to nothing and relative to the scene are
+/// the same thing; LEGO Island, for its camera.
+fn reference(ctx: &Ctx<'_>, method: &str, at: u32) -> Result<Matrix, Stop> {
     if at == 0 {
-        if ctx.state.scene.frame(frame).is_some_and(|f| f.parent == 0) {
-            return Ok(super::scene::IDENTITY);
-        }
-        return Err(Stop::NotWritten {
-            what: format!(
-                "IDirect3DRMFrame3::{method}: a null reference for a frame with a parent"
-            ),
-            caller: 0,
-        });
+        return Ok(super::scene::IDENTITY);
     }
     let at = ctx.state.identity(at);
     ctx.state.scene.world(at).ok_or_else(|| Stop::NotWritten {
@@ -1973,7 +2393,7 @@ fn reference_into_parent(ctx: &Ctx<'_>, method: &str, frame: u32, at: u32) -> Re
         return Ok(super::scene::IDENTITY);
     }
     Ok(super::scene::multiply(
-        &reference(ctx, method, frame, at)?,
+        &reference(ctx, method, at)?,
         &into_parent(ctx, method, frame)?,
     ))
 }
@@ -2143,7 +2563,7 @@ fn relative(ctx: &Ctx<'_>, method: &str, this: u32, reference: u32) -> Result<Ma
             caller: 0,
         })?;
     let into =
-        super::scene::invert(&self::reference(ctx, method, this, reference)?).ok_or_else(|| {
+        super::scene::invert(&self::reference(ctx, method, reference)?).ok_or_else(|| {
             Stop::NotWritten {
                 what: format!("IDirect3DRMFrame3::{method}: a reference that flattens space"),
                 caller: 0,

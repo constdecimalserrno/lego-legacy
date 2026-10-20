@@ -43,3 +43,9 @@ milliseconds in: the first instant of its LEGO bricks fading up out of black, fo
 within 8/255 of it. First light is the first frame that is not one colour; flip 0, the engine's
 cleared screen, and the loop's flips 1 to 459 are all black. The route runs to 98,000,000, twice,
 for the determinism gate.
+
+Its Information Center is drawn (#120). At flip 3200 retained mode clears the viewport, the room
+is painted over it, and retained mode draws the room's actors in front: the two plants on the
+stage at once, and from flip 3241 the Infomaniac, lit and textured, walking about. The run goes on
+into the Information Center's idle loop with no wall. The world runs to 3,800,000,000, flip 3437,
+twice, and its test finds the plants green on the grey stage in the first frame.
