@@ -154,7 +154,7 @@ pub static D3D3: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        wall("EnumDevices", 2),
+        method("EnumDevices", 2, enum_devices3),
         method("CreateLight", 2, create_light),
         method("CreateMaterial", 2, create_material),
         method("CreateViewport", 2, create_viewport),
@@ -582,31 +582,46 @@ fn write_triangle_caps(
 /// it is handed (`LEGO1.DLL` RVA 0x9be90).
 const DEVICE_DESC_BYTES: u32 = 0xcc;
 
+/// And DirectX 6's, which goes on to the texture stages: `D3DDEVICEDESC` in
+/// Wine's `d3dcaps.h`, through `wMaxSimultaneousTextures`.
+const DEVICE_DESC6_BYTES: u32 = 0xfc;
+
 /// DirectX 5's enumeration of the declared machine's one device (#117).
-///
-/// The same device DirectX 7's enumeration offers, described the way
-/// DirectX 5 describes one: its identifier, a description and a name, then
-/// what the hardware does and what is emulated. A device whose hardware
-/// description has a colour model is a hardware device, and nothing of this
-/// one is emulated, so its emulated description is empty.
 fn enum_devices2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    enum_devices(ctx, args, DEVICE_DESC_BYTES, "d3d2")
+}
+
+/// DirectX 6's, which Rock Raiders' mode dialog lists its devices from. Asked
+/// for `IDirect3D3` and refused, it listed "Error: DirectX6 not installed."
+/// and went on with no device at all, reading its flags through a null
+/// pointer (#132).
+fn enum_devices3(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    enum_devices(ctx, args, DEVICE_DESC6_BYTES, "d3d3")
+}
+
+/// The declared machine's one device, as DirectX 5 and 6 enumerate it.
+///
+/// The same device DirectX 7's enumeration offers, described the way those
+/// versions describe one, `bytes` of it: its identifier, a description and a
+/// name, then what the hardware does and what is emulated. A device whose
+/// hardware description has a colour model is a hardware device, and nothing
+/// of this one is emulated, so its emulated description is empty.
+fn enum_devices(ctx: &mut Ctx<'_>, args: &[u32], bytes: u32, which: &str) -> Result<u32, Stop> {
     // EnumDevices(callback, context). One device, so one call.
     let (callback, context) = (args[0], args[1]);
     let guid = ctx.state.heap.alloc(16);
     ctx.mem.write(guid, &HAL_DEVICE).map_err(Stop::Fault)?;
-    let hardware = ctx.state.heap.alloc(DEVICE_DESC_BYTES);
-    write_device_desc(ctx, hardware)?;
-    let emulated = ctx.state.heap.alloc(DEVICE_DESC_BYTES);
+    let hardware = ctx.state.heap.alloc(bytes);
+    write_device_desc(ctx, hardware, bytes)?;
+    let emulated = ctx.state.heap.alloc(bytes);
     ctx.mem
-        .write(emulated, &[0; DEVICE_DESC_BYTES as usize])
+        .write(emulated, &vec![0; bytes as usize])
         .map_err(Stop::Fault)?;
-    ctx.mem
-        .write_u32(emulated, DEVICE_DESC_BYTES)
-        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(emulated, bytes).map_err(Stop::Fault)?;
     let description = ctx.intern("lego-legacy rasteriser").map_err(Stop::Fault)?;
     let name = ctx.intern("Direct3D HAL").map_err(Stop::Fault)?;
     ctx.log
-        .line("d3d2 enumerate: one device, and it rasterises");
+        .line(&format!("{which} enumerate: one device, and it rasterises"));
     if callback != 0 {
         ctx.call_guest = Some((
             callback,
@@ -616,14 +631,14 @@ fn enum_devices2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
     Ok(S_OK)
 }
 
-/// Write the declared device's DirectX 5 description where the guest asked
-/// for it: every field it fills says so in `dwFlags`.
-fn write_device_desc(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
+/// Write the declared device's DirectX 5 or 6 description, `bytes` long,
+/// where the guest asked for it: every field it fills says so in `dwFlags`.
+fn write_device_desc(ctx: &mut Ctx<'_>, desc: u32, bytes: u32) -> Result<(), Stop> {
     ctx.mem
-        .write(desc, &[0; DEVICE_DESC_BYTES as usize])
+        .write(desc, &vec![0; bytes as usize])
         .map_err(Stop::Fault)?;
     let mut put = |at: u32, value: u32| ctx.mem.write_u32(desc + at, value).map_err(Stop::Fault);
-    put(0x00, DEVICE_DESC_BYTES)?;
+    put(0x00, bytes)?;
     // D3DDD_COLORMODEL through D3DDD_DEVICEZBUFFERBITDEPTH: no execute
     // buffer, so neither of its limits.
     put(0x04, 0x0000_01ff)?;
@@ -645,7 +660,16 @@ fn write_device_desc(ctx: &mut Ctx<'_>, desc: u32) -> Result<(), Stop> {
     put(0xac, 1)?;
     put(0xb0, 1)?;
     put(0xb4, 1024)?;
-    put(0xb8, 1024)
+    put(0xb8, 1024)?;
+    if bytes < DEVICE_DESC6_BYTES {
+        return Ok(());
+    }
+    // What DirectX 6 added, as DirectX 7's description says it: a texture
+    // repeats as far as it is wide, one sample with no anisotropy, and one
+    // blend stage with one texture in it.
+    put(0xcc, 1024)?;
+    put(0xd4, 1)?;
+    put(0xf8, 1 | (1 << 16))
 }
 
 /// The depth buffers the declared machine offers, which is one: sixteen bits

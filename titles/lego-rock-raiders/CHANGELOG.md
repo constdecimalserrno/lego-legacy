@@ -15,6 +15,14 @@ The title's C runtime only stores the word, so no route takes a different turn, 
 digest moves; core's changelog lists them. The declared-machine test reads the build from
 `dwBuildNumber`'s low word.
 
+Core answers the `IDirect3D3` the title's mode dialog asks its DirectDraw for, and enumerates the
+declared machine's one device through it (#132). The dialog had listed "Error: DirectX6 not
+installed.", and the title went on with no device and read its flags through a null pointer. That
+gave 0 until core made the bottom of the address space fault as Windows 9x does. No route takes a
+different turn, the frames compared are the same pictures, and every end line is unchanged. The seven runs past the dialog
+move their digests: core's changelog lists them, and the maintainer accepted them. The
+screen-mode test also checks for the enumeration.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

@@ -246,6 +246,34 @@ when its run stopped there:
 
 `core/tests/shims.rs` asks all five. No other title's route moves.
 
+Rock Raiders is handed DirectX 6's Direct3D, as Windows 98 with DirectX 6 hands it (#132). Its
+mode dialog asks its DirectDraw for `IDirect3D3` to list the devices it can draw with. This
+machine refused, so the list said the title's own "Error: DirectX6 not installed." and the title
+went on with no device, reading its flags through a null pointer at `0x004784be`. That read gave 0
+until the bottom of the address space faulted, below.
+
+- `IDirectDraw4::QueryInterface` answers `IID_IDirect3D3` (Wine's `d3d.h`) with the same object's
+  `IDirect3D3`.
+- `IDirect3D3::EnumDevices` offers the declared machine's one device, the `Direct3D HAL` that
+  DirectX 5 and 7 already enumerate, in DirectX 6's `D3DDEVICEDESC`. That is 0xfc bytes, as Wine's
+  `d3dcaps.h` has it: DirectX 5's fields, then the texture repeat, anisotropy and blend stages that
+  DirectX 7's description gives. One enumeration serves DirectX 5 and 6.
+
+The title now lists the device and hands its identifier to `IDirect3DRM3::CreateDeviceFromSurface`.
+It asks `SetSceneFogMethod` for table fog rather than vertex fog. This machine's retained mode
+takes neither further, and every hundredth frame of `first-mission.route` to flip 9,100 is the
+same picture as before. Every end line is unchanged. The digest of each run past the dialog,
+about 39.7 million instructions in, moves:
+
+- `first-light.route` `d0504186…` to `322ab7a0…`, `first-mission.route` `5c74c51c…` to
+  `74b1031b…`, `level-select.route` `82a0c841…` to `49e57d12…`, `click-the-intro.route`
+  `e71381ad…` to `b1c537af…`, `skip-the-intro.route` `ed8f2de4…` to `315d3880…`.
+- The runs with no route to 61,000,000 (`f820fc34…` to `3e8b8a38…`) and 400,000,000
+  (`f0cc0561…` to `6714ce40…`).
+
+The run to 100,000 does not reach the dialog and does not move. No other title's route moves.
+Accepted by the maintainer on 2026-10-20.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

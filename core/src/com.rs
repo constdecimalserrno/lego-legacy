@@ -142,6 +142,13 @@ const FACES: &[(&str, &str, &str)] = &[
         "f5049e77-4861-11d2-a407-00a0c90629a8",
         "IDirect3D7",
     ),
+    // DirectX 6's, which Rock Raiders' mode dialog asks its DirectDraw object
+    // for, as Windows 98 with DirectX 6 hands it back (#132).
+    (
+        "IDirectDraw4",
+        "bb223240-e72b-11d0-a9b4-00aa00c0993e",
+        "IDirect3D3",
+    ),
     // DirectX 5's Direct3D, which comes off the DirectDraw object the same
     // way, and which LEGO Island asks its DirectDraw object for (#117).
     (

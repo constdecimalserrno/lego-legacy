@@ -255,7 +255,10 @@ fn the_screen_mode_is_the_one_the_titles_own_dialog_chose() {
     // Its setup dialog lists the modes the declared machine has and selects
     // the first; a person pressing Enter takes it. Without the dialog the
     // title would set 320x200, which is not what anyone playing it sees.
+    // Its device list is DirectX 6's enumeration, of the declared machine's
+    // one device; refused, it said DirectX 6 was not installed (#132).
     ran.assert_logged("ddraw modes: 640x480x16")
+        .assert_logged("d3d3 enumerate: one device")
         .assert_logged("dialog default button pressed")
         .assert_logged("dialog ended with 1")
         .assert_logged("display mode 640x480x16");
