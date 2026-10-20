@@ -1,7 +1,7 @@
 //! LEGO Island, run headless from the player's rip: the launcher finding it
-//! or refusing it, its declared tree, its committed route to first light, and
-//! its boot as far as the machine carries it, each replayed to the same
-//! machine every time.
+//! or refusing it, its declared tree, its boot, and its committed routes to
+//! first light and to its Information Center's idle loop, each replayed to the
+//! same machine every time.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -24,14 +24,35 @@ use lego_legacy_core::Title;
 const BOOT_BUDGET: u64 = 5_571_000;
 
 /// Enough instructions for the game to build its world, about four hundred
-/// meshes, out of `WORLD.WDB` (#119), play its intro, and go into its
-/// Information Center, whose actors retained mode draws itself (#120): its
-/// first frame is flip 3200, and by flip 3437 the Infomaniac is walking about.
-const WORLD_BUDGET: u64 = 3_800_000_000;
+/// meshes, out of `WORLD.WDB` (#119), play its intro, go into its Information
+/// Center, whose actors retained mode draws itself (#120), and come round its
+/// idle loop there once and a quarter (#121): flip 5249 is presented at
+/// 3,964,530,295.
+const WORLD_BUDGET: u64 = 3_965_000_000;
 
 /// The Information Center's first frame: the stage painted, and the two
 /// plants on it drawn by retained mode.
 const INFORMATION_CENTER: u64 = 3200;
+
+/// The Information Center's idle loop (#121): its first frame, the milestone
+/// the route is held to.
+///
+/// The milestone is the loop's first frame rather than the room's, because the
+/// room idles twice. The Infomaniac first stands by the right rail, and the
+/// room loops there from flip 3905, but at flip 4937 he walks over beside the
+/// desk by himself. From here he stays, and the loop holds for as long as
+/// nobody touches it. It starts here and not before: the frame before it, his
+/// last step, is not the one a period later.
+const IDLE_LOOP: u64 = 5099;
+
+/// How many frames the idle loop takes to come round, every one of them
+/// counted: 88 still, then 32 in which the brick on the desk rocks. Sampled
+/// every hundredth flip it reads as a loop of 600, lcm(100, 120), which is the
+/// sampling's beat and not the game's.
+const PERIOD: u64 = 120;
+
+/// A frame of the loop with the brick on the desk tipped up.
+const ROCKING: u64 = IDLE_LOOP + 30;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -338,17 +359,33 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     );
 }
 
-/// The world, built and its intro played, replayed: once for the tests, and
-/// once more beside it for the determinism gate.
+/// The committed route to the Information Center's idle loop, replayed: once
+/// for the tests, and once more beside it for the determinism gate.
 fn world(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
 ) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("routes/information-center.route"),
+        ),
+        ..Cli::default()
+    };
     testkit::replay(
         slot,
         scratch,
         &ISLAND,
-        &Cli::default(),
-        &[INFORMATION_CENTER - 1, INFORMATION_CENTER],
+        &cli,
+        &[
+            INFORMATION_CENTER - 1,
+            INFORMATION_CENTER,
+            IDLE_LOOP - 1,
+            IDLE_LOOP,
+            ROCKING,
+            IDLE_LOOP + PERIOD - 1,
+            IDLE_LOOP + PERIOD,
+            ROCKING + PERIOD,
+        ],
         WORLD_BUDGET,
     )
 }
@@ -368,7 +405,7 @@ fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() 
         lego_legacy_core::machine::Outcome::BudgetExhausted,
         "nothing stops the run in its Information Center"
     );
-    assert_eq!(ran.finish.flips, 3437);
+    assert_eq!(ran.finish.flips, 5254);
     assert!(
         ran.host.frames.iter().any(|f| !f.is_uniform()),
         "the intro is on the screen"
@@ -391,8 +428,34 @@ fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() 
     }
 }
 
+/// The milestone: from flip 5099 on, with the Infomaniac beside the desk, the
+/// room goes round the same 120 frames.
 #[test]
-fn the_world_replays_to_the_same_machine_every_time() {
+fn the_route_reaches_the_information_centers_idle_loop_and_it_holds() {
+    let Some(ran) = world(&WORLD) else { return };
+    ran.assert_logged("flip 5099 cursor 3952208885 640x480x16");
+    let frame = |flip: u64| &ran.host.frame(flip).expect("kept").pixels;
+
+    // Its first frame, and one with the brick tipped up, come round again a
+    // period later; and the brick does move.
+    for flip in [IDLE_LOOP, ROCKING] {
+        assert!(
+            frame(flip) == frame(flip + PERIOD),
+            "flip {flip} comes round again at {}",
+            flip + PERIOD
+        );
+    }
+    assert!(frame(IDLE_LOOP) != frame(ROCKING), "the brick rocks");
+    // And it starts at 5099: the Infomaniac's last step up to the desk is not
+    // in it.
+    assert!(
+        frame(IDLE_LOOP - 1) != frame(IDLE_LOOP + PERIOD - 1),
+        "the loop starts at flip {IDLE_LOOP}"
+    );
+}
+
+#[test]
+fn the_information_center_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     // The second replay runs beside the first rather than after it.
     let (first, second) = std::thread::scope(|scope| {
@@ -403,4 +466,9 @@ fn the_world_replays_to_the_same_machine_every_time() {
         return;
     };
     first.assert_same_machine(second);
+    assert!(
+        first.host.frame(IDLE_LOOP).map(|f| &f.pixels)
+            == second.host.frame(IDLE_LOOP).map(|f| &f.pixels),
+        "including what it presented at flip {IDLE_LOOP}"
+    );
 }

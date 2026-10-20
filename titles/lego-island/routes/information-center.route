@@ -1,0 +1,11 @@
+#lego-legacy-route 1
+# LEGO Island, from its boot through its intro to its Information Center's
+# idle loop (#121).
+#
+# Nothing on the way is pressed. The boot and first light are
+# first-light.route's. The intro plays, and at flip 3200 the Information
+# Center is drawn. The Infomaniac walks in, talks, and goes to stand by the
+# right rail, where the room idles; at flip 4937 he walks over beside the
+# info desk by himself. From flip 5099 the room holds one loop of 120 frames
+# for as long as nobody touches it: 88 still, and 32 in which the brick on the
+# desk rocks.

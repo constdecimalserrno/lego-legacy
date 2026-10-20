@@ -49,3 +49,13 @@ is painted over it, and retained mode draws the room's actors in front: the two 
 stage at once, and from flip 3241 the Infomaniac, lit and textured, walking about. The run goes on
 into the Information Center's idle loop with no wall. The world runs to 3,800,000,000, flip 3437,
 twice, and its test finds the plants green on the grey stage in the first frame.
+
+Its Information Center is reached, and it holds its idle loop there (#121). With nothing pressed,
+by the committed `information-center.route`, the Infomaniac walks in and talks, then stands by the
+right rail while the room idles, and at flip 4937 walks over beside the info desk by himself. From
+flip 5099, instruction 3,952,208,885, 181,983 declared milliseconds in, the room goes round one
+loop of 120 frames, 88 still and 32 in which the brick on the desk rocks, for as long as nobody
+touches it. The loop's first frame is the milestone. The world run is now this route, to
+3,965,000,000 and 5,254 flips, twice, for the determinism gate, and its test finds the loop come
+round a period later, without the frame before it. Nothing calls `SetTimer` on the way, nor by
+instruction 5,000,000,000.
