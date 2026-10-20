@@ -65,3 +65,14 @@ projects with uniform scaling as d3drm does (#134), and the Infomaniac is in pro
 was a third too wide for his height. The first-frame test looks for the plants' green pots there.
 `information-center.route`'s end line is unchanged and its digest moves, which core's changelog
 lists.
+
+It is heard (#123), with nothing new in core: DirectSound already mixed what it plays. Measured
+against the disc's scripts, the route's mix carries every wave the game plays, sample for sample,
+at the volume the game gives it. The intro is three waves out of `INTRO.SI`, the LEGO logo's from flip 459,
+Mindscape's from 878 and the intro movie's from 1112 to 3196, each streamed whole through a
+two-second buffer. In the Information Center, the Infomaniac's speech and the sounds his
+animation makes are 3D buffers placed about him, under a listener at the camera. From flip 3938
+the room's music, `InformationCenter_Music` out of `JUKEBOX.SI`, plays on under him at the game's
+own lowered volume, going round at its end. Its new test hears each part, and the determinism
+gate's second replay asks for `--audio` and ends on the same machine and the same mix. No buffer
+asks for position notifications, and every position the game reads comes from the declared clock.

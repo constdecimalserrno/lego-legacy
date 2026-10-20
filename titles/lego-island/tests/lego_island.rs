@@ -1,7 +1,7 @@
 //! LEGO Island, run headless from the player's rip: the launcher finding it
 //! or refusing it, its declared tree, its boot, and its committed routes to
-//! first light and to its Information Center's idle loop, each replayed to the
-//! same machine every time.
+//! first light and to its Information Center's idle loop, what the second is
+//! heard to play, and each replayed to the same machine every time.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -360,15 +360,18 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
 }
 
 /// The committed route to the Information Center's idle loop, replayed: once
-/// for the tests, and once more beside it for the determinism gate.
+/// for the tests, and once more beside it for the determinism gate, that one
+/// asking for `--audio`.
 fn world(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    audio: bool,
 ) -> Option<&'static testkit::Ran> {
     let cli = Cli {
         route: Some(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("routes/information-center.route"),
         ),
+        audio,
         ..Cli::default()
     };
     testkit::replay(
@@ -399,7 +402,9 @@ static WORLD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::n
 /// drawn in front by retained mode, lit and textured (#120).
 #[test]
 fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() {
-    let Some(ran) = world(&WORLD) else { return };
+    let Some(ran) = world(&WORLD, false) else {
+        return;
+    };
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
@@ -433,7 +438,9 @@ fn the_game_builds_its_world_plays_its_intro_and_draws_its_information_center() 
 /// room goes round the same 120 frames.
 #[test]
 fn the_route_reaches_the_information_centers_idle_loop_and_it_holds() {
-    let Some(ran) = world(&WORLD) else { return };
+    let Some(ran) = world(&WORLD, false) else {
+        return;
+    };
     ran.assert_logged("flip 5099 cursor 3952208885 640x480x16");
     let frame = |flip: u64| &ran.host.frame(flip).expect("kept").pixels;
 
@@ -455,21 +462,91 @@ fn the_route_reaches_the_information_centers_idle_loop_and_it_holds() {
     );
 }
 
+/// The flip the Information Center's music starts at (#123): the Infomaniac's
+/// welcome over, the game plays `InformationCenter_Music` out of
+/// `JUKEBOX.SI`, and it plays on under everything after.
+const MUSIC: u64 = 3938;
+
+/// LEGO Island is heard (#123): its intro, the Infomaniac, and the Information
+/// Center's music, on the mix the route makes, block by block. Each sound in it
+/// was held sample for sample against the wave it plays out of the disc's
+/// scripts, at the volume the game gave it; #123's comment says how.
+#[test]
+fn the_route_is_heard_from_its_intro_to_the_information_centers_music() {
+    let Some(ran) = world(&WORLD, false) else {
+        return;
+    };
+    let mean = |r: &[f64]| r.iter().sum::<f64>() / r.len().max(1) as f64;
+
+    // Nothing until the LEGO logo's sound starts, a flip before first light.
+    assert!(
+        ran.loudness(0, FIRST_LIGHT - 1).iter().all(|r| *r == 0.0),
+        "silence before the intro"
+    );
+    // The intro's three waves out of `INTRO.SI`, one after another: the LEGO
+    // logo's, Mindscape's, and the intro movie's.
+    for (from, to) in [(FIRST_LIGHT, 870), (880, 1055), (1115, 3195)] {
+        let heard = mean(&ran.loudness(from, to));
+        assert!(heard > 2000.0, "flips {from} to {to} are heard: {heard:.0}");
+    }
+    // In the Information Center the Infomaniac welcomes the player, his speech
+    // and the sounds his animation makes in 3D buffers about him.
+    let welcome = mean(&ran.loudness(3241, MUSIC));
+    assert!(welcome > 1000.0, "the welcome is heard: {welcome:.0}");
+
+    // Then the music, under the Infomaniac at the game's own lowered volume,
+    // in every block to the end of the route.
+    let music = ran.loudness(MUSIC + 1, u64::MAX);
+    assert!(
+        music.len() > 900 && music.iter().all(|r| *r > 0.0),
+        "the music is heard to the end: {} blocks",
+        music.len()
+    );
+    // It is a two and a half minute wave streamed through a buffer of two
+    // seconds: two seconds on, it is the next part, not the same two again.
+    let mix = ran.host.audio_blocks.concat();
+    let block = ran.host.audio_blocks[0].len();
+    let at = block
+        * ran
+            .host
+            .audio_flips
+            .iter()
+            .position(|flip| *flip >= MUSIC + 60)
+            .expect("mixed this far");
+    let fifth = |from: usize| mix.get(from..from + 8820).expect("mixed this far");
+    let two_seconds = 2 * lego_legacy_core::sound::RATE as usize * 2;
+    assert!(
+        fifth(at) != fifth(at + two_seconds),
+        "the music goes on past its buffer"
+    );
+}
+
 #[test]
 fn the_information_center_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
-    // The second replay runs beside the first rather than after it.
+    // The second replay runs beside the first rather than after it, and asks
+    // for `--audio`. Headless, that reaches only the run log: whether a
+    // device listens is nothing the guest can see, since every answer
+    // DirectSound gives comes from the declared clock (#123).
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| world(&AGAIN));
-        (world(&WORLD), second.join().expect("the second replay ran"))
+        let second = scope.spawn(|| world(&AGAIN, true));
+        (
+            world(&WORLD, false),
+            second.join().expect("the second replay ran"),
+        )
     });
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
+    second.assert_logged("audio true");
     first.assert_same_machine(second);
     assert!(
         first.host.frame(IDLE_LOOP).map(|f| &f.pixels)
             == second.host.frame(IDLE_LOOP).map(|f| &f.pixels),
         "including what it presented at flip {IDLE_LOOP}"
+    );
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks,
+        "and what it mixed"
     );
 }
