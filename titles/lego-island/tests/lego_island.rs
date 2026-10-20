@@ -14,11 +14,12 @@ use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::Title;
 
 /// Enough instructions for both C runtimes to start, the game to read its
-/// settings back and open its window (#114), and its engine to make its
-/// Direct3D 2 device and hand it to retained mode (#117), and no more: at
-/// 478,302 it asks its window for the instance it was made with, which is
-/// the next ticket's (#118).
-const BOOT_BUDGET: u64 = 478_000;
+/// settings back and open its window (#114), its engine to make its Direct3D
+/// 2 device and hand it to retained mode (#117), and the game to count two
+/// hundred frames down, open its scripts and start building its world out of
+/// `WORLD.WDB` (#118), and no more: at 5,560,671 it asks retained mode for its
+/// first mesh, which is #119's.
+const BOOT_BUDGET: u64 = 5_560_600;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -161,6 +162,52 @@ fn the_engine_makes_its_own_direct3d_2_device_and_hands_it_to_retained_mode() {
         lego_legacy_core::machine::Outcome::BudgetExhausted,
         "nothing in Direct3D or retained mode stops the run"
     );
+}
+
+/// The frames the game presents before its world is built, all of them black
+/// (#118): the screen its engine clears, then its back buffer copied onto the
+/// screen once a frame while it counts two hundred of them down to its
+/// scripts.
+#[test]
+fn the_game_counts_its_frames_down_to_its_scripts_and_starts_its_world() {
+    let Some(ran) = boot() else { return };
+
+    // Its window's instance, and no table of keys in its own image.
+    ran.assert_logged("call USER32.dll!GetWindowLongA(0x10010, 0xfffffffa)")
+        .assert_logged("call USER32.dll!LoadAcceleratorsA(0x400000, 0x4100bc)");
+
+    // The engine lets go of the whole screen it has just cleared, which is a
+    // frame: the screen is what a person would see, and there is no flipping
+    // chain behind it. Every frame after is a copy of the whole back buffer
+    // onto the screen.
+    ran.assert_logged("flip 0 cursor 458966 640x480x16")
+        .assert_logged("call IDirectDrawSurface::Blt(0x1ffcb0, 0x20b6cab8, 0x1ffca0, 0x0, 0x1ffcc0) on 0x20ad6aa8")
+        .assert_logged("flip 1 cursor 644157 640x480x16");
+    assert!(
+        ran.host.frames.iter().all(|f| f.is_uniform()),
+        "nothing is drawn before the world is built"
+    );
+
+    // After two hundred frames of its own, flips 1 to 200, its scripts are
+    // opened where they lie on the disc, and then its world database from
+    // the install. The count is the game's (`ISLE.EXE` 0x4017cb), and that
+    // it lands on flip 200 says the cleared screen before them is no frame of
+    // its loop's.
+    let opened = |name: &str| {
+        let line = ran
+            .log
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} is opened"));
+        ran.log[..line].matches("\nflip ").count()
+    };
+    assert_eq!(opened("file opened D:\\lego\\scripts\\isle\\isle.si"), 201);
+    ran.assert_logged("file opened C:\\Program Files\\LEGO Island\\lego\\data\\world.wdb")
+        // Its textures through DirectX 5's retained mode, and SmartHeap asking
+        // how much of a region it reserved is committed.
+        .assert_logged("call IDirect3DRM2::CreateTextureFromSurface(")
+        .assert_logged("call KERNEL32.dll!VirtualQuery(0x20d50000, ")
+        .assert_logged("call IDirect3DRM2::CreateMaterial(0x41200000, ");
+    assert_eq!(ran.finish.flips, 203);
 }
 
 #[test]

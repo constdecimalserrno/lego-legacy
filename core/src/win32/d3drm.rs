@@ -107,12 +107,12 @@ pub static D3DRM2: Interface = Interface {
         wall("CreateTexture", 2),
         wall("CreateLight", 3),
         method("CreateLightRGB", 5, create_light_rgb),
-        wall("CreateMaterial", 2),
+        method("CreateMaterial", 2, create_material1),
         wall("CreateDevice", 3),
         wall("CreateDeviceFromSurface", 4),
         method("CreateDeviceFromD3D", 3, device_from_d3d),
         wall("CreateDeviceFromClipper", 5),
-        wall("CreateTextureFromSurface", 2),
+        method("CreateTextureFromSurface", 2, create_texture2),
         wall("CreateShadow", 9),
         method("CreateViewport", 7, create_viewport1),
         wall("CreateWrap", 16),
@@ -532,47 +532,64 @@ pub static MESH: Interface = Interface {
 /// `IDirect3DRMTexture3`: an image a mesh is drawn with.
 pub static TEXTURE3: Interface = Interface {
     name: "IDirect3DRMTexture3",
-    methods: &[
-        QUERY_INTERFACE,
-        ADD_REF,
-        RELEASE,
-        wall("Clone", 3),
-        wall("AddDestroyCallback", 2),
-        wall("DeleteDestroyCallback", 2),
-        method("SetAppData", 1, set_app_data),
-        method("GetAppData", 0, get_app_data),
-        method("SetName", 1, set_name),
-        method("GetName", 2, get_name),
-        method("GetClassName", 2, get_class_name),
-        wall("InitFromFile", 1),
-        wall("InitFromSurface", 1),
-        wall("InitFromResource", 1),
-        wall("Changed", 3),
-        wall("SetColors", 1),
-        wall("SetShades", 1),
-        wall("SetDecalSize", 2),
-        wall("SetDecalOrigin", 2),
-        wall("SetDecalScale", 1),
-        wall("SetDecalTransparency", 1),
-        wall("SetDecalTransparentColor", 1),
-        wall("GetDecalSize", 2),
-        wall("GetDecalOrigin", 2),
-        wall("GetImage", 0),
-        wall("GetShades", 0),
-        wall("GetColors", 0),
-        wall("GetDecalScale", 0),
-        wall("GetDecalTransparency", 0),
-        wall("GetDecalTransparentColor", 0),
-        wall("InitFromImage", 1),
-        wall("InitFromResource2", 3),
-        wall("GenerateMIPMap", 1),
-        wall("GetSurface", 2),
-        wall("SetCacheOptions", 2),
-        wall("GetCacheOptions", 2),
-        wall("SetDownsampleCallback", 2),
-        wall("SetValidationCallback", 2),
-    ],
+    methods: &TEXTURE3_METHODS,
 };
+
+/// `IDirect3DRMTexture2`: DirectX 5's face of the same texture, which LEGO
+/// Island's retained mode makes (#118). DirectX 6's as far as
+/// `GenerateMIPMap`, but for `Changed`, which takes whether the pixels and
+/// whether the palette changed, where DirectX 6's takes flags and rectangles.
+pub static TEXTURE2: Interface = Interface {
+    name: "IDirect3DRMTexture2",
+    methods: TEXTURE2_METHODS.split_at(33).0,
+};
+
+const TEXTURE2_METHODS: &[crate::com::Method] = &{
+    let mut methods = TEXTURE3_METHODS;
+    methods[14] = wall("Changed", 2);
+    methods
+};
+
+const TEXTURE3_METHODS: [crate::com::Method; 38] = [
+    QUERY_INTERFACE,
+    ADD_REF,
+    RELEASE,
+    wall("Clone", 3),
+    wall("AddDestroyCallback", 2),
+    wall("DeleteDestroyCallback", 2),
+    method("SetAppData", 1, set_app_data),
+    method("GetAppData", 0, get_app_data),
+    method("SetName", 1, set_name),
+    method("GetName", 2, get_name),
+    method("GetClassName", 2, get_class_name),
+    wall("InitFromFile", 1),
+    wall("InitFromSurface", 1),
+    wall("InitFromResource", 1),
+    wall("Changed", 3),
+    wall("SetColors", 1),
+    wall("SetShades", 1),
+    wall("SetDecalSize", 2),
+    wall("SetDecalOrigin", 2),
+    wall("SetDecalScale", 1),
+    wall("SetDecalTransparency", 1),
+    wall("SetDecalTransparentColor", 1),
+    wall("GetDecalSize", 2),
+    wall("GetDecalOrigin", 2),
+    wall("GetImage", 0),
+    wall("GetShades", 0),
+    wall("GetColors", 0),
+    wall("GetDecalScale", 0),
+    wall("GetDecalTransparency", 0),
+    wall("GetDecalTransparentColor", 0),
+    wall("InitFromImage", 1),
+    wall("InitFromResource2", 3),
+    wall("GenerateMIPMap", 1),
+    wall("GetSurface", 2),
+    wall("SetCacheOptions", 2),
+    wall("GetCacheOptions", 2),
+    wall("SetDownsampleCallback", 2),
+    wall("SetValidationCallback", 2),
+];
 
 /// `IDirect3DRMLight`: a light hung on a frame.
 pub static LIGHT: Interface = Interface {
@@ -635,6 +652,14 @@ pub static MATERIAL2: Interface = Interface {
         wall("GetAmbient", 3),
         wall("SetAmbient", 3),
     ],
+};
+
+/// `IDirect3DRMMaterial`: DirectX 5's face of the same material, which LEGO
+/// Island's retained mode makes (#118): DirectX 6's without its ambient
+/// colour.
+pub static MATERIAL: Interface = Interface {
+    name: "IDirect3DRMMaterial",
+    methods: MATERIAL2.methods.split_at(17).0,
 };
 
 /// `IDirect3DRMUserVisual`: something a title draws itself when retained mode renders the frame it hangs on.
@@ -790,8 +815,10 @@ pub static INTERFACES: &[&Interface] = &[
     &MESH_BUILDER3,
     &MESH,
     &TEXTURE3,
+    &TEXTURE2,
     &LIGHT,
     &MATERIAL2,
+    &MATERIAL,
     &USER_VISUAL,
     &FRAME,
     &FRAME2,
@@ -864,6 +891,12 @@ fn create_texture(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     make(ctx, &TEXTURE3, args[1])
 }
 
+/// DirectX 5's texture: the same texture, as the face DirectX 5 hands out.
+fn create_texture2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateTextureFromSurface(surface, out).
+    make(ctx, &TEXTURE2, args[1])
+}
+
 fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreateLight(type, colour, out): a light of that type and colour, opaque.
     light(ctx, args[0], 0xff00_0000 | args[1], args[2])
@@ -893,6 +926,11 @@ fn light(ctx: &mut Ctx<'_>, kind: u32, colour: u32, out: u32) -> Result<u32, Sto
 fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreateMaterial(power, out).
     make(ctx, &MATERIAL2, args[1])
+}
+
+/// DirectX 5's material: the same material, as the face DirectX 5 hands out.
+fn create_material1(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    make(ctx, &MATERIAL, args[1])
 }
 
 fn material_unread(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop> {

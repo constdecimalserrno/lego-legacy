@@ -246,6 +246,13 @@ pub struct State {
     /// refused, which is what tells a guest's own DLL loader to relocate the
     /// image rather than lay it over the last one (#61).
     pub claimed: Vec<(u32, u32)>,
+    /// Every region `VirtualAlloc` reserved, by where it starts: how big it
+    /// is and the protection it was reserved with. What `VirtualQuery`
+    /// answers from (#118).
+    pub reserved: BTreeMap<u32, (u32, u32)>,
+    /// Every page committed in them, by address, with the protection it was
+    /// committed with.
+    pub committed: BTreeMap<u32, u32>,
     /// Where the next file mapped into the arena will go. Mappings sit above
     /// everything else the machine hands out, because Alpha Team maps four
     /// hundred megabytes of archives and never lets go (#57).
@@ -274,6 +281,8 @@ pub struct State {
     pub window_made: bool,
     /// The style its window was made with.
     pub window_style: u32,
+    /// The instance its window was made with.
+    pub window_instance: u32,
     /// Where the pointer is, in the guest's own coordinates.
     pub pointer: (i32, i32),
     /// Where a person last put the pointer, which is what the mouse moved
@@ -396,6 +405,8 @@ impl State {
             thread: 0,
             next_thread_id: crate::machine::THREAD_ID,
             claimed: Vec::new(),
+            reserved: BTreeMap::new(),
+            committed: BTreeMap::new(),
             next_mapping: MAPPING_BASE,
             sections: BTreeMap::new(),
             tls_slots: 0,
@@ -411,6 +422,7 @@ impl State {
             window_procedure: 0,
             window_made: false,
             window_style: 0,
+            window_instance: 0,
             // The middle of the screen: where Windows leaves the pointer when
             // a mode is set, and so where a title that draws its own starts
             // it. The first thing the mouse does is measured from here, and

@@ -17,6 +17,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "UpdateWindow", 1, succeed),
     stdcall("USER32", "SetFocus", 1, succeed),
     stdcall("USER32", "TranslateAcceleratorA", 3, translate_accelerator),
+    stdcall("USER32", "LoadAcceleratorsA", 2, load_accelerators),
     stdcall("USER32", "FindWindowA", 2, find_window),
     stdcall("USER32", "GetActiveWindow", 0, active_window),
     stdcall("USER32", "WaitMessage", 0, wait_message),
@@ -259,6 +260,7 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let first = !ctx.state.window_made;
     ctx.state.window_made = true;
     ctx.state.window_style = args[3];
+    ctx.state.window_instance = args[10];
     if first {
         let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
         activate(ctx.state, time);
@@ -268,9 +270,10 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 /// A word of what the window system keeps about a window.
 ///
-/// Only its style is answered: the one LEGO Island's engine reads, to see
-/// whether a person could drag its window's edges before it takes the screen
-/// (#114).
+/// Its style, which LEGO Island's engine reads to see whether a person could
+/// drag its window's edges before it takes the screen (#114), and its
+/// instance, which the engine reads before it builds its first picture
+/// (#118). Both as `CreateWindowExA` was given them.
 // ponytail: the style as `CreateWindowExA` was given it. `SetWindowLongA`
 // keeps nothing, and the bits Windows adds itself (`WS_VISIBLE` once shown,
 // `WS_CLIPSIBLINGS` on a top-level window) are not added; answer them when a
@@ -278,8 +281,10 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetWindowLongA(window, index).
     const GWL_STYLE: u32 = -16i32 as u32;
+    const GWL_HINSTANCE: u32 = -6i32 as u32;
     match (args[0], args[1]) {
         (WINDOW, GWL_STYLE) if ctx.state.window_made => Ok(ctx.state.window_style),
+        (WINDOW, GWL_HINSTANCE) if ctx.state.window_made => Ok(ctx.state.window_instance),
         (window, index) => Err(Stop::NotWritten {
             what: format!(
                 "USER32.dll!GetWindowLongA: index {} of window {window:#x}",
@@ -318,6 +323,40 @@ fn activate(state: &mut super::State, time: u32) {
 /// roster loads one — so no message is ever translated and every keystroke
 /// goes on to the title's own window procedure.
 fn translate_accelerator(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(0)
+}
+
+/// A module's table of shortcut keys, by name, looked for where Windows looks:
+/// in the resources its own headers point to.
+///
+/// LEGO Island asks its own image for `AppAccel` (#118), and that image's
+/// resources are its cursors, its icons and its version, with no table of
+/// keys among them. So Windows answers none, and says the kind of resource was
+/// not found. An image that does hold one stops the run: nothing reads one yet.
+fn load_accelerators(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // LoadAcceleratorsA(module, name).
+    const RT_ACCELERATOR: u32 = 9;
+    const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
+    let module = args[0];
+    let read = |at: u32| ctx.mem.read_u32(at).map_err(Stop::Fault);
+    let headers = module.wrapping_add(read(module + 0x3c)?);
+    // The resources are the third of the optional header's data directories.
+    let resources = read(headers + 24 + 96 + 2 * 8)?;
+    if resources != 0 {
+        let directory = module.wrapping_add(resources);
+        let counts = read(directory + 12)?;
+        let (named, numbered) = (counts & 0xffff, counts >> 16);
+        for entry in named..named + numbered {
+            if read(directory + 16 + 8 * entry)? == RT_ACCELERATOR {
+                return Err(Stop::NotWritten {
+                    what: "USER32.dll!LoadAcceleratorsA: the module holds a table of keys"
+                        .to_owned(),
+                    caller: 0,
+                });
+            }
+        }
+    }
+    ctx.state.last_error = ERROR_RESOURCE_TYPE_NOT_FOUND;
     Ok(0)
 }
 

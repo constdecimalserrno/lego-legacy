@@ -1,7 +1,7 @@
 //! What KERNEL32, USER32 and retained mode answer, called as a title calls
 //! them but without one: each shim or method run on the stub's machine with
 //! the arguments a title would push, and what it wrote and answered read back
-//! (#114, #117).
+//! (#114, #117, #118).
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
@@ -130,8 +130,9 @@ fn a_setting_win_ini_does_not_have_is_the_callers_default_cut_to_fit() {
 }
 
 #[test]
-fn a_window_style_is_the_one_it_was_made_with() {
+fn a_window_style_and_instance_are_the_ones_it_was_made_with() {
     const GWL_STYLE: u32 = -16i32 as u32;
+    const GWL_HINSTANCE: u32 = -6i32 as u32;
     const GWL_USERDATA: u32 = -21i32 as u32;
     const WS_CAPTION_SYSMENU: u32 = 0x00c8_0000;
     let mut m = machine();
@@ -163,6 +164,10 @@ fn a_window_style_is_the_one_it_was_made_with() {
     assert_eq!(
         call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_STYLE]),
         Ok(WS_CAPTION_SYSMENU)
+    );
+    assert_eq!(
+        call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_HINSTANCE]),
+        Ok(0x0040_0000)
     );
     // Any other word is not answered.
     assert!(call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_USERDATA]).is_err());
@@ -223,6 +228,140 @@ fn a_new_region_starts_on_the_allocation_granularity() {
         assert_ne!(at, 0, "{size:#x} bytes are reserved");
         assert_eq!(at % 0x1_0000, 0, "{at:#x} is not on a 64 KiB boundary");
     }
+}
+
+/// A region says how much of it, from an address, is committed and how, and
+/// how much only reserved, as SmartHeap in LEGO Island's engine asks (#118).
+#[test]
+fn a_region_says_how_much_of_it_is_committed() {
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_DECOMMIT: u32 = 0x4000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const MEM_PRIVATE: u32 = 0x2_0000;
+    const PAGE_NOACCESS: u32 = 0x01;
+    const PAGE_READWRITE: u32 = 0x04;
+    let mut m = machine();
+    let base = call(
+        &mut m,
+        "KERNEL32",
+        "VirtualAlloc",
+        &[0, 0x1_0000, MEM_RESERVE, PAGE_NOACCESS],
+    )
+    .expect("answered");
+    let commit = [base, 0x5000, MEM_COMMIT, PAGE_READWRITE];
+    assert_eq!(call(&mut m, "KERNEL32", "VirtualAlloc", &commit), Ok(base));
+    let mut query = |at: u32| {
+        assert_eq!(
+            call(&mut m, "KERNEL32", "VirtualQuery", &[at, OUT, 28]),
+            Ok(28)
+        );
+        [0, 4, 8, 12, 16, 20, 24].map(|o| m.arena.read_u32(OUT + o).expect("in the arena"))
+    };
+    // Base, allocation base, its protection, size, state, protection, type.
+    assert_eq!(
+        query(base),
+        [
+            base,
+            base,
+            PAGE_NOACCESS,
+            0x5000,
+            MEM_COMMIT,
+            PAGE_READWRITE,
+            MEM_PRIVATE
+        ]
+    );
+    // From inside a page, the run starts on that page.
+    assert_eq!(
+        query(base + 0x1234)[..5],
+        [base + 0x1000, base, 1, 0x4000, MEM_COMMIT]
+    );
+    // What is only reserved runs to the region's end, with no protection.
+    assert_eq!(query(base + 0x5000)[3..6], [0xb000, MEM_RESERVE, 0]);
+
+    // A page given back ends the committed run before it.
+    let decommit = [base + 0x4000, 0x1000, MEM_DECOMMIT];
+    assert_eq!(call(&mut m, "KERNEL32", "VirtualFree", &decommit), Ok(1));
+    assert_eq!(
+        call(&mut m, "KERNEL32", "VirtualQuery", &[base, OUT, 28]),
+        Ok(28)
+    );
+    assert_eq!(m.arena.read_u32(OUT + 12), Ok(0x4000));
+
+    // A region let go of is no region at all.
+    let release = [base, 0, MEM_RELEASE];
+    assert_eq!(call(&mut m, "KERNEL32", "VirtualFree", &release), Ok(1));
+    assert!(call(&mut m, "KERNEL32", "VirtualQuery", &[base, OUT, 28]).is_err());
+}
+
+/// A module with no table of keys among its resources has none to load, as
+/// LEGO Island's own image has none (#118); one that does stops the run.
+#[test]
+fn a_table_of_keys_is_looked_for_in_the_modules_resources() {
+    const RT_ICON: u32 = 3;
+    const RT_ACCELERATOR: u32 = 9;
+    let mut m = machine();
+    // Headers at 0x40, the resource directory's address at the third of the
+    // optional header's data directories, and one resource type in it.
+    let module = DATA;
+    m.arena
+        .write_u32(module + 0x3c, 0x40)
+        .expect("in the arena");
+    m.arena
+        .write_u32(module + 0x40 + 24 + 96 + 16, 0x200)
+        .expect("in the arena");
+    m.arena
+        .write_u32(module + 0x200 + 12, 1 << 16)
+        .expect("in the arena");
+    m.arena.write(OUT, b"AppAccel\0").expect("in the arena");
+
+    m.arena
+        .write_u32(module + 0x200 + 16, RT_ICON)
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "USER32", "LoadAcceleratorsA", &[module, OUT]),
+        Ok(0)
+    );
+    // ERROR_RESOURCE_TYPE_NOT_FOUND.
+    assert_eq!(m.state.last_error, 1813);
+
+    m.arena
+        .write_u32(module + 0x200 + 16, RT_ACCELERATOR)
+        .expect("in the arena");
+    assert!(call(&mut m, "USER32", "LoadAcceleratorsA", &[module, OUT]).is_err());
+}
+
+/// DirectX 5's retained mode makes DirectX 5's texture and material (#118):
+/// the texture is DirectX 6's as far as `GenerateMIPMap`, with a `Changed`
+/// that takes two flags, and the material is DirectX 6's without its ambient
+/// colour.
+#[test]
+fn directx_5_makes_its_own_textures_and_materials() {
+    let mut m = machine();
+    // IDirect3DRM2::CreateTextureFromSurface(surface, out), at 18.
+    assert_eq!(com(&mut m, "IDirect3DRM2", 18, 0, &[0, OUT]), Ok(0));
+    let texture = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(m.state.interface_of(texture), Some("IDirect3DRMTexture2"));
+    let changed = win32::com_method("IDirect3DRMTexture2", 14).expect("declared");
+    assert_eq!((changed.name, changed.args), ("Changed", 2));
+    assert_eq!(
+        win32::com_method("IDirect3DRMTexture2", 32).map(|m| m.name),
+        Some("GenerateMIPMap")
+    );
+    assert!(win32::com_method("IDirect3DRMTexture2", 33).is_none());
+
+    // IDirect3DRM2::CreateMaterial(power, out), at 13.
+    assert_eq!(
+        com(&mut m, "IDirect3DRM2", 13, 0, &[10.0f32.to_bits(), OUT]),
+        Ok(0)
+    );
+    let material = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(m.state.interface_of(material), Some("IDirect3DRMMaterial"));
+    assert_eq!(
+        win32::com_method("IDirect3DRMMaterial", 16).map(|m| m.name),
+        Some("GetEmissive")
+    );
+    assert!(win32::com_method("IDirect3DRMMaterial", 17).is_none());
 }
 
 /// Three floats where `at` is.

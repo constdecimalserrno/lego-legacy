@@ -228,6 +228,24 @@ are guest memory, so the digest of every title's run moves, and no stub's:
 
 Accepted by the maintainer on 2026-10-20, with Windows 95's word as Wine's `0xC0000004`.
 
+What LEGO Island asks between its retained mode and its world's first mesh (#118), each written
+when its run stopped there:
+
+- `GetWindowLongA(GWL_HINSTANCE)` answers the instance `CreateWindowExA` was given.
+- `LoadAcceleratorsA` looks for a table of keys where Windows does, among the resources the
+  module's own headers point to. `ISLE.EXE`'s are cursors, icons and its version, so it answers
+  none, with `ERROR_RESOURCE_TYPE_NOT_FOUND`. A module that holds a table stops the run.
+- `VirtualQuery` answers from what `VirtualAlloc` and `VirtualFree` now write down: each region's
+  start, size and protection, and which of its pages are committed and how. It gives the run of
+  like pages from an address, as SmartHeap asks before it gives pages back; an address outside
+  every region stops the run. Nothing a title reads changes from the writing down.
+- `IDirect3DRM2::CreateTextureFromSurface` makes DirectX 5's `IDirect3DRMTexture2`: DirectX 6's
+  texture as far as `GenerateMIPMap`, but for `Changed`, which takes two flags.
+- `IDirect3DRM2::CreateMaterial` makes DirectX 5's `IDirect3DRMMaterial`: DirectX 6's material
+  without its ambient colour.
+
+`core/tests/shims.rs` asks all five. No other title's route moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

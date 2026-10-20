@@ -90,6 +90,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "HeapSize", 3, heap_size),
     stdcall("KERNEL32", "VirtualAlloc", 4, virtual_alloc),
     stdcall("KERNEL32", "VirtualFree", 3, virtual_free),
+    stdcall("KERNEL32", "VirtualQuery", 3, virtual_query),
     stdcall("KERNEL32", "GetStdHandle", 1, get_std_handle),
     stdcall("KERNEL32", "GetFileType", 1, get_file_type),
     stdcall("KERNEL32", "SetHandleCount", 1, set_handle_count),
@@ -411,15 +412,33 @@ fn heap_size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(ctx.state.heap.size_of(args[2]).unwrap_or(u32::MAX))
 }
 
+/// Every page the bytes from `at` for `size` touch.
+fn pages(at: u32, size: u32) -> impl Iterator<Item = u32> {
+    let end = at.saturating_add(size).next_multiple_of(0x1000);
+    ((at & !0xfff)..end).step_by(0x1000)
+}
+
+/// Write down the pages from `at` for `size` as committed, when the call
+/// commits them.
+fn commit(state: &mut super::State, kind: u32, at: u32, size: u32, protection: u32) {
+    const MEM_COMMIT: u32 = 0x1000;
+    if kind & MEM_COMMIT != 0 {
+        for page in pages(at, size) {
+            state.committed.insert(page, protection);
+        }
+    }
+}
+
 fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // VirtualAlloc(address, size, type, protection).
     //
     // The declared machine's whole address space is already mapped, so
-    // committing memory inside a region the guest already reserved is nothing
-    // to do: the address it asked about is the address it gets back. Handing
-    // out new memory for each commit is how a title that suballocates its own
-    // four megabytes eats a heap five hundred megabytes wide.
-    let (address, size) = (args[0], args[1]);
+    // committing memory inside a region the guest already reserved is only
+    // written down, for `VirtualQuery`: the address it asked about is the
+    // address it gets back. Handing out new memory for each commit is how a
+    // title that suballocates its own four megabytes eats a heap five hundred
+    // megabytes wide.
+    let (address, size, kind, protection) = (args[0], args[1], args[2], args[3]);
     if address != 0 {
         // Inside the heap the address is inside a region this machine already
         // handed out, and committing it again is nothing to do. Outside it the
@@ -430,6 +449,7 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         use crate::guest::heap::{HEAP_BASE, HEAP_BYTES};
         let end = address.saturating_add(size.max(1));
         if address >= HEAP_BASE && end <= HEAP_BASE + HEAP_BYTES {
+            commit(ctx.state, kind, address, size, protection);
             return Ok(address);
         }
         if ctx
@@ -444,6 +464,10 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             return Ok(0);
         }
         ctx.state.claimed.push((address, end));
+        ctx.state
+            .reserved
+            .insert(address, (size.next_multiple_of(0x1000), protection));
+        commit(ctx.state, kind, address, size, protection);
         return Ok(address);
     }
     // A new region starts on Windows' allocation granularity, sixty-four
@@ -455,7 +479,12 @@ fn virtual_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .alloc_aligned(size.next_multiple_of(0x1000), 0x1_0000);
     if at == 0 {
         ctx.log.line(&format!("no room to reserve {size} bytes"));
+        return Ok(0);
     }
+    ctx.state
+        .reserved
+        .insert(at, (size.next_multiple_of(0x1000), protection));
+    commit(ctx.state, kind, at, size, protection);
     Ok(at)
 }
 
@@ -468,6 +497,11 @@ fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (address, size, kind) = (args[0], args[1], args[2]);
     if kind & MEM_RELEASE != 0 {
         ctx.state.claimed.retain(|(start, _)| *start != address);
+        if let Some((size, _)) = ctx.state.reserved.remove(&address) {
+            for page in pages(address, size) {
+                ctx.state.committed.remove(&page);
+            }
+        }
         let whole = ctx.state.heap.size_of(address).unwrap_or(0);
         ctx.mem
             .write(address, &vec![0; whole as usize])
@@ -485,8 +519,64 @@ fn virtual_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem
             .write(start, &vec![0; end.saturating_sub(start) as usize])
             .map_err(Stop::Fault)?;
+        for page in pages(address, size) {
+            ctx.state.committed.remove(&page);
+        }
     }
     Ok(1)
+}
+
+/// What `VirtualAlloc` made of the page at an address, and of every page
+/// after it that is the same: which region they are in, and whether they are
+/// committed and how. SmartHeap, linked into LEGO Island's engine, asks how
+/// much of a region it reserved is committed (#118).
+fn virtual_query(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // VirtualQuery(address, buffer, length), into a MEMORY_BASIC_INFORMATION.
+    const MEMORY_BASIC_INFORMATION: u32 = 28;
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_PRIVATE: u32 = 0x2_0000;
+    let (address, buffer, length) = (args[0], args[1], args[2]);
+    let region = ctx
+        .state
+        .reserved
+        .range(..=address)
+        .next_back()
+        .map(|(base, (size, protection))| (*base, *size, *protection))
+        .filter(|(base, size, _)| address - base < *size);
+    let Some((base, size, reserved_with)) = region.filter(|_| length >= MEMORY_BASIC_INFORMATION)
+    else {
+        // Anywhere else is the machine's own memory, or nothing, and what
+        // Windows says of either is not written yet.
+        return Err(Stop::NotWritten {
+            what: format!(
+                "KERNEL32.dll!VirtualQuery({address:#x}) into {length} bytes, outside every \
+                 region VirtualAlloc reserved"
+            ),
+            caller: 0,
+        });
+    };
+    let page = address & !0xfff;
+    let here = ctx.state.committed.get(&page).copied();
+    let mut end = page + 0x1000;
+    while end - base < size && ctx.state.committed.get(&end).copied() == here {
+        end += 0x1000;
+    }
+    // A page that is only reserved has no protection of its own.
+    let (state, protection) = here.map_or((MEM_RESERVE, 0), |p| (MEM_COMMIT, p));
+    let answer = [
+        page,
+        base,
+        reserved_with,
+        end - page,
+        state,
+        protection,
+        MEM_PRIVATE,
+    ];
+    for (at, value) in (buffer..).step_by(4).zip(answer) {
+        ctx.mem.write_u32(at, value).map_err(Stop::Fault)?;
+    }
+    Ok(MEMORY_BASIC_INFORMATION)
 }
 
 fn get_std_handle(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

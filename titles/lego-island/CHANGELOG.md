@@ -21,3 +21,11 @@ lights. At instruction 478,302 it asks its window for the instance it was made w
 Core's `GetVersion` answers as Windows 95 did, with the top bit that says it is not NT (#129).
 Both C runtimes only store the word, so the boot calls what it called, and its digest moves.
 SmartHeap's test for NT in `ISLE.EXE` and `LEGO1.DLL`, not yet reached, now finds Windows 95.
+
+Its frames start and its world starts to load (#118), the way to first light. The engine lets go
+of the whole screen it has just cleared at instruction 458,966, flip 0, and from then on copies
+its back buffer onto the screen once a frame. After two hundred of those, counted by `ISLE.EXE`,
+it opens its scripts where they lie on the disc, then `WORLD.WDB`, and makes its textures and its
+first material through DirectX 5's retained mode. Every frame so far is black. At 5,560,671 it
+asks retained mode for its first mesh, which is #119's; first light is past the world it builds.
+The boot tests run to 5,560,600.
