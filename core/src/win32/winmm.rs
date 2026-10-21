@@ -277,7 +277,7 @@ fn move_to(ctx: &mut Ctx<'_>, handle: u32, to: u32) {
 /// What `mmioDescend` looks for: the next chunk, a chunk by its id, or a RIFF
 /// or LIST chunk by its form type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Find {
+pub(crate) enum Find {
     Next,
     Chunk(u32),
     Form(u32, u32),
@@ -285,16 +285,17 @@ enum Find {
 
 /// A chunk found: its id, size, form type, and where its data starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Chunk {
-    id: u32,
-    size: u32,
-    form: u32,
-    data: u32,
+pub(crate) struct Chunk {
+    pub(crate) id: u32,
+    pub(crate) size: u32,
+    pub(crate) form: u32,
+    pub(crate) data: u32,
 }
 
 /// Find a chunk in RIFF bytes, from `at` to `end`, stepping over each chunk
-/// that is not it, padded to an even size.
-fn find_chunk(bytes: &[u8], mut at: u32, end: u32, find: Find) -> Option<Chunk> {
+/// that is not it, padded to an even size. A DLS bank is walked with it too
+/// ([`crate::dls`]).
+pub(crate) fn find_chunk(bytes: &[u8], mut at: u32, end: u32, find: Find) -> Option<Chunk> {
     let word = |o: u32| {
         bytes
             .get(o as usize..o as usize + 4)

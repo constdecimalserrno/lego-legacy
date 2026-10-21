@@ -334,6 +334,8 @@ impl Voice {
 #[derive(Default)]
 pub struct Mixer {
     voices: Vec<Voice>,
+    /// The machine's MIDI out, once it has one (ADR-0008).
+    synth: Option<crate::synth::Synth>,
     /// Blocks mixed whole, the block being mixed, and whole blocks not yet
     /// handed out.
     blocks: u64,
@@ -392,6 +394,21 @@ impl Mixer {
         }
     }
 
+    /// Give the mix a General MIDI synth, which every frame mixed from here
+    /// on hears (ADR-0008).
+    pub fn open_synth(&mut self, synth: crate::synth::Synth) {
+        self.synth = Some(synth);
+    }
+
+    /// A short MIDI message, packed as `midiOutShortMsg` takes one, heard
+    /// from the frame of the mix a declared time falls in, or from the next
+    /// frame mixed if the mix is past it. A mix with no synth hears nothing.
+    pub fn midi(&mut self, nanos: u64, message: u32) {
+        if let Some(synth) = &mut self.synth {
+            synth.message(frame_at(nanos), message);
+        }
+    }
+
     /// Stop a sound at a declared time: what the mix has not reached by then
     /// is not heard, and what it has, was.
     pub fn stop(&mut self, id: u32, nanos: u64) {
@@ -427,6 +444,10 @@ impl Mixer {
             for s in self.voices.iter().filter_map(|v| v.at(frame, mem)) {
                 pair[0] += i32::from(s[0]);
                 pair[1] += i32::from(s[1]);
+            }
+            if let Some(synth) = &mut self.synth {
+                let [left, right] = synth.frame(frame);
+                pair = [pair[0].saturating_add(left), pair[1].saturating_add(right)];
             }
             self.block
                 .extend(pair.map(|s| s.clamp(-32768, 32767) as i16));
@@ -621,6 +642,29 @@ mod tests {
             assert_eq!(a[0], b[0], "the left side is on the same sample at {i}");
             assert_eq!(a[1], if i < after { b[1] } else { 0 }, "the right at {i}");
         }
+    }
+
+    #[test]
+    fn a_midi_message_is_heard_from_the_frame_its_declared_time_falls_in() {
+        let mem = guest(&[]);
+        let mut mixer = Mixer::default();
+        // Note on, key 60, channel 1: nothing hears it before there is a
+        // synth.
+        let note = 0x7f_3c_90;
+        mixer.midi(0, note);
+        let bank = crate::dls::Bank::parse(&crate::dls::tiny::bytes()).expect("a bank");
+        mixer.open_synth(crate::synth::Synth::new(bank));
+        // Program 1, its ramp, at full volume and hard left, a tenth of a
+        // block in.
+        for message in [0x01_c0, 0x7f_07_b0, 0x00_0a_b0] {
+            mixer.midi(0, message);
+        }
+        let at = BLOCK_NANOS / 10;
+        mixer.midi(at, note);
+        let block = mixer.due(BLOCK_NANOS + 1_000_000, &mem).remove(0);
+        let from = frame_at(at) as usize * 2;
+        assert!(block[..from].iter().all(|s| *s == 0), "nothing before it");
+        assert_eq!(block[from..from + 8], [0, 0, 100, 0, 200, 0, 300, 0]);
     }
 
     #[test]

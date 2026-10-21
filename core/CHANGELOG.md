@@ -218,6 +218,39 @@ does: LEGO Island's hands, which drive the machine through a headless host, reco
 they recorded before. The macOS backend is compiled and its unit tests run, not played; the
 Windows and X backends are compiled and clippy-clean, not run.
 
+A General MIDI synth in core plays a DLS Level 1 bank into the mix on the declared clock (#155,
+ADR-0008 1(a)). Nothing calls it yet: LEGO Chess's MIDI stream (#154) and the player's bank
+(#156) will, and no title's run moves.
+
+- `dls::Bank::parse` reads a bank, written from the MIDI Manufacturers Association's DLS Level 1
+  specification (v1.1b, read with its errata): instruments, their regions of the keyboard, each
+  region's wave through the pool table, its sample values (the region's own `wsmp`, else its
+  wave's, else a one-shot at middle C) and its articulation (the region's own `art1`, else its
+  instrument's, else the specification's defaults). A bank that records more than it holds, a wave
+  that is not mono PCM at eight or sixteen bits, or a loop past its wave's end is refused. It walks
+  RIFF with `winmm`'s chunk finder.
+- `synth::Synth` plays it: note on and off, program change and bank select, modulation, volume,
+  pan, expression, sustain, the pitch wheel and its range, fine and coarse tuning, reset all
+  controllers and all notes off, and drums on channel 10 from the bank's own kits, their keys past
+  General MIDI's 35 to 81 included. Volume and pitch envelopes, one LFO, velocity and key scaling
+  and loops come from each region's articulation. What the specification leaves to the device is
+  declared in `synth.rs` with its reasons: 32 voices, Windows 98 SE's, a finished voice freeing its
+  place before a note looks for one, stolen by DLS Level 1's static channel priority, a released
+  voice before a held one and the oldest first; linear interpolation; envelopes and the LFO moved
+  every frame; gain added up in centibels and stopped at 0 dB; a key group cut in 15 ms; a key
+  struck again ending its last note, held or kept by the pedal; a variation the bank lacks played
+  as its capital tone; no reverb or chorus. A system common message ends running status.
+- The mix plays the synth: `Mixer::open_synth` gives it one, and `Mixer::midi` hands it a short
+  message, packed as `midiOutShortMsg` takes one, heard from the frame its declared time falls in.
+- Every sample is integer arithmetic. Cents to a ratio, centibels to an amplitude and the LFO's
+  sine read tables built once with `cpu::x87::maths`, whose IEEE operations round alike on every
+  host, and a test pins the tables' hash and what a tiny bank written in the tests renders.
+- With the player's `GM16.DLS` (sha256 `3229b09b…`) on their LEGO Racers rip, a C major scale on
+  the piano and the GS Shaker, key 82, sound and render to the same samples every time; without
+  the rip those tests skip, and `LEGO_LEGACY_REQUIRE_DISC=1` fails them. LEGO Chess's four tunes,
+  played through it with that bank, reach 40 to 55 voices at once with every release tail heard, so
+  at 32 some tails are stolen; with 256 voices they peak at 20,758, unclipped.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old
