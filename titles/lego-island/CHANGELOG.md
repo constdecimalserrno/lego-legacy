@@ -156,3 +156,30 @@ the same bytes the quit door saved. The game then leaves its loop, destroys its 
 exit, at instruction 13,071,129,548 and flip 17341, where it stopped at the wall; a new test holds
 it.
 Closing the host's window still ends a run without the game being told.
+
+It plays one whole activity by hand (#137): Nick Brick's pizza, from the Pizzeria to Nubby at the
+gas station on the skateboard. No core change was needed; nothing on the way walls. The committed
+`pizza-delivery.route` is what a synthetic hand recorded through the host. It clicks the intro
+through, signs the book as LEGO and picks Nick, the fourth portrait, then goes out of the door and
+rides the bicycle down to the foot of the plaza. The Pizzeria is clicked from there at flip 10137,
+where it shows just over the handlebars; the game cuts to it, and Papa Brickolini brings a pizza
+out. Clicking the pizza while he holds it out takes the job, and from flip 12447 Nick is on the
+skateboard beside the Pizzeria with the pizza on its dashboard. Holding Up, with Left for two
+turns, it goes east and north into the gas station's road, where at flip 13085 Nubby comes and
+takes the pizza. The Information Center's tower, clicked from there, goes back inside; the quit
+door saves at flip 15327; the credits roll; and the game closes itself and exits 0 at instruction
+10,657,537,517, flip 22041.
+
+Its save says the pizza got there: Nick, actor 4, is the player in `G0.GS`, and his pizza mission
+scores red, delivered inside a hundred declared seconds, with nobody else's taken. Its tests run
+the hand over an empty data root and look at its frames on the bicycle, on the skateboard, at the
+handover and back inside, and at the credits. Replayed over an empty data root of its own, the
+route ends on the same machine, presents the same handover and saves the same bytes.
+
+Nick is picked, not Pepper. Each player's pizza goes somewhere of their own, and Pepper's goes to
+the jail. The road there from the town has road works across it, two workers and their fences,
+for the whole 350 declared seconds he has; the other way, down the ramp from the Information
+Center's plaza and round the police station, is more than four times as long as Nick's.
+
+Outdoors the game runs at 2.3 declared seconds a wall second on this machine headless, frames
+converted and presented included: a person's window has twice what it needs.

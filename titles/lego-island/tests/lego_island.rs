@@ -6,7 +6,9 @@
 //! and away on a bike, and the route its run recorded; and its saves, written
 //! by a hand that signs the book and quits, saved again as the game closes
 //! itself after its credits, and loaded by the next run over the same data
-//! root.
+//! root; and one whole activity by hand, Nick Brick's pizza taken from the
+//! Pizzeria to the gas station on the skateboard, and the game saved on the
+//! way out.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -630,6 +632,7 @@ const KEY_G: u32 = 0x22;
 const KEY_L: u32 = 0x26;
 const KEY_UP: u32 = 0xc8;
 const KEY_LEFT: u32 = 0xcb;
+const KEY_RIGHT: u32 = 0xcd;
 
 impl Hand {
     /// Where Windows leaves the pointer after a mode is set: the middle of
@@ -675,6 +678,20 @@ impl Hand {
         self.done
             .push((self.flip, Input::Key { code, down: false }));
         self.flip += 1;
+        self
+    }
+
+    /// A key pressed and kept down while the hand goes on to other things, as
+    /// a person keeps going forward while steering (#137).
+    fn press(mut self, code: u32) -> Self {
+        self.done.push((self.flip, Input::Key { code, down: true }));
+        self
+    }
+
+    /// A key kept down by [`Hand::press`], let go.
+    fn release(mut self, code: u32) -> Self {
+        self.done
+            .push((self.flip, Input::Key { code, down: false }));
         self
     }
 
@@ -1278,4 +1295,263 @@ fn the_next_run_loads_the_saves_and_a_second_name_moves_the_first_down_a_slot() 
     assert_eq!(players[..2], [2, 0]);
     assert_eq!(players[2..], [name("ISLE"), name("LEGO")].concat());
     assert_eq!(saves["HISTORY.GSI"][..2], [2, 0]);
+}
+
+/// Where the delivery presses (#137). Anywhere on the floor of the
+/// Information Center, which clicks the intro and the Infomaniac's welcome
+/// through. Nick Brick's portrait, the fourth over the map. The Pizzeria, its
+/// red and white awning just over the handlebars, seen from the foot of the
+/// plaza below the Information Center; the pizza Papa Brickolini holds out;
+/// and the Information Center's tower, seen from the gas station.
+const ANYWHERE: (i32, i32) = (600, 450);
+const NICK: (i32, i32) = (372, 105);
+const PIZZERIA: (i32, i32) = (330, 268);
+const PIZZA: (i32, i32) = (290, 284);
+const THE_TOWER: (i32, i32) = (363, 185);
+
+/// One whole activity by hand (#137): Nick Brick takes a pizza from the
+/// Pizzeria to Nubby at the gas station, comes back, and saves.
+///
+/// The book is signed as the ride signs it, but Nick is picked: each player's
+/// pizza goes somewhere of their own (`PizzaMissionState`), and Pepper's goes
+/// to the jail, past road works whose two workers and fences close the road
+/// there from the town for as long as he carries it, where Nick's is a
+/// straight road and a turn. Out of the door, a step, a turn to the bicycle, and the
+/// road down to the foot of the plaza; a turn to the town, and the Pizzeria is
+/// clicked from there: anywhere it is seen. Papa Brickolini brings the pizza
+/// out, and clicking it while he holds it out takes the job, so the game puts
+/// Nick on the skateboard beside the Pizzeria with the pizza on its
+/// dashboard. East along the road with the key held down, north at the
+/// crossroads, and into the gas station's road, where Nubby comes for it.
+/// Then the tower of the Information Center, clicked from there, goes back
+/// inside, and the quit door saves the game.
+fn delivery() -> Hand {
+    let mut hand = Hand::new();
+    for flip in (98..800).step_by(100) {
+        hand = hand.wait(flip).click(ANYWHERE);
+    }
+    hand.wait(949)
+        .click(BOOK)
+        .wait(2800)
+        .hold(KEY_L, 2)
+        .hold(KEY_E, 2)
+        .hold(KEY_G, 2)
+        .hold(KEY_O, 2)
+        .wait(2900)
+        .click(TICK)
+        .wait(4300)
+        .click(NICK)
+        .wait(5800)
+        .click(TO_THE_ELEVATOR)
+        .wait(6800)
+        .click(TO_THE_DOOR)
+        .wait(7800)
+        .click(DOOR)
+        // Outside, turning a key's 8 degrees a frame.
+        .wait(8800)
+        .hold(KEY_UP, 40)
+        .wait(8900)
+        .hold(KEY_LEFT, 5)
+        .wait(9100)
+        .click(BIKE)
+        .wait(9400)
+        .hold(KEY_UP, 600)
+        .wait(10050)
+        .hold(KEY_RIGHT, 8)
+        .wait(10120)
+        .click(PIZZERIA)
+        .wait(11884)
+        .click(PIZZA)
+        // On the skateboard, facing the sea: east, and north.
+        .wait(12526)
+        .hold(KEY_LEFT, 11)
+        .press(KEY_UP)
+        .wait(12825)
+        .hold(KEY_LEFT, 11)
+        .wait(13300)
+        .release(KEY_UP)
+        // Delivered, and facing the Information Center.
+        .wait(14250)
+        .hold(KEY_RIGHT, 11)
+        .wait(14300)
+        .click(THE_TOWER)
+        .wait(14700)
+        .click(QUIT_DOOR)
+        .wait(15300)
+        .click(YES)
+}
+
+/// The flips the delivery is looked at: on the bicycle; Papa Brickolini
+/// holding the pizza out; on the skateboard; Nubby with the pizza in his
+/// hands; back in the Information Center; and the credits.
+const DOWN_TO_THE_PLAZA: u64 = 9700;
+const HELD_OUT: u64 = 11880;
+const SKATING: u64 = 12800;
+const HANDED_OVER: u64 = 13500;
+const BACK_INSIDE: u64 = 14600;
+const LAST_CREDITS: u64 = 16000;
+const DELIVERY_FRAMES: &[u64] = &[
+    DOWN_TO_THE_PLAZA,
+    HELD_OUT,
+    SKATING,
+    HANDED_OVER,
+    BACK_INSIDE,
+    LAST_CREDITS,
+];
+
+/// Enough for the credits to finish and the game to close itself: it is gone
+/// by 10.66 billion.
+const DELIVERY_BUDGET: u64 = 10_700_000_000;
+
+fn delivered_by_hand() -> Option<&'static Saving> {
+    static DELIVERED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        record: true,
+        ..Cli::default()
+    };
+    saving(
+        &DELIVERED,
+        "pizza-delivery-by-hand",
+        || delivery().host(DELIVERY_FRAMES),
+        cli,
+        DELIVERY_BUDGET,
+    )
+}
+
+fn delivery_route() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/pizza-delivery.route")
+}
+
+/// Each player's pizza mission as the game saves it, Pepper, Mama, Papa, Nick
+/// and Laura in turn: four numbers each, the last two the score of its latest
+/// delivery and its best, 0 for none and 3 for red, the fastest.
+fn pizza_missions(game: &[u8]) -> Vec<[i16; 4]> {
+    let name = b"PizzaMissionState";
+    let at = game
+        .windows(name.len())
+        .position(|w| w == name)
+        .expect("the pizza missions are saved")
+        + name.len();
+    game[at..at + 40]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|m| [0, 2, 4, 6].map(|i| i16::from_le_bytes([m[i], m[i + 1]])))
+        .collect()
+}
+
+/// The ticket's bar (#137): one activity from its start to its end by hand,
+/// through the host, and saved. Nothing on the way stops the run: the game
+/// ends it itself, closing after its credits. What it saved says the pizza got
+/// there: Nick's delivery is red, inside a hundred declared seconds.
+#[test]
+fn a_hand_takes_nicks_pizza_to_the_gas_station_comes_back_and_saves() {
+    let Some(delivered) = delivered_by_hand() else {
+        return;
+    };
+    let ran = &delivered.ran;
+    ran.assert_exited(0);
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+    let red = |[r, g, b]: [u8; 3]| r > 200 && g < 60 && b < 60;
+
+    // Down the road to the plaza's foot under the island's sky, the bicycle's
+    // red handlebars across the foot of the screen.
+    let [r, g, b] = pixel(frame(DOWN_TO_THE_PLAZA), 320, 10);
+    assert!(b > 200 && b > r + 100 && b > g + 30, "the sky");
+    assert!(
+        red(pixel(frame(DOWN_TO_THE_PLAZA), 320, 400)),
+        "the bicycle"
+    );
+    // On the skateboard the pizza is on its dashboard; at the gas station it
+    // is in Nubby's hands, and gone from the dashboard.
+    assert!(
+        red(pixel(frame(SKATING), 90, 360)),
+        "the pizza on the dashboard"
+    );
+    assert!(
+        red(pixel(frame(HANDED_OVER), 196, 276)),
+        "the pizza with Nubby"
+    );
+    assert!(
+        !red(pixel(frame(HANDED_OVER), 90, 360)),
+        "and not on the dashboard"
+    );
+    // Back inside, the Information Center's plants either side of its stage;
+    // after the quit door, the credits.
+    for (x, y) in [(180, 342), (472, 343)] {
+        let [a, green, b] = pixel(frame(BACK_INSIDE), x, y);
+        assert!(green > a && green > b, "a plant at {x},{y}");
+    }
+    for x in [40, 600] {
+        assert_eq!(pixel(frame(LAST_CREDITS), x, 300), [0, 0, 0], "the credits");
+    }
+
+    // The players when the book is signed, the game and the scores at the quit
+    // door, and both again as the game closes.
+    let written = |save: &str| {
+        flip_of(
+            ran,
+            &format!(r"file written C:\Program Files\LEGO Island\{save},"),
+        )
+    };
+    assert_eq!(written("Players.gsi"), 2913, "pressing the tick");
+    assert_eq!(written("History.gsi"), 15327, "letting go of yes");
+    assert_eq!(written("G0.GS"), 15327);
+    assert_eq!(delivered.saves["PLAYERS.GSI"][2..], name("LEGO"));
+    // LEGO's game, in the first act, with Nick, actor 4, as the player; his
+    // pizza delivered red, and nobody else's taken.
+    let game = &delivered.saves["G0.GS"];
+    assert_eq!(game[..9], [0x0c, 0, 1, 0, 0, 0, 0, 0, 4]);
+    let missions = pizza_missions(game);
+    assert_eq!(missions[3][2..], [3, 3], "Nick's, red: {missions:?}");
+    for other in [0, 1, 2, 4] {
+        assert_eq!(missions[other][2..], [0, 0], "{missions:?}");
+    }
+}
+
+/// The committed route is the hand's own, as its run recorded it.
+#[test]
+fn the_committed_delivery_is_what_the_hand_recorded() {
+    let Some(delivered) = delivered_by_hand() else {
+        return;
+    };
+    let recorded = lego_legacy_core::route::Route::load(&delivered.ran.dir.join("route"))
+        .expect("the run recorded a route");
+    let committed = lego_legacy_core::route::Route::load(&delivery_route()).expect("it reads");
+    assert_eq!(recorded, committed);
+}
+
+/// The determinism gate: the committed delivery, replayed over an empty data
+/// root of its own, ends on the machine the hand's run ended on, presents the
+/// pizza handed over as it did, and saves what it saved, byte for byte.
+#[test]
+fn the_delivery_replays_to_the_machine_the_hand_made_and_saves_the_same() {
+    static REPLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        route: Some(delivery_route()),
+        ..Cli::default()
+    };
+    // The replay runs beside the hand's run rather than after it.
+    let (hand, replay) = std::thread::scope(|scope| {
+        let replay = scope.spawn(|| {
+            saving(
+                &REPLAYED,
+                "pizza-delivery-replayed",
+                || Headless::new().keeping(DELIVERY_FRAMES),
+                cli,
+                DELIVERY_BUDGET,
+            )
+        });
+        (delivered_by_hand(), replay.join().expect("the replay ran"))
+    });
+    let (Some(hand), Some(replay)) = (hand, replay) else {
+        return;
+    };
+    hand.ran.assert_same_machine(&replay.ran);
+    assert!(
+        hand.ran.host.frame(HANDED_OVER).map(|f| &f.pixels)
+            == replay.ran.host.frame(HANDED_OVER).map(|f| &f.pixels),
+        "including what it presented at flip {HANDED_OVER}"
+    );
+    assert!(hand.saves == replay.saves, "and the same saves");
 }

@@ -1,0 +1,283 @@
+#lego-legacy-route 1
+# LEGO Island, one whole activity: Nick Brick's pizza, from the Pizzeria to
+# Nubby at the gas station on the skateboard, then back to the Information
+# Center and out by the quit door, which saves the game (#137).
+#
+# Recorded, not written: a synthetic hand in lego_island.rs (`delivery`) did
+# this through the host, as a person's hand reaches a run in a window, and the
+# run wrote down what it was handed. The pointer glides a few pixels a flip; a
+# button is held two flips; a key as long as it is held, Up held down while
+# Left turns the skateboard.
+#
+# Clicks on the floor skip the intro and the Infomaniac's welcome. In the
+# Information Center the book is signed LEGO and Nick's portrait, the fourth,
+# is picked; the elevator, the revolving door, and out at flip 7900. A step, a
+# turn of 40 degrees to the bicycle, and down the road on it to the foot of the
+# plaza. Turned to the town, the Pizzeria shows just over the handlebars, and
+# is clicked at flip 10137: the game cuts to it, and Papa Brickolini brings a
+# pizza out. Clicking it while he holds it out, at flip 11887, takes the job,
+# and from flip 12447 Nick is on the skateboard beside the Pizzeria with the
+# pizza on its dashboard. Up from flip 12538 with Left for the turns: east
+# along the road, north at the crossroads, into the gas station's road, where
+# at flip 13085 Nubby comes and takes the pizza, red. The Information Center's
+# tower, clicked from the gas station at flip 14307, goes back inside; the quit
+# door and yes save the game and the scores at flip 15327, the credits roll,
+# and the game closes itself and leaves at flip 22041.
+flip 98 move 336 256
+flip 99 move 352 272
+flip 100 move 368 288
+flip 101 move 384 304
+flip 102 move 400 320
+flip 103 move 416 336
+flip 104 move 432 352
+flip 105 move 448 368
+flip 106 move 464 384
+flip 107 move 480 400
+flip 108 move 496 416
+flip 109 move 512 432
+flip 110 move 528 448
+flip 111 move 544 450
+flip 112 move 560 450
+flip 113 move 576 450
+flip 114 move 592 450
+flip 115 move 600 450
+flip 116 down
+flip 118 up
+flip 198 down
+flip 200 up
+flip 298 down
+flip 300 up
+flip 398 down
+flip 400 up
+flip 498 down
+flip 500 up
+flip 598 down
+flip 600 up
+flip 698 down
+flip 700 up
+flip 798 down
+flip 800 up
+flip 949 move 584 434
+flip 950 move 568 418
+flip 951 move 552 402
+flip 952 move 536 386
+flip 953 move 520 370
+flip 954 move 504 354
+flip 955 move 488 338
+flip 956 move 472 322
+flip 957 move 456 306
+flip 958 move 440 294
+flip 959 move 424 294
+flip 960 move 408 294
+flip 961 move 392 294
+flip 962 move 376 294
+flip 963 move 360 294
+flip 964 move 344 294
+flip 965 move 328 294
+flip 966 move 322 294
+flip 967 down
+flip 969 up
+flip 2800 key L down
+flip 2802 key L up
+flip 2803 key E down
+flip 2805 key E up
+flip 2806 key G down
+flip 2808 key G up
+flip 2809 key O down
+flip 2811 key O up
+flip 2900 move 338 278
+flip 2901 move 354 262
+flip 2902 move 370 246
+flip 2903 move 386 230
+flip 2904 move 402 214
+flip 2905 move 418 198
+flip 2906 move 434 182
+flip 2907 move 450 166
+flip 2908 move 466 150
+flip 2909 move 482 135
+flip 2910 move 498 135
+flip 2911 move 514 135
+flip 2912 move 519 135
+flip 2913 down
+flip 2915 up
+flip 4300 move 503 119
+flip 4301 move 487 105
+flip 4302 move 471 105
+flip 4303 move 455 105
+flip 4304 move 439 105
+flip 4305 move 423 105
+flip 4306 move 407 105
+flip 4307 move 391 105
+flip 4308 move 375 105
+flip 4309 move 372 105
+flip 4310 down
+flip 4312 up
+flip 5800 move 356 121
+flip 5801 move 340 137
+flip 5802 move 324 153
+flip 5803 move 308 169
+flip 5804 move 292 185
+flip 5805 move 276 201
+flip 5806 move 260 217
+flip 5807 move 244 233
+flip 5808 move 228 249
+flip 5809 move 212 265
+flip 5810 move 196 281
+flip 5811 move 180 297
+flip 5812 move 164 310
+flip 5813 move 148 310
+flip 5814 move 132 310
+flip 5815 move 116 310
+flip 5816 move 100 310
+flip 5817 move 84 310
+flip 5818 move 68 310
+flip 5819 move 52 310
+flip 5820 move 36 310
+flip 5821 move 28 310
+flip 5822 down
+flip 5824 up
+flip 6800 move 35 294
+flip 6801 move 35 278
+flip 6802 move 35 262
+flip 6803 move 35 246
+flip 6804 move 35 230
+flip 6805 move 35 214
+flip 6806 move 35 198
+flip 6807 move 35 182
+flip 6808 move 35 166
+flip 6809 move 35 150
+flip 6810 move 35 140
+flip 6811 down
+flip 6813 up
+flip 7800 move 51 156
+flip 7801 move 67 172
+flip 7802 move 83 188
+flip 7803 move 99 204
+flip 7804 move 115 220
+flip 7805 move 131 220
+flip 7806 move 147 220
+flip 7807 move 163 220
+flip 7808 move 179 220
+flip 7809 move 195 220
+flip 7810 move 211 220
+flip 7811 move 227 220
+flip 7812 move 243 220
+flip 7813 move 259 220
+flip 7814 move 275 220
+flip 7815 move 291 220
+flip 7816 move 307 220
+flip 7817 move 323 220
+flip 7818 move 330 220
+flip 7819 down
+flip 7821 up
+flip 8800 key Up down
+flip 8840 key Up up
+flip 8900 key Left down
+flip 8905 key Left up
+flip 9100 move 314 236
+flip 9101 move 298 252
+flip 9102 move 282 268
+flip 9103 move 266 271
+flip 9104 move 250 271
+flip 9105 move 234 271
+flip 9106 move 218 271
+flip 9107 move 202 271
+flip 9108 move 186 271
+flip 9109 move 170 271
+flip 9110 move 154 271
+flip 9111 move 138 271
+flip 9112 move 122 271
+flip 9113 move 106 271
+flip 9114 move 90 271
+flip 9115 move 74 271
+flip 9116 move 70 271
+flip 9117 down
+flip 9119 up
+flip 9400 key Up down
+flip 10000 key Up up
+flip 10050 key Right down
+flip 10058 key Right up
+flip 10120 move 86 268
+flip 10121 move 102 268
+flip 10122 move 118 268
+flip 10123 move 134 268
+flip 10124 move 150 268
+flip 10125 move 166 268
+flip 10126 move 182 268
+flip 10127 move 198 268
+flip 10128 move 214 268
+flip 10129 move 230 268
+flip 10130 move 246 268
+flip 10131 move 262 268
+flip 10132 move 278 268
+flip 10133 move 294 268
+flip 10134 move 310 268
+flip 10135 move 326 268
+flip 10136 move 330 268
+flip 10137 down
+flip 10139 up
+flip 11884 move 314 284
+flip 11885 move 298 284
+flip 11886 move 290 284
+flip 11887 down
+flip 11889 up
+flip 12526 key Left down
+flip 12537 key Left up
+flip 12538 key Up down
+flip 12825 key Left down
+flip 12836 key Left up
+flip 13300 key Up up
+flip 14250 key Right down
+flip 14261 key Right up
+flip 14300 move 306 268
+flip 14301 move 322 252
+flip 14302 move 338 236
+flip 14303 move 354 220
+flip 14304 move 363 204
+flip 14305 move 363 188
+flip 14306 move 363 185
+flip 14307 down
+flip 14309 up
+flip 14700 move 379 201
+flip 14701 move 395 217
+flip 14702 move 411 233
+flip 14703 move 427 249
+flip 14704 move 443 260
+flip 14705 move 459 260
+flip 14706 move 475 260
+flip 14707 move 491 260
+flip 14708 move 507 260
+flip 14709 move 523 260
+flip 14710 move 539 260
+flip 14711 move 555 260
+flip 14712 move 571 260
+flip 14713 move 587 260
+flip 14714 move 590 260
+flip 14715 down
+flip 14717 up
+flip 15300 move 574 276
+flip 15301 move 558 292
+flip 15302 move 542 308
+flip 15303 move 526 324
+flip 15304 move 510 340
+flip 15305 move 494 356
+flip 15306 move 478 372
+flip 15307 move 462 388
+flip 15308 move 446 400
+flip 15309 move 430 400
+flip 15310 move 414 400
+flip 15311 move 398 400
+flip 15312 move 382 400
+flip 15313 move 366 400
+flip 15314 move 350 400
+flip 15315 move 334 400
+flip 15316 move 318 400
+flip 15317 move 302 400
+flip 15318 move 286 400
+flip 15319 move 270 400
+flip 15320 move 254 400
+flip 15321 move 238 400
+flip 15322 move 222 400
+flip 15323 move 210 400
+flip 15324 down
+flip 15326 up
