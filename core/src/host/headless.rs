@@ -4,7 +4,7 @@
 //! makes it the host every test runs on. Input comes from a route, so a
 //! headless run is a function of that route alone.
 
-use super::{sys, Frame, Host, HostError, Input, Mapping};
+use super::{sys, Cursor, Frame, Host, HostError, Input, Mapping};
 
 /// One frame this host was asked to present.
 pub struct Presented {
@@ -50,6 +50,9 @@ pub struct Headless {
     pending: Vec<(u64, Input)>,
     /// Flips whose pixels are kept however long the run goes on.
     keep: Vec<u64>,
+    /// Every pointer shape the host was told of, with how many flips had
+    /// been presented when it was (#139).
+    pub shapes: Vec<(u64, Option<Cursor>)>,
 }
 
 impl Headless {
@@ -62,6 +65,7 @@ impl Headless {
             audio_flips: Vec::new(),
             pending: Vec::new(),
             keep: Vec::new(),
+            shapes: Vec::new(),
         }
     }
 
@@ -138,6 +142,10 @@ impl Host for Headless {
     fn audio(&mut self, samples: &[i16]) {
         self.audio_blocks.push(samples.to_vec());
         self.audio_flips.push(self.flips);
+    }
+
+    fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        self.shapes.push((self.flips, shape.cloned()));
     }
 
     fn map(&mut self, len: usize) -> Result<Mapping, HostError> {

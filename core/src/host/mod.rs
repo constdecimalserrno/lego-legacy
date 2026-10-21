@@ -118,6 +118,31 @@ pub fn key_change(held: &mut Vec<u32>, code: u32, down: bool) -> Option<Input> {
     Some(Input::Key { code, down })
 }
 
+/// A pointer shape a title set with `SetCursor`, as the host draws it over
+/// the picture (#139).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub width: u32,
+    pub height: u32,
+    /// The pixel the pointer points with, from the top left.
+    pub hot: (u32, u32),
+    /// Red, green, blue and alpha a pixel, top row first. Alpha is 0 or 255.
+    pub pixels: Vec<u8>,
+}
+
+impl Cursor {
+    /// No pointer at all: what `SetCursor(NULL)` shows.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            hot: (0, 0),
+            pixels: vec![0; 4],
+        }
+    }
+}
+
 /// A region of host memory the guest's arena lives in.
 ///
 /// Owned: dropping it releases the mapping. The host hands one out rather than
@@ -219,6 +244,14 @@ pub trait Host {
     /// the mouse's next move is measured from it (#59, #64). The person's own
     /// pointer is never moved. A host with no pointer has nothing to do.
     fn put_pointer(&mut self, _x: i32, _y: i32) {}
+
+    /// The shape the title set its pointer to, or `None` for the host's own
+    /// arrow, which is what Windows' own is drawn as.
+    ///
+    /// Drawn only over the picture, and only while the window is in front:
+    /// anywhere else the pointer is the person's, with whatever shape the
+    /// desktop gives it (#111). A host with no pointer has nothing to do.
+    fn pointer_shape(&mut self, _shape: Option<&Cursor>) {}
 
     /// Whether the person has ended the run from outside it, by closing the
     /// window or by what [`listen`] hears. A host with no window has only the

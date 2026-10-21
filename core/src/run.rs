@@ -49,8 +49,9 @@ pub fn run_digested(
     let finish = machine.run(host, &mut log, budget);
     // Nothing reads the pointer once the run has ended, so it is the
     // person's again, by the way losing focus gives it back, and stays theirs
-    // while the window waits to be closed (#111).
+    // while the window waits to be closed (#111), in the host's own shape.
     host.show_pointer(true);
+    host.pointer_shape(None);
     let digest = wrap_up(title, &mut machine, host, &mut log, &finish);
     Ok((finish, log, digest))
 }

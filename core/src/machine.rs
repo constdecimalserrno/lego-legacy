@@ -108,6 +108,9 @@ pub struct Machine {
     /// that changes: hiding is counted, and telling it twice would take two
     /// showings to undo.
     pointer_shown: bool,
+    /// The cursor the host was last told the title set, so that it is told
+    /// each one once (#139).
+    cursor_told: Option<u32>,
     /// Calls the machine made into guest code, waiting to come back: where to
     /// resume, what to answer with, and where the guest's stack stood when the
     /// call was set up. The last of those is how an abandoned call is
@@ -184,6 +187,7 @@ impl Machine {
             pointer_puts: 0,
             pointer_puts_told: 0,
             pointer_shown: true,
+            cursor_told: None,
             continuations: Vec::new(),
             dialog_turns: Vec::new(),
             pass_through: Vec::new(),
@@ -1800,6 +1804,15 @@ impl Machine {
                     "the title draws it, so the host steers by the mouse"
                 }
             ));
+        }
+        // And the shape the title last set it to, which the host draws over
+        // the picture (#139).
+        if self.state.cursor != self.cursor_told {
+            self.cursor_told = self.state.cursor;
+            if let Some(cursor) = self.state.cursor {
+                host.pointer_shape(crate::win32::user32::shape(&self.state, cursor).as_ref());
+                log.line(&format!("pointer shape flip {} {cursor:#x}", self.flips));
+            }
         }
         // And where the title put it, while the title is the one drawing a
         // pointer: the host measures the person's next move from there, and

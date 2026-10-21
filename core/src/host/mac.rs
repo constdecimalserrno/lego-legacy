@@ -10,7 +10,7 @@
 //! scales it, keeps its aspect, and asks nothing of us per pixel.
 
 use super::pointer::{content_scale, moved, Moved, Steer};
-use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
+use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_void, CStr, CString};
 
 type Id = *mut c_void;
@@ -44,6 +44,9 @@ type MsgCharPtr = unsafe extern "C" fn(Id, Sel) -> *const c_char;
 type MsgPoint = unsafe extern "C" fn(Id, Sel) -> Point;
 type MsgRect = unsafe extern "C" fn(Id, Sel) -> Rect;
 type MsgF64 = unsafe extern "C" fn(Id, Sel) -> f64;
+/// An `NSSize` is laid out as a `Point` is: two doubles.
+type MsgIdPtrPoint = unsafe extern "C" fn(Id, Sel, *mut c_void, Point) -> Id;
+type MsgIdIdPoint = unsafe extern "C" fn(Id, Sel, Id, Point) -> Id;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -315,6 +318,106 @@ extern "C" fn release_pixels(info: *mut c_void, _data: *const c_void, _size: usi
     }
 }
 
+/// A title's pointer shape as an `NSCursor`, which the caller owns: an
+/// image of its pixels, by Core Graphics, with its hot spot, which AppKit
+/// measures from the top left as Windows does (#139).
+///
+/// # Errors
+/// When Core Graphics' functions cannot be found, or AppKit makes nothing.
+fn ns_cursor(rt: &Runtime, shape: &Cursor) -> Result<Id, HostError> {
+    let (width, height) = (shape.width as usize, shape.height as usize);
+    let Some(pixels) = shape.pixels.get(..width * height * 4) else {
+        return Err(HostError::Unsupported(
+            "a pointer shape shorter than it says",
+        ));
+    };
+    // Safety: each function is called through the signature Core Graphics'
+    // and AppKit's headers give it; the image's copy of the pixels is handed
+    // back to `release_pixels` once, and every object made is released once,
+    // after the one that keeps it has taken it.
+    unsafe {
+        let space_named: unsafe extern "C" fn(*const c_char) -> *mut c_void =
+            rt.graphics("CGColorSpaceCreateWithName")?;
+        let space_release: unsafe extern "C" fn(*mut c_void) =
+            rt.graphics("CGColorSpaceRelease")?;
+        let provider_with: unsafe extern "C" fn(
+            *mut c_void,
+            *const u8,
+            usize,
+            *mut c_void,
+        ) -> *mut c_void = rt.graphics("CGDataProviderCreateWithData")?;
+        let provider_release: unsafe extern "C" fn(*mut c_void) =
+            rt.graphics("CGDataProviderRelease")?;
+        let image_create: unsafe extern "C" fn(
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            *mut c_void,
+            u32,
+            *mut c_void,
+            *mut c_void,
+            bool,
+            i32,
+        ) -> *mut c_void = rt.graphics("CGImageCreate")?;
+        let image_release: unsafe extern "C" fn(*mut c_void) = rt.graphics("CGImageRelease")?;
+
+        let copy: Box<Vec<u8>> = Box::new(pixels.to_vec());
+        let bytes = copy.as_ptr();
+        let provider = provider_with(
+            Box::into_raw(copy).cast(),
+            bytes,
+            pixels.len(),
+            release_pixels as *mut c_void,
+        );
+        let name = rt.core_graphics.symbol("kCGColorSpaceSRGB")?;
+        let space = space_named(*name.cast::<*const c_char>());
+        // Red, green, blue, then alpha, not multiplied in:
+        // `kCGImageAlphaLast` in the bytes' own order.
+        let image = image_create(
+            width,
+            height,
+            8,
+            32,
+            width * 4,
+            space,
+            3,
+            provider,
+            std::ptr::null_mut(),
+            false,
+            0,
+        );
+        space_release(space);
+        provider_release(provider);
+        if image.is_null() {
+            return Err(HostError::Unsupported(
+                "Core Graphics made no pointer image",
+            ));
+        }
+        let size = Point {
+            x: width as f64,
+            y: height as f64,
+        };
+        let ns_image: Id = rt.send::<MsgId>()(rt.class("NSImage"), rt.sel("alloc"));
+        let ns_image: Id =
+            rt.send::<MsgIdPtrPoint>()(ns_image, rt.sel("initWithCGImage:size:"), image, size);
+        image_release(image);
+        let hot = Point {
+            x: f64::from(shape.hot.0),
+            y: f64::from(shape.hot.1),
+        };
+        let cursor: Id = rt.send::<MsgId>()(rt.class("NSCursor"), rt.sel("alloc"));
+        let cursor: Id =
+            rt.send::<MsgIdIdPoint>()(cursor, rt.sel("initWithImage:hotSpot:"), ns_image, hot);
+        rt.send::<MsgVoid>()(ns_image, rt.sel("release"));
+        if cursor.is_null() {
+            return Err(HostError::Unsupported("AppKit made no pointer"));
+        }
+        Ok(cursor)
+    }
+}
+
 /// A window on the host's screen, showing what the guest drew.
 pub struct MacWindow {
     rt: Runtime,
@@ -344,6 +447,11 @@ pub struct MacWindow {
     /// wants it gone *and* the person is over this window with this
     /// application in front.
     pointer_taken: bool,
+    /// The shape the title set its pointer to, as an `NSCursor` this window
+    /// owns, or nil for the person's own arrow (#139).
+    shape: Id,
+    /// Whether the pointer was given that shape at the last pump.
+    shaped: bool,
     /// The pointer the guest is handed while the pointer is taken ([`Steer`]).
     steer: Steer,
     cg_associate: unsafe extern "C" fn(bool) -> i32,
@@ -490,6 +598,8 @@ impl MacWindow {
                 pointer_hidden: false,
                 pointer_over_us: true,
                 pointer_taken: false,
+                shape: std::ptr::null_mut(),
+                shaped: false,
                 steer: Steer::new(
                     (
                         i32::try_from(width / 2).unwrap_or(320),
@@ -545,6 +655,23 @@ impl MacWindow {
             v & 0xff != 0
         };
         let take = self.pointer_hidden && self.pointer_over_us && active;
+        // The title's shape, over the picture while it is in front, and the
+        // arrow everywhere else (#139). AppKit puts its own arrow back as the
+        // pointer crosses its windows, so the shape is set on every pump.
+        let shaped = !take && self.pointer_over_us && active && !self.shape.is_null();
+        if shaped || self.shaped {
+            // Safety: NSCursor's own class method, and `set` on a cursor.
+            unsafe {
+                let cursor = if shaped {
+                    self.shape
+                } else {
+                    let class = self.rt.class("NSCursor");
+                    self.rt.send::<MsgId>()(class, self.rt.sel("arrowCursor"))
+                };
+                self.rt.send::<MsgVoid>()(cursor, self.rt.sel("set"));
+            }
+        }
+        self.shaped = shaped;
         if take == self.pointer_taken {
             return;
         }
@@ -802,8 +929,9 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         // A run that ended with the pointer hidden would leave a person
-        // without one.
+        // without one, or with the title's shape.
         self.show_pointer(true);
+        self.pointer_shape(None);
         // Safety: closing a window we opened.
         unsafe {
             self.rt.send::<MsgVoid>()(self.window, self.rt.sel("close"));
@@ -882,6 +1010,20 @@ impl Host for MacWindow {
         self.draw_pointer_where_it_belongs();
     }
 
+    fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        // Safety: the cursor is one this window made, released once.
+        unsafe {
+            if !self.shape.is_null() {
+                self.rt.send::<MsgVoid>()(self.shape, self.rt.sel("release"));
+            }
+        }
+        // A shape AppKit will not make is the person's arrow.
+        self.shape = shape
+            .and_then(|shape| ns_cursor(&self.rt, shape).ok())
+            .unwrap_or(std::ptr::null_mut());
+        self.draw_pointer_where_it_belongs();
+    }
+
     fn put_pointer(&mut self, x: i32, y: i32) {
         // The pointer the guest is handed starts again from where the title
         // put it, and the mouse's next move is measured from there. That is
@@ -920,7 +1062,10 @@ impl Host for MacWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, direct_input_modifier, guest_point, Rect, PRESENT_BITMAP_INFO};
+    use super::{
+        direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId, MsgPoint,
+        MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
+    };
     use crate::host::{sys, Input};
 
     use std::ffi::{c_char, c_void};
@@ -1060,6 +1205,39 @@ mod tests {
         // A point outside the window is clamped rather than passed through
         // negative.
         assert_eq!(guest_point(same, (640, 480), -5.0, 600.0), (0, 0));
+    }
+
+    /// A title's pointer shape becomes an AppKit cursor of its size, with
+    /// its hot spot (#139). Nothing is shown and no window is opened: the
+    /// cursor is made, read back and let go.
+    #[test]
+    fn a_pointer_shape_is_an_appkit_cursor_with_its_hot_spot() {
+        let rt = Runtime::open().expect("AppKit is on every Mac");
+        let shape = crate::host::Cursor {
+            width: 3,
+            height: 2,
+            hot: (2, 1),
+            pixels: vec![0xff; 3 * 2 * 4],
+        };
+        let cursor = ns_cursor(&rt, &shape).expect("AppKit makes it");
+        // Safety: AppKit's own accessors on the cursor just made, which is
+        // released once.
+        unsafe {
+            let hot: Point = rt.send::<MsgPoint>()(cursor, rt.sel("hotSpot"));
+            assert_eq!((hot.x, hot.y), (2.0, 1.0));
+            let image: Id = rt.send::<MsgId>()(cursor, rt.sel("image"));
+            let size: Point = rt.send::<MsgPoint>()(image, rt.sel("size"));
+            assert_eq!((size.x, size.y), (3.0, 2.0));
+            rt.send::<MsgVoid>()(cursor, rt.sel("release"));
+        }
+        let short = crate::host::Cursor {
+            pixels: vec![0; 4],
+            ..shape
+        };
+        assert!(
+            ns_cursor(&rt, &short).is_err(),
+            "a shape short of its pixels"
+        );
     }
 
     #[test]

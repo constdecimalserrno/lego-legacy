@@ -1,9 +1,9 @@
 //! What the Windows backend works out for itself, with no Windows to ask.
 //!
 //! A key message's scan code, where the picture sits in the window and where
-//! a point in the window is on the guest's screen, and how far a raw mouse
-//! report says the mouse went, are all arithmetic on numbers Windows hands
-//! over. They live here, with no `cfg`, so every host's tests hold them, and
+//! a point in the window is on the guest's screen, how far a raw mouse
+//! report says the mouse went, and the bitmaps a title's pointer shape is
+//! handed over as, are all arithmetic on numbers. They live here, with no `cfg`, so every host's tests hold them, and
 //! the backend that uses them (`windows.rs`) is left with only the calls into
 //! Windows (#107).
 
@@ -143,12 +143,58 @@ pub fn raw_moved(
     (pixels(x, was_x, screen.0), pixels(y, was_y, screen.1))
 }
 
+/// A pointer shape as `CreateIconIndirect` is handed it (#139): its colours,
+/// four bytes a pixel, blue first and alpha last; and its mask, a bit a pixel
+/// with every row a whole number of words, set where the pointer is not
+/// drawn. Nothing for a shape shorter than it says it is.
+#[must_use]
+pub fn cursor_bitmaps(shape: &super::Cursor) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (w, h) = (shape.width as usize, shape.height as usize);
+    let pixels = shape.pixels.get(..w * h * 4)?;
+    let colour = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[2], p[1], p[0], p[3]])
+        .collect();
+    let row = w.div_ceil(16) * 2;
+    let mut mask = vec![0; row * h];
+    for (i, p) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] == 0 {
+            mask[i / w * row + i % w / 8] |= 0x80 >> (i % w % 8);
+        }
+    }
+    Some((colour, mask))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        closes, direct_input_key, guest_point, key, picture, raw_moved, WM_KEYDOWN, WM_KEYUP,
-        WM_SYSKEYDOWN, WM_SYSKEYUP,
+        closes, cursor_bitmaps, direct_input_key, guest_point, key, picture, raw_moved, WM_KEYDOWN,
+        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
+
+    /// A pointer shape reaches Windows as its colours, blue first, and a mask
+    /// of the pixels it does not draw, each row padded to a word (#139).
+    #[test]
+    fn a_pointer_shape_is_a_colour_bitmap_and_a_mask() {
+        let clear = [0, 0, 0, 0];
+        let red = [0xff, 0, 0, 0xff];
+        let shape = crate::host::Cursor {
+            width: 3,
+            height: 2,
+            hot: (0, 0),
+            pixels: [red, clear, red, clear, red, clear].concat(),
+        };
+        let (colour, mask) = cursor_bitmaps(&shape).expect("whole");
+        assert_eq!(colour[..8], [0, 0, 0xff, 0xff, 0, 0, 0, 0]);
+        assert_eq!(mask, [0b0100_0000, 0, 0b1010_0000, 0]);
+        let short = crate::host::Cursor {
+            pixels: red.to_vec(),
+            ..shape
+        };
+        assert_eq!(cursor_bitmaps(&short), None);
+    }
     use crate::host::Input;
 
     /// A key message's `lParam`: its scan code, and whether it is extended.

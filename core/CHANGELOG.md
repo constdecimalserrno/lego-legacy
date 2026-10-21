@@ -449,6 +449,42 @@ every Hot Wheels run, which is the maintainer's to decide. Nor is LEGO Island's 
 
 No other title's run moves.
 
+`PostMessageA` posts, where it answered success and posted nothing, which golden rule 4 forbids
+(#139). The message waits in the queue of the thread that made the window, stamped with the
+declared time and the pointer as it is posted, and `PeekMessage` takes it as Windows documents:
+after whatever was sent or posted before it, before every key and mouse message, however long those
+have waited. Only the thread that made the window takes its messages. A message below `WM_USER`,
+or to any window but the title's own, is a wall: which of the system's carry pointers, and so
+cannot be posted, is not written. No title calls `PostThreadMessageA`.
+
+And a title's pointer shapes reach the host (#139). `LoadCursorA` loads a cursor out of a module's
+own resources, its `RT_GROUP_CURSOR` and the `RT_CURSOR` the group names, once, as `LoadCursor`
+shares what it loads; a group of more than one cursor, or a cursor that is not paletted, is a
+wall. Windows' own arrow is answered with the handle every title had before. `SetCursor` sets the
+shape and answers the one before; a handle that is not a cursor is a wall. At the flip the host is
+told, through a new `Host::pointer_shape` whose default does nothing: macOS sets an `NSCursor` of
+it over the picture while the window is in front, Windows makes it the window class's cursor
+while the window is in front, and X defines it on the window while the window has the keyboard.
+Each gives the arrow back on focus loss, and every host is given it back when the run ends (#111).
+The headless host records what it was told. The Windows and X backends are compiled and their
+bitmaps tested on every host, not run.
+
+LEGO Island posts itself `WM_ISLE_SETCURSOR`, 21 times on its ride, and its window procedure answers
+with `SetCursor`: the hourglass as it starts, the arrow, the hourglass again, no pointer for the
+intro, and the arrow and the hourglass as it loads and is clicked. Its runs move, and only its:
+
+- `first-light.route` `47ad2868…` to `e753e559…`; first light is still flip 460, now at
+  instruction 97,000,702 where it was 97,000,222.
+- `information-center.route` `69bd9a2e…` to `93ac795c…`; its idle loop still starts at flip
+  5099, now at 3,952,209,667 where it was 3,952,208,885.
+- `first-ride.route`, and the hand's run it was recorded from, `cf079381…` to `e08fb5c1…`. The
+  route is unchanged: the hand's run records the same one.
+- The restless hand `b172d1ec…` to `c029337f…`, and the boot `31cce8ba…` to `da6e3642…`.
+
+Every run ends on the instruction, flip and declared millisecond it ended on before. Rock Raiders,
+Hot Wheels and Alpha Team never post a message, set a cursor or load one but Windows' arrow, and
+none of their runs moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

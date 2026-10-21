@@ -27,7 +27,7 @@ use super::pace::Pace;
 use super::pointer::{moved, Moved, Steer};
 use super::stretch::Stretch;
 use super::x11::{self, Held};
-use super::{sys, Button, Frame, Host, HostError, Input, Mapping};
+use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_ushort, c_void, CString};
 use std::mem::{offset_of, size_of};
 use std::sync::OnceLock;
@@ -441,6 +441,7 @@ xlib! {
     ) -> Xid;
     free_pixmap = "XFreePixmap": fn(*mut Display, Xid) -> c_int;
     free_cursor = "XFreeCursor": fn(*mut Display, Xid) -> c_int;
+    define_cursor = "XDefineCursor": fn(*mut Display, Xid, Xid) -> c_int;
 }
 
 /// A window on the host's screen, showing what the guest drew.
@@ -452,6 +453,10 @@ pub struct LinuxWindow {
     depth: c_int,
     /// A cursor with nothing in it, shown while the pointer is taken.
     blank: Xid,
+    /// The title's pointer shape as a cursor this window made, or none; and
+    /// the cursor the window has now, none being the desktop's own (#139).
+    shape: Xid,
+    defined: Xid,
     wm_protocols: Xid,
     wm_delete_window: Xid,
     /// The window's size as the window manager last said it was.
@@ -597,6 +602,8 @@ impl LinuxWindow {
                 gc,
                 depth,
                 blank,
+                shape: 0,
+                defined: 0,
                 wm_protocols,
                 wm_delete_window,
                 window_size: (width, height),
@@ -874,6 +881,48 @@ impl LinuxWindow {
         }
     }
 
+    /// A title's pointer shape as an X cursor, in white and black, or none
+    /// when the shape is short of its pixels (#139).
+    fn cursor_of(&self, shape: &Cursor) -> Xid {
+        let Some((light, drawn)) = x11::cursor_bitmaps(shape) else {
+            return 0;
+        };
+        // Safety: two bitmaps of the shape's size from bytes laid out as
+        // `XCreateBitmapFromData` reads them, freed once the cursor holds
+        // what it needs of them.
+        unsafe {
+            let bitmap = |bits: &[u8]| {
+                (self.x.create_bitmap_from_data)(
+                    self.display,
+                    self.window,
+                    bits.as_ptr().cast(),
+                    shape.width,
+                    shape.height,
+                )
+            };
+            let (source, mask) = (bitmap(&light), bitmap(&drawn));
+            let mut white = XColor {
+                red: 0xffff,
+                green: 0xffff,
+                blue: 0xffff,
+                ..XColor::default()
+            };
+            let mut black = XColor::default();
+            let cursor = (self.x.create_pixmap_cursor)(
+                self.display,
+                source,
+                mask,
+                &raw mut white,
+                &raw mut black,
+                shape.hot.0,
+                shape.hot.1,
+            );
+            (self.x.free_pixmap)(self.display, source);
+            (self.x.free_pixmap)(self.display, mask);
+            cursor
+        }
+    }
+
     /// Take the pointer from the person, or give it back, as the title, the
     /// person's pointer and the keyboard now say.
     ///
@@ -890,6 +939,18 @@ impl LinuxWindow {
     /// its connection: there is nothing to restore from a signal, as there
     /// is on the Mac (#45).
     fn take_pointer_where_it_belongs(&mut self) {
+        // The title's shape while this window has the keyboard, and the
+        // desktop's pointer while it does not (#139). X draws a window's
+        // cursor only over that window.
+        let shape = if self.focused { self.shape } else { 0 };
+        if shape != self.defined {
+            self.defined = shape;
+            // Safety: the window is ours, the cursor ours or none.
+            unsafe {
+                (self.x.define_cursor)(self.display, self.window, shape);
+                (self.x.flush)(self.display);
+            }
+        }
         let take = self.pointer_hidden && self.pointer_over_us && self.focused;
         if take == self.taken.is_some() {
             return;
@@ -929,6 +990,7 @@ impl Drop for LinuxWindow {
     fn drop(&mut self) {
         self.audio = None;
         self.show_pointer(true);
+        self.pointer_shape(None);
         // Safety: the cursor and window are ours, and the display is closed
         // last and once.
         unsafe {
@@ -971,6 +1033,16 @@ impl Host for LinuxWindow {
     fn show_pointer(&mut self, show: bool) {
         self.pointer_hidden = !show;
         self.take_pointer_where_it_belongs();
+    }
+
+    fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        let new = shape.map_or(0, |shape| self.cursor_of(shape));
+        let old = std::mem::replace(&mut self.shape, new);
+        self.take_pointer_where_it_belongs();
+        if old != 0 {
+            // Safety: a cursor this window made, which the window has let go.
+            unsafe { (self.x.free_cursor)(self.display, old) };
+        }
     }
 
     fn put_pointer(&mut self, x: i32, y: i32) {

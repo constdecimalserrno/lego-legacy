@@ -1109,7 +1109,7 @@ fn critical_section(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// Which thread is asking, as the sections know threads.
-fn running_thread(ctx: &Ctx<'_>) -> u32 {
+pub(super) fn running_thread(ctx: &Ctx<'_>) -> u32 {
     ctx.state
         .threads
         .get(ctx.state.thread)

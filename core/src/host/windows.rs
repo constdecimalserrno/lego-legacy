@@ -20,7 +20,7 @@ use super::pace::Pace;
 use super::pointer::{moved, Moved, Steer};
 use super::stretch::Stretch;
 use super::windows_input::{self as input, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
-use super::{sys, Button, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
+use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -47,6 +47,8 @@ const CW_USEDEFAULT: i32 = i32::MIN;
 /// Repainted whole when resized either way, so the bars are drawn again.
 const CS_REDRAW: u32 = 0x0001 | 0x0002;
 const IDC_ARROW: usize = 32512;
+/// The class's cursor, which Windows draws over the client area.
+const GCLP_HCURSOR: i32 = -12;
 const BLACK_BRUSH: i32 = 4;
 const RID_INPUT: u32 = 0x1000_0003;
 const RIM_TYPEMOUSE: u32 = 0;
@@ -104,6 +106,16 @@ struct WndClassExW {
     menu_name: *const u16,
     class_name: *const u16,
     icon_small: Handle,
+}
+
+/// An `ICONINFO`, which a cursor is made from.
+#[repr(C)]
+struct IconInfo {
+    icon: i32,
+    hot_x: u32,
+    hot_y: u32,
+    mask: Handle,
+    colour: Handle,
 }
 
 /// A `PAINTSTRUCT`.
@@ -224,6 +236,10 @@ struct User32 {
     begin_paint: unsafe extern "system" fn(Handle, *mut PaintStruct) -> Handle,
     end_paint: unsafe extern "system" fn(Handle, *const PaintStruct) -> i32,
     load_cursor: unsafe extern "system" fn(Handle, *const u16) -> Handle,
+    set_cursor: unsafe extern "system" fn(Handle) -> Handle,
+    set_class_long_ptr: unsafe extern "system" fn(Handle, i32, isize) -> usize,
+    create_icon_indirect: unsafe extern "system" fn(*const IconInfo) -> Handle,
+    destroy_cursor: unsafe extern "system" fn(Handle) -> i32,
     show_cursor: unsafe extern "system" fn(i32) -> i32,
     clip_cursor: ClipCursor,
     cursor_pos: unsafe extern "system" fn(*mut Point) -> i32,
@@ -255,6 +271,10 @@ impl User32 {
                 begin_paint: lib.function("BeginPaint")?,
                 end_paint: lib.function("EndPaint")?,
                 load_cursor: lib.function("LoadCursorW")?,
+                set_cursor: lib.function("SetCursor")?,
+                set_class_long_ptr: lib.function("SetClassLongPtrW")?,
+                create_icon_indirect: lib.function("CreateIconIndirect")?,
+                destroy_cursor: lib.function("DestroyCursor")?,
                 show_cursor: lib.function("ShowCursor")?,
                 clip_cursor: lib.function("ClipCursor")?,
                 cursor_pos: lib.function("GetCursorPos")?,
@@ -292,6 +312,8 @@ struct Gdi32 {
     ) -> i32,
     stretch_mode: unsafe extern "system" fn(Handle, i32) -> i32,
     stock_object: unsafe extern "system" fn(i32) -> Handle,
+    create_bitmap: unsafe extern "system" fn(i32, i32, u32, u32, *const c_void) -> Handle,
+    delete_object: unsafe extern "system" fn(Handle) -> i32,
 }
 
 impl Gdi32 {
@@ -303,6 +325,8 @@ impl Gdi32 {
                 stretch_dibits: lib.function("StretchDIBits")?,
                 stretch_mode: lib.function("SetStretchBltMode")?,
                 stock_object: lib.function("GetStockObject")?,
+                create_bitmap: lib.function("CreateBitmap")?,
+                delete_object: lib.function("DeleteObject")?,
                 _lib: lib,
             })
         }
@@ -382,6 +406,12 @@ pub struct WinWindow {
     pointer_taken: bool,
     /// The one pixel the person's pointer is clipped to while it is taken.
     frozen: Rect,
+    /// Windows' arrow, the class's cursor everywhere but where the title's
+    /// shape is drawn; the title's shape, as a cursor this window made, or
+    /// null for none; and which of the two the class has now (#139).
+    arrow: Handle,
+    shape: Handle,
+    class_cursor: Handle,
     /// The pointer the guest is handed while the pointer is taken ([`Steer`]).
     steer: Steer,
     /// Where the last raw report that said where rather than how far put the
@@ -468,7 +498,12 @@ impl WinWindow {
         if window.is_null() {
             return Err(os("CreateWindowExW"));
         }
+        // Safety: Windows' own arrow, which is shared and never destroyed.
+        let arrow = unsafe { (user.load_cursor)(std::ptr::null_mut(), IDC_ARROW as *const u16) };
         let ours = Self {
+            arrow,
+            shape: std::ptr::null_mut(),
+            class_cursor: arrow,
             user,
             gdi,
             window,
@@ -585,6 +620,24 @@ impl WinWindow {
         if !self.pointer_taken {
             self.pointer_over_us = self.over_the_picture();
         }
+        // The title's shape while the window is in front, and the arrow
+        // while it is not (#139). The class's cursor is what Windows draws
+        // over the client area as the pointer moves, and only there.
+        let want = if active && !self.shape.is_null() {
+            self.shape
+        } else {
+            self.arrow
+        };
+        if want != self.class_cursor {
+            self.class_cursor = want;
+            // Safety: our own window, and a cursor that is Windows' or ours.
+            unsafe {
+                (self.user.set_class_long_ptr)(self.window, GCLP_HCURSOR, want as isize);
+                if self.pointer_over_us {
+                    (self.user.set_cursor)(want);
+                }
+            }
+        }
         let take = self.pointer_hidden && self.pointer_over_us && active;
         if take != self.pointer_taken {
             self.pointer_taken = take;
@@ -617,6 +670,33 @@ impl WinWindow {
         if self.pointer_taken {
             // Safety: a rectangle of ours, for the call's duration.
             unsafe { (self.user.clip_cursor)(&self.frozen) };
+        }
+    }
+
+    /// A title's pointer shape as a Windows cursor, or null when Windows will
+    /// not make one, which leaves the arrow (#139).
+    fn cursor_of(&self, shape: &Cursor) -> Handle {
+        let Some((colour, mask)) = input::cursor_bitmaps(shape) else {
+            return std::ptr::null_mut();
+        };
+        let (w, h) = (
+            i32::try_from(shape.width).unwrap_or(0),
+            i32::try_from(shape.height).unwrap_or(0),
+        );
+        // Safety: bitmaps of the size and depth their bytes hold, which
+        // `CreateIconIndirect` copies, and so are deleted after it.
+        unsafe {
+            let info = IconInfo {
+                icon: 0,
+                hot_x: shape.hot.0,
+                hot_y: shape.hot.1,
+                mask: (self.gdi.create_bitmap)(w, h, 1, 1, mask.as_ptr().cast()),
+                colour: (self.gdi.create_bitmap)(w, h, 1, 32, colour.as_ptr().cast()),
+            };
+            let cursor = (self.user.create_icon_indirect)(&info);
+            (self.gdi.delete_object)(info.mask);
+            (self.gdi.delete_object)(info.colour);
+            cursor
         }
     }
 
@@ -848,8 +928,9 @@ fn os(what: &'static str) -> HostError {
 impl Drop for WinWindow {
     fn drop(&mut self) {
         // A run that ended with the pointer hidden and frozen would leave a
-        // person without one.
+        // person without one, or with the title's shape.
         self.show_pointer(true);
+        self.pointer_shape(None);
         // Safety: destroying a window we made.
         unsafe { (self.user.destroy_window)(self.window) };
     }
@@ -898,6 +979,16 @@ impl Host for WinWindow {
     fn show_pointer(&mut self, show: bool) {
         self.pointer_hidden = !show;
         self.draw_pointer_where_it_belongs();
+    }
+
+    fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        let new = shape.map_or(std::ptr::null_mut(), |shape| self.cursor_of(shape));
+        let old = std::mem::replace(&mut self.shape, new);
+        self.draw_pointer_where_it_belongs();
+        if !old.is_null() {
+            // Safety: a cursor this window made, which the class has let go.
+            unsafe { (self.user.destroy_cursor)(old) };
+        }
     }
 
     fn put_pointer(&mut self, x: i32, y: i32) {

@@ -275,7 +275,7 @@ fn retained_mode_keeps_the_meshes_the_world_is_built_of() {
 const FIRST_LIGHT: u64 = 460;
 
 /// Enough instructions for the game to build its world and present first
-/// light, at 97,000,222, and a frame more.
+/// light, at 97,000,702, and a frame more.
 const FIRST_LIGHT_BUDGET: u64 = 98_000_000;
 
 /// The committed route to first light, replayed, keeping first light and the
@@ -310,7 +310,7 @@ fn the_route_reaches_first_light_as_the_bricks_start_to_fade_up() {
         lego_legacy_core::machine::Outcome::BudgetExhausted,
         "nothing on the way to first light stops the run"
     );
-    ran.assert_logged("flip 460 cursor 97000222 640x480x16");
+    ran.assert_logged("flip 460 cursor 97000702 640x480x16");
 
     let lit = ran
         .host
@@ -338,6 +338,51 @@ fn the_route_reaches_first_light_as_the_bricks_start_to_fade_up() {
         .frame(FIRST_LIGHT - 1)
         .expect("the frame before it is kept");
     assert_eq!(before.pixels[..3], [0, 0, 0], "and before it, black");
+}
+
+/// The game sets its pointer's shape by posting its own window
+/// `WM_ISLE_SETCURSOR`, which its window procedure answers with `SetCursor`
+/// (#139): the hourglass as it starts, the arrow for a moment once its
+/// scripts are open, the hourglass again, and no pointer at all for the intro.
+/// Each reaches the host as the cursor `ISLE.EXE` holds, and the host's own
+/// arrow comes back when the run ends.
+#[test]
+fn the_game_sets_its_pointers_shape_and_the_host_is_told() {
+    let Some(ran) = first_light(&LIT) else { return };
+    for line in [
+        "pointer shape flip 2 0x30001",
+        "pointer shape flip 406 0x30000",
+        "pointer shape flip 409 0x30001",
+        "pointer shape flip 456 0x0",
+    ] {
+        ran.assert_logged(line);
+    }
+    let shapes: Vec<_> = ran.host.shapes.iter().map(|(_, shape)| shape).collect();
+    let [Some(hourglass), Some(arrow), Some(again), Some(none), None] = shapes[..] else {
+        panic!("the host was told {} shapes", shapes.len());
+    };
+    assert_eq!(again, hourglass);
+    let pixel = |c: &lego_legacy_core::host::Cursor, x: u32, y: u32| {
+        c.pixels[((y * c.width + x) * 4) as usize..][..4].to_vec()
+    };
+    // The arrow points with its tip, black edged and white within; the
+    // hourglass with its middle, its top a black bar.
+    assert_eq!((arrow.width, arrow.height, arrow.hot), (32, 32, (1, 1)));
+    assert_eq!(pixel(arrow, 0, 0), [0, 0, 0, 0], "clear about the tip");
+    assert_eq!(pixel(arrow, 1, 1), [0, 0, 0, 255], "the edge");
+    assert_eq!(pixel(arrow, 2, 2), [255, 255, 255, 255], "within");
+    assert_eq!(
+        (hourglass.width, hourglass.height, hourglass.hot),
+        (32, 32, (16, 16))
+    );
+    assert_eq!(
+        pixel(hourglass, 12, 5),
+        [0, 0, 0, 255],
+        "the top of the glass"
+    );
+    assert_eq!(pixel(hourglass, 0, 0), [0, 0, 0, 0]);
+    // No pointer is a pointer that shows nothing.
+    assert!(none.pixels.chunks(4).all(|p| p[3] == 0));
 }
 
 #[test]
@@ -444,7 +489,7 @@ fn the_route_reaches_the_information_centers_idle_loop_and_it_holds() {
     let Some(ran) = world(&WORLD, false) else {
         return;
     };
-    ran.assert_logged("flip 5099 cursor 3952208885 640x480x16");
+    ran.assert_logged("flip 5099 cursor 3952209667 640x480x16");
     let frame = |flip: u64| &ran.host.frame(flip).expect("kept").pixels;
 
     // Its first frame, and one with the brick tipped up, come round again a

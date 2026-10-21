@@ -5,8 +5,8 @@
 //! that the tests reach it where the backend cannot be run: which DirectInput
 //! key an X key is, which keys end a run, where the picture sits in the window
 //! and how the guest's frame is scaled into it, which point of the guest's
-//! screen a point in the window is, and how far a pointer held in the middle of
-//! the window moved.
+//! screen a point in the window is, how far a pointer held in the middle of
+//! the window moved, and the bitmaps a title's pointer shape is made of.
 
 use super::pointer::content_scale;
 
@@ -220,9 +220,64 @@ impl Held {
     }
 }
 
+/// A pointer shape as `XCreatePixmapCursor` is handed it (#139): which
+/// pixels are light, drawn in the cursor's white rather than its black, and
+/// which are drawn at all, each a bit a pixel, leftmost first in a byte and
+/// every row a whole number of bytes, as `XCreateBitmapFromData` reads one.
+/// Nothing for a shape shorter than it says it is.
+// ponytail: two colours, which is what a core X cursor has and every cursor on
+// the roster is. Xcursor's ARGB images if a title's shape has more.
+#[must_use]
+pub fn cursor_bitmaps(shape: &super::Cursor) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (w, h) = (shape.width as usize, shape.height as usize);
+    let pixels = shape.pixels.get(..w * h * 4)?;
+    let row = w.div_ceil(8);
+    let (mut light, mut drawn) = (vec![0; row * h], vec![0; row * h]);
+    for (i, p) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        let (at, bit) = (i / w * row + i % w / 8, 1 << (i % w % 8));
+        if p[3] != 0 {
+            drawn[at] |= bit;
+        }
+        if p[..3].iter().map(|c| u32::from(*c)).sum::<u32>() > 3 * 127 {
+            light[at] |= bit;
+        }
+    }
+    Some((light, drawn))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{direct_input_key, guest_point, picture, quits, scale, Held, Picture};
+    use super::{
+        cursor_bitmaps, direct_input_key, guest_point, picture, quits, scale, Held, Picture,
+    };
+
+    /// A pointer shape reaches X as two bitmaps, leftmost pixel in the lowest
+    /// bit: the light pixels, and the ones drawn at all (#139).
+    #[test]
+    fn a_pointer_shape_is_a_light_bitmap_and_a_mask() {
+        let clear = [0, 0, 0, 0];
+        let black = [0, 0, 0, 0xff];
+        let white = [0xff, 0xff, 0xff, 0xff];
+        let shape = crate::host::Cursor {
+            width: 9,
+            height: 1,
+            hot: (0, 0),
+            pixels: [
+                [black, white, clear].concat(),
+                [clear; 5].concat(),
+                white.to_vec(),
+            ]
+            .concat(),
+        };
+        let (light, drawn) = cursor_bitmaps(&shape).expect("whole");
+        assert_eq!(light, [0b0000_0010, 0b1]);
+        assert_eq!(drawn, [0b0000_0011, 0b1]);
+        let short = crate::host::Cursor {
+            pixels: white.to_vec(),
+            ..shape
+        };
+        assert_eq!(cursor_bitmaps(&short), None);
+    }
 
     #[test]
     fn an_x_key_reaches_the_guest_as_the_key_in_the_same_place() {

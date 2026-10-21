@@ -105,3 +105,12 @@ find the sky through the doorway, the handlebars on the bike, and the island goi
 is the one the hand's run recorded, and replayed beside that run it ends on the same machine and
 presents the same frame. Its clicks are let go before the game's one-second drag timer is due,
 which no title is yet sent (#138).
+
+It shows its own pointers (#139). It loads its arrow, hourglass and no-entry sign out of
+`ISLE.EXE`, and sets one by posting its own window `WM_ISLE_SETCURSOR`, which its window procedure
+answers with `SetCursor`. Core now posts what was faked before and hands each shape to the host,
+which draws it over the picture: the hourglass from flip 2, the arrow at 406, the hourglass at
+409, no pointer for the intro from 456. The posted messages are dispatched as they are on Windows,
+so every run that reaches the first one moves its digest, and first light and the idle loop come a
+few hundred instructions later, at the same flips: first light at 97,000,702, the idle loop at
+3,952,209,667. The ride's route is the one the hand's run records still.

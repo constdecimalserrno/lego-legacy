@@ -31,8 +31,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "SetWindowsHookExA", 4, set_windows_hook),
     stdcall("USER32", "UnhookWindowsHookEx", 1, succeed),
     stdcall("USER32", "CallNextHookEx", 4, succeed_zero),
-    stdcall("USER32", "SetCursor", 1, succeed_zero),
-    stdcall("USER32", "LoadCursorA", 2, load_resource),
+    stdcall("USER32", "SetCursor", 1, set_cursor),
+    stdcall("USER32", "LoadCursorA", 2, load_cursor),
     stdcall("USER32", "LoadIconA", 2, load_resource),
     stdcall("USER32", "GetClientRect", 2, client_rect),
     stdcall("USER32", "GetWindowRect", 2, client_rect),
@@ -57,7 +57,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetDlgItem", 2, dialog_item),
     stdcall("USER32", "SendMessageA", 4, send_message),
     stdcall("USER32", "GetDesktopWindow", 0, desktop_window),
-    stdcall("USER32", "PostMessageA", 4, succeed),
+    stdcall("USER32", "PostMessageA", 4, post_message),
     stdcall("USER32", "SetActiveWindow", 1, succeed_zero),
     stdcall("USER32", "SetTimer", 4, succeed),
     stdcall("USER32", "KillTimer", 2, succeed),
@@ -260,6 +260,7 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // sent.
     let first = !ctx.state.window_made;
     ctx.state.window_made = true;
+    ctx.state.window_thread = super::kernel32::running_thread(ctx);
     ctx.state.window_style = args[3];
     ctx.state.window_instance = args[10];
     if first {
@@ -681,9 +682,55 @@ fn post(state: &mut super::State, message: u32, wparam: u32, time: u32) {
     }
 }
 
+/// PostMessageA(window, message, wParam, lParam): the message waits in the
+/// queue of the thread that made the window, stamped with the time and the
+/// pointer as it is posted, and the title's own loop takes it.
+///
+/// LEGO Island posts itself its pointer's shape this way (#139). Only a
+/// title's own messages, from `WM_USER` up, are posted here: which of the
+/// system's carry a pointer, and so cannot be posted, is not written, and
+/// neither is a message to any window but the title's own.
+fn post_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const WM_USER: u32 = 0x0400;
+    let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
+    if window != WINDOW || message < WM_USER {
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!PostMessageA: message {message:#06x} to window {window:#x}"),
+            caller: 0,
+        });
+    }
+    let posted = super::Message {
+        window,
+        message,
+        wparam,
+        lparam,
+        time: u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0),
+        point: ctx.state.pointer,
+    };
+    post_behind_the_posted(ctx.state, posted);
+    Ok(1)
+}
+
+/// Queue a posted message where `PeekMessage` takes it: after whatever was
+/// posted before it, and ahead of every key and mouse message waiting, which
+/// Windows takes after the posted ones whenever they were made.
+fn post_behind_the_posted(state: &mut super::State, posted: super::Message) {
+    let input = |m: &super::Message| matches!(m.message, 0x0100..=0x0109 | 0x0200..=0x020d);
+    let at = state
+        .messages
+        .iter()
+        .position(input)
+        .unwrap_or(state.messages.len());
+    state.messages.insert(at, posted);
+}
+
 /// The first waiting message a filter takes: a window, and a range of
-/// messages where zero to zero is all of them.
+/// messages where zero to zero is all of them. Every message waiting is the
+/// window's, so only the thread that made it takes any (#139).
 fn waiting(ctx: &Ctx<'_>, window: u32, first: u32, last: u32) -> Option<usize> {
+    if super::kernel32::running_thread(ctx) != ctx.state.window_thread {
+        return None;
+    }
     ctx.state.messages.iter().position(|m| {
         (window == 0 || m.window == window)
             && ((first == 0 && last == 0) || (first..=last).contains(&m.message))
@@ -870,8 +917,216 @@ fn system_parameters(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn load_resource(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // A cursor or an icon: a handle the guest only ever passes back to us.
+    // An icon: a handle the guest only ever passes back to us.
     Ok(0x0001_0020)
+}
+
+/// Windows' own arrow, `LoadCursorA(NULL, IDC_ARROW)`, which the host draws
+/// as its own pointer. The handle every title on the roster was answered
+/// before the cursors were (#139).
+pub const ARROW: u32 = 0x0001_0020;
+
+/// Where the handles of the cursors a title loads out of its own modules
+/// start, one after another as they are loaded.
+const CURSORS: u32 = 0x0003_0000;
+
+/// LoadCursorA(module, name): a cursor out of a module's resources, or
+/// Windows' own arrow.
+///
+/// A module's cursor is found where Windows finds it: its `RT_GROUP_CURSOR`
+/// of that name, and the `RT_CURSOR` the group names. It is loaded once, as
+/// `LoadCursor` shares what it loads, so asking again is the same handle.
+/// LEGO Island loads its arrow, its no-entry sign and its hourglass out of
+/// `ISLE.EXE` (#139).
+fn load_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const IDC_ARROW: u32 = 32512;
+    const RT_CURSOR: u32 = 1;
+    const RT_GROUP_CURSOR: u32 = 12;
+    let (module, name) = (args[0], args[1]);
+    let wall = |what: String| Stop::NotWritten {
+        what: format!("USER32.dll!LoadCursorA: {what}"),
+        caller: 0,
+    };
+    if module == 0 && name == IDC_ARROW {
+        return Ok(ARROW);
+    }
+    if module == 0 || name > 0xffff {
+        return Err(wall(format!("cursor {name:#x} of module {module:#x}")));
+    }
+    if let Some(i) = ctx
+        .state
+        .cursors
+        .iter()
+        .position(|c| (c.0, c.1) == (module, name))
+    {
+        return Ok(CURSORS + u32::try_from(i).unwrap_or(0));
+    }
+    let group = match resource(ctx, module, RT_GROUP_CURSOR, name)? {
+        Ok((group, _)) => group,
+        Err(error) => {
+            ctx.state.last_error = error;
+            return Ok(0);
+        }
+    };
+    // A group is a count after two words, then fourteen bytes a cursor, the
+    // last two of which are its `RT_CURSOR`'s number. Windows picks from
+    // several by size and colours; every group on the roster has one.
+    let word = |at: u32| {
+        ctx.mem
+            .read_u32(at)
+            .map(|v| v & 0xffff)
+            .map_err(Stop::Fault)
+    };
+    let count = word(group + 4)?;
+    if count != 1 {
+        return Err(wall(format!("group {name:#x} holds {count} cursors")));
+    }
+    let (at, size) = match resource(ctx, module, RT_CURSOR, word(group + 6 + 12)?)? {
+        Ok(found) => found,
+        Err(error) => {
+            ctx.state.last_error = error;
+            return Ok(0);
+        }
+    };
+    let bytes = ctx.mem.slice(at, size as usize).map_err(Stop::Fault)?;
+    let cursor = cursor_image(bytes).map_err(|why| wall(format!("cursor {name:#x}: {why}")))?;
+    ctx.state.cursors.push((module, name, cursor));
+    Ok(CURSORS + u32::try_from(ctx.state.cursors.len() - 1).unwrap_or(0))
+}
+
+/// The data of a module's resource, by its type and number: where it is and
+/// how long, in the first language it is written in. Or the error
+/// `FindResource` says when there is none: no resources at all, none of that
+/// type, none of that number, or none in any language.
+fn resource(
+    ctx: &Ctx<'_>,
+    module: u32,
+    kind: u32,
+    name: u32,
+) -> Result<Result<(u32, u32), u32>, Stop> {
+    let read = |at: u32| ctx.mem.read_u32(at).map_err(Stop::Fault);
+    let headers = module.wrapping_add(read(module + 0x3c)?);
+    // The resources are the third of the optional header's data directories.
+    let root = read(headers + 24 + 96 + 2 * 8)?;
+    if root == 0 {
+        return Ok(Err(1812));
+    }
+    let root = module.wrapping_add(root);
+    // A directory is sixteen bytes, its last four the count of its named
+    // entries and then of its numbered ones; each entry is a number and where
+    // what it names is, with the top bit set where that is a directory.
+    let mut at = root;
+    for (number, missing) in [(Some(kind), 1813), (Some(name), 1814), (None, 1815)] {
+        let counts = read(at + 12)?;
+        let (named, numbered) = (counts & 0xffff, counts >> 16);
+        let mut found = None;
+        for entry in named..named + numbered {
+            let entry = at + 16 + 8 * entry;
+            let id = read(entry)?;
+            if number.is_none_or(|n| n == id) {
+                found = Some(read(entry + 4)?);
+                break;
+            }
+        }
+        let Some(next) = found else {
+            return Ok(Err(missing));
+        };
+        at = root + (next & 0x7fff_ffff);
+    }
+    // The language's entry: where the bytes are, from the module, and how
+    // many.
+    Ok(Ok((module.wrapping_add(read(at)?), read(at + 4)?)))
+}
+
+/// A cursor resource, as the host draws it: two words of hot spot, then a
+/// bitmap of colours and the mask over it, each bottom row first, which is
+/// twice as tall as the cursor because it holds both.
+///
+/// A pixel the mask leaves out is not drawn, unless its colour is not black,
+/// which is the screen under it turned over: no host pointer can draw that,
+/// so it is drawn black. Paletted colour only, as every cursor on the roster
+/// is; anything else is said.
+///
+/// # Errors
+/// What it holds that is not read here, or that it is cut short.
+fn cursor_image(bytes: &[u8]) -> Result<crate::host::Cursor, String> {
+    let short = || "the resource is cut short".to_owned();
+    let u16_at = |at: usize| -> Result<u32, String> {
+        let b = bytes.get(at..at + 2).ok_or_else(short)?;
+        Ok(u32::from(u16::from_le_bytes([b[0], b[1]])))
+    };
+    let u32_at = |at: usize| -> Result<u32, String> { Ok(u16_at(at)? | u16_at(at + 2)? << 16) };
+    let hot = (u16_at(0)?, u16_at(2)?);
+    // The bitmap's own header, as `BITMAPINFOHEADER` lays it out.
+    let size = u32_at(4)? as usize;
+    let (width, height) = (u32_at(8)?, u32_at(12)? / 2);
+    let (bits, compression, used) = (u16_at(18)?, u32_at(20)?, u32_at(36)?);
+    if !matches!(bits, 1 | 4 | 8) || compression != 0 || width > 256 || height > 256 {
+        return Err(format!(
+            "{width}x{height}, {bits} bits a pixel, compression {compression}"
+        ));
+    }
+    let palette = 4 + size;
+    let colour_rows = palette + 4 * (if used == 0 { 1 << bits } else { used }) as usize;
+    let stride = |bits: u32| (width * bits).div_ceil(32) as usize * 4;
+    let mask_rows = colour_rows + stride(bits) * height as usize;
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in (0..height as usize).rev() {
+        for x in 0..width {
+            // The `bits` of pixel x, in the row y of the bitmap from `start`.
+            let pixel = |start: usize, bits: u32| -> Result<usize, String> {
+                let at = start + stride(bits) * y + (x * bits / 8) as usize;
+                let byte = *bytes.get(at).ok_or_else(short)?;
+                Ok(usize::from(byte >> (8 - bits - x * bits % 8)) & ((1 << bits) - 1))
+            };
+            let at = palette + 4 * pixel(colour_rows, bits)?;
+            let &[b, g, r] = bytes.get(at..at + 3).ok_or_else(short)? else {
+                unreachable!("three bytes");
+            };
+            pixels.extend(match (pixel(mask_rows, 1)? == 1, [r, g, b]) {
+                (true, [0, 0, 0]) => [0, 0, 0, 0],
+                (true, _) => [0, 0, 0, 255],
+                (false, [r, g, b]) => [r, g, b, 255],
+            });
+        }
+    }
+    Ok(crate::host::Cursor {
+        width,
+        height,
+        hot,
+        pixels,
+    })
+}
+
+/// SetCursor(cursor): the pointer's shape from now on, over the title's
+/// picture, and the one it had before, or none the first time. No cursor is
+/// no pointer at all. The host is told at the flip (#139).
+fn set_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let cursor = args[0];
+    let loaded = cursor
+        .checked_sub(CURSORS)
+        .is_some_and(|i| (i as usize) < ctx.state.cursors.len());
+    if !(cursor == 0 || cursor == ARROW || loaded) {
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!SetCursor: {cursor:#x}, which is not a cursor"),
+            caller: 0,
+        });
+    }
+    Ok(ctx.state.cursor.replace(cursor).unwrap_or(0))
+}
+
+/// The shape a cursor handle is drawn as: none for Windows' own arrow, which
+/// is the host's own pointer.
+#[must_use]
+pub fn shape(state: &super::State, cursor: u32) -> Option<crate::host::Cursor> {
+    match cursor {
+        0 => Some(crate::host::Cursor::none()),
+        ARROW => None,
+        _ => state
+            .cursors
+            .get(cursor.wrapping_sub(CURSORS) as usize)
+            .map(|c| c.2.clone()),
+    }
 }
 
 fn client_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1369,6 +1624,74 @@ mod tests {
         assert_eq!(moved(&mut state), 3, "the first frame");
         assert_eq!(moved(&mut state), 3, "and every frame after it");
         assert_eq!(moved(&mut state), 3, "for as long as the hand moves");
+    }
+
+    /// A posted message is taken after what was sent or posted before it,
+    /// and before every key and mouse message, however long those have been
+    /// waiting (#139): `PeekMessage` takes sent messages, then posted ones,
+    /// then input.
+    #[test]
+    fn a_posted_message_is_taken_before_what_a_person_did() {
+        let mut state = State::new();
+        state.window_made = true;
+        activate(&mut state, 1);
+        deliver(&mut state, Input::Move { x: 10, y: 20 }, 2);
+        deliver(&mut state, Input::Down(Button::Left), 3);
+        let posted = |wparam| crate::win32::Message {
+            window: WINDOW,
+            message: 0x5400,
+            wparam,
+            lparam: 0,
+            time: 4,
+            point: (10, 20),
+        };
+        super::post_behind_the_posted(&mut state, posted(1));
+        super::post_behind_the_posted(&mut state, posted(2));
+        deliver(&mut state, Input::Up(Button::Left), 5);
+        let order: Vec<(u32, u32)> = state
+            .messages
+            .iter()
+            .map(|m| (m.message, m.wparam))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (WM_ACTIVATEAPP, 1),
+                (0x5400, 1),
+                (0x5400, 2),
+                (0x0200, 0),
+                (WM_LBUTTONDOWN, 1),
+                (super::WM_LBUTTONUP, 0),
+            ]
+        );
+    }
+
+    /// A cursor resource is read as Windows draws it (#139): its hot spot, its
+    /// rows top first, the mask's pixels left out, and a pixel the mask
+    /// leaves out with a colour, which turns the screen over, drawn black.
+    #[test]
+    fn a_cursor_resource_is_its_shape_and_its_hot_spot() {
+        // Eight pixels by two, a bit a pixel, after its hot spot of 3,1.
+        let mut bytes = vec![3, 0, 1, 0];
+        for value in [40u32, 8, 4, 0x0001_0001, 0, 0, 0, 0, 0, 0] {
+            bytes.extend(value.to_le_bytes());
+        }
+        // Black and white; then the colours, bottom row first, and the mask.
+        bytes.extend([0, 0, 0, 0, 0xff, 0xff, 0xff, 0]);
+        bytes.extend([0xff, 0, 0, 0, 0x30, 0, 0, 0]);
+        bytes.extend([0x00, 0, 0, 0, 0x9f, 0, 0, 0]);
+
+        let cursor = super::cursor_image(&bytes).expect("it reads");
+        assert_eq!((cursor.width, cursor.height, cursor.hot), (8, 2, (3, 1)));
+        let pixel = |x: usize, y: usize| &cursor.pixels[(y * 8 + x) * 4..][..4];
+        assert_eq!(pixel(0, 0), [0, 0, 0, 0], "left out");
+        assert_eq!(pixel(1, 0), [0, 0, 0, 255], "black");
+        assert_eq!(pixel(2, 0), [255, 255, 255, 255], "white");
+        assert_eq!(pixel(3, 0), [0, 0, 0, 255], "the screen turned over");
+        assert_eq!(pixel(7, 0), [0, 0, 0, 0]);
+        assert!((0..8).all(|x| pixel(x, 1) == [255, 255, 255, 255]));
+
+        assert!(super::cursor_image(&bytes[..60]).is_err(), "cut short");
     }
 
     #[test]

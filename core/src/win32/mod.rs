@@ -279,6 +279,8 @@ pub struct State {
     pub window_procedure: u32,
     /// Whether the guest has made its window.
     pub window_made: bool,
+    /// The thread that made it, whose queue its messages wait in.
+    pub window_thread: u32,
     /// The style its window was made with.
     pub window_style: u32,
     /// The instance its window was made with.
@@ -341,6 +343,11 @@ pub struct State {
     /// Windows' own show count for the pointer: it is drawn while this is
     /// zero or more, and a title that draws its own takes it below zero.
     pub cursor_shown: i32,
+    /// The cursor the title last set with `SetCursor`, until it has set one.
+    pub cursor: Option<u32>,
+    /// The cursors it loaded out of its own modules, by the module and the
+    /// name, in the order they were loaded (#139).
+    pub cursors: Vec<(u32, u32, crate::host::Cursor)>,
     /// Window messages waiting for the title to take them, oldest first.
     pub messages: VecDeque<Message>,
     /// The modal dialog a title has up, while it has one.
@@ -424,6 +431,7 @@ impl State {
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
+            window_thread: crate::machine::THREAD_ID,
             window_style: 0,
             window_instance: 0,
             // The middle of the screen: where Windows leaves the pointer when
@@ -453,6 +461,8 @@ impl State {
             pointer_put: None,
             double_clicks: false,
             cursor_shown: 0,
+            cursor: None,
+            cursors: Vec::new(),
             messages: VecDeque::new(),
             dialog: None,
             names: BTreeMap::new(),
