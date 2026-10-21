@@ -3,6 +3,11 @@
 One heading per version, newest first. What each part of the launcher's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
+## 1.1.1 — 2026-10-21
+
+Took core 1.2.0 (#140). The launcher uses core only to find and check the rips and starts each
+title as a program of its own, so nothing it does changed.
+
 ## 1.1.0 — 2026-10-21
 
 It lists and starts four titles, the fourth LEGO Island, playable at its 1.0.0, and runs on core

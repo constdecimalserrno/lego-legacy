@@ -11,6 +11,14 @@ Core's `GetVersion` answers as Windows 98 SE did, with the top bit that says it 
 The title's C runtime only stores the word, so no route takes a different turn, and every run's
 digest moves; core's changelog lists them.
 
+Took core 1.2.0 (#140), whose `DestroyWindow` sends the window `WM_DESTROY` and then
+`WM_NCDESTROY`, as Microsoft documents, and whose `DefWindowProcA` destroys the window it is handed
+`WM_CLOSE` for. The title destroys its window as it exits and hands both messages to
+`DefWindowProcA`, so its two runs that exit, the escape route and `first-race.route`, end 54
+instructions later, their flips, declared milliseconds and exit code unchanged; core's changelog
+lists them. The maintainer blessed the move on 2026-10-21. Its run moved, so a person should drive
+the first race again before this version is released.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

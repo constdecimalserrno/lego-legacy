@@ -18,18 +18,18 @@ dependencies = [
 
 [[package]]
 name = "lego-island"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "lego-legacy-core",
 ]
 
 [[package]]
 name = "lego-legacy-core"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "lego-legacy-launcher"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "lego-legacy-core",
 ]

@@ -3,6 +3,28 @@
 One heading per version, newest first. What each part of core's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
+## 1.2.0 — 2026-10-21
+
+`DestroyWindow` tells the window it destroys, as Microsoft documents, where it answered success and
+told it nothing (#140). Its procedure is sent `WM_DESTROY` and then `WM_NCDESTROY`, whatever it
+answers the first, through the program `call_each` writes, which no longer has to stop at a zero.
+The window is then gone: the messages waiting for it go too, what a person does reaches no window,
+`GetActiveWindow` answers none, and destroying it again, or destroying any other handle, fails with
+`ERROR_INVALID_WINDOW_HANDLE`. `DefWindowProcA` destroys the window it is handed `WM_CLOSE` for, as
+Microsoft documents; every other message is still answered zero. The messages Windows also sends a
+window that is shown and in front as it is destroyed, hiding it and taking the front from it, are
+not sent. Hot Wheels destroys its window as it exits, and its procedure hands both messages to
+`DefWindowProcA`, so its two runs that exit move, each by 54 instructions, their flips, declared
+milliseconds and exit code unchanged, a move the maintainer blessed on 2026-10-21:
+
+- the escape route from 583,424,271 and `920d063e…` to 583,424,325 and `8bf567a9…`;
+- `first-race.route` from 13,462,722,489 and `ca178965…` to 13,462,722,543 and `d48d8761…`.
+
+LEGO Island's procedure does the same as it leaves after its credits, so each of its runs that
+close themselves ends 58 instructions later, its flips unchanged: `first-save.route`, past its end,
+at 13,071,129,606, and `pizza-delivery.route` at 10,657,537,575. No other title destroys its window
+in a committed run.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

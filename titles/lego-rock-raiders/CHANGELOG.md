@@ -29,6 +29,8 @@ tall and as narrow as in the retail game's Mission Brief. No route takes a diffe
 end line is unchanged; `first-mission.route`'s digest moves, which core's changelog lists. Accepted by
 the maintainer on 2026-10-20; the first mission is played again by a person before this release.
 
+Took core 1.2.0 (#140). The title never destroys its window in a committed run, so no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

@@ -277,7 +277,7 @@ pub struct State {
     pub installed_files: usize,
     /// The window procedure the guest registered, if it has.
     pub window_procedure: u32,
-    /// Whether the guest has made its window.
+    /// Whether the guest has made its window, and not destroyed it (#140).
     pub window_made: bool,
     /// The thread that made it, whose queue its messages wait in.
     pub window_thread: u32,
@@ -886,7 +886,7 @@ pub struct Ctx<'a> {
 }
 
 /// Call one of the guest's own callbacks several times over, once per set of
-/// arguments, stopping early if it says to.
+/// arguments, stopping early if it says to and `stop` lets it.
 ///
 /// A shim can park one call into guest code and no more (`call_guest`), which
 /// is enough for an enumeration with one answer in it and not for one with
@@ -894,13 +894,19 @@ pub struct Ctx<'a> {
 /// calls itself and returns to the machine at the end — the same thing the
 /// module loader does to run a DllMain (#55, #57).
 ///
-/// The callback is stdcall, so each call clears its own arguments; a callback
-/// that answers zero has asked to stop, which Direct3D spells
-/// `D3DENUMRET_CANCEL`.
+/// The callback is stdcall, so each call clears its own arguments; with
+/// `stop`, a callback that answers zero has asked to stop, which Direct3D
+/// spells `D3DENUMRET_CANCEL`. Without it every call is made, as a window is
+/// sent each of the messages `DestroyWindow` sends whatever it answers (#140).
 ///
 /// # Errors
 /// When the program will not fit in guest memory.
-pub fn call_each(ctx: &mut Ctx<'_>, callback: u32, calls: &[Vec<u32>]) -> Result<(), Stop> {
+pub fn call_each(
+    ctx: &mut Ctx<'_>,
+    callback: u32,
+    calls: &[Vec<u32>],
+    stop: bool,
+) -> Result<(), Stop> {
     let mut program: Vec<u8> = Vec::new();
     // Every call ends up jumping to the same `ret`, whose place is only known
     // once they are all written, so the jumps are filled in afterwards.
@@ -913,6 +919,9 @@ pub fn call_each(ctx: &mut Ctx<'_>, callback: u32, calls: &[Vec<u32>]) -> Result
         program.push(0xb8); // mov eax, <the callback>
         program.extend_from_slice(&callback.to_le_bytes());
         program.extend_from_slice(&[0xff, 0xd0]); // call eax
+        if !stop {
+            continue;
+        }
         program.extend_from_slice(&[0x85, 0xc0]); // test eax, eax
         program.extend_from_slice(&[0x0f, 0x84]); // je <the end>
         holes.push(program.len());

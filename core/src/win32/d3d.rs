@@ -732,7 +732,7 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
     }
     ctx.log
         .line(&format!("d3d7 texture formats: {} of them", calls.len()));
-    super::call_each(ctx, args[0], &calls)?;
+    super::call_each(ctx, args[0], &calls, true)?;
     Ok(S_OK)
 }
 

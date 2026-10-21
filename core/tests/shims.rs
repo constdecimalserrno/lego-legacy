@@ -48,10 +48,7 @@ fn com(
     with_ctx(machine, |ctx| (method.run)(ctx, this, args))
 }
 
-fn with_ctx(
-    machine: &mut Machine,
-    run: impl FnOnce(&mut Ctx<'_>) -> Result<u32, Stop>,
-) -> Result<u32, Stop> {
+fn with_ctx<T>(machine: &mut Machine, run: impl FnOnce(&mut Ctx<'_>) -> T) -> T {
     let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
     let mut ctx = Ctx {
         cpu: &mut machine.cpu,
@@ -172,6 +169,68 @@ fn a_window_style_and_instance_are_the_ones_it_was_made_with() {
     );
     // Any other word is not answered.
     assert!(call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_USERDATA]).is_err());
+}
+
+/// Make the title's window, with its procedure at `procedure`.
+fn window(m: &mut Machine, procedure: u32) {
+    m.arena.write(DATA, b"LEGO\0").expect("in the arena");
+    m.state.window_procedure = procedure;
+    let mut made = [0; 12];
+    made[1] = DATA;
+    made[2] = DATA;
+    assert_eq!(call(m, "USER32", "CreateWindowExA", &made), Ok(WINDOW));
+}
+
+/// A window destroyed is told twice, `WM_DESTROY` and then `WM_NCDESTROY`,
+/// whatever its procedure answers the first, and is then gone: its waiting
+/// messages with it, and a second destroy fails as one of no window does
+/// (#140).
+#[test]
+fn a_destroyed_window_is_told_and_then_gone() {
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    const PROCEDURE: u32 = 0x0040_1000;
+    let mut m = machine();
+    let destroy = |m: &mut Machine| {
+        let shim = win32::find("USER32", "DestroyWindow").expect("written");
+        with_ctx(m, |ctx| ((shim.run)(ctx, &[WINDOW]), ctx.call_guest.take()))
+    };
+    let last_error = |m: &mut Machine| call(m, "KERNEL32", "GetLastError", &[]);
+
+    assert_eq!(destroy(&mut m), (Ok(0), None), "no window yet");
+    assert_eq!(last_error(&mut m), Ok(ERROR_INVALID_WINDOW_HANDLE));
+
+    window(&mut m, PROCEDURE);
+    assert!(!m.state.messages.is_empty(), "WM_ACTIVATEAPP waits");
+    let (answer, program) = destroy(&mut m);
+    assert_eq!(answer, Ok(1));
+    assert!(m.state.messages.is_empty(), "it went with the window");
+    assert_eq!(call(&mut m, "USER32", "GetActiveWindow", &[]), Ok(0));
+
+    // The program the machine runs calls the procedure with each message,
+    // its arguments pushed last first, and never looks at what it answered.
+    let (at, _) = program.expect("the procedure is called");
+    let code = m.arena.slice(at, 64).expect("in the arena").to_vec();
+    let sent = |message: u32| {
+        let mut push = vec![0x68];
+        push.extend_from_slice(&message.to_le_bytes());
+        push.push(0x68);
+        push.extend_from_slice(&WINDOW.to_le_bytes());
+        push.push(0xb8);
+        push.extend_from_slice(&PROCEDURE.to_le_bytes());
+        code.windows(push.len()).position(|w| w == push)
+    };
+    let (first, last) = (sent(0x0002), sent(0x0082));
+    assert!(
+        first.is_some() && first < last,
+        "WM_DESTROY, then WM_NCDESTROY"
+    );
+    assert!(
+        !code.windows(2).any(|w| w == [0x85, 0xc0]),
+        "no answer looked at"
+    );
+
+    assert_eq!(destroy(&mut m), (Ok(0), None), "gone already");
+    assert_eq!(last_error(&mut m), Ok(ERROR_INVALID_WINDOW_HANDLE));
 }
 
 #[test]

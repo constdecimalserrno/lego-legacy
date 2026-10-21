@@ -3,6 +3,14 @@
 One heading per version, newest first. What each part of a title's version means is in
 [ADR-0007](../../docs/adr/0007-every-crate-carries-its-own-version.md).
 
+## 1.0.1 — 2026-10-21
+
+Took core 1.2.0 (#140), whose `DestroyWindow` tells the window it is going: as the game leaves,
+its window procedure is sent `WM_DESTROY` and `WM_NCDESTROY` and hands both to `DefWindowProcA`,
+so its own close ends 58 instructions later, its flips unchanged: `first-save.route`, past its
+end, at 13,071,129,606, and `pizza-delivery.route` at 10,657,537,575.
+`maintainer-first-play.route` ends on its budget, before the game closes, and does not move.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from

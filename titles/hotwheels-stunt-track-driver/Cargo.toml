@@ -15,4 +15,4 @@ name = "hotwheels-stunt-track-driver"
 path = "src/main.rs"
 
 [dependencies]
-lego-legacy-core = { path = "../../core", version = "=1.1.0" }
+lego-legacy-core = { path = "../../core", version = "=1.2.0" }

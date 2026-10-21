@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "RegisterClassA", 1, register_class),
     stdcall("USER32", "CreateWindowExA", 12, create_window),
-    stdcall("USER32", "DestroyWindow", 1, succeed),
+    stdcall("USER32", "DestroyWindow", 1, destroy_window),
     stdcall("USER32", "ShowWindow", 2, succeed),
     stdcall("USER32", "UpdateWindow", 1, succeed),
     stdcall("USER32", "SetFocus", 1, succeed),
@@ -24,7 +24,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "PeekMessageA", 5, peek_message),
     stdcall("USER32", "TranslateMessage", 1, translate_message),
     stdcall("USER32", "DispatchMessageA", 1, dispatch_message),
-    stdcall("USER32", "DefWindowProcA", 4, succeed_zero),
+    stdcall("USER32", "DefWindowProcA", 4, default_procedure),
     stdcall("USER32", "PostQuitMessage", 1, post_quit),
     stdcall("USER32", "GetSystemMetrics", 1, system_metrics),
     stdcall("USER32", "ShowCursor", 1, show_cursor),
@@ -299,6 +299,57 @@ fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 /// What a window is sent, or posted, when it is asked to close.
 const WM_CLOSE: u32 = 0x0010;
+
+/// What a window is sent as it is destroyed: the first while it still has
+/// everything it had, the last once nothing else is left of it.
+const WM_DESTROY: u32 = 0x0002;
+const WM_NCDESTROY: u32 = 0x0082;
+
+/// DestroyWindow(window): the window is gone, and it is told, as Microsoft
+/// documents: `WM_DESTROY` and then `WM_NCDESTROY` are sent to its procedure
+/// and answered before this returns. The messages waiting for it go with it,
+/// and what a person does from then on reaches no window (#140).
+///
+/// The title's window is the only one the machine makes, so another handle,
+/// or this one once it is gone, fails as Windows fails it, with
+/// `ERROR_INVALID_WINDOW_HANDLE`.
+// ponytail: the two messages Microsoft names. Windows sends a window that is
+// shown and in front more before them, as it is hidden and loses the front
+// (`WM_WINDOWPOSCHANGING`, `WM_WINDOWPOSCHANGED`, `WM_NCACTIVATE`,
+// `WM_ACTIVATE`, `WM_ACTIVATEAPP` with 0, `WM_KILLFOCUS`); send them when a
+// title is seen to read one as it closes.
+fn destroy_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    let window = args[0];
+    if window != WINDOW || !ctx.state.window_made {
+        ctx.state.last_error = ERROR_INVALID_WINDOW_HANDLE;
+        return Ok(0);
+    }
+    ctx.state.window_made = false;
+    ctx.state.messages.retain(|m| m.window != window);
+    ctx.log.line("window destroyed");
+    let procedure = ctx.state.window_procedure;
+    super::call_each(
+        ctx,
+        procedure,
+        &[
+            vec![window, WM_DESTROY, 0, 0],
+            vec![window, WM_NCDESTROY, 0, 0],
+        ],
+        false,
+    )?;
+    Ok(1)
+}
+
+/// DefWindowProcA(window, message, wParam, lParam): what Windows does with a
+/// message a title's procedure hands on. `WM_CLOSE` destroys the window, as
+/// Microsoft documents (#140); every other message is answered zero.
+fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[1] == WM_CLOSE {
+        destroy_window(ctx, &args[..1])?;
+    }
+    Ok(0)
+}
 
 /// What Windows tells a title when its own application becomes the active one.
 const WM_ACTIVATEAPP: u32 = 0x001c;

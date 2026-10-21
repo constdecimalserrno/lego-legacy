@@ -16,6 +16,8 @@ Core's `RaiseException` puts `EFlags` and `Esp` in the context where `winnt.h` h
 No handler on the title's chain reads its C++ throws' context, so no route takes a different
 turn, and the digest of every run that throws moves; core's changelog lists them.
 
+Took core 1.2.0 (#140). The title never destroys its window in a committed run, so no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main
