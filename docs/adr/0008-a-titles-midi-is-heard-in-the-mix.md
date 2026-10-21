@@ -1,9 +1,14 @@
 # A title's MIDI is heard in the machine's mix, and LEGO Island plays none
 
-**Status: Accepted in part** (#122, 2026-10-20). The maintainer accepted part 1 of the
-recommendation: Island gets no MIDI code, and the twelve imports stay walls no route reaches. Part
-2, how the first title that does play MIDI is heard, is **left open** until a title stops at one
-of these walls; the options below stay the starting point for that decision.
+**Status: Accepted** (#122, 2026-10-20; part 2 on 2026-10-21). The maintainer accepted part 1 of
+the recommendation on 2026-10-20: Island gets no MIDI code, and the twelve imports stay walls no
+route reaches. Part 2 was left open until a title played MIDI. LEGO Chess is that title: its four
+General MIDI tunes play through `midiStream*` on the MIDI mapper. On 2026-10-21 the maintainer
+accepted part 2 as recommended: **option 1(a)**, a General MIDI synth in core playing a DLS Level 1
+bank into the mix on the declared clock, with the bank (Roland's `GM16.DLS`, sha256 `3229b09b…`)
+a file the player supplies from their own copy. They did not take reading it out of the LEGO Chess
+Masterpiece disc's own DirectX 8 installer, which would need an LZX decoder in core. Without the
+bank, the device says it has none (option 3).
 
 ## Context
 
@@ -251,6 +256,16 @@ With part 1 accepted:
 - Reading a bank out of a redistributable on the player's disc is new. ADR-0002 forbids *running*
   a redistributable, and reading a data file is not running one, but whether a declared file may
   come from another title's disc is the maintainer's call.
+
+With part 2 accepted (2026-10-21, for LEGO Chess):
+
+- The player supplies `GM16.DLS` as a file. It is loose on their own LEGO Racers disc
+  (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`). The launcher names it, as it names Rock Raiders' music
+  pressing, and checks it by sha256. Roland licenses this bank "for use with Microsoft operating
+  system products only" (its `gmreadme.txt`). The README says so, and that the copy used is the
+  player's own.
+- The declared MIDI out is the Microsoft GS Wavetable SW Synth, which plays the GS drum kit's notes
+  beyond General MIDI's (LEGO Chess's Western tune plays the Shaker, key 82, 536 times).
 
 ## Sources
 
