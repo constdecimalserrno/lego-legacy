@@ -49,6 +49,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetDC", 1, succeed_zero),
     stdcall("USER32", "ReleaseDC", 2, succeed),
     stdcall("USER32", "GetCursorPos", 1, cursor_pos),
+    stdcall("USER32", "GetAsyncKeyState", 1, async_key_state),
     stdcall("USER32", "SetCursorPos", 2, set_cursor_pos),
     stdcall("USER32", "ClipCursor", 1, succeed),
     stdcall("USER32", "DialogBoxParamA", 5, dialog_box),
@@ -521,6 +522,35 @@ fn lane(button: crate::host::Button) -> u32 {
     }
 }
 
+/// A button's virtual key: `VK_LBUTTON` and `VK_RBUTTON`.
+fn button_key(button: crate::host::Button) -> u32 {
+    match button {
+        crate::host::Button::Left => 0x01,
+        crate::host::Button::Right => 0x02,
+    }
+}
+
+/// GetAsyncKeyState(key): whether a virtual key is down now, in the top bit,
+/// and whether it went down since the guest last asked about it, in the
+/// bottom one, as Windows 95 answers. Windows 95 tells no left key from a
+/// right one here, so the keys that have two sides are asked about as one.
+///
+/// LEGO Island asks about the left and right arrows before it believes
+/// DirectInput's word that they are held, and lets go of the one Windows
+/// says is up (`LEGO1.DLL` 0x1005c17c, #124).
+fn async_key_state(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(key_state_now(ctx.state, args[0]))
+}
+
+fn key_state_now(state: &mut super::State, key: u32) -> u32 {
+    let down = state.keys_down.iter().any(|c| virtual_key(*c) == Some(key))
+        || (state.mouse_down && key == button_key(crate::host::Button::Left))
+        || (state.right_down && key == button_key(crate::host::Button::Right));
+    let pressed = state.keys_pressed.contains(&key);
+    state.keys_pressed.retain(|k| *k != key);
+    u32::from(down) << 15 | u32::from(pressed)
+}
+
 /// The buttons a mouse message carries as held, in `wParam`.
 fn held_buttons(state: &super::State) -> u32 {
     u32::from(state.mouse_down) * MK_LBUTTON + u32::from(state.right_down) * MK_RBUTTON
@@ -548,6 +578,10 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
         Input::Down(button) => {
             *button_of(state, button) = true;
             state.buffer_input(false, lane(button), DOWN);
+            let key = button_key(button);
+            if !state.keys_pressed.contains(&key) {
+                state.keys_pressed.push(key);
+            }
             // The second of two clicks near each other and soon after each
             // other is a double click, which is a message of its own. Each
             // button counts its own: a right click after a left one is not
@@ -592,6 +626,9 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
             // Team's `DDKeyboard::processKey` is handed a virtual key and the
             // parameter Windows sent with it (#59).
             if let Some(key) = virtual_key(code) {
+                if down && !state.keys_pressed.contains(&key) {
+                    state.keys_pressed.push(key);
+                }
                 let repeat_and_scan = 1 | ((code & 0x7f) << 16) | ((code & 0x80) << 17);
                 let (message, transition) = if down {
                     (WM_KEYDOWN, 0)
@@ -1063,8 +1100,8 @@ fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 mod tests {
     use super::WM_ACTIVATEAPP;
     use super::{
-        activate, deliver, virtual_key, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW,
-        WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        activate, deliver, key_state_now, virtual_key, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN,
+        WINDOW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
     };
     use crate::host::{Button, Input};
     use crate::win32::State;
@@ -1123,6 +1160,33 @@ mod tests {
             state.keyboard_data.iter().copied().collect::<Vec<_>>(),
             [(0x39, DOWN), (0xcb, 0)]
         );
+    }
+
+    /// GetAsyncKeyState says whether a key is down now, in the top bit, and
+    /// whether it went down since the last time it was asked, in the bottom
+    /// one, which asking clears (#124). LEGO Island lets go of an arrow
+    /// DirectInput says is held when this says it is up.
+    #[test]
+    fn asking_whether_a_key_is_down_says_now_and_since() {
+        let mut state = State::new();
+        let left_arrow = (0xcb, 0x25);
+        let key = |code, down| Input::Key { code, down };
+        assert_eq!(key_state_now(&mut state, left_arrow.1), 0, "never pressed");
+        deliver(&mut state, key(left_arrow.0, true), 1);
+        assert_eq!(key_state_now(&mut state, left_arrow.1), 0x8001);
+        assert_eq!(key_state_now(&mut state, left_arrow.1), 0x8000, "asked");
+        // Pressed and let go between two askings: up, but pressed since.
+        deliver(&mut state, key(left_arrow.0, false), 2);
+        deliver(&mut state, key(left_arrow.0, true), 3);
+        deliver(&mut state, key(left_arrow.0, false), 4);
+        assert_eq!(key_state_now(&mut state, left_arrow.1), 0x0001);
+        assert_eq!(key_state_now(&mut state, left_arrow.1), 0);
+        // Either Shift is Shift, as Windows 95 asks after it; and a button is
+        // a key too.
+        deliver(&mut state, key(0x36, true), 5);
+        assert_eq!(key_state_now(&mut state, 0x10), 0x8001);
+        deliver(&mut state, Input::Down(Button::Left), 6);
+        assert_eq!(key_state_now(&mut state, 0x01), 0x8001);
     }
 
     /// Every key a host can produce has a virtual key to be sent as, and

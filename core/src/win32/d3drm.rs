@@ -304,7 +304,7 @@ const VIEWPORT2_METHODS: [crate::com::Method; 41] = [
     method("GetCamera", 1, viewport_get_camera),
     method("GetDevice", 1, viewport_get_device),
     method("GetPlane", 4, viewport_get_plane),
-    wall("Pick", 3),
+    method("Pick", 3, pick),
     wall("GetUniformScaling", 0),
     method("GetX", 0, viewport_get_x),
     method("GetY", 0, viewport_get_y),
@@ -738,7 +738,7 @@ const FRAME2_METHODS: &[crate::com::Method] = &[
     method("AddVisual", 1, add_visual),
     method("GetChildren", 1, get_children),
     method("GetColor", 0, get_color),
-    wall("GetLights", 1),
+    method("GetLights", 1, get_lights),
     wall("GetMaterialMode", 0),
     method("GetParent", 1, get_parent),
     method("GetPosition", 2, get_position),
@@ -815,6 +815,31 @@ pub static FRAME_ARRAY: Interface = Interface {
     ],
 };
 
+/// `IDirect3DRMLightArray`: a frame's lights, as they were when it was asked.
+pub static LIGHT_ARRAY: Interface = Interface {
+    name: "IDirect3DRMLightArray",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("GetSize", 0, array_size),
+        method("GetElement", 2, array_element),
+    ],
+};
+
+/// `IDirect3DRMPickedArray`: what a viewport's `Pick` found under a place,
+/// nearest first.
+pub static PICKED_ARRAY: Interface = Interface {
+    name: "IDirect3DRMPickedArray",
+    methods: &[
+        QUERY_INTERFACE,
+        ADD_REF,
+        RELEASE,
+        method("GetSize", 0, picked_size),
+        method("GetPick", 4, picked_element),
+    ],
+};
+
 pub static INTERFACES: &[&Interface] = &[
     &D3DRM,
     &D3DRM2,
@@ -836,6 +861,8 @@ pub static INTERFACES: &[&Interface] = &[
     &FRAME,
     &FRAME2,
     &FRAME_ARRAY,
+    &LIGHT_ARRAY,
+    &PICKED_ARRAY,
 ];
 
 /// What a title hangs on one of these objects, and reads back later.
@@ -3093,25 +3120,53 @@ fn get_children(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let mut faces = Vec::with_capacity(children.len());
-    for child in children {
-        faces.push(State::face(ctx, child, &FRAME).map_err(Stop::Fault)?);
+    give_array(ctx, args[0], (&FRAME_ARRAY, &FRAME), children)
+}
+
+fn get_lights(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetLights(out): an array of the lights hung on the frame as they are
+    // now. LEGO Island's lights are each a frame with one light on it, and it
+    // reaches the light through this to change its colour (#124).
+    if args[0] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
     }
-    let array = State::make_com(ctx, &FRAME_ARRAY, ComState::FrameArray { frames: faces })
-        .map_err(Stop::Fault)?;
-    ctx.mem.write_u32(args[0], array).map_err(Stop::Fault)?;
+    let Some(lights) = ctx
+        .state
+        .scene
+        .frame(ctx.state.identity(this))
+        .map(|f| f.lights.clone())
+    else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    give_array(ctx, args[0], (&LIGHT_ARRAY, &LIGHT), lights)
+}
+
+/// An array of objects as they are now, each as the face the array holds,
+/// handed to the guest through `out`.
+fn give_array(
+    ctx: &mut Ctx<'_>,
+    out: u32,
+    (array, face): (&'static Interface, &'static Interface),
+    objects: Vec<u32>,
+) -> Result<u32, Stop> {
+    let mut items = Vec::with_capacity(objects.len());
+    for object in objects {
+        items.push(State::face(ctx, object, face).map_err(Stop::Fault)?);
+    }
+    let array = State::make_com(ctx, array, ComState::Array { items }).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(out, array).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
-fn array_frames(ctx: &Ctx<'_>, this: u32) -> Vec<u32> {
+fn array_items(ctx: &Ctx<'_>, this: u32) -> Vec<u32> {
     match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::FrameArray { frames }) => frames.clone(),
+        Some(ComState::Array { items }) => items.clone(),
         _ => Vec::new(),
     }
 }
 
 fn array_size(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(u32::try_from(array_frames(ctx, this).len()).unwrap_or(0))
+    Ok(u32::try_from(array_items(ctx, this).len()).unwrap_or(0))
 }
 
 fn array_element(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -3119,7 +3174,7 @@ fn array_element(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     if args[1] == 0 {
         return Ok(D3DRMERR_BADVALUE);
     }
-    let frames = array_frames(ctx, this);
+    let frames = array_items(ctx, this);
     let Some(frame) = frames.get(args[0] as usize).copied() else {
         ctx.mem.write_u32(args[1], 0).map_err(Stop::Fault)?;
         return Ok(D3DRMERR_BADVALUE);
@@ -3350,6 +3405,224 @@ fn viewport_inverse_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Res
         });
     };
     write_vector(ctx, args[0], point)?;
+    Ok(S_OK)
+}
+
+/// Pick(x, y, out): every mesh the viewport draws over a place on the device,
+/// nearest first, each with the frames from its scene's root down to the one
+/// it hangs on (#124). LEGO Island asks at every press of the button, and
+/// takes the first frame below the root on the nearest one's path that it
+/// hung data of its own on as what was pressed.
+///
+/// A face is under the place where `Render` would draw it there: cut to the
+/// view volume and culled as `Render` cuts and culls it, a pixel's centre
+/// being its whole coordinates. Each mesh is picked once, at its nearest face,
+/// and its `D3DRMPICKDESC` says which face of which group, and where.
+// ponytail: "where" is the place picked in the scene's own space. `Pick`'s
+// documentation says only "the position of the picked object", and nothing on
+// the roster reads it; measure native retained mode when a title does.
+fn pick(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let at = (args[0] as i32 as f32, args[1] as i32 as f32);
+    if args[2] == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    let (Some((view, rect, camera)), Some(ComState::Viewport { camera: eye, .. })) =
+        (looking(ctx, "Pick", this)?, viewport_state(ctx, this))
+    else {
+        return Ok(D3DRMERR_BADOBJECT);
+    };
+    let Some(seen_from) = super::scene::invert(&camera) else {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport::Pick: a camera that flattens space".to_owned(),
+            caller: 0,
+        });
+    };
+    let clip_from_world = super::scene::multiply(&seen_from, &view.perspective(rect.2, rect.3));
+    let root = ctx.state.scene.root(ctx.state.identity(eye)).unwrap_or(0);
+    let mut meshes = Vec::new();
+    if let Some(world) = ctx.state.scene.world(root) {
+        collect_paths(ctx, root, world, &mut Vec::new(), &mut meshes)?;
+    }
+    let place = super::pipeline::Viewport::whole(rect.0, rect.1, rect.2, rect.3);
+    let mut found = Vec::new();
+    for (world, path, visual, mesh) in meshes {
+        let clip_from_model = super::scene::multiply(&world, &clip_from_world);
+        if let Some((depth, group, face)) = nearest_face(ctx, mesh, &clip_from_model, &place, at) {
+            found.push((depth, path, visual, group, face));
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut picks = Vec::with_capacity(found.len());
+    for (depth, path, visual, group, face) in found {
+        let mut frames = Vec::with_capacity(path.len());
+        for frame in path {
+            frames.push(State::face(ctx, frame, &FRAME).map_err(Stop::Fault)?);
+        }
+        let array = State::make_com(ctx, &FRAME_ARRAY, ComState::Array { items: frames })
+            .map_err(Stop::Fault)?;
+        let [x, y, z] = view
+            .from_screen(rect, &camera, [at.0, at.1, depth, 1.0])
+            .unwrap_or_default()
+            .map(f32::to_bits);
+        picks.push((visual, array, [face, group, x, y, z]));
+    }
+    let picked = picks.len();
+    ctx.log.at(crate::cli::Trace::Shims, || {
+        format!("picked {picked} meshes")
+    });
+    let array = State::make_com(ctx, &PICKED_ARRAY, ComState::PickedArray { picks })
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(args[2], array).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// Every mesh in a frame's tree as `Render` finds them, each where it is in
+/// the world, with the frames from the scene's root down to the one it hangs
+/// on, a frame hung as a visual among them, the visual as it was hung, and the
+/// mesh.
+fn collect_paths(
+    ctx: &Ctx<'_>,
+    frame: u32,
+    world: Matrix,
+    path: &mut Vec<u32>,
+    meshes: &mut Vec<(Matrix, Vec<u32>, u32, u32)>,
+) -> Result<(), Stop> {
+    let Some(node) = ctx.state.scene.frame(frame) else {
+        return Ok(());
+    };
+    if path.len() > ctx.state.scene.frames.len() {
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport::Pick: a frame that is its own ancestor".to_owned(),
+            caller: 0,
+        });
+    }
+    path.push(frame);
+    let local = |f: u32| {
+        ctx.state
+            .scene
+            .frames
+            .get(&f)
+            .map_or(super::scene::IDENTITY, |f| f.local)
+    };
+    for &visual in &node.visuals {
+        let identity = ctx.state.identity(visual);
+        if ctx.state.scene.meshes.contains_key(&identity) {
+            meshes.push((world, path.clone(), visual, identity));
+        } else if ctx.state.scene.frames.contains_key(&identity) {
+            let placed = super::scene::multiply(&local(identity), &world);
+            collect_paths(ctx, identity, placed, path, meshes)?;
+        } else {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "IDirect3DRMViewport::Pick: a {} visual, which nothing here picks",
+                    ctx.state.interface_of(visual).unwrap_or("foreign")
+                ),
+                caller: 0,
+            });
+        }
+    }
+    for &child in &node.children {
+        let placed = super::scene::multiply(&local(child), &world);
+        collect_paths(ctx, child, placed, path, meshes)?;
+    }
+    path.pop();
+    Ok(())
+}
+
+/// The nearest face of a mesh over a place on the device, if any: its depth,
+/// its group and its number in the group.
+fn nearest_face(
+    ctx: &Ctx<'_>,
+    mesh: u32,
+    clip_from_model: &Matrix,
+    place: &super::pipeline::Viewport,
+    (x, y): (f32, f32),
+) -> Option<(f32, u32, u32)> {
+    use super::pipeline::{self, Clipped};
+    let mut nearest: Option<(f32, u32, u32)> = None;
+    for (g, group) in (0u32..).zip(&ctx.state.scene.meshes.get(&mesh)?.groups) {
+        let corner = |index: &u32| {
+            let vertex = group.vertices.get(*index as usize).copied().flatten()?;
+            let position = [value(vertex[0]), value(vertex[1]), value(vertex[2]), 1.0];
+            Some(Clipped {
+                clip: pipeline::project(clip_from_model, position),
+                diffuse: [0.0; 4],
+                specular: [0.0; 3],
+                uv: [0.0; 2],
+                fog: 1.0,
+            })
+        };
+        let faces = group.indices.chunks_exact(group.per_face.max(1) as usize);
+        for (f, face) in (0u32..).zip(faces) {
+            let Some(corners) = face.iter().map(corner).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let polygon: Vec<_> = pipeline::clip(&corners)
+                .iter()
+                .map(|v| place.place(v))
+                .collect();
+            // Wound anticlockwise on the screen, it is turned away and not
+            // drawn (`d3d::rasterise`'s D3DCULL_CCW).
+            let area: f32 = (0..polygon.len())
+                .map(|p| {
+                    let (u, v) = (polygon[p], polygon[(p + 1) % polygon.len()]);
+                    u.x * v.y - v.x * u.y
+                })
+                .sum();
+            if polygon.len() < 3 || area < 0.0 {
+                continue;
+            }
+            let edge = |a: crate::raster::Vertex, b: crate::raster::Vertex| {
+                (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+            };
+            for p in 1..polygon.len() - 1 {
+                let (a, b, c) = (polygon[0], polygon[p], polygon[p + 1]);
+                let (wa, wb, wc) = (edge(b, c), edge(c, a), edge(a, b));
+                let total = wa + wb + wc;
+                if total <= 0.0 || wa < 0.0 || wb < 0.0 || wc < 0.0 {
+                    continue;
+                }
+                let depth = (wa * a.z + wb * b.z + wc * c.z) / total;
+                if nearest.is_none_or(|(d, ..)| depth < d) {
+                    nearest = Some((depth, g, f));
+                }
+            }
+        }
+    }
+    nearest
+}
+
+fn picks(ctx: &Ctx<'_>, this: u32) -> Vec<(u32, u32, [u32; 5])> {
+    match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::PickedArray { picks }) => picks.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn picked_size(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    Ok(u32::try_from(picks(ctx, this).len()).unwrap_or(0))
+}
+
+fn picked_element(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetPick(index, visual, frames, description).
+    let (visual_at, frames_at, description) = (args[1], args[2], args[3]);
+    let Some((visual, frames, words)) = picks(ctx, this).get(args[0] as usize).copied() else {
+        return Ok(D3DRMERR_BADVALUE);
+    };
+    if visual_at == 0 || frames_at == 0 {
+        return Ok(D3DRMERR_BADVALUE);
+    }
+    for (at, object) in [(visual_at, visual), (frames_at, frames)] {
+        ctx.state.com_ref(object, 1);
+        ctx.mem.write_u32(at, object).map_err(Stop::Fault)?;
+    }
+    if description != 0 {
+        for (i, word) in (0u32..).zip(words) {
+            ctx.mem
+                .write_u32(description + 4 * i, word)
+                .map_err(Stop::Fault)?;
+        }
+    }
     Ok(S_OK)
 }
 

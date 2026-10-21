@@ -417,6 +417,38 @@ Rock Raiders' other runs, its menus and level select included, and every other t
 move. Accepted by the maintainer on 2026-10-20; Rock Raiders' first mission is played again by a
 person before its next release (golden rule 7).
 
+What LEGO Island asks for once a hand is on it (#124), each written when a run driven by a
+synthetic hand through the host stopped there:
+
+- `IDirect3DRMViewport::Pick`: every mesh the viewport draws over a place on the device, nearest
+  first, each found where `Render` would draw it, cut to the view volume and culled as it is, and
+  picked once at its nearest face. `IDirect3DRMPickedArray` hands each one out with its visual,
+  an `IDirect3DRMFrameArray` of the frames from its scene's root down to the one it hangs on (a
+  frame hung as a visual among them), and its `D3DRMPICKDESC`: face, group, and where in the scene
+  the place picked is. The game asks at every press of the button and takes the first frame below
+  the root that carries its own data as what was pressed. This was the old tree's live crash: it
+  had no `Pick`, and the first press ended the run, even in the black seconds before first light,
+  which a person saw as the game crashing right away and no route, which never pressed a button,
+  could see. This tree stopped at the same wall, at instruction 942,097, flip 102.
+- `IDirect3DRMFrame2::GetLights` and `IDirect3DRMLightArray`: the lights hung on a frame as they
+  are now. Signing the registration book recolours a light through it.
+- `IDirectDrawSurface::Blt` with `DDBLT_ROP` and the raster operation `SRCCOPY`, which is a copy;
+  any other operation is a wall. The registration book draws its blinking cursor this way.
+- `GetAsyncKeyState`, as Windows 95 answers it: the top bit while a key is down, the bottom bit if
+  it went down since it was last asked about, which asking clears; no left key told from a right
+  one; the two buttons as keys too. The game asks about the arrows before it believes
+  DirectInput's word that they are held.
+
+`ComState::FrameArray` is now `ComState::Array`, a frame array's frames or a light array's
+lights. Still not sent: `WM_TIMER` (#138). LEGO Island sets a timer at every press outside and
+kills it at the release, and a button held still for a second starts a drag on Windows with the
+timer's message; Hot Wheels sets a one-second timer as it starts, so sending the message moves
+every Hot Wheels run, which is the maintainer's to decide. Nor is LEGO Island's own
+`PostMessageA` to itself, which sets its pointer's shape (#139). The joystick's `joyGetPosEx` and
+`joyGetDevCapsA` are not reached: `UseJoystick` is not declared and the game's default is off.
+
+No other title's run moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

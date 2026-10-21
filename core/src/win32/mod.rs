@@ -311,6 +311,9 @@ pub struct State {
     pub cd: winmm::CdAudio,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
+    /// Which virtual keys have gone down since the guest last asked
+    /// `GetAsyncKeyState` about each.
+    pub keys_pressed: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
     pub mouse_delta: (i32, i32),
     /// What a person did, waiting in the buffered lane: where in the device's
@@ -438,6 +441,7 @@ impl State {
             palette: 0,
             present: None,
             keys_down: Vec::new(),
+            keys_pressed: Vec::new(),
             mouse_delta: (0, 0),
             mouse_data: VecDeque::new(),
             keyboard_data: VecDeque::new(),
@@ -809,8 +813,13 @@ pub enum ComState {
     /// A buffer of vertices the title fills and then draws from (#57): where
     /// they are, how they are laid out, and how many fit.
     VertexBuffer { store: u32, fvf: u32, count: u32 },
-    /// A frame's children, as they were when a title asked for them.
-    FrameArray { frames: Vec<u32> },
+    /// A frame's children or its lights, as they were when a title asked for
+    /// them.
+    Array { items: Vec<u32> },
+    /// What a viewport's `Pick` found, nearest first: each visual, the array
+    /// of frames from its scene's root down to it, and its `D3DRMPICKDESC`
+    /// as the five words it is written as.
+    PickedArray { picks: Vec<(u32, u32, [u32; 5])> },
     /// Something a title draws itself: its callback, and what to pass it.
     UserVisual { callback: u32, argument: u32 },
     /// Retained mode's device: its surface, and how many buffers the title

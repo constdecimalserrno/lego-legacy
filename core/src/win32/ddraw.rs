@@ -796,13 +796,31 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     const DDBLT_ASYNC: u32 = 0x0000_0200;
     const DDBLT_COLORFILL: u32 = 0x0000_0400;
     const DDBLT_KEYSRC: u32 = 0x0000_8000;
+    const DDBLT_ROP: u32 = 0x0002_0000;
     const DDBLT_WAIT: u32 = 0x0100_0000;
     let flags = args[3];
-    if flags & !(DDBLT_ASYNC | DDBLT_COLORFILL | DDBLT_KEYSRC | DDBLT_WAIT) != 0 {
+    if flags & !(DDBLT_ASYNC | DDBLT_COLORFILL | DDBLT_KEYSRC | DDBLT_ROP | DDBLT_WAIT) != 0 {
         return Err(Stop::NotWritten {
             what: format!("IDirectDrawSurface::Blt: flags {flags:#x}"),
             caller: 0,
         });
+    }
+    // DDBLT_ROP: the raster operation is the effects block's dwROP, eight
+    // bytes in. SRCCOPY is the source copied as it is, which is what a blit
+    // with no operation does: LEGO Island's registration book draws its
+    // cursor this way (#124).
+    if flags & DDBLT_ROP != 0 {
+        const SRCCOPY: u32 = 0x00cc_0020;
+        let rop = match args[4] {
+            0 => None,
+            fx => Some(ctx.mem.read_u32(fx + 8).map_err(Stop::Fault)?),
+        };
+        if rop != Some(SRCCOPY) {
+            return Err(Stop::NotWritten {
+                what: format!("IDirectDrawSurface::Blt: raster operation {rop:#x?}"),
+                caller: 0,
+            });
+        }
     }
     let Some((pixels, width, height, pitch, depth, primary, _)) = surface_of(ctx, this) else {
         return Ok(S_OK);
