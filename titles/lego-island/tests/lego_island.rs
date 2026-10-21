@@ -1,7 +1,9 @@
 //! LEGO Island, run headless from the player's rip: the launcher finding it
 //! or refusing it, its declared tree, its boot, and its committed routes to
 //! first light and to its Information Center's idle loop, what the second is
-//! heard to play, and each replayed to the same machine every time.
+//! heard to play, and each replayed to the same machine every time; and a
+//! synthetic hand driving it through the host, out of the Information Center
+//! and away on a bike, and the route its run recorded.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -9,6 +11,7 @@
 
 use lego_island::LEGO_ISLAND as ISLAND;
 use lego_legacy_core::cli::{Cli, Trace};
+use lego_legacy_core::host::{headless::Headless, Button, Input};
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::testkit;
 use lego_legacy_core::title::EntryImage;
@@ -548,5 +551,326 @@ fn the_information_center_route_replays_to_the_same_machine_every_time() {
     assert!(
         first.host.audio_blocks == second.host.audio_blocks,
         "and what it mixed"
+    );
+}
+
+/// A person's hand, as a run in a window takes it: through the host, whose
+/// `poll_input` hands the machine what was done since the last flip, and not
+/// through a route (#124). A route replaces the hand, and a whole class of
+/// fault is only met by a hand: the old tree's LEGO Island "crashed right
+/// away" for a person and never for a replay, because no route of it pressed
+/// anything.
+///
+/// The pointer glides where it goes, a few pixels a flip as a mouse moves it,
+/// rather than jumping as a route may; a button is held a couple of flips; a
+/// key as long as it is held.
+struct Hand {
+    at: (i32, i32),
+    flip: u64,
+    done: Vec<(u64, Input)>,
+}
+
+/// How far a gliding pointer goes in a flip, on each axis.
+const GLIDE: i32 = 16;
+
+/// The keys the hand presses, as DirectInput numbers them.
+const KEY_E: u32 = 0x12;
+const KEY_O: u32 = 0x18;
+const KEY_G: u32 = 0x22;
+const KEY_L: u32 = 0x26;
+const KEY_UP: u32 = 0xc8;
+const KEY_LEFT: u32 = 0xcb;
+
+impl Hand {
+    /// Where Windows leaves the pointer after a mode is set: the middle of
+    /// the screen.
+    fn new() -> Self {
+        Self {
+            at: (320, 240),
+            flip: 0,
+            done: Vec::new(),
+        }
+    }
+
+    /// Nothing until this flip.
+    fn wait(mut self, flip: u64) -> Self {
+        self.flip = self.flip.max(flip);
+        self
+    }
+
+    fn glide(mut self, to: (i32, i32)) -> Self {
+        while self.at != to {
+            let step = |from: i32, to: i32| from + (to - from).clamp(-GLIDE, GLIDE);
+            self.at = (step(self.at.0, to.0), step(self.at.1, to.1));
+            let (x, y) = self.at;
+            self.done.push((self.flip, Input::Move { x, y }));
+            self.flip += 1;
+        }
+        self
+    }
+
+    /// The left button pressed over a place, and let go two flips later.
+    fn click(self, at: (i32, i32)) -> Self {
+        let mut hand = self.glide(at);
+        hand.done.push((hand.flip, Input::Down(Button::Left)));
+        hand.done.push((hand.flip + 2, Input::Up(Button::Left)));
+        hand.flip += 3;
+        hand
+    }
+
+    /// A key held down for so many flips.
+    fn hold(mut self, code: u32, flips: u64) -> Self {
+        self.done.push((self.flip, Input::Key { code, down: true }));
+        self.flip += flips;
+        self.done
+            .push((self.flip, Input::Key { code, down: false }));
+        self.flip += 1;
+        self
+    }
+
+    /// A host that hands the machine what this hand did, at the flips it did
+    /// it, keeping the frames a test looks at.
+    fn host(self, keep: &[u64]) -> Headless {
+        let mut host = Headless::new().keeping(keep);
+        host.queue(self.done);
+        host
+    }
+}
+
+/// A run taking its input from a hand through the host, recording what it
+/// was given as a route, done once into its slot.
+fn by_hand(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    hand: impl FnOnce() -> Hand,
+    keep: &[u64],
+    budget: u64,
+) -> Option<&'static testkit::Ran> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let cli = Cli {
+            record: true,
+            ..Cli::default()
+        };
+        Some(testkit::run_on(hand().host(keep), &ISLAND, &cli, budget))
+    })
+    .as_ref()
+}
+
+/// A restless hand from the first flip: the pointer goes round and round the
+/// screen, and the button is pressed every 97 flips, through the boot, the
+/// intro, and into the Information Center.
+fn restless() -> Hand {
+    let mut hand = Hand::new();
+    while hand.flip < 900 {
+        let now = hand.flip;
+        let turn = now as f64 / 40.0;
+        let to = (
+            320 + (200.0 * turn.cos()) as i32,
+            240 + (150.0 * turn.sin()) as i32,
+        );
+        hand = if now > 0 && now.is_multiple_of(97) {
+            hand.click(to)
+        } else {
+            hand.glide(to)
+        };
+        hand = hand.wait(now + 1);
+    }
+    hand
+}
+
+/// Enough for the restless hand's clicks to skip the intro and reach the
+/// Information Center: flip 800 is presented at 317 million.
+const RESTLESS_BUDGET: u64 = 320_000_000;
+
+/// The old tree's live crash, met and gone (#124). The hand's first press of
+/// the button, at flip 98, under two declared seconds into the black countdown
+/// before first light, has the game ask retained mode which of its 3D objects is under the
+/// pointer, `IDirect3DRMViewport::Pick`. The old tree had no such method and
+/// ended the run there, which is what a person saw as LEGO Island crashing
+/// right away; this tree stopped at the same wall, at instruction 942,097,
+/// until #124 answered it. No route had ever pressed a button.
+#[test]
+fn a_restless_hand_from_the_first_flip_meets_no_wall() {
+    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let Some(ran) = by_hand(&RAN, restless, &[800], RESTLESS_BUDGET) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing a hand does stops the run"
+    );
+    // The hand's input came through the host: no route was replayed.
+    assert!(!ran.log.contains("\nroute "), "no route was replayed");
+    ran.assert_logged("input flip 98 Down(Left)");
+    // Its clicks were taken: the intro is skipped, and the Information Center
+    // is up at flip 800, more than two thousand flips before the intro ends
+    // untouched, its plants' pots green either side of the stage.
+    let frame = ran.host.frame(800).expect("kept");
+    for (x, y) in [(180, 342), (472, 343)] {
+        let [a, green, b] = pixel(frame, x, y);
+        assert!(
+            green > a && green > b,
+            "a plant at {x},{y}: {:?}",
+            [a, green, b]
+        );
+    }
+}
+
+/// A pixel of a kept frame: red, green and blue.
+fn pixel(frame: &lego_legacy_core::host::headless::Presented, x: usize, y: usize) -> [u8; 3] {
+    let at = (y * frame.width as usize + x) * 4;
+    [2, 1, 0].map(|i| frame.pixels[at + i])
+}
+
+/// Where the ride presses, on the screen. In the Information Center: the blue
+/// brick on the desk, which is the registration book, and the book's tick once
+/// a name is written in it; Pepper's portrait, the third over the map; and the
+/// arrow at the left, to the elevator. By the elevator, the arrow at its left,
+/// to the door. The revolving door out. And outside, the red bicycle by the
+/// door, once the walk has turned to face it.
+const BOOK: (i32, i32) = (322, 294);
+const TICK: (i32, i32) = (519, 135);
+const PEPPER: (i32, i32) = (322, 105);
+const TO_THE_ELEVATOR: (i32, i32) = (28, 310);
+const TO_THE_DOOR: (i32, i32) = (35, 140);
+const DOOR: (i32, i32) = (330, 220);
+const BIKE: (i32, i32) = (70, 271);
+
+/// Out of the Information Center and onto the island, and away on a bike
+/// (#124). The island will not let anyone out who has not signed its book
+/// and picked who they are: the revolving door checks both (`LEGO1.DLL`
+/// 0x10037b35), and a new name in the book picks nobody.
+fn ride() -> Hand {
+    Hand::new()
+        .wait(IDLE_LOOP + 50)
+        .click(BOOK)
+        .wait(7000)
+        .hold(KEY_L, 2)
+        .hold(KEY_E, 2)
+        .hold(KEY_G, 2)
+        .hold(KEY_O, 2)
+        .wait(7100)
+        .click(TICK)
+        .wait(8500)
+        .click(PEPPER)
+        .wait(10000)
+        .click(TO_THE_ELEVATOR)
+        .wait(11000)
+        .click(TO_THE_DOOR)
+        .wait(12000)
+        .click(DOOR)
+        // Outside: a step forward, a turn left to face the bicycle, and on.
+        .wait(13000)
+        .hold(KEY_UP, 40)
+        .wait(13100)
+        .hold(KEY_LEFT, 140)
+        .wait(13300)
+        .click(BIKE)
+        .wait(13600)
+        .hold(KEY_UP, 200)
+}
+
+/// The flips the ride is looked at: by the revolving door, the island through
+/// the doorway, on the bicycle, and away down the road on it.
+const AT_THE_DOOR: u64 = 12000;
+const OUTSIDE: u64 = 12100;
+const ON_THE_BIKE: u64 = 13500;
+const RIDING: u64 = 13800;
+
+/// Enough for the ride to the end of its last key: flip 13900 is presented at
+/// about 6.34 billion.
+const RIDE_BUDGET: u64 = 6_350_000_000;
+
+const RIDE_FRAMES: &[u64] = &[AT_THE_DOOR, OUTSIDE, ON_THE_BIKE, RIDING];
+
+static RIDDEN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// The committed ride, replayed: what the hand did, as the run it did it in
+/// recorded it.
+fn ride_replayed(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(ride_route()),
+        ..Cli::default()
+    };
+    testkit::replay(slot, scratch, &ISLAND, &cli, RIDE_FRAMES, RIDE_BUDGET)
+}
+
+fn ride_route() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-ride.route")
+}
+
+/// The ticket's bar (#124): by hand, through the host, out of the Information
+/// Center onto the island and away on a bike, with no wall on the way. Each
+/// press the island takes is one a person's hand would make, and two of them
+/// met walls on the way: the book's blinking cursor is copied with a raster
+/// operation, and signing it recolours a light that hangs on a frame.
+#[test]
+fn a_hand_walks_out_of_the_information_center_and_rides_a_bike() {
+    let Some(ran) = by_hand(&RIDDEN, ride, RIDE_FRAMES, RIDE_BUDGET) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the ride stops the run"
+    );
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+    let sky = |flip: u64| {
+        let [r, g, b] = pixel(frame(flip), 320, 10);
+        b > 200 && b > r + 100 && b > g + 30
+    };
+    // Inside, a grey ceiling; a hundred flips on, through the doorway, the
+    // island's sky.
+    assert!(!sky(AT_THE_DOOR), "inside, by the revolving door");
+    assert!(sky(OUTSIDE), "outside, under the sky");
+    // On the bike, its red handlebars and their stem across the foot of the
+    // screen; and riding, the island going by above them.
+    for flip in [ON_THE_BIKE, RIDING] {
+        let [r, g, b] = pixel(frame(flip), 320, 400);
+        assert!(r > 150 && g < 60 && b < 60, "the handlebars at flip {flip}");
+    }
+    assert!(
+        testkit::differing(frame(ON_THE_BIKE), frame(RIDING), (0, 0, 640, 300)) > 30_000,
+        "the island goes by"
+    );
+}
+
+/// The committed route is the hand's own, as its run recorded it.
+#[test]
+fn the_committed_ride_is_what_the_hand_recorded() {
+    let Some(ran) = by_hand(&RIDDEN, ride, RIDE_FRAMES, RIDE_BUDGET) else {
+        return;
+    };
+    let recorded = lego_legacy_core::route::Route::load(&ran.dir.join("route"))
+        .expect("the run recorded a route");
+    let committed = lego_legacy_core::route::Route::load(&ride_route()).expect("it reads");
+    assert_eq!(recorded, committed);
+}
+
+/// The determinism gate: the committed ride, replayed, ends on the machine
+/// the hand's own run ended on, and presents what it presented.
+#[test]
+fn the_ride_replays_to_the_machine_the_hand_made() {
+    static REPLAYED: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    // The replay runs beside the hand's run rather than after it.
+    let (hand, replay) = std::thread::scope(|scope| {
+        let replay = scope.spawn(|| ride_replayed(&REPLAYED));
+        (
+            by_hand(&RIDDEN, ride, RIDE_FRAMES, RIDE_BUDGET),
+            replay.join().expect("the replay ran"),
+        )
+    });
+    let (Some(hand), Some(replay)) = (hand, replay) else {
+        return;
+    };
+    hand.assert_same_machine(replay);
+    assert!(
+        hand.host.frame(RIDING).map(|f| &f.pixels) == replay.host.frame(RIDING).map(|f| &f.pixels),
+        "including what it presented at flip {RIDING}"
     );
 }

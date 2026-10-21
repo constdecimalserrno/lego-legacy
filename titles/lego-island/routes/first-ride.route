@@ -1,0 +1,144 @@
+#lego-legacy-route 1
+# LEGO Island, from its boot out of its Information Center and onto the
+# island, and away on a bike (#124).
+#
+# Recorded, not written: a synthetic hand in lego_island.rs (`ride`) did this
+# through the host, as a person's hand reaches a run in a window, and the run
+# wrote down what it was handed. The pointer glides a few pixels a flip; a
+# button is held two flips; a key as long as it is held.
+#
+# Until flip 5149 nothing is pressed, which is information-center.route. Then,
+# in the Information Center: the blue brick on the desk opens the registration
+# book, L, E, G and O are typed on the keyboard, and the tick signs the book.
+# Then Pepper's portrait: his movie plays and he is who the player is. The
+# island lets nobody out who has not signed and picked someone, and a new name
+# picks nobody, so the book comes first. The arrow at the left goes to the
+# elevator, the arrow at its left to the revolving door, and the door out:
+# from flip 12100 the island is seen through the doorway. Outside, Up walks a
+# step forward and Left turns to face the red bicycle by the door. It is
+# clicked at flip 13317, its handlebars are in front of the camera by
+# flip 13400, and Up rides it away down the road from flip 13600 to 13800.
+flip 5149 move 322 256
+flip 5150 move 322 272
+flip 5151 move 322 288
+flip 5152 move 322 294
+flip 5153 down
+flip 5155 up
+flip 7000 key L down
+flip 7002 key L up
+flip 7003 key E down
+flip 7005 key E up
+flip 7006 key G down
+flip 7008 key G up
+flip 7009 key O down
+flip 7011 key O up
+flip 7100 move 338 278
+flip 7101 move 354 262
+flip 7102 move 370 246
+flip 7103 move 386 230
+flip 7104 move 402 214
+flip 7105 move 418 198
+flip 7106 move 434 182
+flip 7107 move 450 166
+flip 7108 move 466 150
+flip 7109 move 482 135
+flip 7110 move 498 135
+flip 7111 move 514 135
+flip 7112 move 519 135
+flip 7113 down
+flip 7115 up
+flip 8500 move 503 119
+flip 8501 move 487 105
+flip 8502 move 471 105
+flip 8503 move 455 105
+flip 8504 move 439 105
+flip 8505 move 423 105
+flip 8506 move 407 105
+flip 8507 move 391 105
+flip 8508 move 375 105
+flip 8509 move 359 105
+flip 8510 move 343 105
+flip 8511 move 327 105
+flip 8512 move 322 105
+flip 8513 down
+flip 8515 up
+flip 10000 move 306 121
+flip 10001 move 290 137
+flip 10002 move 274 153
+flip 10003 move 258 169
+flip 10004 move 242 185
+flip 10005 move 226 201
+flip 10006 move 210 217
+flip 10007 move 194 233
+flip 10008 move 178 249
+flip 10009 move 162 265
+flip 10010 move 146 281
+flip 10011 move 130 297
+flip 10012 move 114 310
+flip 10013 move 98 310
+flip 10014 move 82 310
+flip 10015 move 66 310
+flip 10016 move 50 310
+flip 10017 move 34 310
+flip 10018 move 28 310
+flip 10019 down
+flip 10021 up
+flip 11000 move 35 294
+flip 11001 move 35 278
+flip 11002 move 35 262
+flip 11003 move 35 246
+flip 11004 move 35 230
+flip 11005 move 35 214
+flip 11006 move 35 198
+flip 11007 move 35 182
+flip 11008 move 35 166
+flip 11009 move 35 150
+flip 11010 move 35 140
+flip 11011 down
+flip 11013 up
+flip 12000 move 51 156
+flip 12001 move 67 172
+flip 12002 move 83 188
+flip 12003 move 99 204
+flip 12004 move 115 220
+flip 12005 move 131 220
+flip 12006 move 147 220
+flip 12007 move 163 220
+flip 12008 move 179 220
+flip 12009 move 195 220
+flip 12010 move 211 220
+flip 12011 move 227 220
+flip 12012 move 243 220
+flip 12013 move 259 220
+flip 12014 move 275 220
+flip 12015 move 291 220
+flip 12016 move 307 220
+flip 12017 move 323 220
+flip 12018 move 330 220
+flip 12019 down
+flip 12021 up
+flip 13000 key Up down
+flip 13040 key Up up
+flip 13100 key Left down
+flip 13240 key Left up
+flip 13300 move 314 236
+flip 13301 move 298 252
+flip 13302 move 282 268
+flip 13303 move 266 271
+flip 13304 move 250 271
+flip 13305 move 234 271
+flip 13306 move 218 271
+flip 13307 move 202 271
+flip 13308 move 186 271
+flip 13309 move 170 271
+flip 13310 move 154 271
+flip 13311 move 138 271
+flip 13312 move 122 271
+flip 13313 move 106 271
+flip 13314 move 90 271
+flip 13315 move 74 271
+flip 13316 move 70 271
+flip 13317 down
+flip 13319 up
+flip 13600 key Up down
+flip 13800 key Up up

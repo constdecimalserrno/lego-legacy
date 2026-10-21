@@ -101,7 +101,11 @@ pub const LEGO_ISLAND: Title = Title {
     // Not yet measured: no movie of this title's own has played on this
     // machine, so there is nothing a click could be translated inside of.
     click_in_a_movie: None,
-    // One for one, and not yet measured: the title has not yet been handed a
-    // pointer.
+    // One for one, because the pointer is never the title's to steer (#124).
+    // `Draw Cursor` is absent from the registry, so the game takes its own
+    // default, off, and leaves the pointer to Windows: it never hides it,
+    // never puts it anywhere, and reads it only as the place each mouse
+    // message carries. The host's pointer stays the person's, and a declared
+    // speed only acts on a pointer a title has taken.
     pointer_speed: (1.0, 1.0),
 };

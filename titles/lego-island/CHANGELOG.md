@@ -76,3 +76,32 @@ the room's music, `InformationCenter_Music` out of `JUKEBOX.SI`, plays on under 
 own lowered volume, going round at its end. Its new test hears each part, and the determinism
 gate's second replay asks for `--audio` and ends on the same machine and the same mix. No buffer
 asks for position notifications, and every position the game reads comes from the declared clock.
+
+It takes the keyboard and the mouse, and the old tree's live crash is gone (#124). The game reads
+its keys through DirectInput's keyboard and the window's key messages, and the mouse only through
+the window's messages; `Draw Cursor`'s default is off, so the pointer stays the person's and is
+never taken. The old tree's live play ended at the first press of the button: the game asks
+retained mode which of its 3D objects is under the pointer at every press, even in the black
+seconds before first light, and the old tree had no `Pick`. No route had pressed a button, so no
+replay saw it. This tree stopped at the same wall, and core now answers it.
+
+A synthetic hand drives the game through the host, as a person's reaches a run in a window, and
+not through a route: the pointer glides, a button is held two flips, a key as long as it is held.
+A restless hand, circling the pointer and pressing every 97 flips from the first flip, meets no
+wall; its clicks skip the intro, and by flip 800 it is in the Information Center. Before #124 its
+first press, at flip 98, stopped the run at `IDirect3DRMViewport::Pick`.
+
+The committed `first-ride.route` is what a second hand recorded: out of the Information Center
+and away on a bike. In the Information Center it opens the registration book (the blue brick on
+the desk), types LEGO on the keyboard, signs with the tick, and picks Pepper. The island lets
+nobody out who has not signed and picked, and a new name picks nobody, so the book comes first.
+Then the arrow to the elevator, the arrow to the revolving door, and the door: from flip 12100 the
+island is seen through the doorway. Outside, Up walks a step, Left turns to face the red bicycle
+by the door, a click at flip 13317 gets on it, and Up rides it down the road from flip 13600 to
+13800. On the way it met four walls, each answered in core: `Pick`, the book's cursor copied with
+a raster operation, signing it recolouring a light through `GetLights`, and `GetAsyncKeyState`,
+which the game asks about the arrows. Its tests run the hand to 6,350,000,000 and flip 13,964 and
+find the sky through the doorway, the handlebars on the bike, and the island going by. The route
+is the one the hand's run recorded, and replayed beside that run it ends on the same machine and
+presents the same frame. Its clicks are let go before the game's one-second drag timer is due,
+which no title is yet sent (#138).
