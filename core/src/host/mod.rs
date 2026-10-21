@@ -36,15 +36,22 @@ pub mod windows_input;
 pub mod x11;
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Whether the run was asked to end from outside it: Windows' close button,
-/// or what the operating system sends a process someone means to stop, which
-/// is Ctrl-C, `SIGTERM` and its terminal closing on Unix ([`sys::listen`]),
-/// and Ctrl-C, Ctrl-Break and its console closing on Windows (#107, #110).
-/// Every host's [`Host::closed`] answers it, so each ends the run as the
-/// window's close button does, with its `end` line and digest.
-pub(crate) static CLOSE_ASKED: AtomicBool = AtomicBool::new(false);
+/// How many times the run was asked to end from outside it: Windows' close
+/// button, or what the operating system sends a process someone means to
+/// stop, which is Ctrl-C, `SIGTERM` and its terminal closing on Unix
+/// ([`sys::listen`]), and Ctrl-C, Ctrl-Break and its console closing on
+/// Windows (#107, #110). Every host's [`Host::closes`] counts them, so each
+/// is answered as the window's close button is: the first is the title's to
+/// answer, and a second ends the run there and then, with its `end` line and
+/// digest (#140).
+pub(crate) static CLOSE_ASKED: AtomicU32 = AtomicU32::new(0);
+
+/// Ask the run to end once more, and say how many times it has been asked.
+pub(crate) fn ask_to_close() -> u32 {
+    CLOSE_ASKED.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// Hear the operating system ask a run to end, from now on. A title's `main`
 /// does, for a run headless or in a window; the debugger does not, so Ctrl-C
@@ -84,6 +91,11 @@ pub enum Input {
         code: u32,
         down: bool,
     },
+    /// The person asked the window to close: its close button, Command-Q or
+    /// -W, Control-Q, Alt-F4, or the run's terminal or console. The title is
+    /// told as Windows tells it, and the run ends when the title leaves
+    /// (#140).
+    Close,
 }
 
 /// Which of the pointer's buttons a person pressed.
@@ -253,10 +265,11 @@ pub trait Host {
     /// desktop gives it (#111). A host with no pointer has nothing to do.
     fn pointer_shape(&mut self, _shape: Option<&Cursor>) {}
 
-    /// Whether the person has ended the run from outside it, by closing the
-    /// window or by what [`listen`] hears. A host with no window has only the
-    /// second.
-    fn closed(&self) -> bool {
+    /// How many times the person has asked to end the run from outside it,
+    /// by closing the window or by what [`listen`] hears. A host with no
+    /// window has only the second. The first close is delivered to the title
+    /// at the next flip, as [`Input::Close`]; a second stops the run (#140).
+    fn closes(&self) -> u32 {
         CLOSE_ASKED.load(Ordering::Relaxed)
     }
 

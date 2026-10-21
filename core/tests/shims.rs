@@ -6,7 +6,7 @@
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
 use lego_legacy_core::guest::GuestMem;
-use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::host::{headless::Headless, Input};
 use lego_legacy_core::machine::Machine;
 use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
@@ -231,6 +231,59 @@ fn a_destroyed_window_is_told_and_then_gone() {
 
     assert_eq!(destroy(&mut m), (Ok(0), None), "gone already");
     assert_eq!(last_error(&mut m), Ok(ERROR_INVALID_WINDOW_HANDLE));
+}
+
+/// A person's close reaches the window as Alt-F4's does, `WM_SYSCOMMAND` with
+/// `SC_CLOSE`, and `DefWindowProcA` answers that by sending the window
+/// `WM_CLOSE` and answering what the window answers (#140).
+#[test]
+fn a_close_is_a_system_command_and_its_default_sends_wm_close() {
+    const PROCEDURE: u32 = 0x0040_1000;
+    let mut m = machine();
+    window(&mut m, PROCEDURE);
+    m.state.messages.clear();
+    win32::user32::deliver(&mut m.state, Input::Close, 0);
+    let close = m.state.messages.front().expect("waiting");
+    assert_eq!((close.message, close.wparam), (0x0112, 0xf060));
+
+    let default = win32::find("USER32", "DefWindowProcA").expect("written");
+    let sent = with_ctx(&mut m, |ctx| {
+        let answer = (default.run)(ctx, &[WINDOW, 0x0112, 0xf063, 0]);
+        (answer, ctx.call_guest.take(), ctx.answer_is_the_call_s)
+    });
+    assert_eq!(
+        sent,
+        (Ok(0), Some((PROCEDURE, vec![WINDOW, 0x0010, 0, 0])), true),
+        "the low four bits are the system's own"
+    );
+}
+
+/// A thread that asked to quit is handed `WM_QUIT`, with the code it asked
+/// with and no window, once what was posted to it is taken and before what a
+/// person did, and once (#140).
+#[test]
+fn a_thread_that_asked_to_quit_is_handed_wm_quit_after_what_was_posted() {
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    win32::user32::deliver(
+        &mut m.state,
+        Input::Key {
+            code: 0x39,
+            down: true,
+        },
+        0,
+    );
+    assert_eq!(call(&mut m, "USER32", "PostQuitMessage", &[3]), Ok(0));
+    let mut taken = Vec::new();
+    while call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]) == Ok(1) {
+        let read = |o: u32| m.arena.read_u32(OUT + o).expect("in the arena");
+        taken.push((read(0), read(4), read(8)));
+    }
+    assert_eq!(
+        taken,
+        [(WINDOW, 0x001c, 1), (0, 0x0012, 3), (WINDOW, 0x0100, 0x20)],
+        "WM_ACTIVATEAPP, then WM_QUIT, then the key"
+    );
 }
 
 #[test]

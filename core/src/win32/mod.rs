@@ -279,6 +279,9 @@ pub struct State {
     pub window_procedure: u32,
     /// Whether the guest has made its window, and not destroyed it (#140).
     pub window_made: bool,
+    /// The thread that asked to quit, and the code it asked with, until its
+    /// queue hands it `WM_QUIT` (#140).
+    pub quit: Option<(u32, u32)>,
     /// The thread that made it, whose queue its messages wait in.
     pub window_thread: u32,
     /// The style its window was made with.
@@ -431,6 +434,7 @@ impl State {
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
+            quit: None,
             window_thread: crate::machine::THREAD_ID,
             window_style: 0,
             window_instance: 0,

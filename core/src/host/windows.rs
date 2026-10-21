@@ -348,9 +348,10 @@ unsafe extern "system" fn window_proc(
     lparam: isize,
 ) -> isize {
     // The close button, or the window's system menu. The window is not
-    // destroyed; the run is ended (#107).
+    // destroyed; the title is told, and the run ends when it leaves (#107,
+    // #140).
     if message == WM_CLOSE {
-        CLOSE_ASKED.store(true, Ordering::Relaxed);
+        super::ask_to_close();
         return 0;
     }
     // Safety: written with `DefWindowProcW`'s own address before the window
@@ -390,9 +391,9 @@ pub struct WinWindow {
     held: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<super::windows_audio::WinAudio>,
-    /// Whether the person pressed Alt-F4. The close button and the console
-    /// say so in [`CLOSE_ASKED`].
-    closed: bool,
+    /// How many times the person pressed Alt-F4. The close button and the
+    /// console count theirs in [`CLOSE_ASKED`] (#140).
+    closes: u32,
     /// Whether the title asked for the host's pointer to be hidden.
     pointer_hidden: bool,
     /// Whether the person's own pointer is over this window's picture. Asked
@@ -510,7 +511,7 @@ impl WinWindow {
             pending: Vec::new(),
             held: Vec::new(),
             audio: None,
-            closed: false,
+            closes: 0,
             pointer_hidden: false,
             pointer_over_us: false,
             pointer_taken: false,
@@ -547,13 +548,13 @@ impl WinWindow {
         Ok(ours)
     }
 
-    /// Whether the person has closed the window, or the console. Read from
-    /// the console's own thread as it is asked, not at the next pump: a run
-    /// that is loading does not pump, and a closing console waits only five
-    /// seconds for the run to end.
+    /// How many times the person has asked the window, or the console, to
+    /// close. Read from the console's own thread as it is asked, not at the
+    /// next pump: a run that is loading does not pump, and a closing console
+    /// waits only five seconds for the run to end.
     #[must_use]
-    pub fn closed(&self) -> bool {
-        self.closed || CLOSE_ASKED.load(Ordering::Relaxed)
+    pub fn closes(&self) -> u32 {
+        self.closes + CLOSE_ASKED.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through Windows' default output from now on, or
@@ -836,7 +837,7 @@ impl WinWindow {
             // (`host::key_change`).
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 if input::closes(msg.message, msg.wparam, lparam) {
-                    self.closed = true;
+                    self.closes += 1;
                 } else if let Some(Input::Key { code, down }) = input::key(msg.message, lparam) {
                     self.pending
                         .extend(super::key_change(&mut self.held, code, down));
@@ -1004,8 +1005,8 @@ impl Host for WinWindow {
         }
     }
 
-    fn closed(&self) -> bool {
-        WinWindow::closed(self)
+    fn closes(&self) -> u32 {
+        WinWindow::closes(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {
@@ -1074,25 +1075,27 @@ mod way_back {
     /// event handled, and false hands it on to the next handler, which ends
     /// the process.
     ///
-    /// Ctrl-C and Ctrl-Break are handled: the run sees the close at its next
-    /// burst and ends, and the process with it. A second press, with the run
-    /// already ending, is handed on, so a run that never gets there can still
-    /// be stopped. A console closing ends the process as soon as this returns,
-    /// or five seconds after it was sent if it does not, so this never
-    /// returns: the run writes its wrap-up meanwhile, and `main` returning
+    /// Ctrl-C and Ctrl-Break are handled: the title is told at the next flip,
+    /// and a second press ends the run at its next burst, and the process
+    /// with it (#140). A third, with the run already ending, is handed on, so
+    /// a run that never gets there can still be stopped. A console closing
+    /// ends the process as soon as this returns, or five seconds after it was
+    /// sent if it does not, which is no time to wait for a title to leave: it
+    /// ends the run at its next burst, as a second close does, and this never
+    /// returns. The run writes its wrap-up meanwhile, and `main` returning
     /// ends the process, this thread with it.
     unsafe extern "system" fn on_console(event: u32) -> i32 {
         restore();
         if event > CTRL_CLOSE_EVENT {
             return 0;
         }
-        let again = CLOSE_ASKED.swap(true, Ordering::Relaxed);
         if event == CTRL_CLOSE_EVENT {
+            CLOSE_ASKED.fetch_max(2, Ordering::Relaxed);
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
-        i32::from(!again)
+        i32::from(super::super::ask_to_close() < 3)
     }
 
     /// Remember how to let go of the pointer.

@@ -430,8 +430,11 @@ pub struct MacWindow {
     held: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<super::mac_audio::MacAudio>,
-    /// Whether the person closed the window.
-    closed: bool,
+    /// How many times the person asked the window to close (#140).
+    closes: u32,
+    /// Whether the window is gone from the screen, closed by its button,
+    /// which is one close however long it stays gone.
+    hidden: bool,
     /// Whether we have hidden the pointer. AppKit counts hides, so it is
     /// hidden once and shown once.
     pointer_hidden: bool,
@@ -594,7 +597,8 @@ impl MacWindow {
                 pending: Vec::new(),
                 held: Vec::new(),
                 audio: None,
-                closed: false,
+                closes: 0,
+                hidden: false,
                 pointer_hidden: false,
                 pointer_over_us: true,
                 pointer_taken: false,
@@ -614,11 +618,11 @@ impl MacWindow {
         }
     }
 
-    /// Whether the person has closed the window, or asked the run to end
-    /// from its terminal ([`super::listen`], #110).
+    /// How many times the person has asked the window to close, or the run
+    /// to end from its terminal ([`super::listen`], #110, #140).
     #[must_use]
-    pub fn closed(&self) -> bool {
-        self.closed || super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn closes(&self) -> u32 {
+        self.closes + super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Let the mix be heard through the Mac's output from now on, or say why
@@ -777,7 +781,8 @@ impl MacWindow {
                 let ours_alone = matches!(kind, 10 | 11) && !command;
                 // Command-Q and Command-W are how a person quits or closes the
                 // window, and with no main menu nothing in AppKit answers them,
-                // so they end the run here, as closing the window does. They
+                // so they close it here, as its button does, once a press: a
+                // key held down repeating is still the one close (#140). They
                 // are read by the character the key types, not where it sits,
                 // so they hold on any keyboard layout (#100).
                 if kind == 10 && command {
@@ -788,7 +793,10 @@ impl MacWindow {
                     if !utf8.is_null()
                         && matches!(CStr::from_ptr(utf8).to_bytes(), b"q" | b"Q" | b"w" | b"W")
                     {
-                        self.closed = true;
+                        let repeat: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("isARepeat"));
+                        if repeat & 0xff == 0 {
+                            self.closes += 1;
+                        }
                         continue;
                     }
                 }
@@ -915,8 +923,9 @@ impl MacWindow {
                 let v: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isVisible"));
                 v & 0xff != 0
             };
-            if !visible {
-                self.closed = true;
+            if !visible && !self.hidden {
+                self.hidden = true;
+                self.closes += 1;
             }
         }
         // Where the person's pointer is and which application is in front are
@@ -1039,8 +1048,8 @@ impl Host for MacWindow {
         }
     }
 
-    fn closed(&self) -> bool {
-        MacWindow::closed(self)
+    fn closes(&self) -> u32 {
+        MacWindow::closes(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {

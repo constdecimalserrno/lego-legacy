@@ -285,6 +285,8 @@ impl Route {
                     };
                     Input::Key { code, down }
                 }
+                // The person closed the window (#140).
+                "close" => Input::Close,
                 _ => return Err(fail("no such event")),
             };
             if words.next().is_some() {
@@ -313,6 +315,7 @@ impl Route {
                         if *down { "down" } else { "up" }
                     )
                 }
+                Input::Close => format!("flip {flip} close"),
             };
             out.push_str(&line);
             out.push('\n');
@@ -346,6 +349,7 @@ mod tests {
             },
         );
         route.push(9013, Input::Up(Button::Left));
+        route.push(9014, Input::Close);
 
         let text = route.to_text();
         assert_eq!(
@@ -359,6 +363,7 @@ mod tests {
             text.contains("flip 9012 key 255 up"),
             "a key with no name is its number"
         );
+        assert!(text.contains("flip 9014 close"));
         assert_eq!(
             Route::parse("flip 1 key return down\n")
                 .expect("names read in any case")
@@ -404,6 +409,10 @@ mod tests {
             ),
             (
                 "flip 3 move 4 5 6\n",
+                "an event ends where its own words end",
+            ),
+            (
+                "flip 3 close now\n",
                 "an event ends where its own words end",
             ),
             ("press 3 up\n", "an event starts with `flip`"),

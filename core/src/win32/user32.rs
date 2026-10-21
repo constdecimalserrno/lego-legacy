@@ -341,12 +341,26 @@ fn destroy_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// What a window is sent when the person chooses a command of its window
+/// menu, or its close button, and the command that closes it.
+const WM_SYSCOMMAND: u32 = 0x0112;
+const SC_CLOSE: u32 = 0xf060;
+
 /// DefWindowProcA(window, message, wParam, lParam): what Windows does with a
-/// message a title's procedure hands on. `WM_CLOSE` destroys the window, as
-/// Microsoft documents (#140); every other message is answered zero.
+/// message a title's procedure hands on. `WM_CLOSE` destroys the window, and
+/// `WM_SYSCOMMAND` with `SC_CLOSE` sends it `WM_CLOSE` and answers what the
+/// window answers, as Microsoft documents and Wine's `defwnd.c` does (#140);
+/// every other message is answered zero.
 fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    if args[1] == WM_CLOSE {
-        destroy_window(ctx, &args[..1])?;
+    match (args[1], args[2] & 0xfff0) {
+        (WM_CLOSE, _) => {
+            destroy_window(ctx, &args[..1])?;
+        }
+        (WM_SYSCOMMAND, SC_CLOSE) => {
+            ctx.call_guest = Some((ctx.state.window_procedure, vec![args[0], WM_CLOSE, 0, 0]));
+            ctx.answer_is_the_call_s = true;
+        }
+        _ => {}
     }
     Ok(0)
 }
@@ -693,6 +707,11 @@ pub fn deliver(state: &mut super::State, event: crate::host::Input, time: u32) {
                 queue(state, message, key, repeat_and_scan | transition, time);
             }
         }
+        // The person closed the window. Windows tells the title as Alt-F4
+        // does, posting its window `WM_SYSCOMMAND` with `SC_CLOSE` (Wine's
+        // `defwnd.c`); the close button sends the same from `DefWindowProc`,
+        // inside the title's own dispatch of the click (#140).
+        Input::Close => queue(state, WM_SYSCOMMAND, SC_CLOSE, 0, time),
     }
 }
 
@@ -771,13 +790,18 @@ fn post_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// posted before it, and ahead of every key and mouse message waiting, which
 /// Windows takes after the posted ones whenever they were made.
 fn post_behind_the_posted(state: &mut super::State, posted: super::Message) {
-    let input = |m: &super::Message| matches!(m.message, 0x0100..=0x0109 | 0x0200..=0x020d);
     let at = state
         .messages
         .iter()
         .position(input)
         .unwrap_or(state.messages.len());
     state.messages.insert(at, posted);
+}
+
+/// Whether a message is a key's or the mouse's, which Windows takes after
+/// everything posted.
+fn input(m: &super::Message) -> bool {
+    matches!(m.message, 0x0100..=0x0109 | 0x0200..=0x020d)
 }
 
 /// The first waiting message a filter takes: a window, and a range of
@@ -813,8 +837,34 @@ fn write_message(ctx: &mut Ctx<'_>, at: u32, m: &super::Message) -> Result<(), S
 /// it to `msg` unless that is null, and take it off the queue if `remove`.
 /// Whether there was one.
 fn take_message(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool, Stop> {
+    const WM_QUIT: u32 = 0x0012;
     let msg = filter[0];
-    let Some(index) = waiting(ctx, filter[1], filter[2], filter[3]) else {
+    let found = waiting(ctx, filter[1], filter[2], filter[3]);
+    // A thread that asked to quit is handed `WM_QUIT` after whatever was
+    // posted to it and before what a person did, whatever it filters for, as
+    // Wine's message server hands it out (`server/queue.c`, read as
+    // documentation).
+    let thread = super::kernel32::running_thread(ctx);
+    if let Some((_, code)) = ctx.state.quit.filter(|(t, _)| *t == thread) {
+        if found.is_none_or(|i| input(&ctx.state.messages[i])) {
+            if remove {
+                ctx.state.quit = None;
+            }
+            if msg != 0 {
+                let quit = super::Message {
+                    window: 0,
+                    message: WM_QUIT,
+                    wparam: code,
+                    lparam: 0,
+                    time: u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0),
+                    point: ctx.state.pointer,
+                };
+                write_message(ctx, msg, &quit)?;
+            }
+            return Ok(true);
+        }
+    }
+    let Some(index) = found else {
         return Ok(false);
     };
     let message = ctx.state.messages[index];
@@ -932,9 +982,12 @@ fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// PostQuitMessage(code): the thread that asks is handed `WM_QUIT` with the
+/// code, once nothing posted to it is left waiting (#140).
 fn post_quit(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.log
         .line(&format!("guest asked to quit with {}", args[0]));
+    ctx.state.quit = Some((super::kernel32::running_thread(ctx), args[0]));
     Ok(0)
 }
 

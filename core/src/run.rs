@@ -333,9 +333,9 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
             report(title, &finish, &log);
             // A run the person ended by closing the window has none left to
             // close (#107).
-            if finish.flips > 0 && !host.closed() {
+            if finish.flips > 0 && host.closes() == 0 {
                 println!("close the window to end");
-                while !host.closed() {
+                while host.closes() == 0 {
                     host.pump();
                     std::thread::sleep(std::time::Duration::from_millis(16));
                 }

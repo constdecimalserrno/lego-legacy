@@ -25,6 +25,52 @@ close themselves ends 58 instructions later, its flips unchanged: `first-save.ro
 at 13,071,129,606, and `pizza-delivery.route` at 10,657,537,575. No other title destroys its window
 in a committed run.
 
+Closing the window reaches the title as Windows delivers a close, and the run ends when the title
+leaves (#140). It stopped the run at once, and the title was never told. This changes how every
+title's run ends when a person closes it.
+
+- Every way a person closes a run is counted, `Host::closes` where `Host::closed` said whether:
+  the window's close button, Command-Q or -W, Control-Q, Alt-F4, and the run's terminal or
+  console, by Ctrl-C, Ctrl-Break, `SIGTERM` or `SIGHUP`. A key held down repeating is one close.
+- The first is delivered at the next flip, as everything a person does is, as `Input::Close`. A
+  route records it as `flip N close`, so a replay closes where the person did. The title's window
+  is told as Alt-F4 tells it: `WM_SYSCOMMAND` with `SC_CLOSE` is posted to it (Wine's `defwnd.c`,
+  read as documentation). The close button sends the same from `DefWindowProc`, inside the
+  title's own dispatch of the click.
+- `DefWindowProcA` answers `SC_CLOSE` by sending the window `WM_CLOSE` and answering what the
+  window answers, as Microsoft documents and `defwnd.c` does.
+- `PostQuitMessage` posts `WM_QUIT` with its code, where it only said so in the log. The thread
+  that asked is handed it after whatever was posted to it and before what a person did, whatever
+  it filters for, as Wine's message server hands it out (`server/queue.c`). The digest hashes a
+  quit asked for and not taken, only when there is one.
+- The run ends with the title's own exit. A second close still stops it at once, wherever it is,
+  as `stopped by the person`, as one close did before; so does a close before the title has a
+  window to tell. A title told that has not left within `machine::CLOSE_GRACE_MILLIS`, five
+  declared seconds, is stopped then, on the same instruction every time its route is replayed. A
+  third Ctrl-C or signal is let be what it was, as the second was. A closing Windows console,
+  which Windows gives five seconds, stops the run as a second close does.
+
+What each title does when it is closed, by a route that replays a committed one and closes:
+
+| Title, where | What it does | Instructions to its exit |
+|---|---|---|
+| Rock Raiders, in its first mission (flip 9000) | stops its CD audio, exits 0 | 1,500,815 |
+| Rock Raiders, at its level select (flip 5000) | its window is destroyed and it runs on; stopped after the grace | never exits |
+| Hot Wheels, in its first race (flip 1020) | exits 1, as it always exits | 13,835,553 |
+| Alpha Team, at its menu (flip 2300) | posts its quit, writes `Game.txt`, shuts NetImmerse down, exits 0 | 1,062,668 |
+| Alpha Team, in its first mission (flip 8000) | the same | 973,232 |
+| LEGO Island, in its Information Center (flip 5200) | posts itself `WM_CLOSE`, exits 0 | 6,669,503 |
+| LEGO Island, signed as LEGO with Pepper picked (flip 9000) | the same, saving `G0.GS` and `History.gsi` first | 8,858,439 |
+
+None asks a question. Rock Raiders' front end runs loops of its own that never look at the flag its
+window procedure sets on `WM_CLOSE` and `WM_DESTROY` (OpenLRR's `Main_WndProc` and its note on the
+close button within menus, read as documentation), so on Windows too it would run on with its
+window gone. No committed route closes, so no run moves: LEGO Island's
+`maintainer-first-play.route` was recorded before a route kept a close, and ends on its budget. The
+stub run `stopped.rs` stops with a signal, which has no window to tell, now logs the close as
+`input flip 0 Close` and ends where and as it did. The Windows and X backends are compiled and
+clippy-clean, not run.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

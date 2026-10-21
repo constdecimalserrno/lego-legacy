@@ -38,8 +38,10 @@ pub enum Outcome {
     Wall { what: String },
     /// The instruction budget ran out first.
     BudgetExhausted,
-    /// The person closed the window, or ended the run from its terminal or
-    /// console, as [`crate::host::listen`] hears (#110).
+    /// The person stopped the run (#110, #140): they closed the window, or
+    /// ended the run from its terminal or console, as [`crate::host::listen`]
+    /// hears, twice, or once with no window to tell, or once and the title
+    /// was told and had not left within [`CLOSE_GRACE_MILLIS`].
     Closed,
     /// The person quit the debugger before the guest stopped.
     Quit,
@@ -56,6 +58,12 @@ impl fmt::Display for Outcome {
         }
     }
 }
+
+/// How long a title is given to leave once it has been told the person
+/// closed its window, in declared milliseconds, before the run is stopped as
+/// the person stopping it (#140). Declared, so that a route that closes ends
+/// on the same instruction every time it is replayed.
+pub const CLOSE_GRACE_MILLIS: u64 = 5_000;
 
 /// A run that has ended, and what it spent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +150,9 @@ pub struct Machine {
     next_snapshot: Option<u64>,
     /// Where the machine is in its schedule (ADR-0005, #131).
     turn: Turn,
+    /// The declared millisecond the run stops at as the person stopping it,
+    /// once a close has been delivered (#140).
+    close_by: Option<u64>,
 }
 
 /// Where the machine is in the one schedule every run keeps (#131).
@@ -200,6 +211,7 @@ impl Machine {
             snapshot_every: None,
             next_snapshot: None,
             turn: Turn::Top,
+            close_by: None,
         })
     }
 
@@ -302,7 +314,7 @@ impl Machine {
     /// person, and the person's own input is not mixed in: a route replays
     /// what it says and nothing else.
     fn deliver_input(&mut self, host: &mut dyn Host, log: &mut RunLog) {
-        let events = match &self.route {
+        let mut events = match &self.route {
             // A route that has run out hands the machine to the person: what
             // it was for was getting here, and from here on the mouse and the
             // keyboard are theirs. Headless, the host has nothing to say and
@@ -315,8 +327,24 @@ impl Machine {
             }
             _ => host.poll_input(self.flips),
         };
+        // The person's close is theirs whether or not a route is replaying,
+        // and is delivered once, at the flip, as everything a person does is,
+        // so a route that records it closes where they did (#140).
+        if host.closes() > 0 && self.close_by.is_none() {
+            events.push(crate::host::Input::Close);
+        }
         let millis = u32::try_from(self.clock.millis() & 0xffff_ffff).unwrap_or(0);
         for event in events {
+            // A title told it was closed is given its grace to leave; one with
+            // no window has nothing to be told, and stops here.
+            if event == crate::host::Input::Close && self.close_by.is_none() {
+                let grace = if self.state.window_made {
+                    CLOSE_GRACE_MILLIS
+                } else {
+                    0
+                };
+                self.close_by = Some(self.clock.millis() + grace);
+            }
             log.line(&format!("input flip {} {event:?}", self.flips));
             if let Some(recording) = &mut self.recording {
                 recording.push(self.flips, event);
@@ -360,9 +388,9 @@ impl Machine {
     /// after every switch ([`Machine::step`]); stepping a threaded title by
     /// this alone is not the run its route makes.
     pub fn tick(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
-        // A person closing the window ends the run there and then, with the
-        // log written up to the instruction it stopped on.
-        if host.closed() {
+        // A person stopping the run ends it there and then, with the log
+        // written up to the instruction it stopped on.
+        if self.stopped(host) {
             return Some(Outcome::Closed);
         }
         // A call that lands on the boundary is a call into something Microsoft
@@ -1089,6 +1117,12 @@ impl Machine {
                 hash.update(&value.to_le_bytes());
             }
         }
+        // A quit asked for and not yet taken, hashed only when there is one,
+        // so that a run that never asks hashes as it did (#140).
+        if let Some((thread, code)) = input.quit {
+            hash.update(&thread.to_le_bytes());
+            hash.update(&code.to_le_bytes());
+        }
 
         // The regions anything writes to, which are the ones a snapshot
         // carries.
@@ -1439,7 +1473,7 @@ impl Machine {
                 .run(&mut self.cpu, &mut self.arena, count, Boundary::RANGE);
         self.clock.retire_many(retired);
         match result {
-            Ok(()) => host.closed().then_some(Outcome::Closed),
+            Ok(()) => self.stopped(host).then_some(Outcome::Closed),
             Err(Stop::Interrupt(n)) => Some(Outcome::Wall {
                 what: format!("int {n:#04x}"),
             }),
@@ -1448,6 +1482,18 @@ impl Machine {
                 what: stop.to_string(),
             }),
         }
+    }
+
+    /// Whether the person has stopped the run (#140): they asked twice, or
+    /// once before the title had a window to be told, or the title was told
+    /// and its grace is over. Only the first of those depends on when the
+    /// host heard them; the grace is the declared clock's, so a route that
+    /// closes stops on the same instruction every time.
+    fn stopped(&self, host: &dyn Host) -> bool {
+        let closes = host.closes();
+        closes >= 2
+            || (closes == 1 && self.close_by.is_none() && !self.state.window_made)
+            || self.close_by.is_some_and(|by| self.clock.millis() >= by)
     }
 
     /// Give the next runnable guest thread the processor.

@@ -19,6 +19,10 @@ instructions later, their flips, declared milliseconds and exit code unchanged; 
 lists them. The maintainer blessed the move on 2026-10-21. Its run moved, so a person should drive
 the first race again before this version is released.
 
+Closing its window tells it, as Windows does (#140), where the run stopped at once without telling
+it: it hears `WM_SYSCOMMAND` with `SC_CLOSE` and exits 1, as it always exits. A second close stops
+the run at once. No committed route closes, so no run moves.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

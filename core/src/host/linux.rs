@@ -476,8 +476,11 @@ pub struct LinuxWindow {
     keys: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<LinuxAudio>,
-    /// Whether the person closed the window.
-    closed: bool,
+    /// How many times the person asked the window to close (#140).
+    closes: u32,
+    /// Whether Control-Q is down, so that the key repeating is still the one
+    /// close: with detectable auto-repeat, a repeat is a press alone.
+    quitting: bool,
     /// Whether the title asked for the host's pointer to be hidden.
     pointer_hidden: bool,
     /// Whether the person's own pointer is over this window. Starts false,
@@ -614,7 +617,8 @@ impl LinuxWindow {
                 pending: Vec::new(),
                 keys: Vec::new(),
                 audio: None,
-                closed: false,
+                closes: 0,
+                quitting: false,
                 pointer_hidden: false,
                 pointer_over_us: false,
                 focused: false,
@@ -633,11 +637,11 @@ impl LinuxWindow {
         }
     }
 
-    /// Whether the person has closed the window, or asked the run to end
-    /// from its terminal ([`super::listen`], #110).
+    /// How many times the person has asked the window to close, or the run
+    /// to end from its terminal ([`super::listen`], #110, #140).
     #[must_use]
-    pub fn closed(&self) -> bool {
-        self.closed || super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn closes(&self) -> u32 {
+        self.closes + super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Let the mix be heard through ALSA's default output from now on, or
@@ -779,10 +783,17 @@ impl LinuxWindow {
                     let down = event.kind == KEY_PRESS;
                     let (state, keycode) = (event.key.state, event.key.keycode);
                     // Control-Q is how a person quits, as Command-Q is on the
-                    // Mac, and the Q goes no further, pressed or let go.
+                    // Mac, once a press, and the Q goes no further, pressed or
+                    // let go.
                     if down && x11::quits((self.x.lookup_keysym)(&raw mut event.key, 0), state) {
-                        self.closed = true;
+                        if !self.quitting {
+                            self.closes += 1;
+                        }
+                        self.quitting = true;
                         return;
+                    }
+                    if !down {
+                        self.quitting = false;
                     }
                     if let Some(input) = x11::direct_input_key(keycode)
                         .and_then(|code| super::key_change(&mut self.keys, code, down))
@@ -838,10 +849,10 @@ impl LinuxWindow {
                     if client.message_type == self.wm_protocols
                         && client.data[0] as Xid == self.wm_delete_window
                     {
-                        self.closed = true;
+                        self.closes += 1;
                     }
                 }
-                DESTROY_NOTIFY => self.closed = true,
+                DESTROY_NOTIFY => self.closes += 1,
                 _ => {}
             }
         }
@@ -1057,8 +1068,8 @@ impl Host for LinuxWindow {
         }
     }
 
-    fn closed(&self) -> bool {
-        LinuxWindow::closed(self)
+    fn closes(&self) -> u32 {
+        LinuxWindow::closes(self)
     }
 
     fn audio_underruns(&self) -> Option<u64> {

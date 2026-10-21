@@ -29,7 +29,12 @@ tall and as narrow as in the retail game's Mission Brief. No route takes a diffe
 end line is unchanged; `first-mission.route`'s digest moves, which core's changelog lists. Accepted by
 the maintainer on 2026-10-20; the first mission is played again by a person before this release.
 
-Took core 1.2.0 (#140). The title never destroys its window in a committed run, so no route moved.
+Took core 1.2.0 (#140), in which closing its window tells it, as Windows does, where the run
+stopped at once without telling it. In a mission it stops its CD audio and exits 0. Its front end's
+screens run loops of their own that never look at the flag its window procedure sets, so there it
+runs on with its window gone until core stops the run five declared seconds later; a second close
+stops it at once. No committed route closes, and the title never destroys its window in one, so no
+route moved.
 
 ## 1.0.0 — 2026-10-18
 

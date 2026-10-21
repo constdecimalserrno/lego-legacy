@@ -1210,6 +1210,84 @@ fn after_its_credits_the_game_closes_itself_and_saves_as_it_goes() {
     assert!(closed.saves == hand.saves, "the same saves as at the door");
 }
 
+/// LEGO signs the book and picks Pepper, and then the person closes the
+/// window, in the Information Center, never having left by the quit door.
+fn closed_by_hand() -> Hand {
+    let mut hand = signed_as_pepper().wait(CLOSED_AT);
+    hand.done.push((hand.flip, Input::Close));
+    hand
+}
+
+/// The flip the person closes the window at, and enough for the game to
+/// have left after it: it is gone by 5 billion.
+const CLOSED_AT: u64 = 9000;
+const CLOSED_BY_HAND_BUDGET: u64 = 5_010_000_000;
+
+/// The ticket's bar (#140): the person's close reaches the game as Windows
+/// delivers it, `WM_SYSCOMMAND` with `SC_CLOSE`. The game posts itself
+/// `WM_CLOSE`, as its procedure answers the close button, and its `Close`
+/// saves the game and the scores, which nothing else had saved, and it
+/// leaves. The run ends with its exit, not where the host heard the close.
+/// The close is in the route the run recorded, at the flip the person closed
+/// at, and that route, replayed, ends the same way and saves the same.
+#[test]
+fn a_person_closing_the_window_is_told_and_the_game_saves_and_leaves() {
+    static BY_HAND: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    static REPLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let Some(hand) = saving(
+        &BY_HAND,
+        "closed-by-hand",
+        || closed_by_hand().host(&[]),
+        Cli {
+            record: true,
+            ..Cli::default()
+        },
+        CLOSED_BY_HAND_BUDGET,
+    ) else {
+        return;
+    };
+    let ran = &hand.ran;
+    ran.assert_exited(0);
+    let close = format!("input flip {CLOSED_AT} Close");
+    let (_, after) = ran.log.split_once(&close).expect("the close is delivered");
+    assert!(after.contains("window procedure given message 0x0112"));
+    assert!(after.contains("window procedure given message 0x0010"));
+    for save in ["G0.GS", "History.gsi"] {
+        assert!(
+            ran.log
+                .matches(&format!(
+                    r"file written C:\Program Files\LEGO Island\{save},"
+                ))
+                .count()
+                == 1
+                && after.contains(&format!(
+                    r"file written C:\Program Files\LEGO Island\{save},"
+                )),
+            "{save} is saved once, as the game closes"
+        );
+    }
+    // LEGO's game: the version, his number, 0, and the first act.
+    assert_eq!(hand.saves["G0.GS"][..8], [0x0c, 0, 1, 0, 0, 0, 0, 0]);
+
+    let recorded = ran.dir.join("route");
+    let route = lego_legacy_core::route::Route::load(&recorded).expect("recorded");
+    assert_eq!(route.at(CLOSED_AT), [Input::Close]);
+    let Some(replay) = saving(
+        &REPLAYED,
+        "closed-replayed",
+        Headless::new,
+        Cli {
+            route: Some(recorded),
+            ..Cli::default()
+        },
+        CLOSED_BY_HAND_BUDGET,
+    ) else {
+        return;
+    };
+    hand.ran.assert_same_machine(&replay.ran);
+    assert!(hand.saves == replay.saves, "and the same saves");
+}
+
 /// The next run over the same data root (#125): the book opened, LEGO picked
 /// from the names already in it, and then a second player, ISLE, signing it.
 fn again() -> Hand {
@@ -1570,9 +1648,9 @@ const PICKED: u64 = 8900;
 const AT_THE_BEACH: u64 = 10666;
 
 /// Where the maintainer closed the window: their run stopped at instruction
-/// 3,341,815,783, flip 10667, 274,650 declared milliseconds in. A route keeps
-/// what a person did and not the window closing, so the replay is held to
-/// that instruction by its budget.
+/// 3,341,815,783, flip 10667, 274,650 declared milliseconds in. The route was
+/// recorded before a route kept the window closing (#140), so the replay is
+/// held to that instruction by its budget.
 const PLAYED_BUDGET: u64 = 3_341_815_783;
 
 /// The maintainer's play replayed over an empty data root of its own, done
@@ -1601,8 +1679,8 @@ static PLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
 /// their MacBook, at the same instruction, flip and declared time, the budget
 /// exhausted where theirs was stopped by the person. Their play began from an
 /// empty profile, so a replay over an empty data root starts from what theirs
-/// did: it changes nothing. Closing the window does not tell the game, so the
-/// players are all it saved, as theirs were.
+/// did: it changes nothing. Their window closing did not tell the game, then,
+/// so the players are all it saved, as theirs were.
 #[test]
 fn the_maintainers_play_replays_to_where_they_closed_the_window() {
     let Some(played) = played(&PLAYED, "maintainer-first-play") else {

@@ -5,11 +5,20 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-21
 
-Took core 1.2.0 (#140), whose `DestroyWindow` tells the window it is going: as the game leaves,
-its window procedure is sent `WM_DESTROY` and `WM_NCDESTROY` and hands both to `DefWindowProcA`,
-so its own close ends 58 instructions later, its flips unchanged: `first-save.route`, past its
-end, at 13,071,129,606, and `pizza-delivery.route` at 10,657,537,575.
-`maintainer-first-play.route` ends on its budget, before the game closes, and does not move.
+Took core 1.2.0 (#140), whose `DestroyWindow` tells the window it is going: as the game leaves, its
+window procedure is sent `WM_DESTROY` and `WM_NCDESTROY` and hands both to `DefWindowProcA`, so its
+own close ends 58 instructions later, its flips unchanged: `first-save.route`, past its end, at
+13,071,129,606, and `pizza-delivery.route` at 10,657,537,575. `maintainer-first-play.route` ends on
+its budget, before the game closes, and does not move.
+
+A person closing the window is answered as on Windows, with core's close (#140), so it saves the
+game as the quit door does, where 1.0.0 lost what was played since the last save. The game hears
+`WM_SYSCOMMAND` with `SC_CLOSE`, posts itself `WM_CLOSE`, saves as it closes and leaves. A hand
+that signs the book as LEGO, picks Pepper and closes the window at flip 9000, never having taken
+the quit door, leaves `G0.GS` and `History.gsi` behind, written as the game closed, and exits 0 at
+4,998,298,712; the route its run recorded ends `flip 9000 close`, and replayed it ends on the same
+machine and saves the same bytes. In the Information Center with nobody signed, the game leaves
+without saving.
 
 ## 1.0.0 — 2026-10-21
 

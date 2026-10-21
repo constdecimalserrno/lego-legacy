@@ -106,12 +106,12 @@ with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 | `--data-root <dir>` | keep saves in `<dir>/profile` instead of beside the rip |
 
 While the window is in front and the pointer is over the picture, a title that draws its own
-pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q or Cmd-W ends the run. The Linux backend
-is written to do the same, giving the mouse back when another window takes the keyboard and
-ending the run on Ctrl-Q or the window's close button; it has not yet been run on Linux. In Hot
-Wheels, Space gets past the splash screens and Escape quits. In LEGO Island, leave by the
-Information Center's quit door to save: closing the window ends the run without the game being
-told ([#140](https://github.com/constdecimalserrno/lego-legacy/issues/140)). If the host cannot keep up, the game
+pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q, Cmd-W or the window's close button asks
+the game to close, as Windows does, and the run ends when it leaves; a second close stops the run
+at once. The Linux backend is written to do the same, giving the mouse back when another window
+takes the keyboard and closing on Ctrl-Q or the window's close button; it has not yet been run on
+Linux. In Hot Wheels, Space gets past the splash screens and Escape quits. In LEGO Island, closing
+the window saves the game as it leaves, as the quit door does. If the host cannot keep up, the game
 runs in slow motion with its sound stretched to match, rather than skipping.
 
 ## Tests

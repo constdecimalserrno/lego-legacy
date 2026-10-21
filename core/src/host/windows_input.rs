@@ -70,11 +70,15 @@ pub fn key(message: u32, lparam: u32) -> Option<Input> {
     direct_input_key(lparam).map(|code| Input::Key { code, down })
 }
 
-/// Whether a key message is Alt-F4, which ends the run as the close button
-/// does. Bit 29 of `lParam` is Alt held; with it, F4 comes as a system key.
+/// Whether a key message is Alt-F4, which closes the window as the close
+/// button does. Bit 29 of `lParam` is Alt held; with it, F4 comes as a system
+/// key. A key held down repeating is still the one close (#140).
 #[must_use]
 pub fn closes(message: u32, wparam: usize, lparam: u32) -> bool {
-    message == WM_SYSKEYDOWN && wparam == VK_F4 && lparam & (1 << 29) != 0
+    message == WM_SYSKEYDOWN
+        && wparam == VK_F4
+        && lparam & (1 << 29) != 0
+        && lparam & (1 << 30) == 0
 }
 
 /// Where the picture goes in a window's client area, as `(x, y, width,
@@ -300,6 +304,10 @@ mod tests {
         assert!(closes(WM_SYSKEYDOWN, 0x73, f4 | (1 << 29)));
         assert!(!closes(WM_KEYDOWN, 0x73, f4), "F4 alone is a key");
         assert!(!closes(WM_SYSKEYUP, 0x73, f4 | (1 << 29)));
+        assert!(
+            !closes(WM_SYSKEYDOWN, 0x73, f4 | (1 << 29) | (1 << 30)),
+            "held down, it repeats the one close"
+        );
         assert!(!closes(
             WM_SYSKEYDOWN,
             0x72,

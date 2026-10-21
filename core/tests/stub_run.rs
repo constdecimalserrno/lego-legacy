@@ -157,6 +157,31 @@ fn input_is_delivered_at_the_flip_it_names_and_always_recorded() {
     );
 }
 
+/// A close is delivered at the flip it names and recorded there, as anything
+/// a person does is; with no window to tell, it stops the run there, as the
+/// person stopping it (#140).
+#[test]
+fn a_close_with_no_window_to_tell_stops_the_run_at_its_flip() {
+    scratch();
+    let mut host = lego_legacy_core::host::headless::Headless::new();
+    host.queue(vec![(0, Input::Close)]);
+    let cli = Cli {
+        stub: true,
+        record: true,
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(host, &TEST_TITLE, &cli, 1_000);
+
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::Closed,
+        "where the stub would have exited"
+    );
+    ran.assert_flips(1).assert_logged("input flip 0 Close");
+    let recorded = lego_legacy_core::route::Route::load(&ran.dir.join("route")).expect("recorded");
+    assert_eq!(recorded.at(0), [Input::Close]);
+}
+
 /// The headless host, with a device that kept up.
 struct Heard(Headless);
 

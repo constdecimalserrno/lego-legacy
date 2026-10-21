@@ -88,17 +88,18 @@ pub fn listen() {
     }
 }
 
-/// Ask for the close, which is all a handler can safely do: the run sees it
-/// at its next burst and ends, writing its `end` line and digest, and gives
-/// the pointer back as it ends (#110).
+/// Ask for the close, which is all a handler can safely do: the title is told
+/// at the next flip, and a second signal ends the run at its next burst,
+/// writing its `end` line and digest and giving the pointer back as it ends
+/// (#110, #140).
 ///
-/// A second signal, with the run already ending, is the signal let be what it
+/// A third signal, with the run already ending, is the signal let be what it
 /// was, so a run that never gets there can still be stopped. That one puts
 /// the Mac's pointer back first, since the process is going without its
 /// destructors (#45).
 #[cfg(unix)]
 extern "C" fn on_signal(sig: i32) {
-    if !super::CLOSE_ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    if super::ask_to_close() < 3 {
         return;
     }
     #[cfg(target_os = "macos")]
