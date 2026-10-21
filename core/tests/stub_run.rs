@@ -237,13 +237,13 @@ fn a_run_a_device_heard_says_it_never_ran_dry_and_one_nobody_heard_says_nothing(
     );
 }
 
-/// A run that has ended gives the pointer back before anything else, so a
-/// window waiting to be closed holds nothing of it (#111), not even the
-/// shape the title gave it (#139).
+/// A run that has ended gives the mouse back before anything else, so a
+/// window waiting to be closed holds nothing of it (#111, #141), not even the
+/// shape the title gave the pointer (#139).
 #[test]
 fn a_run_that_has_ended_gives_the_pointer_back() {
-    /// The headless host, with a window's record of whether the title has
-    /// the pointer hidden.
+    /// The headless host, with a window's record of whether the mouse is
+    /// still the run's.
     struct Held(Headless, bool);
     impl Host for Held {
         fn present(&mut self, frame: &Frame<'_>) {
@@ -258,8 +258,8 @@ fn a_run_that_has_ended_gives_the_pointer_back() {
         fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
             self.0.map(len)
         }
-        fn show_pointer(&mut self, show: bool) {
-            self.1 = !show;
+        fn free_mouse(&mut self) {
+            self.1 = false;
         }
         fn pointer_shape(&mut self, shape: Option<&lego_legacy_core::host::Cursor>) {
             self.0.pointer_shape(shape);
@@ -274,7 +274,7 @@ fn a_run_that_has_ended_gives_the_pointer_back() {
     };
     let mut host = Held(Headless::new(), true);
     run::run(&TEST_TITLE, &cli, &mut host, 1_000).expect("the stub runs");
-    assert!(!host.1, "the pointer is still the run's after it ended");
+    assert!(!host.1, "the mouse is still the run's after it ended");
     assert!(
         matches!(host.0.shapes.last(), Some((_, None))),
         "and it is the host's own arrow"

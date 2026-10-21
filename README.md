@@ -105,14 +105,17 @@ with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 | `--headless` | no window, uncapped |
 | `--data-root <dir>` | keep saves in `<dir>/profile` instead of beside the rip |
 
-While the window is in front and the pointer is over the picture, a title that draws its own
-pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q, Cmd-W or the window's close button asks
-the game to close, as Windows does, and the run ends when it leaves; a second close stops the run
-at once. The Linux backend is written to do the same, giving the mouse back when another window
-takes the keyboard and closing on Ctrl-Q or the window's close button; it has not yet been run on
-Linux. In Hot Wheels, Space gets past the splash screens and Escape quits. In LEGO Island, closing
-the window saves the game as it leaves, as the quit door does. If the host cannot keep up, the game
-runs in slow motion with its sound stretched to match, rather than skipping.
+In every title, click on the picture to play. Until you do, the mouse is yours and the game sees
+none of it, and the click that captures it does not reach the game either. Escape frees the mouse
+again, and while the mouse is captured Escape does not reach the game: the next one, with the mouse
+free, does. Cmd-Tab, or anything else that takes the window out of the front, frees it too, and the
+window's title says which it is. Cmd-Q, Cmd-W or the window's close button asks the game to close,
+as Windows does, and the run ends when it leaves; a second close stops the run at once. The Linux
+backend is written to do the same, freeing the mouse when another window takes the keyboard and
+closing on Ctrl-Q or the window's close button; it has not yet been run on Linux. In Hot Wheels,
+Space gets past the splash screens and Escape quits, once the mouse is free. In LEGO Island,
+closing the window saves the game as it leaves, as the quit door does. If the host cannot keep up,
+the game runs in slow motion with its sound stretched to match, rather than skipping.
 
 ## Tests
 

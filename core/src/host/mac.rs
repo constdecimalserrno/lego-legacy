@@ -9,7 +9,7 @@
 //! What the guest draws is already a finished frame in its own memory; a layer
 //! scales it, keeps its aspect, and asks nothing of us per pixel.
 
-use super::pointer::{content_scale, moved, Moved, Steer};
+use super::pointer::{content_scale, moved, Capture, Moved, Steer};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_void, CStr, CString};
 
@@ -158,6 +158,22 @@ pub fn guest_point(content: (f64, f64), frame: (u32, u32), x: f64, y: f64) -> (i
     let gx = ((x - left) / scale).clamp(0.0, fw - 1.0);
     let gy = ((ch - y - bottom) / scale).clamp(0.0, fh - 1.0);
     (gx as i32, gy as i32)
+}
+
+/// Where to put the person's pointer back so that it is on the picture, or
+/// nothing when it is on it: the pointer `at` and the picture's `origin` and
+/// `size` are all in AppKit's screen coordinates, which count up from the
+/// bottom of the screen. A pointer put back is a point inside each edge, so
+/// that the picture's own events place it on the picture (#141).
+#[must_use]
+pub fn back_on_the_picture(
+    at: (f64, f64),
+    origin: (f64, f64),
+    size: (f64, f64),
+) -> Option<(f64, f64)> {
+    let x = at.0.min(origin.0 + size.0 - 1.0).max(origin.0);
+    let y = at.1.min(origin.1 + size.1 - 1.0).max(origin.1 + 1.0);
+    ((x, y) != at).then_some((x, y))
 }
 
 /// The DirectInput key number for a Mac key, by where the key sits on the
@@ -435,21 +451,24 @@ pub struct MacWindow {
     /// Whether the window is gone from the screen, closed by its button,
     /// which is one close however long it stays gone.
     hidden: bool,
-    /// Whether we have hidden the pointer. AppKit counts hides, so it is
-    /// hidden once and shown once.
+    /// Whether the title draws its own pointer, and so wants the host's out
+    /// of the way while the mouse is its own.
     pointer_hidden: bool,
-    /// Whether the person's own pointer is over this window.
-    ///
-    /// A title that draws its own pointer wants the host's out of the way, but
-    /// only where its own is drawn: everywhere else the pointer is the
-    /// person's and they are using it. Starts true, because a window that has
-    /// just opened under the pointer has not been told otherwise.
+    /// Whether the person's own pointer is over this window's picture, where
+    /// it takes the title's shape (#139). Starts true, because a window that
+    /// has just opened under the pointer has not been told otherwise.
     pointer_over_us: bool,
-    /// Whether the host's pointer is hidden right now, which is not the same
-    /// as the title having asked for it: it is hidden only while the title
-    /// wants it gone *and* the person is over this window with this
-    /// application in front.
+    /// Whether the host's pointer is hidden and frozen right now, which is
+    /// not the same as the title drawing its own: it is only while the title
+    /// does *and* the mouse is captured (#141). AppKit counts hides, so it is
+    /// hidden once and shown once.
     pointer_taken: bool,
+    /// Whose the mouse is ([`Capture`], #141).
+    capture: Capture,
+    /// The name the window is titled with, and what its title last said
+    /// after it of whose the mouse is.
+    name: String,
+    hint: &'static str,
     /// The shape the title set its pointer to, as an `NSCursor` this window
     /// owns, or nil for the person's own arrow (#139).
     shape: Id,
@@ -459,6 +478,7 @@ pub struct MacWindow {
     steer: Steer,
     cg_associate: unsafe extern "C" fn(bool) -> i32,
     cg_show_cursor: unsafe extern "C" fn(u32) -> i32,
+    cg_warp: unsafe extern "C" fn(Point) -> i32,
     cg_main_display: u32,
     /// Presentation held to real time, and the pace it came to (#75).
     pace: crate::host::pace::Pace,
@@ -573,8 +593,8 @@ impl MacWindow {
 
             let create_space: unsafe extern "C" fn(*const c_char) -> *mut c_void =
                 rt.graphics("CGColorSpaceCreateWithName")?;
-            let name = rt.core_graphics.symbol("kCGColorSpaceSRGB")?;
-            let colour_space = create_space(*name.cast::<*const c_char>());
+            let srgb = rt.core_graphics.symbol("kCGColorSpaceSRGB")?;
+            let colour_space = create_space(*srgb.cast::<*const c_char>());
 
             let cg_associate = rt.graphics("CGAssociateMouseAndMouseCursorPosition")?;
             let cg_show_cursor: unsafe extern "C" fn(u32) -> i32 =
@@ -584,6 +604,7 @@ impl MacWindow {
             Ok(Self {
                 cg_associate,
                 cg_show_cursor,
+                cg_warp: rt.graphics("CGWarpMouseCursorPosition")?,
                 cg_main_display,
                 cg_image_create: rt.graphics("CGImageCreate")?,
                 cg_provider: rt.graphics("CGDataProviderCreateWithData")?,
@@ -602,6 +623,9 @@ impl MacWindow {
                 pointer_hidden: false,
                 pointer_over_us: true,
                 pointer_taken: false,
+                capture: Capture::default(),
+                name: name.to_owned(),
+                hint: "",
                 shape: std::ptr::null_mut(),
                 shaped: false,
                 steer: Steer::new(
@@ -644,10 +668,11 @@ impl MacWindow {
     /// is not being shown the title's own.
     ///
     /// A title that draws its own pointer wants the host's out of the way, but
-    /// only over its own window and only while it is the application in front.
-    /// Anywhere else the pointer is the person's and they are using it — to
-    /// reach another window, to stop the run, to do something else entirely —
-    /// and taking it from them there is taking their machine.
+    /// only while the mouse is its own, which is from a click on the picture
+    /// until Escape or this application leaving the front ([`Capture`],
+    /// #141). Anywhere else the pointer is the person's and they are using it
+    /// — to reach another window, to stop the run, to do something else
+    /// entirely — and taking it from them there is taking their machine.
     ///
     /// Hiding is a count on AppKit's side, so this keeps its own flag and only
     /// ever moves it by one.
@@ -658,7 +683,9 @@ impl MacWindow {
             let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
             v & 0xff != 0
         };
-        let take = self.pointer_hidden && self.pointer_over_us && active;
+        self.capture.front(active);
+        self.title_says();
+        let take = self.capture.captured() && self.pointer_hidden;
         // The title's shape, over the picture while it is in front, and the
         // arrow everywhere else (#139). AppKit puts its own arrow back as the
         // pointer crosses its windows, so the shape is set on every pump.
@@ -698,10 +725,97 @@ impl MacWindow {
             // went (`Steer`). That is what a title steering by distance
             // needs, and it is why a hand can never outrun the window (#64,
             // #40). It is switched off for the whole desktop, which is why it
-            // is only ever on while the title has asked, the person is over
-            // this window and this application is in front — settled on every
-            // pump, and undone by `arm_the_way_back` if the run is killed.
+            // is only ever on while the mouse is captured, which is only while
+            // this application is in front — settled on every pump, and
+            // undone by `arm_the_way_back` if the run is killed.
             (self.cg_associate)(!take);
+        }
+    }
+
+    /// Say in the window's title whose the mouse is, once that has changed
+    /// (#141).
+    fn title_says(&mut self) {
+        let hint = self.capture.hint();
+        if hint == self.hint {
+            return;
+        }
+        self.hint = hint;
+        let title = CString::new(format!("{}{hint}", self.name)).unwrap_or_default();
+        // Safety: an NSString made from a NUL-terminated string, and
+        // `setTitle:` on our own window.
+        unsafe {
+            let title: Id = self.rt.send::<MsgIdCharPtr>()(
+                self.rt.class("NSString"),
+                self.rt.sel("stringWithUTF8String:"),
+                title.as_ptr(),
+            );
+            self.rt.send::<MsgVoidId>()(self.window, self.rt.sel("setTitle:"), title);
+        }
+    }
+
+    /// The title's pointer is the person's own and it is here on the guest's
+    /// screen: the title is told, and the hand starts again from here.
+    fn placed(&mut self, at: (i32, i32)) {
+        self.steer.placed(at);
+        self.pending.push(Input::Move { x: at.0, y: at.1 });
+    }
+
+    /// The person's pointer is off the picture, on the window's frame or
+    /// outside the window. It is theirs there, unless the mouse is captured by
+    /// a title that shows the host's pointer, which keeps it on the picture.
+    fn left_the_picture(&mut self) {
+        if self.capture.captured() && !self.pointer_hidden {
+            self.keep_on_the_picture();
+        } else {
+            self.pointer_over_us = false;
+        }
+    }
+
+    /// Put the person's pointer back on the picture, while the mouse is
+    /// captured by a title that shows the host's pointer (#141), and tell the
+    /// title where it is. macOS has no `ClipCursor`, so a pointer that has
+    /// left is put back at the edge it left by.
+    fn keep_on_the_picture(&mut self) {
+        // Safety: AppKit's own accessors, which answer a point, rectangles
+        // and objects by value; then Core Graphics' warp, which takes a point
+        // in its own coordinates, and its switch, which takes a flag.
+        unsafe {
+            let at: Point =
+                self.rt.send::<MsgPoint>()(self.rt.class("NSEvent"), self.rt.sel("mouseLocation"));
+            let window: Rect = self.rt.send::<MsgRect>()(self.window, self.rt.sel("frame"));
+            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+            let content: Rect = self.rt.send::<MsgRect>()(view, self.rt.sel("frame"));
+            // The content view's frame is the window's own coordinates, which
+            // start at the window's bottom left corner on the screen.
+            let (left, bottom) = (window.x + content.x, window.y + content.y);
+            self.pointer_over_us = true;
+            let Some((x, y)) = back_on_the_picture(
+                (at.x, at.y),
+                (left, bottom),
+                (content.width, content.height),
+            ) else {
+                return;
+            };
+            // Core Graphics counts down from the top of the screen with the
+            // menu bar, which AppKit lists first.
+            let screens: Id =
+                self.rt.send::<MsgId>()(self.rt.class("NSScreen"), self.rt.sel("screens"));
+            let first: Id = self.rt.send::<MsgId>()(screens, self.rt.sel("firstObject"));
+            let first: Rect = self.rt.send::<MsgRect>()(first, self.rt.sel("frame"));
+            (self.cg_warp)(Point {
+                x,
+                y: first.height - y,
+            });
+            // A warp holds the mouse's own events back for a quarter of a
+            // second, unless the mouse is joined to the pointer again straight
+            // after (as SDL does, read as documentation); it already is here.
+            (self.cg_associate)(true);
+            self.placed(guest_point(
+                (content.width, content.height),
+                self.frame_size,
+                x - left,
+                y - bottom,
+            ));
         }
     }
 
@@ -804,14 +918,28 @@ impl MacWindow {
                     // Either button down, either button up. A press on the
                     // window's own frame — its title bar, its edges — is the
                     // person taking hold of the window, not a click on the
-                    // title (#49). A release is never dropped: a press the
-                    // guest saw is a button it has to see let go of.
+                    // title (#49). A press on the picture with the mouse the
+                    // person's captures it, and is the host's; a title that
+                    // shows the host's pointer is told where it is, which no
+                    // move has told it since (#141). A press the guest saw is
+                    // a button it has to see let go of, and only that one.
                     1 | 3 => {
-                        if self.on_the_picture(event).is_some() {
-                            self.pending.push(Input::Down(button(kind)));
+                        if let Some(at) = self.on_the_picture(event) {
+                            match self.capture.press(button(kind)) {
+                                Some(down) => self.pending.push(down),
+                                None => {
+                                    if self.capture.captured() && !self.pointer_hidden {
+                                        self.placed(at);
+                                    }
+                                    self.draw_pointer_where_it_belongs();
+                                }
+                            }
                         }
                     }
-                    2 | 4 => self.pending.push(Input::Up(button(kind))),
+                    2 | 4 => {
+                        let up = self.capture.release(button(kind));
+                        self.pending.extend(up);
+                    }
                     // Moved and dragged, which is one of three things
                     // ([`moved`]).
                     5..=7 => {
@@ -848,19 +976,20 @@ impl MacWindow {
                                 // teleports the title's pointer to wherever their
                                 // frozen one happens to sit — which a title that
                                 // steers by distance reads as one enormous
-                                // movement (#40, #86). All this event carries
-                                // then is that the person is over the window.
-                                Some((x, y)) => {
+                                // movement (#40, #86). Nor is it a place while
+                                // the mouse is the person's (#141). All this
+                                // event carries then is that the person is over
+                                // the window.
+                                Some(at) => {
                                     self.pointer_over_us = true;
-                                    if !self.pointer_hidden {
-                                        self.steer.placed((x, y));
-                                        self.pending.push(Input::Move { x, y });
+                                    if self.capture.captured() && !self.pointer_hidden {
+                                        self.placed(at);
                                     }
                                 }
                                 // On the frame the pointer is the person's, to
                                 // resize or move the window by, and the title's
                                 // stays where it last was on the picture.
-                                None => self.pointer_over_us = false,
+                                None => self.left_the_picture(),
                             },
                             // A move of nobody's window is the person's pointer
                             // outside ours, and its location is in screen
@@ -868,14 +997,15 @@ impl MacWindow {
                             // would throw the guest's pointer somewhere else. The
                             // pointer stays where it last was inside the window;
                             // what the machine learns is only that the person's
-                            // own pointer has left, so that it can be given back.
-                            Moved::Elsewhere => self.pointer_over_us = false,
+                            // own pointer has left, so that it is drawn as theirs.
+                            Moved::Elsewhere => self.left_the_picture(),
                         }
                     }
                     // Key down, key up, and a modifier pressed or let go. A
                     // key held down repeating is still the one press, and
                     // the Q or W of Command-Q or Command-W goes no further
-                    // let go than pressed (`host::key_change`).
+                    // let go than pressed (`host::key_change`). Escape with
+                    // the mouse captured frees it, and is the host's (#141).
                     10..=12 => {
                         let key: u64 = self.rt.send::<MsgU64>()(event, self.rt.sel("keyCode"));
                         let input = if kind == 12 {
@@ -893,8 +1023,12 @@ impl MacWindow {
                                 })
                         };
                         if let Some(Input::Key { code, down }) = input {
-                            self.pending
-                                .extend(super::key_change(&mut self.held, code, down));
+                            if self.capture.key(code, down) {
+                                self.draw_pointer_where_it_belongs();
+                            } else {
+                                self.pending
+                                    .extend(super::key_change(&mut self.held, code, down));
+                            }
                         }
                     }
                     _ => {}
@@ -937,9 +1071,9 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
-        // A run that ended with the pointer hidden would leave a person
-        // without one, or with the title's shape.
-        self.show_pointer(true);
+        // A run that ended with the mouse captured would leave a person
+        // without a pointer, or with the title's shape.
+        self.free_mouse();
         self.pointer_shape(None);
         // Safety: closing a window we opened.
         unsafe {
@@ -1019,6 +1153,11 @@ impl Host for MacWindow {
         self.draw_pointer_where_it_belongs();
     }
 
+    fn free_mouse(&mut self) {
+        self.capture.end();
+        self.draw_pointer_where_it_belongs();
+    }
+
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
         // Safety: the cursor is one this window made, released once.
         unsafe {
@@ -1040,10 +1179,12 @@ impl Host for MacWindow {
         // is never moved under their hand (#46), and while it is taken it does
         // not move at all. A move already waiting was measured from a place
         // the title has now moved on from, so it goes, and what it carried is
-        // said again from here ([`Steer::put`], #86).
+        // said again from here ([`Steer::put`], #86), while the mouse is the
+        // title's (#141).
         self.pending
             .retain(|input| !matches!(input, Input::Move { .. }));
-        if let Some((x, y)) = self.steer.put((x, y), self.frame_size) {
+        let told = self.steer.put((x, y), self.frame_size);
+        if let Some((x, y)) = told.filter(|_| self.capture.captured()) {
             self.pending.push(Input::Move { x, y });
         }
     }
@@ -1072,8 +1213,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId, MsgPoint,
-        MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
+        back_on_the_picture, direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id,
+        MsgId, MsgPoint, MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
 
@@ -1247,6 +1388,25 @@ mod tests {
             ns_cursor(&rt, &short).is_err(),
             "a shape short of its pixels"
         );
+    }
+
+    /// A pointer kept on the picture is put back at the edge it left by, a
+    /// point inside it, and one on the picture stays where it is (#141).
+    #[test]
+    fn a_pointer_kept_on_the_picture_is_put_back_at_the_edge_it_left_by() {
+        // A picture 640 by 480 points, its bottom left corner at (100, 50) on
+        // the screen, which counts up from the bottom.
+        let back = |at| back_on_the_picture(at, (100.0, 50.0), (640.0, 480.0));
+        assert_eq!(back((300.0, 200.0)), None, "on the picture");
+        assert_eq!(back((90.0, 200.0)), Some((100.0, 200.0)), "off the left");
+        assert_eq!(back((800.0, 200.0)), Some((739.0, 200.0)), "off the right");
+        assert_eq!(
+            back((300.0, 560.0)),
+            Some((300.0, 529.0)),
+            "up on the title bar"
+        );
+        assert_eq!(back((300.0, 10.0)), Some((300.0, 51.0)), "below");
+        assert_eq!(back((0.0, 0.0)), Some((100.0, 51.0)), "a corner");
     }
 
     #[test]

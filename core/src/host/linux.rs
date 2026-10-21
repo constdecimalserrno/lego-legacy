@@ -16,15 +16,15 @@
 //! of every field read out of one, is checked when this file is compiled.
 //!
 //! The rules for the pointer are the Mac backend's, and its comments say what
-//! each one cost to learn: the title's pointer is only taken from the person
-//! while the title draws its own, the person's pointer is over the picture
-//! and this window has the keyboard; while it is taken it is steered by how
-//! far the mouse went ([`Steer`]); and it is given back the moment any of the
-//! three stops being so.
+//! each one cost to learn: the mouse is the person's until they click on the
+//! picture, and the title's from then until Escape or this window losing the
+//! keyboard ([`Capture`], #141); while it is the title's, a title that draws
+//! its own pointer has it steered by how far the mouse went ([`Steer`]), and
+//! one that shows the host's has it kept in the window.
 
 use super::linux_audio::LinuxAudio;
 use super::pace::Pace;
-use super::pointer::{moved, Moved, Steer};
+use super::pointer::{moved, Capture, Moved, Steer};
 use super::stretch::Stretch;
 use super::x11::{self, Held};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
@@ -287,7 +287,6 @@ const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
 const MOTION_NOTIFY: c_int = 6;
 const ENTER_NOTIFY: c_int = 7;
-const LEAVE_NOTIFY: c_int = 8;
 const FOCUS_IN: c_int = 9;
 const FOCUS_OUT: c_int = 10;
 const EXPOSE: c_int = 12;
@@ -301,7 +300,6 @@ const KEY_RELEASE_MASK: c_long = 1 << 1;
 const BUTTON_PRESS_MASK: c_long = 1 << 2;
 const BUTTON_RELEASE_MASK: c_long = 1 << 3;
 const ENTER_WINDOW_MASK: c_long = 1 << 4;
-const LEAVE_WINDOW_MASK: c_long = 1 << 5;
 const POINTER_MOTION_MASK: c_long = 1 << 6;
 const EXPOSURE_MASK: c_long = 1 << 15;
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
@@ -313,7 +311,6 @@ const EVENTS: c_long = KEY_PRESS_MASK
     | BUTTON_PRESS_MASK
     | BUTTON_RELEASE_MASK
     | ENTER_WINDOW_MASK
-    | LEAVE_WINDOW_MASK
     | POINTER_MOTION_MASK
     | EXPOSURE_MASK
     | STRUCTURE_NOTIFY_MASK
@@ -481,17 +478,23 @@ pub struct LinuxWindow {
     /// Whether Control-Q is down, so that the key repeating is still the one
     /// close: with detectable auto-repeat, a repeat is a press alone.
     quitting: bool,
-    /// Whether the title asked for the host's pointer to be hidden.
+    /// Whether the title draws its own pointer, and so wants the host's out
+    /// of the way while the mouse is its own.
     pointer_hidden: bool,
-    /// Whether the person's own pointer is over this window. Starts false,
-    /// because an X window can open anywhere on the screen, and X says so
-    /// when the pointer is over it.
-    pointer_over_us: bool,
     /// Whether this window has the keyboard.
     focused: bool,
-    /// The pointer while it is taken, held in the middle of the window; none
-    /// while it is the person's own.
+    /// Whose the mouse is ([`Capture`], #141), and whether the pointer is
+    /// grabbed to this window for it.
+    capture: Capture,
+    grabbed: bool,
+    /// The pointer while it is steered, held in the middle of the window;
+    /// none while it is the person's own, or kept in the window for a title
+    /// that shows it.
     taken: Option<Held>,
+    /// The name the window is titled with, and what its title last said
+    /// after it of whose the mouse is.
+    name: String,
+    hint: &'static str,
     /// Where the person's own pointer was last seen in the window, which is
     /// where it is put back when it is given back.
     seen_at: (i32, i32),
@@ -620,9 +623,12 @@ impl LinuxWindow {
                 closes: 0,
                 quitting: false,
                 pointer_hidden: false,
-                pointer_over_us: false,
                 focused: false,
+                capture: Capture::default(),
+                grabbed: false,
                 taken: None,
+                name: name.to_owned(),
+                hint: "",
                 seen_at: (0, 0),
                 steer: Steer::new(
                     (
@@ -795,38 +801,46 @@ impl LinuxWindow {
                     if !down {
                         self.quitting = false;
                     }
-                    if let Some(input) = x11::direct_input_key(keycode)
-                        .and_then(|code| super::key_change(&mut self.keys, code, down))
-                    {
+                    // Escape with the mouse captured frees it, and is the
+                    // host's (#141).
+                    let Some(code) = x11::direct_input_key(keycode) else {
+                        return;
+                    };
+                    if self.capture.key(code, down) {
+                        self.take_pointer_where_it_belongs();
+                    } else if let Some(input) = super::key_change(&mut self.keys, code, down) {
                         self.pending.push(input);
                     }
                 }
-                // The left button is X's first, the right its third. Every
-                // press reaches the guest: the window's frame, where a person
-                // takes hold of it, is the window manager's own window, not
-                // this one (#49). A release is never dropped.
+                // The left button is X's first, the right its third. The
+                // window's frame, where a person takes hold of it, is the
+                // window manager's own window, not this one (#49), so every
+                // press here is on the picture. One with the mouse the
+                // person's captures it, and is the host's; a title that
+                // shows the host's pointer is told where it is, which no move
+                // has told it since (#141). A press the guest saw is a button
+                // it has to see let go of, and only that one.
                 BUTTON_PRESS | BUTTON_RELEASE => {
                     let button = match event.button.button {
                         1 => Button::Left,
                         3 => Button::Right,
                         _ => return,
                     };
-                    self.pending.push(if event.kind == BUTTON_PRESS {
-                        Input::Down(button)
+                    if event.kind == BUTTON_RELEASE {
+                        let up = self.capture.release(button);
+                        self.pending.extend(up);
+                    } else if let Some(down) = self.capture.press(button) {
+                        self.pending.push(down);
                     } else {
-                        Input::Up(button)
-                    });
+                        self.moved(event.button.x, event.button.y);
+                        self.take_pointer_where_it_belongs();
+                    }
                 }
                 MOTION_NOTIFY => self.moved(event.motion.x, event.motion.y),
                 // A crossing that a grab made says nothing about where the
                 // person is.
-                ENTER_NOTIFY | LEAVE_NOTIFY if event.crossing.mode == NOTIFY_NORMAL => {
-                    if event.kind == ENTER_NOTIFY {
-                        self.pointer_over_us = true;
-                        self.seen_at = (event.crossing.x, event.crossing.y);
-                    } else if moved(self.taken.is_some(), false) == Moved::Elsewhere {
-                        self.pointer_over_us = false;
-                    }
+                ENTER_NOTIFY if event.crossing.mode == NOTIFY_NORMAL => {
+                    self.seen_at = (event.crossing.x, event.crossing.y);
                 }
                 FOCUS_IN | FOCUS_OUT if event.focus.detail != NOTIFY_POINTER => {
                     self.focused = event.kind == FOCUS_IN;
@@ -877,18 +891,19 @@ impl LinuxWindow {
                 }
             }
             // Where the title draws its own pointer, the person's is not a
-            // place the guest's pointer should be moved to: all this says
-            // then is that the person is over the window (#40, #86).
+            // place the guest's pointer should be moved to (#40, #86), nor is
+            // it while the mouse is the person's (#141): all this says then
+            // is where the person's pointer is.
             Moved::Placed => {
-                self.pointer_over_us = true;
                 self.seen_at = (x, y);
-                if !self.pointer_hidden {
+                if self.capture.captured() && !self.pointer_hidden {
                     let at = x11::guest_point(self.window_size, self.frame_size, x, y);
                     self.steer.placed(at);
                     self.pending.push(Input::Move { x: at.0, y: at.1 });
                 }
             }
-            Moved::Elsewhere => self.pointer_over_us = false,
+            // A move this window is told of is one in it.
+            Moved::Elsewhere => {}
         }
     }
 
@@ -934,22 +949,26 @@ impl LinuxWindow {
         }
     }
 
-    /// Take the pointer from the person, or give it back, as the title, the
-    /// person's pointer and the keyboard now say.
+    /// Take the pointer from the person, or give it back, as the mouse being
+    /// captured, the title and the keyboard now say.
     ///
-    /// Taken only while the title draws its own pointer, the person's is
-    /// over this window and this window has the keyboard. Anywhere else the
-    /// pointer is the person's and they are using it, and taking it from
-    /// them there is taking their machine.
+    /// Taken only while the mouse is captured, which is from a click on the
+    /// picture until Escape or this window losing the keyboard ([`Capture`],
+    /// #141). Anywhere else the pointer is the person's and they are using
+    /// it, and taking it from them there is taking their machine.
     ///
-    /// Taking it grabs it to this window with a cursor that shows nothing,
-    /// so the mouse moves only the guest's pointer. Giving it back puts it
-    /// where it was seen last before it was taken, so it comes back where it
-    /// went, as the Mac's frozen one does. The grab and the cursor are the
-    /// connection's, so a run killed outright gives the pointer back with
-    /// its connection: there is nothing to restore from a signal, as there
-    /// is on the Mac (#45).
+    /// Taking it grabs it to this window: for a title that draws its own
+    /// pointer, with a cursor that shows nothing, so the mouse moves only the
+    /// guest's pointer, and for one that shows the host's, with the window's
+    /// own, which keeps the pointer in the window. Giving back a steered one
+    /// puts it where it was seen last before it was taken, so it comes back
+    /// where it went, as the Mac's frozen one does. The grab and the cursor
+    /// are the connection's, so a run killed outright gives the pointer back
+    /// with its connection: there is nothing to restore from a signal, as
+    /// there is on the Mac (#45).
     fn take_pointer_where_it_belongs(&mut self) {
+        self.capture.front(self.focused);
+        self.title_says();
         // The title's shape while this window has the keyboard, and the
         // desktop's pointer while it does not (#139). X draws a window's
         // cursor only over that window.
@@ -962,13 +981,22 @@ impl LinuxWindow {
                 (self.x.flush)(self.display);
             }
         }
-        let take = self.pointer_hidden && self.pointer_over_us && self.focused;
-        if take == self.taken.is_some() {
+        let steered = self.capture.captured() && self.pointer_hidden;
+        if self.capture.captured() == self.grabbed && steered == self.taken.is_some() {
             return;
         }
         // Safety: the window is ours and the display open.
         unsafe {
-            if take {
+            if self.grabbed {
+                if self.taken.take().is_some() {
+                    let (x, y) = self.seen_at;
+                    (self.x.warp_pointer)(self.display, 0, self.window, 0, 0, 0, 0, x, y);
+                }
+                (self.x.ungrab_pointer)(self.display, CURRENT_TIME);
+                self.grabbed = false;
+            }
+            if self.capture.captured() {
+                let cursor = if steered { self.blank } else { 0 };
                 let grabbed = (self.x.grab_pointer)(
                     self.display,
                     self.window,
@@ -977,21 +1005,34 @@ impl LinuxWindow {
                     GRAB_MODE_ASYNC,
                     GRAB_MODE_ASYNC,
                     self.window,
-                    self.blank,
+                    cursor,
                     CURRENT_TIME,
                 );
                 // Refused, as it is while another client holds a grab: asked
                 // again at the next pump.
-                if grabbed != GRAB_SUCCESS {
-                    return;
+                self.grabbed = grabbed == GRAB_SUCCESS;
+                if self.grabbed && steered {
+                    self.taken = Some(Held::new(self.seen_at, self.window_size));
                 }
-                self.taken = Some(Held::new(self.seen_at, self.window_size));
-            } else {
-                let (x, y) = self.seen_at;
-                (self.x.warp_pointer)(self.display, 0, self.window, 0, 0, 0, 0, x, y);
-                (self.x.ungrab_pointer)(self.display, CURRENT_TIME);
-                self.taken = None;
             }
+            (self.x.flush)(self.display);
+        }
+    }
+
+    /// Say in the window's title whose the mouse is, once that has changed
+    /// (#141). `XStoreName` takes Latin-1, which has no dash this long.
+    fn title_says(&mut self) {
+        let hint = self.capture.hint();
+        if hint == self.hint {
+            return;
+        }
+        self.hint = hint;
+        let title = format!("{}{hint}", self.name).replace('—', "-");
+        let title = CString::new(title).unwrap_or_default();
+        // Safety: our own window, and a NUL-terminated name that outlives
+        // the call.
+        unsafe {
+            (self.x.store_name)(self.display, self.window, title.as_ptr());
             (self.x.flush)(self.display);
         }
     }
@@ -1000,7 +1041,7 @@ impl LinuxWindow {
 impl Drop for LinuxWindow {
     fn drop(&mut self) {
         self.audio = None;
-        self.show_pointer(true);
+        self.free_mouse();
         self.pointer_shape(None);
         // Safety: the cursor and window are ours, and the display is closed
         // last and once.
@@ -1046,6 +1087,11 @@ impl Host for LinuxWindow {
         self.take_pointer_where_it_belongs();
     }
 
+    fn free_mouse(&mut self) {
+        self.capture.end();
+        self.take_pointer_where_it_belongs();
+    }
+
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
         let new = shape.map_or(0, |shape| self.cursor_of(shape));
         let old = std::mem::replace(&mut self.shape, new);
@@ -1060,10 +1106,12 @@ impl Host for LinuxWindow {
         // As on the Mac: the pointer the guest is handed starts again from
         // where the title put it, the person's own is never moved under
         // their hand (#46), and a move already waiting was measured from a
-        // place the title has moved on from ([`Steer::put`], #86).
+        // place the title has moved on from ([`Steer::put`], #86). The title
+        // is told only while the mouse is its own (#141).
         self.pending
             .retain(|input| !matches!(input, Input::Move { .. }));
-        if let Some((x, y)) = self.steer.put((x, y), self.frame_size) {
+        let told = self.steer.put((x, y), self.frame_size);
+        if let Some((x, y)) = told.filter(|_| self.capture.captured()) {
             self.pending.push(Input::Move { x, y });
         }
     }

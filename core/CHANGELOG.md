@@ -167,6 +167,41 @@ pointers.
 `absent_libraries` is a required field every title had to add to build, so it makes core's next
 release a major one (ADR-0007, as #163 settled). Core stays at 1.2.0 until that release.
 
+The mouse is the person's until they click on the picture, the same in every title, by the
+maintainer's rule of 2026-10-21 (#141). A title that draws its own pointer took the mouse as soon as
+the person's pointer was over the picture with the window in front, and only Cmd-Tab gave it back;
+LEGO Island never took it, and was handed every move over its picture.
+
+- Until a click on the picture the title sees none of the mouse, no move and no button. That
+  click captures it and is the host's, and so is its release: it would otherwise press whatever
+  the title's own pointer was over. A press on the window's frame never captures (#49).
+- Captured, every move and button is the title's. A title that draws its own pointer (Rock
+  Raiders, Hot Wheels, Alpha Team) has the person's hidden and frozen and its own steered by how
+  far the mouse goes, as when it was taken. One that shows the host's (LEGO Island, #139) keeps
+  it, in the title's shape, on the picture: by `ClipCursor` to the client area on Windows, by a
+  grab confined to the window on X, and on macOS, which has neither, by putting it back at the
+  edge it left by, with the mouse joined to the pointer again straight after so that the warp holds
+  no event back. That title is told where the pointer is at the click that captures, which no move
+  has told it since.
+- Escape frees it and is the host's, repeating and let go, so the Escape that frees the mouse
+  never quits Hot Wheels; the next one, with the mouse free, reaches the title as any key does.
+  The window leaving the front frees it too, and only a click captures it again. The end of the run
+  frees it for good, through `Host::free_mouse`, which the run calls where it called
+  `show_pointer(true)`, so no click captures it while the window waits to be closed (#111).
+- A button let go reaches the title only if its press did, as a key does: a press the title saw
+  is let go of in it, the mouse freed in between or not, and a press on the window's frame let go
+  on the picture is no longer a release the title never saw pressed.
+- The window's title says which it is, `<name> — click to play` or `<name> — Escape frees the
+  mouse`, with a plain dash on X, whose `XStoreName` takes Latin-1, and the name alone once the run
+  is over.
+
+The rule is one state machine, `host::pointer::Capture`, to which each backend hands its clicks,
+its keys and whether it is in front; nothing in it is a title's. No route records the click that
+captures, its release or the Escape that frees, and a headless run has no window to capture, so no
+committed route moves and no run does: LEGO Island's hands, which drive the machine through a
+headless host, record the routes they recorded before. The macOS backend is compiled and its unit
+tests run, not played; the Windows and X backends are compiled and clippy-clean, not run.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

@@ -9,10 +9,10 @@
 //!
 //! What a backend works out without asking its operating system is kept
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
-//! pointer a title is handed ([`pointer`]), the keys it is told of
-//! ([`key_change`]), the pace ([`pace`]), the feed to an audio device
-//! ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys and
-//! scaling ([`windows_input`]), and X's ([`x11`]).
+//! pointer a title is handed and whose the mouse is ([`pointer`]), the keys
+//! it is told of ([`key_change`]), the pace ([`pace`]), the feed to an audio
+//! device ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys
+//! and scaling ([`windows_input`]), and X's ([`x11`]).
 
 pub mod feed;
 pub mod headless;
@@ -244,9 +244,17 @@ pub trait Host {
     fn map(&mut self, len: usize) -> Result<Mapping, HostError>;
 
     /// Draw the pointer a person is really moving, or stop: a title that
-    /// draws its own wants one pointer on the screen, not two. A host with no
-    /// window has nothing to do here.
+    /// draws its own wants one pointer on the screen, not two. So while the
+    /// mouse is captured ([`pointer::Capture`], #141) the person's pointer is
+    /// hidden and frozen and the title's steered by how far the mouse goes;
+    /// for a title that shows the host's, it is kept on the picture. A host
+    /// with no window has nothing to do here.
     fn show_pointer(&mut self, _show: bool) {}
+
+    /// The run is over: the mouse is the person's again, and no click
+    /// captures it while the window waits to be closed (#111, #141). A host
+    /// with no window has nothing to do here.
+    fn free_mouse(&mut self) {}
 
     /// The title put the pointer at a place on the guest's screen.
     ///

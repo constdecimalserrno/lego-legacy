@@ -17,7 +17,7 @@
 //! per pixel.
 
 use super::pace::Pace;
-use super::pointer::{moved, Moved, Steer};
+use super::pointer::{moved, Capture, Moved, Steer};
 use super::stretch::Stretch;
 use super::windows_input::{self as input, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
@@ -244,6 +244,8 @@ struct User32 {
     clip_cursor: ClipCursor,
     cursor_pos: unsafe extern "system" fn(*mut Point) -> i32,
     screen_to_client: unsafe extern "system" fn(Handle, *mut Point) -> i32,
+    client_to_screen: unsafe extern "system" fn(Handle, *mut Point) -> i32,
+    set_window_text: unsafe extern "system" fn(Handle, *const u16) -> i32,
     window_from_point: unsafe extern "system" fn(Point) -> Handle,
     foreground_window: unsafe extern "system" fn() -> Handle,
     set_capture: unsafe extern "system" fn(Handle) -> Handle,
@@ -279,6 +281,8 @@ impl User32 {
                 clip_cursor: lib.function("ClipCursor")?,
                 cursor_pos: lib.function("GetCursorPos")?,
                 screen_to_client: lib.function("ScreenToClient")?,
+                client_to_screen: lib.function("ClientToScreen")?,
+                set_window_text: lib.function("SetWindowTextW")?,
                 window_from_point: lib.function("WindowFromPoint")?,
                 foreground_window: lib.function("GetForegroundWindow")?,
                 set_capture: lib.function("SetCapture")?,
@@ -394,7 +398,8 @@ pub struct WinWindow {
     /// How many times the person pressed Alt-F4. The close button and the
     /// console count theirs in [`CLOSE_ASKED`] (#140).
     closes: u32,
-    /// Whether the title asked for the host's pointer to be hidden.
+    /// Whether the title draws its own pointer, and so wants the host's out
+    /// of the way while the mouse is its own.
     pointer_hidden: bool,
     /// Whether the person's own pointer is over this window's picture. Asked
     /// of Windows every pump while the pointer is the person's, and never
@@ -402,11 +407,20 @@ pub struct WinWindow {
     /// cannot have left ([`moved`]).
     pointer_over_us: bool,
     /// Whether the host's pointer is hidden and frozen right now: only while
-    /// the title wants it gone *and* the person is over this window with it
-    /// in front, as on macOS.
+    /// the title draws its own *and* the mouse is captured (#141), as on
+    /// macOS.
     pointer_taken: bool,
     /// The one pixel the person's pointer is clipped to while it is taken.
     frozen: Rect,
+    /// Whether the person's pointer is clipped, frozen or kept on the
+    /// picture, so that it is let go of once.
+    clipped: bool,
+    /// Whose the mouse is ([`Capture`], #141).
+    capture: Capture,
+    /// The name the window is titled with, and what its title last said
+    /// after it of whose the mouse is.
+    name: String,
+    hint: &'static str,
     /// Windows' arrow, the class's cursor everywhere but where the title's
     /// shape is drawn; the title's shape, as a cursor this window made, or
     /// null for none; and which of the two the class has now (#139).
@@ -516,6 +530,10 @@ impl WinWindow {
             pointer_over_us: false,
             pointer_taken: false,
             frozen: Rect::default(),
+            clipped: false,
+            capture: Capture::default(),
+            name: name.to_owned(),
+            hint: "",
             steer: Steer::new(
                 (
                     i32::try_from(width / 2).unwrap_or(320),
@@ -609,15 +627,20 @@ impl WinWindow {
     /// is not being shown the title's own, by macOS's rules.
     ///
     /// A title that draws its own pointer wants the host's out of the way, but
-    /// only over its own window and only while it is the window in front.
-    /// Anywhere else the pointer is the person's and they are using it, and
-    /// taking it from them there is taking their machine. Taken, it is hidden
-    /// once (`ShowCursor` counts, as AppKit does) and frozen where it is, by
-    /// clipping it to the one pixel under it: the mouse then moves the
-    /// guest's pointer by how far it went (#64, #40), read as raw input.
+    /// only while the mouse is its own, which is from a click on the picture
+    /// until Escape or the window leaving the front, as `WM_ACTIVATEAPP`
+    /// tells a window it has ([`Capture`], #141). Anywhere else the pointer is
+    /// the person's and they are using it, and taking it from them there is
+    /// taking their machine. Taken, it is hidden once (`ShowCursor` counts, as
+    /// AppKit does) and frozen where it is, by clipping it to the one pixel
+    /// under it: the mouse then moves the guest's pointer by how far it went
+    /// (#64, #40), read as raw input. A title that shows the host's pointer
+    /// has it clipped to the picture instead.
     fn draw_pointer_where_it_belongs(&mut self) {
         // Safety: user32's own, which takes nothing.
         let active = unsafe { (self.user.foreground_window)() } == self.window;
+        self.capture.front(active);
+        self.title_says();
         if !self.pointer_taken {
             self.pointer_over_us = self.over_the_picture();
         }
@@ -639,17 +662,12 @@ impl WinWindow {
                 }
             }
         }
-        let take = self.pointer_hidden && self.pointer_over_us && active;
+        let take = self.capture.captured() && self.pointer_hidden;
         if take != self.pointer_taken {
             self.pointer_taken = take;
-            // Safety: user32's own, with a point to write into and a
-            // rectangle, or none, to clip to.
+            // Safety: user32's own, with a point to write into.
             unsafe {
                 if take {
-                    // A run that takes the pointer arms the way back, because
-                    // the pointer belongs to the person and not to the run
-                    // (#45).
-                    way_back::arm(self.user.clip_cursor);
                     let mut at = Point::default();
                     (self.user.cursor_pos)(&mut at);
                     self.frozen = Rect {
@@ -658,20 +676,61 @@ impl WinWindow {
                         right: at.x + 1,
                         bottom: at.y + 1,
                     };
-                    (self.user.show_cursor)(0);
-                } else {
-                    (self.user.show_cursor)(1);
-                    (self.user.clip_cursor)(std::ptr::null());
                 }
+                (self.user.show_cursor)(i32::from(!take));
             }
         }
         // Windows lets go of a clip by itself when something else takes the
-        // screen, so a taken pointer is frozen again on every pump rather
-        // than once.
-        if self.pointer_taken {
-            // Safety: a rectangle of ours, for the call's duration.
-            unsafe { (self.user.clip_cursor)(&self.frozen) };
+        // screen, so a captured mouse is clipped again on every pump rather
+        // than once, and let go of once. A run that clips the pointer arms
+        // the way back, because the pointer belongs to the person and not to
+        // the run (#45).
+        let clip = if take {
+            Some(self.frozen)
+        } else {
+            self.capture.captured().then(|| self.picture_on_screen())
+        };
+        // Safety: a rectangle of ours, or none, for the call's duration.
+        unsafe {
+            match &clip {
+                Some(rect) => {
+                    way_back::arm(self.user.clip_cursor);
+                    (self.user.clip_cursor)(rect);
+                }
+                None if self.clipped => {
+                    (self.user.clip_cursor)(std::ptr::null());
+                }
+                None => {}
+            }
         }
+        self.clipped = clip.is_some();
+    }
+
+    /// The client area, where the picture is, in the screen's own pixels.
+    fn picture_on_screen(&self) -> Rect {
+        let (w, h) = self.client_size();
+        let mut at = Point::default();
+        // Safety: our own window, and a point to write into.
+        unsafe { (self.user.client_to_screen)(self.window, &mut at) };
+        Rect {
+            left: at.x,
+            top: at.y,
+            right: at.x + w,
+            bottom: at.y + h,
+        }
+    }
+
+    /// Say in the window's title whose the mouse is, once that has changed
+    /// (#141).
+    fn title_says(&mut self) {
+        let hint = self.capture.hint();
+        if hint == self.hint {
+            return;
+        }
+        self.hint = hint;
+        let title = wide(&format!("{}{hint}", self.name));
+        // Safety: our own window, and a string that outlives the call.
+        unsafe { (self.user.set_window_text)(self.window, title.as_ptr()) };
     }
 
     /// A title's pointer shape as a Windows cursor, or null when Windows will
@@ -703,10 +762,11 @@ impl WinWindow {
 
     /// The person's own pointer moved over the window, to here in the client
     /// area: the place to hand the guest, unless the title draws its own,
-    /// in which case where the person's pointer is says nothing (#40, #86).
+    /// in which case where the person's pointer is says nothing (#40, #86),
+    /// or the mouse is the person's (#141).
     fn placed(&mut self, x: i32, y: i32) {
         let (w, h) = self.client_size();
-        if self.pointer_hidden || x < 0 || y < 0 || x >= w || y >= h {
+        if !self.capture.captured() || self.pointer_hidden || x < 0 || y < 0 || x >= w || y >= h {
             return;
         }
         let at = input::guest_point((w, h), self.frame_size, x, y);
@@ -834,30 +894,46 @@ impl WinWindow {
             // window menu, which holds the thread in a loop of its own and
             // the run with it. Alt-F4 is answered here instead, as macOS
             // answers Cmd-Q, and its F4 goes no further let go than pressed
-            // (`host::key_change`).
+            // (`host::key_change`). Escape with the mouse captured frees it,
+            // and is the host's (#141).
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 if input::closes(msg.message, msg.wparam, lparam) {
                     self.closes += 1;
                 } else if let Some(Input::Key { code, down }) = input::key(msg.message, lparam) {
-                    self.pending
-                        .extend(super::key_change(&mut self.held, code, down));
+                    if self.capture.key(code, down) {
+                        self.draw_pointer_where_it_belongs();
+                    } else {
+                        self.pending
+                            .extend(super::key_change(&mut self.held, code, down));
+                    }
                 }
                 true
             }
             // A press on the window's own frame comes as a non-client
             // message, never as one of these: it is the person taking hold
-            // of the window, not a click on the title (#49). The button is
-            // captured while it is held, so that the release is seen
-            // wherever it happens: a press the guest saw is a button it has
-            // to see let go of.
+            // of the window, not a click on the title (#49). A press with the
+            // mouse the person's captures it, and is the host's; a title that
+            // shows the host's pointer is told where it is, which no move has
+            // told it since (#141). The button is captured while it is held,
+            // as Windows captures one, so that the release is seen wherever
+            // it happens: a press the guest saw is a button it has to see let
+            // go of, and only that one.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
-                self.pending.push(Input::Down(button(msg.message)));
+                match self.capture.press(button(msg.message)) {
+                    Some(down) => self.pending.push(down),
+                    None => {
+                        let (x, y) = client_xy(msg.lparam);
+                        self.placed(x, y);
+                        self.draw_pointer_where_it_belongs();
+                    }
+                }
                 // Safety: our own window.
                 unsafe { (self.user.set_capture)(self.window) };
                 false
             }
             WM_LBUTTONUP | WM_RBUTTONUP => {
-                self.pending.push(Input::Up(button(msg.message)));
+                let up = self.capture.release(button(msg.message));
+                self.pending.extend(up);
                 if msg.wparam & MK_BUTTONS == 0 {
                     // Safety: user32's own, which takes nothing.
                     unsafe { (self.user.release_capture)() };
@@ -928,9 +1004,9 @@ fn os(what: &'static str) -> HostError {
 
 impl Drop for WinWindow {
     fn drop(&mut self) {
-        // A run that ended with the pointer hidden and frozen would leave a
-        // person without one, or with the title's shape.
-        self.show_pointer(true);
+        // A run that ended with the mouse captured would leave a person
+        // without a pointer, or clipped, or with the title's shape.
+        self.free_mouse();
         self.pointer_shape(None);
         // Safety: destroying a window we made.
         unsafe { (self.user.destroy_window)(self.window) };
@@ -982,6 +1058,11 @@ impl Host for WinWindow {
         self.draw_pointer_where_it_belongs();
     }
 
+    fn free_mouse(&mut self) {
+        self.capture.end();
+        self.draw_pointer_where_it_belongs();
+    }
+
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
         let new = shape.map_or(std::ptr::null_mut(), |shape| self.cursor_of(shape));
         let old = std::mem::replace(&mut self.shape, new);
@@ -997,10 +1078,12 @@ impl Host for WinWindow {
         // where the title put it, and the person's own is never moved under
         // their hand (#46). A move already waiting was measured from a place
         // the title has moved on from, so it goes, and what it carried is said
-        // again from here ([`Steer::put`], #86).
+        // again from here ([`Steer::put`], #86), while the mouse is the
+        // title's (#141).
         self.pending
             .retain(|input| !matches!(input, Input::Move { .. }));
-        if let Some((x, y)) = self.steer.put((x, y), self.frame_size) {
+        let told = self.steer.put((x, y), self.frame_size);
+        if let Some((x, y)) = told.filter(|_| self.capture.captured()) {
             self.pending.push(Input::Move { x, y });
         }
     }
