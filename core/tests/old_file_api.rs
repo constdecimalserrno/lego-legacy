@@ -1,6 +1,7 @@
 //! The old file API LEGO Island reads its scripts and world through (#116):
 //! `OpenFile`, `_hread`, `_hwrite`, `_llseek` and `_lclose`, with
-//! `GetFileSize` and `SetEndOfFile`, over the handles `CreateFileA` makes.
+//! `GetFileSize` and `SetEndOfFile`, over the handles `CreateFileA` makes; and
+//! `MoveFileA`, which moves its saves from slot to slot (#125).
 //!
 //! Each is called across the boundary by a guest of the test's own making, as
 //! LEGO1's `MxIOInfo` calls them, so what is held is what a title would be
@@ -394,6 +395,81 @@ fn a_file_made_by_its_old_name_is_written_cut_and_kept() {
         (136, 0, 19, "D:\\SAVE.GSI".to_owned()),
         "a CD-ROM is not a fixed disk, and is not written to"
     );
+}
+
+const ERROR_ALREADY_EXISTS: u32 = 183;
+
+/// LEGO Island moves every player's save down a slot when a new name signs its
+/// book, `G0.GS` to `G1.GS` and on (#125): a slot with no save in it fails to
+/// move, and so does one whose next slot is taken, and the game carries on.
+#[test]
+fn a_save_moves_to_a_free_slot_and_nowhere_else() {
+    let mut g = Guest::new();
+    let profile = g.profile("moving");
+    g.machine
+        .tree
+        .declare("C:\\STUB\\TEN.BIN", b"0123456789".to_vec());
+    for (slot, bytes) in [("G0", "zero"), ("G2", "two")] {
+        g.machine
+            .tree
+            .write(&format!("C:\\STUB\\{slot}.GS"), bytes.as_bytes())
+            .expect("the profile takes it");
+    }
+    let [zero, one, two, ten] = ["G0.GS", "G1.GS", "C:\\STUB\\G2.GS", "TEN.BIN"].map(|n| g.text(n));
+    let moved = g.call("MoveFileA", &[Value(zero), Value(one)]);
+    let gone = g.call("MoveFileA", &[Value(zero), Value(one)]);
+    let taken = g.call("MoveFileA", &[Value(two), Value(one)]);
+    let pressing = g.call("MoveFileA", &[Value(two), Value(ten)]);
+    assert_eq!(g.run(), Outcome::Exited { code: 0 });
+
+    assert_eq!(g.answer(moved), 1);
+    assert_eq!(g.failed(gone), (0, ERROR_FILE_NOT_FOUND), "it has gone");
+    assert_eq!(g.failed(taken), (0, ERROR_ALREADY_EXISTS));
+    assert_eq!(
+        g.failed(pressing),
+        (0, ERROR_ALREADY_EXISTS),
+        "the pressing's own file is there too"
+    );
+    let read = |g: &mut Guest, slot: &str| g.machine.tree.read(&format!("c:/stub/{slot}.gs"));
+    assert_eq!(read(&mut g, "G0"), None);
+    assert_eq!(read(&mut g, "G1").as_deref(), Some(&b"zero"[..]));
+    assert_eq!(read(&mut g, "G2").as_deref(), Some(&b"two"[..]));
+    assert!(
+        profile.join("C/STUB/G1.GS").is_file(),
+        "in the profile, where the next run finds it"
+    );
+}
+
+/// What the declared machine cannot move as Windows would is a wall: a file
+/// a handle holds open, the pressing's own, and anything onto the disc.
+#[test]
+fn a_move_the_machine_cannot_make_is_a_wall() {
+    for (from, to, open) in [
+        ("C:\\STUB\\G0.GS", "C:\\STUB\\G1.GS", true),
+        ("C:\\STUB\\TEN.BIN", "C:\\STUB\\G1.GS", false),
+        ("C:\\STUB\\G0.GS", "D:\\G1.GS", false),
+    ] {
+        let mut g = Guest::new();
+        g.profile("not-moving");
+        g.machine
+            .tree
+            .declare("C:\\STUB\\TEN.BIN", b"0123456789".to_vec());
+        g.machine
+            .tree
+            .write("C:\\STUB\\G0.GS", b"zero")
+            .expect("the profile takes it");
+        let (named, onto) = (g.text(from), g.text(to));
+        if open {
+            g.call("OpenFile", &[Value(named), Value(0), Value(OF_READ)]);
+        }
+        g.call("MoveFileA", &[Value(named), Value(onto)]);
+        let outcome = g.run();
+        let wall = format!("MoveFileA: {from} to {to}");
+        assert!(
+            matches!(&outcome, Outcome::Wall { what } if what.contains(&wall)),
+            "{outcome}"
+        );
+    }
 }
 
 #[test]

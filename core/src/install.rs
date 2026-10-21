@@ -138,6 +138,22 @@ impl Tree {
             .is_some_and(|path| std::fs::remove_file(path).is_ok())
     }
 
+    /// Move a file the guest wrote to another path, where the guest will read
+    /// it back from. Nothing for a file it did not write: as with
+    /// [`Tree::remove`], the pressing's own files are not the guest's to move.
+    ///
+    /// # Errors
+    /// When the host refuses the move.
+    pub fn rename(&mut self, from: &str, to: &str) -> Option<std::io::Result<PathBuf>> {
+        let from = self.profile_path(from).filter(|path| path.is_file())?;
+        let to = self.profile_path(to)?;
+        let moved = to
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::rename(&from, &to));
+        Some(moved.map(|()| to))
+    }
+
     /// The form a guest path is looked up by: case does not matter on the
     /// declared machine, and neither does which way the separators lean.
     fn key(path: &str) -> String {

@@ -218,6 +218,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "FindNextFileA", 2, find_next_file),
     stdcall("KERNEL32", "FindClose", 1, find_close),
     stdcall("KERNEL32", "DeleteFileA", 1, delete_file),
+    stdcall("KERNEL32", "MoveFileA", 2, move_file),
     stdcall("KERNEL32", "CreateDirectoryA", 2, create_directory),
     stdcall("KERNEL32", "GetFullPathNameA", 4, get_full_path_name),
     stdcall("KERNEL32", "SetFileAttributesA", 2, set_file_attributes),
@@ -3036,6 +3037,62 @@ fn delete_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.state.last_error = ERROR_FILE_NOT_FOUND;
     }
     Ok(u32::from(gone))
+}
+
+/// The path a file is moved to is already taken.
+const ERROR_ALREADY_EXISTS: u32 = 183;
+
+fn move_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // MoveFileA(from, to): LEGO Island moves each player's save down a slot
+    // when a new name signs its book (#125). Nothing is there to move, or
+    // something is already where it would go, and the move fails as
+    // Windows' does.
+    let from = ctx.string(args[0]).map_err(Stop::Fault)?;
+    let to = ctx.string(args[1]).map_err(Stop::Fault)?;
+    let (from, to) = (ctx.absolute(&from), ctx.absolute(&to));
+    if !ctx.tree.readable(&from) {
+        ctx.state.last_error = ERROR_FILE_NOT_FOUND;
+        return Ok(0);
+    }
+    if ctx.tree.holds(&to) {
+        ctx.state.last_error = ERROR_ALREADY_EXISTS;
+        return Ok(0);
+    }
+    // Only a closed file the guest wrote moves, and only on C:. A file a
+    // handle holds open is written where it was when the handle closes, and
+    // the pressing's own files and the disc in D: are not the guest's to
+    // change, so moving any of those is a wall rather than a guess.
+    let key = |path: &str| path.replace('/', "\\").to_ascii_uppercase();
+    let open = ctx
+        .state
+        .handles
+        .values()
+        .any(|object| matches!(object, Object::File { path, .. } if key(path) == key(&from)));
+    let moved = if open || key(&to).starts_with("D:") {
+        None
+    } else {
+        ctx.tree.rename(&from, &to)
+    };
+    match moved {
+        None => {
+            return Err(Stop::NotWritten {
+                what: format!("KERNEL32.dll!MoveFileA: {from} to {to}"),
+                caller: 0,
+            })
+        }
+        Some(Ok(at)) => ctx
+            .log
+            .line(&format!("file moved {from} to {to}, to {}", at.display())),
+        // As a save the host refuses when its handle closes: the guest is
+        // told it moved, and the person is told it did not.
+        Some(Err(e)) => {
+            ctx.log
+                .line(&format!("file move refused {from} to {to}: {e}"));
+            eprintln!("lego-legacy: {from} was not moved to {to}: {e}");
+            ctx.state.saves_refused += 1;
+        }
+    }
+    Ok(1)
 }
 
 fn create_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

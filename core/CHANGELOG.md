@@ -485,6 +485,18 @@ Every run ends on the instruction, flip and declared millisecond it ended on bef
 Hot Wheels and Alpha Team never post a message, set a cursor or load one but Windows' arrow, and
 none of their runs moves.
 
+`MoveFileA`, which LEGO Island reaches when a second name signs its registration book (#125): it
+moves every player's saved game down a slot, `G0.GS` to `G1.GS` and on, before it saves the new
+player's as the first. A file the guest wrote moves within the profile, where the next run finds
+it. A move from nothing fails with `ERROR_FILE_NOT_FOUND`, and one onto a path already there, the
+guest's or the pressing's, with `ERROR_ALREADY_EXISTS`, as on Windows; the game carries on past
+either. A move the host refuses is told to the person as a refused save is, and the guest is told
+it moved. Moving a file a handle holds open, one of the pressing's own, or anything onto the disc
+in D: is a wall. `core/tests/old_file_api.rs` holds each. The game writes its saves through its C
+runtime, `CreateFileA`, `WriteFile` and `CloseHandle`, and reads them back through `CreateFileA`,
+all answered already; its `_hwrite` and `SetEndOfFile` are its scripts' (#116), and a save does not
+reach them. No title's run moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32
