@@ -114,3 +114,37 @@ which draws it over the picture: the hourglass from flip 2, the arrow at 406, th
 so every run that reaches the first one moves its digest, and first light and the idle loop come a
 few hundred instructions later, at the same flips: first light at 97,000,702, the idle loop at
 3,952,209,667. The ride's route is the one the hand's run records still.
+
+It saves its game and loads it on the next run (#125). The saves go where `savepath` says, the
+install directory, which in a run is its data root's `profile/C/PROGRAM FILES/LEGO ISLAND`; a
+person's is `game-data/lego-island/profile`. Signing the registration book writes the players,
+`Players.gsi`. The game itself, `G0.GS` for the first player, and the scores, `History.gsi`, are
+written only once a name is signed: when the player leaves by the quit door and answers yes, and
+when another name signs the book, both run here; and, by the game's code, when another name is
+picked from the book and as its window closes. At boot it reads the players and the scores back;
+a player's game is read when their name is picked from the book. They are written through the C
+runtime's `CreateFileA`, `WriteFile` and `CloseHandle`, and the one call a save reached that core
+did not answer was `MoveFileA`.
+
+The committed `first-save.route` is what a hand recorded: `first-ride.route` as far as picking
+Pepper, then the door by the right rail. The Infomaniac asks whether the player is sure, with a
+green brick and a red one in front of him; the green one is yes. Signing writes `Players.gsi`
+after flip 7113, yes writes `G0.GS` and `History.gsi` after flip 10627, and after flip 10941 the
+credits roll. Its tests run the hand to 6,030,000,000, just past flip 11000, over an empty data
+root, and find the three saves there: LEGO, his game with Pepper picked, and the scores. Replayed
+over a data root of its own, the route ends on the same machine and saves the same bytes.
+
+A second run over the hand's data root loads all three, and each shows:
+
+- The book opens with LEGO already in it, on the row below the empty line a new name goes on,
+  where the first run's book at the same flip had nobody (from `Players.gsi`).
+- Picking LEGO there puts his name on the board, and Pepper's portrait is framed in blue though
+  nothing in this run picked him (from `G0.GS`).
+- A second name, ISLE, signs: `MoveFileA`, written in core for it, moves LEGO's game to `G1.GS`
+  byte for byte, and ISLE's game is the first, numbered 1, the number the first run's scores
+  saved for the next player (from `History.gsi`).
+
+From here, per ADR-0007, a change that stops a save this version writes being read back is a
+major version. Its save as its window closes is not reached yet (#140): closing the host's window
+ends a run without the game being told, and when the credits end, at flip 17338, the game posts
+its window `WM_CLOSE`, which `PostMessageA` stops at as a wall.

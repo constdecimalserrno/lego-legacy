@@ -1,0 +1,106 @@
+#lego-legacy-route 1
+# LEGO Island, from its boot to its first save: the book signed, and the game
+# saved at the quit door (#125).
+#
+# Recorded, not written: a synthetic hand in lego_island.rs (`quit`) did this
+# through the host, as a person's hand reaches a run in a window, and the run
+# wrote down what it was handed. The pointer glides a few pixels a flip; a
+# button is held two flips; a key as long as it is held.
+#
+# Until flip 8515 it is first-ride.route: the blue brick on the desk opens the
+# registration book, L, E, G and O are typed, and the tick signs it, which
+# writes Players.gsi after flip 7113. Then Pepper's portrait picks him. At
+# flip 10017 the door by the right rail asks to leave: the Infomaniac asks
+# whether the player is sure, with a green and a red brick in front of him.
+# The green one is yes: letting go of it writes the game, G0.GS, and the
+# scores, History.gsi, after flip 10627, and the Infomaniac says goodbye.
+# After flip 10941 the credits' script is opened, and the credits roll.
+flip 5149 move 322 256
+flip 5150 move 322 272
+flip 5151 move 322 288
+flip 5152 move 322 294
+flip 5153 down
+flip 5155 up
+flip 7000 key L down
+flip 7002 key L up
+flip 7003 key E down
+flip 7005 key E up
+flip 7006 key G down
+flip 7008 key G up
+flip 7009 key O down
+flip 7011 key O up
+flip 7100 move 338 278
+flip 7101 move 354 262
+flip 7102 move 370 246
+flip 7103 move 386 230
+flip 7104 move 402 214
+flip 7105 move 418 198
+flip 7106 move 434 182
+flip 7107 move 450 166
+flip 7108 move 466 150
+flip 7109 move 482 135
+flip 7110 move 498 135
+flip 7111 move 514 135
+flip 7112 move 519 135
+flip 7113 down
+flip 7115 up
+flip 8500 move 503 119
+flip 8501 move 487 105
+flip 8502 move 471 105
+flip 8503 move 455 105
+flip 8504 move 439 105
+flip 8505 move 423 105
+flip 8506 move 407 105
+flip 8507 move 391 105
+flip 8508 move 375 105
+flip 8509 move 359 105
+flip 8510 move 343 105
+flip 8511 move 327 105
+flip 8512 move 322 105
+flip 8513 down
+flip 8515 up
+flip 10000 move 338 121
+flip 10001 move 354 137
+flip 10002 move 370 153
+flip 10003 move 386 169
+flip 10004 move 402 185
+flip 10005 move 418 201
+flip 10006 move 434 217
+flip 10007 move 450 233
+flip 10008 move 466 249
+flip 10009 move 482 260
+flip 10010 move 498 260
+flip 10011 move 514 260
+flip 10012 move 530 260
+flip 10013 move 546 260
+flip 10014 move 562 260
+flip 10015 move 578 260
+flip 10016 move 590 260
+flip 10017 down
+flip 10019 up
+flip 10600 move 574 276
+flip 10601 move 558 292
+flip 10602 move 542 308
+flip 10603 move 526 324
+flip 10604 move 510 340
+flip 10605 move 494 356
+flip 10606 move 478 372
+flip 10607 move 462 388
+flip 10608 move 446 400
+flip 10609 move 430 400
+flip 10610 move 414 400
+flip 10611 move 398 400
+flip 10612 move 382 400
+flip 10613 move 366 400
+flip 10614 move 350 400
+flip 10615 move 334 400
+flip 10616 move 318 400
+flip 10617 move 302 400
+flip 10618 move 286 400
+flip 10619 move 270 400
+flip 10620 move 254 400
+flip 10621 move 238 400
+flip 10622 move 222 400
+flip 10623 move 210 400
+flip 10624 down
+flip 10626 up

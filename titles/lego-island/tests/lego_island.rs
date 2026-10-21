@@ -3,7 +3,9 @@
 //! first light and to its Information Center's idle loop, what the second is
 //! heard to play, and each replayed to the same machine every time; and a
 //! synthetic hand driving it through the host, out of the Information Center
-//! and away on a bike, and the route its run recorded.
+//! and away on a bike, and the route its run recorded; and its saves, written
+//! by a hand that signs the book and quits, and loaded by the next run over the
+//! same data root.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -620,7 +622,9 @@ const GLIDE: i32 = 16;
 
 /// The keys the hand presses, as DirectInput numbers them.
 const KEY_E: u32 = 0x12;
+const KEY_I: u32 = 0x17;
 const KEY_O: u32 = 0x18;
+const KEY_S: u32 = 0x1f;
 const KEY_G: u32 = 0x22;
 const KEY_L: u32 = 0x26;
 const KEY_UP: u32 = 0xc8;
@@ -784,11 +788,9 @@ const TO_THE_DOOR: (i32, i32) = (35, 140);
 const DOOR: (i32, i32) = (330, 220);
 const BIKE: (i32, i32) = (70, 271);
 
-/// Out of the Information Center and onto the island, and away on a bike
-/// (#124). The island will not let anyone out who has not signed its book
-/// and picked who they are: the revolving door checks both (`LEGO1.DLL`
-/// 0x10037b35), and a new name in the book picks nobody.
-fn ride() -> Hand {
+/// In the Information Center, LEGO signs the registration book and picks
+/// Pepper: where the ride and the first save both start.
+fn signed_as_pepper() -> Hand {
     Hand::new()
         .wait(IDLE_LOOP + 50)
         .click(BOOK)
@@ -801,6 +803,14 @@ fn ride() -> Hand {
         .click(TICK)
         .wait(8500)
         .click(PEPPER)
+}
+
+/// Out of the Information Center and onto the island, and away on a bike
+/// (#124). The island will not let anyone out who has not signed its book
+/// and picked who they are: the revolving door checks both (`LEGO1.DLL`
+/// 0x10037b35), and a new name in the book picks nobody.
+fn ride() -> Hand {
+    signed_as_pepper()
         .wait(10000)
         .click(TO_THE_ELEVATOR)
         .wait(11000)
@@ -918,4 +928,298 @@ fn the_ride_replays_to_the_machine_the_hand_made() {
         hand.host.frame(RIDING).map(|f| &f.pixels) == replay.host.frame(RIDING).map(|f| &f.pixels),
         "including what it presented at flip {RIDING}"
     );
+}
+
+/// In the Information Center, the quit door by the right rail, and the green
+/// brick that answers yes when the Infomaniac asks whether to leave. In the
+/// registration book, the tick beside the first name already written in it, a
+/// row below the line a new name is written on.
+const QUIT_DOOR: (i32, i32) = (590, 260);
+const YES: (i32, i32) = (210, 400);
+const FIRST_NAME: (i32, i32) = (519, 163);
+
+/// LEGO signs the book and picks Pepper, then leaves by the quit door and
+/// answers yes (#125). Signing writes the players, `Players.gsi`; yes saves
+/// the game, `G0.GS`, and the scores, `History.gsi`, and the credits roll.
+fn quit() -> Hand {
+    signed_as_pepper()
+        .wait(10000)
+        .click(QUIT_DOOR)
+        .wait(10600)
+        .click(YES)
+}
+
+/// The flips the saves are looked at: the book open, nothing yet written in
+/// it; the Information Center once the book is signed, before anyone is
+/// picked; and the credits.
+const BOOK_OPEN: u64 = 6600;
+const SIGNED: u64 = 8200;
+const CREDITS: u64 = 11000;
+const QUIT_FRAMES: &[u64] = &[BOOK_OPEN, SIGNED, CREDITS];
+
+/// Enough for the credits to start: flip 11000 is presented at about 6.03
+/// billion.
+const QUIT_BUDGET: u64 = 6_030_000_000;
+
+/// A run that saved, and what it left in its data root as it left it, since a
+/// later run over the same root changes what is there.
+struct Saving {
+    ran: testkit::Ran,
+    root: std::path::PathBuf,
+    saves: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+/// Every file in a data root's `savepath`, which is the install directory on
+/// C:, by the name the profile keeps it under.
+fn saves_in(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(root.join("profile/C/PROGRAM FILES/LEGO ISLAND"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|file| {
+            let bytes = std::fs::read(file.path()).expect("a save reads");
+            (file.file_name().to_string_lossy().into_owned(), bytes)
+        })
+        .collect()
+}
+
+/// A run to the credits over a data root of its own, empty to start with,
+/// done once into its slot.
+fn saving(
+    slot: &'static std::sync::OnceLock<Option<Saving>>,
+    root: &str,
+    host: impl FnOnce() -> Headless,
+    cli: Cli,
+) -> Option<&'static Saving> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(root);
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = Cli {
+            data_root: Some(root.clone()),
+            ..cli
+        };
+        let ran = testkit::run_on(host(), &ISLAND, &cli, QUIT_BUDGET);
+        Some(Saving {
+            saves: saves_in(&root),
+            ran,
+            root,
+        })
+    })
+    .as_ref()
+}
+
+fn saved_by_hand() -> Option<&'static Saving> {
+    static SAVED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        record: true,
+        ..Cli::default()
+    };
+    saving(
+        &SAVED,
+        "first-save-by-hand",
+        || quit().host(QUIT_FRAMES),
+        cli,
+    )
+}
+
+fn save_route() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-save.route")
+}
+
+/// The flip a run had presented last when its log said something.
+fn flip_of(ran: &testkit::Ran, said: &str) -> usize {
+    let at = ran
+        .log
+        .find(said)
+        .unwrap_or_else(|| panic!("`{said}` is logged"));
+    ran.log[..at].matches("\nflip ").count() - 1
+}
+
+/// A name as the game saves it: seven letters, each numbered from A as 0, the
+/// ones not used as -1.
+fn name(letters: &str) -> Vec<u8> {
+    let mut saved: Vec<i16> = letters.bytes().map(|c| i16::from(c - b'A')).collect();
+    saved.resize(7, -1);
+    saved
+        .iter()
+        .flat_map(|letter| letter.to_le_bytes())
+        .collect()
+}
+
+/// The ticket's bar (#125): a route that saves leaves the game's saves in its
+/// data root. The book is signed and the players are written; yes at the quit
+/// door writes the game and the scores, and the credits roll.
+#[test]
+fn a_hand_signs_the_book_quits_and_leaves_the_saves_in_its_data_root() {
+    let Some(saved) = saved_by_hand() else {
+        return;
+    };
+    let ran = &saved.ran;
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way stops the run"
+    );
+    // The data root starts empty: at boot the game looks for its players and
+    // its scores where it saves them, and finds neither.
+    ran.assert_logged(r"file missing C:\Program Files\LEGO Island\Players.gsi")
+        .assert_logged(r"file missing C:\Program Files\LEGO Island\History.gsi");
+    let written = |save: &str| {
+        flip_of(
+            ran,
+            &format!(r"file written C:\Program Files\LEGO Island\{save},"),
+        )
+    };
+    assert_eq!(written("Players.gsi"), 7113, "pressing the tick");
+    assert_eq!(written("History.gsi"), 10627, "letting go of yes");
+    assert_eq!(written("G0.GS"), 10627);
+
+    // One player, LEGO.
+    let players = &saved.saves["PLAYERS.GSI"];
+    assert_eq!(players[..2], [1, 0]);
+    assert_eq!(players[2..], name("LEGO"));
+    // The game's version, then LEGO's number, 0, the first act, and Pepper,
+    // who is actor 1.
+    assert_eq!(saved.saves["G0.GS"][..9], [0x0c, 0, 1, 0, 0, 0, 0, 0, 1]);
+    // The scores, starting with the number the next player will be given.
+    assert_eq!(saved.saves["HISTORY.GSI"][..2], [1, 0]);
+    assert_eq!(saved.saves.len(), 3, "{:?}", saved.saves.keys());
+
+    // The credits: black either side of their first picture.
+    let credits = ran.host.frame(CREDITS).expect("kept");
+    for x in [40, 600] {
+        assert_eq!(pixel(credits, x, 300), [0, 0, 0], "the credits at {x}");
+    }
+}
+
+/// The committed route is the hand's own, as its run recorded it.
+#[test]
+fn the_committed_first_save_is_what_the_hand_recorded() {
+    let Some(saved) = saved_by_hand() else {
+        return;
+    };
+    let recorded = lego_legacy_core::route::Route::load(&saved.ran.dir.join("route"))
+        .expect("the run recorded a route");
+    let committed = lego_legacy_core::route::Route::load(&save_route()).expect("it reads");
+    assert_eq!(recorded, committed);
+}
+
+/// The determinism gate: the committed first save, replayed over a data root
+/// of its own, ends on the machine the hand's run ended on and saves what it
+/// saved, byte for byte.
+#[test]
+fn the_first_save_replays_to_the_machine_the_hand_made_and_saves_the_same() {
+    static REPLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        route: Some(save_route()),
+        ..Cli::default()
+    };
+    // The replay runs beside the hand's run rather than after it.
+    let (hand, replay) = std::thread::scope(|scope| {
+        let replay = scope.spawn(|| {
+            saving(
+                &REPLAYED,
+                "first-save-replayed",
+                || Headless::new().keeping(QUIT_FRAMES),
+                cli,
+            )
+        });
+        (saved_by_hand(), replay.join().expect("the replay ran"))
+    });
+    let (Some(hand), Some(replay)) = (hand, replay) else {
+        return;
+    };
+    hand.ran.assert_same_machine(&replay.ran);
+    assert!(hand.saves == replay.saves, "and the same saves");
+}
+
+/// The next run over the same data root (#125): the book opened, LEGO picked
+/// from the names already in it, and then a second player, ISLE, signing it.
+fn again() -> Hand {
+    Hand::new()
+        .wait(IDLE_LOOP + 50)
+        .click(BOOK)
+        .wait(6700)
+        .click(FIRST_NAME)
+        .wait(8300)
+        .click(BOOK)
+        .wait(9500)
+        .hold(KEY_I, 2)
+        .hold(KEY_S, 2)
+        .hold(KEY_L, 2)
+        .hold(KEY_E, 2)
+        .wait(9600)
+        .click(TICK)
+}
+
+/// Enough for ISLE's signing to be saved, at flip 9613, and a few flips more.
+const AGAIN_BUDGET: u64 = 4_490_000_000;
+
+/// The ticket's bar (#125): the next run over the data root loads all three
+/// saves, and each shows. The book opens with LEGO already in it, from the
+/// players. Picked, LEGO's game is loaded, and Pepper is who the player is,
+/// though nothing in this run picked him. A second name moves LEGO's game down
+/// a slot, through `MoveFileA`, and is given the number the scores saved.
+#[test]
+fn the_next_run_loads_the_saves_and_a_second_name_moves_the_first_down_a_slot() {
+    let Some(first) = saved_by_hand() else {
+        return;
+    };
+    let cli = Cli {
+        data_root: Some(first.root.clone()),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(
+        again().host(&[BOOK_OPEN, SIGNED]),
+        &ISLAND,
+        &cli,
+        AGAIN_BUDGET,
+    );
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way stops the run, a second name included"
+    );
+    for save in ["Players.gsi", "History.gsi"] {
+        assert!(
+            !ran.log.contains(&format!(
+                r"file missing C:\Program Files\LEGO Island\{save}"
+            )),
+            "{save} is found"
+        );
+    }
+    let at = |ran: &testkit::Ran, flip: u64, x: usize, y: usize| {
+        pixel(ran.host.frame(flip).expect("kept"), x, y)
+    };
+
+    // Both runs have the book open at the same flip, after the same presses.
+    // This one has LEGO's yellow letters on the row below the empty line;
+    // the first run's book there was green, with nobody in it.
+    let yellow = |[r, g, b]: [u8; 3]| r > 200 && g > 150 && b < 50;
+    assert!(yellow(at(&ran, BOOK_OPEN, 346, 153)), "LEGO is in the book");
+    assert!(!yellow(at(&first.ran, BOOK_OPEN, 346, 153)));
+
+    // Back in the Information Center with LEGO's name on the board, Pepper's
+    // portrait is framed in blue: he is who LEGO was. At the same flip the
+    // first run had signed and picked nobody yet.
+    let framed = |pixel: [u8; 3]| pixel == [0, 0, 255];
+    assert!(framed(at(&ran, SIGNED, 304, 105)), "Pepper is picked");
+    assert!(!framed(at(&first.ran, SIGNED, 304, 105)));
+
+    // ISLE signs: LEGO's game moves to the second slot as it was saved, and
+    // ISLE's is the first, numbered 1 by the scores the first run saved, in
+    // the first act, with nobody picked.
+    ran.assert_logged(
+        r"file moved C:\Program Files\LEGO Island\G0.GS to C:\Program Files\LEGO Island\G1.GS",
+    );
+    let saves = saves_in(&first.root);
+    assert!(saves["G1.GS"] == first.saves["G0.GS"], "LEGO's game");
+    assert_eq!(saves["G0.GS"][..9], [0x0c, 0, 1, 0, 1, 0, 0, 0, 0]);
+    let players = &saves["PLAYERS.GSI"];
+    assert_eq!(players[..2], [2, 0]);
+    assert_eq!(players[2..], [name("ISLE"), name("LEGO")].concat());
+    assert_eq!(saves["HISTORY.GSI"][..2], [2, 0]);
 }
