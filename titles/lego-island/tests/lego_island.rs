@@ -8,7 +8,8 @@
 //! itself after its credits, and loaded by the next run over the same data
 //! root; and one whole activity by hand, Nick Brick's pizza taken from the
 //! Pizzeria to the gas station on the skateboard, and the game saved on the
-//! way out.
+//! way out; and the maintainer's own play, out on the bicycle to the beach,
+//! replayed to where they closed the window.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -1554,4 +1555,126 @@ fn the_delivery_replays_to_the_machine_the_hand_made_and_saves_the_same() {
         "including what it presented at flip {HANDED_OVER}"
     );
     assert!(hand.saves == replay.saves, "and the same saves");
+}
+
+/// The maintainer's own play (#126), recorded at a window on their MacBook and
+/// signed off: the book signed as OO, up to the observation deck, Pepper
+/// picked, and out on the bicycle to the beach, where they closed the window.
+fn played_route() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/maintainer-first-play.route")
+}
+
+/// Pepper picked, his portrait framed in blue; and the last frame before the
+/// window was closed, on the bicycle at the beach.
+const PICKED: u64 = 8900;
+const AT_THE_BEACH: u64 = 10666;
+
+/// Where the maintainer closed the window: their run stopped at instruction
+/// 3,341,815,783, flip 10667, 274,650 declared milliseconds in. A route keeps
+/// what a person did and not the window closing, so the replay is held to
+/// that instruction by its budget.
+const PLAYED_BUDGET: u64 = 3_341_815_783;
+
+/// The maintainer's play replayed over an empty data root of its own, done
+/// once into its slot.
+fn played(
+    slot: &'static std::sync::OnceLock<Option<Saving>>,
+    root: &str,
+) -> Option<&'static Saving> {
+    let cli = Cli {
+        route: Some(played_route()),
+        ..Cli::default()
+    };
+    saving(
+        slot,
+        root,
+        || Headless::new().keeping(&[PICKED, AT_THE_BEACH]),
+        cli,
+        PLAYED_BUDGET,
+    )
+}
+
+static PLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+
+/// The ticket's bar (#126): a person's play is the committed route, as Hot
+/// Wheels' first race is. Replayed, it ends where the maintainer's run ended on
+/// their MacBook, at the same instruction, flip and declared time, the budget
+/// exhausted where theirs was stopped by the person. Their play began from an
+/// empty profile, so a replay over an empty data root starts from what theirs
+/// did: it changes nothing. Closing the window does not tell the game, so the
+/// players are all it saved, as theirs were.
+#[test]
+fn the_maintainers_play_replays_to_where_they_closed_the_window() {
+    let Some(played) = played(&PLAYED, "maintainer-first-play") else {
+        return;
+    };
+    let ran = &played.ran;
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way stops the run\nlog:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        (
+            ran.finish.cursor,
+            ran.finish.flips,
+            ran.finish.declared_millis
+        ),
+        (PLAYED_BUDGET, 10667, 274_650),
+        "where the maintainer closed the window"
+    );
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+
+    // The book signed as OO, one player, and nothing else saved.
+    assert_eq!(
+        flip_of(
+            ran,
+            r"file written C:\Program Files\LEGO Island\Players.gsi,"
+        ),
+        1678,
+        "pressing the tick"
+    );
+    assert_eq!(
+        played.saves.keys().collect::<Vec<_>>(),
+        ["PLAYERS.GSI"],
+        "the players and nothing else"
+    );
+    assert_eq!(played.saves["PLAYERS.GSI"][..2], [1, 0], "one player");
+    assert_eq!(played.saves["PLAYERS.GSI"][2..], name("OO"));
+    // Pepper's portrait, the third, framed in blue, with the others in gold.
+    assert_eq!(pixel(frame(PICKED), 304, 105), [0, 0, 255], "Pepper");
+    // At the beach on the bicycle, its red stem under the handlebars, and the
+    // sky the colour the observation deck left it, a light orange where the
+    // island's own is blue.
+    let [r, g, b] = pixel(frame(AT_THE_BEACH), 320, 410);
+    assert!(r > 200 && g < 60 && b < 60, "the bicycle");
+    let [r, _, b] = pixel(frame(AT_THE_BEACH), 320, 10);
+    assert!(r > b + 60, "the sky the deck left");
+}
+
+/// The determinism gate: the maintainer's play twice over, each over an empty
+/// data root of its own, ends on the same machine, presents the same beach and
+/// saves the same players.
+#[test]
+fn the_maintainers_play_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| played(&AGAIN, "maintainer-first-play-again"));
+        (
+            played(&PLAYED, "maintainer-first-play"),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.ran.assert_same_machine(&second.ran);
+    assert!(
+        first.ran.host.frame(AT_THE_BEACH).map(|f| &f.pixels)
+            == second.ran.host.frame(AT_THE_BEACH).map(|f| &f.pixels),
+        "including what it presented at flip {AT_THE_BEACH}"
+    );
+    assert!(first.saves == second.saves, "and the same saves");
 }

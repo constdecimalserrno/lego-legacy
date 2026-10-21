@@ -183,3 +183,22 @@ Center's plaza and round the police station, is more than four times as long as 
 
 Outdoors the game runs at 2.3 declared seconds a wall second on this machine headless, frames
 converted and presented included: a person's window has twice what it needs.
+
+A person has played it (#126). The maintainer played it by hand at a window on their MacBook,
+with `--audio --record` on `b90b1d7`, and signed it off on 2026-10-21. The committed
+`maintainer-first-play.route` is the route that run recorded, as Hot Wheels' `first-race.route`
+is the maintainer's own play, with a header saying what was done. The intro is clicked through
+and the book signed as OO; the play goes round the Information Center's rooms and up to the
+observation deck, whose controls turn the sky pink, orange, dark and back to a light orange. Back in the main
+room it picks Pepper, goes out of the revolving door, gets on the red bicycle and rides it down to
+the beach, where the window was closed at instruction 3,341,815,783, flip 10667, 274,650 declared
+milliseconds in. No activity is started; `pizza-delivery.route` is the one played through.
+
+A route keeps what a person did, not the window closing, so the gate holds the replay to that
+instruction by its budget. Replayed headless on another Mac, it ends at the same instruction,
+flip and declared time, with the digest the MacBook's run ended with, `db7bd6b2…`, and the same
+`Players.gsi`: the end line says `budget exhausted` where the play's said `stopped by the person`.
+Their play began from an empty profile, so a replay over an empty data root changes nothing, and
+closing the window does not tell the game, so the players are all it saved. Its tests find Pepper
+picked, the bicycle at the beach under the sky the deck left, and two replays side by side ending
+on the same machine with the same saves.
