@@ -148,3 +148,11 @@ From here, per ADR-0007, a change that stops a save this version writes being re
 major version. Its save as its window closes is not reached yet (#140): closing the host's window
 ends a run without the game being told, and when the credits end, at flip 17338, the game posts
 its window `WM_CLOSE`, which `PostMessageA` stops at as a wall.
+
+Its own close after the credits is answered (#140): core's `PostMessageA` posts `WM_CLOSE`, and the
+game's window procedure deletes the game, whose `Close` saves the game and the scores once more,
+the same bytes the quit door saved. The game then leaves its loop, destroys its window and exits 0.
+`first-save.route`, replayed past its end over a data root of its own, ends with the game's own
+exit, at instruction 13,071,129,548 and flip 17341, where it stopped at the wall; a new test holds
+it.
+Closing the host's window still ends a run without the game being told.

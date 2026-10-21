@@ -497,6 +497,15 @@ runtime, `CreateFileA`, `WriteFile` and `CloseHandle`, and reads them back throu
 all answered already; its `_hwrite` and `SetEndOfFile` are its scripts' (#116), and a save does not
 reach them. No title's run moves.
 
+`PostMessageA` posts `WM_CLOSE`, the first of the system's own messages it posts (#140). It carries
+no pointer, so Windows posts it as it posts a title's own. LEGO Island closes its own window this
+way when its credits are over (`LegoOmni::CloseMainWindow`), which stopped its runs at a wall at
+flip 17338. Its window procedure now takes it: the game is deleted, its `Close` saves the game and
+the scores once more, the same bytes the quit door saved, and it leaves its loop, destroys its
+window and exits 0, at instruction 13,071,129,548, flip 17341. Every other message below `WM_USER`
+is still a wall. No other title posts one, and no committed route reaches Island's, so no run
+moves.
+
 ## 1.0.0 — 2026-10-18
 
 The engine the three v1 titles run on: an x86 and x87 interpreter for the guest's code, the Win32

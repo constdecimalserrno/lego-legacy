@@ -297,6 +297,9 @@ fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
 }
 
+/// What a window is sent, or posted, when it is asked to close.
+const WM_CLOSE: u32 = 0x0010;
+
 /// What Windows tells a title when its own application becomes the active one.
 const WM_ACTIVATEAPP: u32 = 0x001c;
 
@@ -686,14 +689,16 @@ fn post(state: &mut super::State, message: u32, wparam: u32, time: u32) {
 /// queue of the thread that made the window, stamped with the time and the
 /// pointer as it is posted, and the title's own loop takes it.
 ///
-/// LEGO Island posts itself its pointer's shape this way (#139). Only a
-/// title's own messages, from `WM_USER` up, are posted here: which of the
-/// system's carry a pointer, and so cannot be posted, is not written, and
-/// neither is a message to any window but the title's own.
+/// LEGO Island posts itself its pointer's shape this way (#139), and
+/// `WM_CLOSE` when its credits are over (#140). A title's own messages, from
+/// `WM_USER` up, are posted here, and of the system's below it `WM_CLOSE`,
+/// which carries no pointer, so Windows posts it as it posts any other. Which
+/// other system messages carry one, and so cannot be posted, is not written,
+/// and neither is a message to any window but the title's own.
 fn post_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const WM_USER: u32 = 0x0400;
     let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
-    if window != WINDOW || message < WM_USER {
+    if window != WINDOW || (message < WM_USER && message != WM_CLOSE) {
         return Err(Stop::NotWritten {
             what: format!("USER32.dll!PostMessageA: message {message:#06x} to window {window:#x}"),
             caller: 0,

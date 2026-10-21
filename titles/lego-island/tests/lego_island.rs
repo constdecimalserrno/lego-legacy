@@ -4,8 +4,9 @@
 //! heard to play, and each replayed to the same machine every time; and a
 //! synthetic hand driving it through the host, out of the Information Center
 //! and away on a bike, and the route its run recorded; and its saves, written
-//! by a hand that signs the book and quits, and loaded by the next run over the
-//! same data root.
+//! by a hand that signs the book and quits, saved again as the game closes
+//! itself after its credits, and loaded by the next run over the same data
+//! root.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -983,13 +984,14 @@ fn saves_in(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8
         .collect()
 }
 
-/// A run to the credits over a data root of its own, empty to start with,
-/// done once into its slot.
+/// A run to the credits, or past them by its budget, over a data root of its
+/// own, empty to start with, done once into its slot.
 fn saving(
     slot: &'static std::sync::OnceLock<Option<Saving>>,
     root: &str,
     host: impl FnOnce() -> Headless,
     cli: Cli,
+    budget: u64,
 ) -> Option<&'static Saving> {
     slot.get_or_init(|| {
         if !scratch() {
@@ -1001,7 +1003,7 @@ fn saving(
             data_root: Some(root.clone()),
             ..cli
         };
-        let ran = testkit::run_on(host(), &ISLAND, &cli, QUIT_BUDGET);
+        let ran = testkit::run_on(host(), &ISLAND, &cli, budget);
         Some(Saving {
             saves: saves_in(&root),
             ran,
@@ -1022,6 +1024,7 @@ fn saved_by_hand() -> Option<&'static Saving> {
         "first-save-by-hand",
         || quit().host(QUIT_FRAMES),
         cli,
+        QUIT_BUDGET,
     )
 }
 
@@ -1125,6 +1128,7 @@ fn the_first_save_replays_to_the_machine_the_hand_made_and_saves_the_same() {
                 "first-save-replayed",
                 || Headless::new().keeping(QUIT_FRAMES),
                 cli,
+                QUIT_BUDGET,
             )
         });
         (saved_by_hand(), replay.join().expect("the replay ran"))
@@ -1134,6 +1138,58 @@ fn the_first_save_replays_to_the_machine_the_hand_made_and_saves_the_same() {
     };
     hand.ran.assert_same_machine(&replay.ran);
     assert!(hand.saves == replay.saves, "and the same saves");
+}
+
+/// Enough for the credits to finish and the game to close itself and leave:
+/// it is gone by 13.08 billion.
+const CLOSED_BUDGET: u64 = 13_100_000_000;
+
+/// The ticket's bar (#140): when its credits are over the game closes its own
+/// window by posting itself `WM_CLOSE` (`LegoOmni::CloseMainWindow`). Its
+/// window procedure answers by deleting the game, whose `Close` saves the game
+/// and the scores once more, and then it leaves. The committed first save,
+/// replayed past its end, ends with the game's own exit rather than at a wall,
+/// having saved as it closed what it saved at the quit door.
+#[test]
+fn after_its_credits_the_game_closes_itself_and_saves_as_it_goes() {
+    static CLOSED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        route: Some(save_route()),
+        ..Cli::default()
+    };
+    let (hand, closed) = std::thread::scope(|scope| {
+        let closed = scope.spawn(|| {
+            saving(
+                &CLOSED,
+                "first-save-closed",
+                Headless::new,
+                cli,
+                CLOSED_BUDGET,
+            )
+        });
+        (saved_by_hand(), closed.join().expect("the run ran"))
+    });
+    let (Some(hand), Some(closed)) = (hand, closed) else {
+        return;
+    };
+    let ran = &closed.ran;
+    ran.assert_exited(0);
+    let close = "window procedure given message 0x0010";
+    assert_eq!(
+        ran.flip_before(close),
+        17339,
+        "the close, after the credits"
+    );
+    let (_, after) = ran.log.split_once(close).expect("the close is logged");
+    for save in ["G0.GS", "History.gsi"] {
+        assert!(
+            after.contains(&format!(
+                r"file written C:\Program Files\LEGO Island\{save},"
+            )),
+            "{save} is saved as the game closes"
+        );
+    }
+    assert!(closed.saves == hand.saves, "the same saves as at the door");
 }
 
 /// The next run over the same data root (#125): the book opened, LEGO picked
