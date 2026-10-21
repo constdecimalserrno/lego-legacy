@@ -3,10 +3,26 @@
 One heading per version, newest first. What each part of a title's version means is in
 [ADR-0007](../../docs/adr/0007-every-crate-carries-its-own-version.md).
 
-## 0.1.0 — 2026-10-19
+## 1.0.0 — 2026-10-21
+
+Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from
+the Pizzeria to Nubby at the gas station, from the intro to the quit door's save and the game's
+own exit (#137). `routes/maintainer-first-play.route` is the maintainer's own play, and replayed
+headless it ends on the same machine as their run and saves the same players (#126).
+
+Signed off 2026-10-21 on `b90b1d7`, played by the maintainer at a window with sound on their
+MacBook: the book signed, the observation deck, Pepper picked and out on the bicycle to the beach.
+The code this release runs is that build's; since then only its tests, routes, docs and version
+changed.
+
+Not yet: closing the window ends the run without the game being told, so whatever was played since
+its last save is lost; leave by the Information Center's quit door and answer yes to save (#140).
+A button held still does not start a drag by itself, since no `WM_TIMER` is sent yet (#138).
+
+What 1.0.0 holds, as it was reached:
 
 On the roster (#113): `ISLE.EXE` from `DATA/disk`, copied whole as the Wise installer copies it,
-on a declared machine of its own. Untagged until its release (#128).
+on a declared machine of its own.
 
 `ISLE.EXE` opens its window (#114): it turns mouse trails off, makes a window with a caption,
 asks `WIN.INI` for a media path it does not have, and its engine starts its sound and asks

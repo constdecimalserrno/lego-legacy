@@ -61,8 +61,10 @@ and docs) belongs to no crate's version.
 A release tags every crate whose version moved as `<crate>-v<version>`, `lego-alpha-team-v1.0.0`
 for one, and the workspace as `v<version>`. The workspace's version moves by the largest part any
 crate's moved in that release: major if any crate's major did, minor if any crate's minor did,
-patch otherwise. v1 is `v1.0.0`, with all five crates' `-v1.0.0` on the same commit. A tag is
-never moved or deleted, and a tag under a crate's name that is not a version fails the test.
+patch otherwise. A crate's first release counts as a minor move for the workspace's version, since
+it adds a title and changes nothing already released. v1 is `v1.0.0`, with all five crates'
+`-v1.0.0` on the same commit. A tag is never moved or deleted, and a tag under a crate's name that
+is not a version fails the test.
 
 Rolling a title back is `git checkout <title>-v<version>`: that commit is the title as it was
 released, with the core it pinned.

@@ -1,4 +1,4 @@
-//! LEGO Island: the roster's fourth title, and the one in progress (#112).
+//! LEGO Island: the roster's fourth title (#112).
 
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;

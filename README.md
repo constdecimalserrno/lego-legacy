@@ -1,6 +1,6 @@
 # lego-legacy
 
-An emulator that runs the original Windows releases of three late-90s games on any computer,
+An emulator that runs the original Windows releases of four late-90s games on any computer,
 from your own discs. It is OS-agnostic by design: everything it touches on the host sits behind
 one seam, and each operating system is one backend. macOS has its backend today; Windows
 ([#107](https://github.com/constdecimalserrno/lego-legacy/issues/107)) and Linux
@@ -11,7 +11,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | LEGO Rock Raiders | **Playable**: a person has played the first mission through |
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
-| LEGO Island | In progress ([#112](https://github.com/constdecimalserrno/lego-legacy/issues/112)): by route, it plays Nick Brick's pizza delivery from the intro to a save and its own exit; not yet played by a person ([#127](https://github.com/constdecimalserrno/lego-legacy/issues/127)) |
+| LEGO Island | **Playable**: Nick Brick's pizza delivery plays from the intro to a save and its own exit, and a person has signed it off |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
@@ -109,7 +109,9 @@ While the window is in front and the pointer is over the picture, a title that d
 pointer takes the mouse; Cmd-Tab gives it back. Cmd-Q or Cmd-W ends the run. The Linux backend
 is written to do the same, giving the mouse back when another window takes the keyboard and
 ending the run on Ctrl-Q or the window's close button; it has not yet been run on Linux. In Hot
-Wheels, Space gets past the splash screens and Escape quits. If the host cannot keep up, the game
+Wheels, Space gets past the splash screens and Escape quits. In LEGO Island, leave by the
+Information Center's quit door to save: closing the window ends the run without the game being
+told ([#140](https://github.com/constdecimalserrno/lego-legacy/issues/140)). If the host cannot keep up, the game
 runs in slow motion with its sound stretched to match, rather than skipping.
 
 ## Tests

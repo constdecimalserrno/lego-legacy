@@ -3,7 +3,16 @@
 One heading per version, newest first. What each part of core's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
-## 1.1.0 — 2026-10-18
+## 1.1.0 — 2026-10-21
+
+What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old
+file API and files read where they lie on the image, waits on several handles, DirectX 5's
+Direct3D and retained mode with meshes built, drawn, picked and projected with uniform scaling,
+posted messages and a title's own pointer shapes, and `MoveFileA`. Beside it, the Windows (#107)
+and Linux (#108) backends, run by machine and not yet played by a person; a run's wrap-up however
+it is stopped; and answers truer to Windows for every title: x87's own NaNs, `GetVersion` as
+Windows 9x answers it, a null pointer faulting, `RaiseException`'s context, and DirectX 6's
+Direct3D for Rock Raiders. Each change below lists the released titles' runs it moved.
 
 Two backends joined, each written and compiled for its operating system and untested there:
 

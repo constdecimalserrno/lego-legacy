@@ -81,7 +81,7 @@ pub const ALPHA_TEAM: Entry = Entry {
     red_book: None,
 };
 
-/// LEGO Island, the roster's fourth title, and the one in progress (#112).
+/// LEGO Island, the roster's fourth title (#112).
 pub const LEGO_ISLAND: Entry = Entry {
     key: "lego-island",
     name: "LEGO Island",
@@ -104,9 +104,8 @@ pub const LEGO_ISLAND: Entry = Entry {
 };
 
 /// The roster's titles that have a crate, in the order they were taken: the
-/// three v1 titles and LEGO Island, the one in progress. A title joins when
-/// its own crate does, so the launcher never offers something that cannot be
-/// started.
+/// three v1 titles and LEGO Island. A title joins when its own crate does, so
+/// the launcher never offers something that cannot be started.
 pub const ROSTER: &[&Entry] = &[&ROCK_RAIDERS, &HOT_WHEELS, &ALPHA_TEAM, &LEGO_ISLAND];
 
 /// What the launcher found when it went looking for a title.

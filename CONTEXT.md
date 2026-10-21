@@ -1,6 +1,6 @@
 # lego-legacy
 
-A zero-crate Rust emulator that runs the original retail binaries of three late-90s Win32/DirectX
+A zero-crate Rust emulator that runs the original retail binaries of four late-90s Win32/DirectX
 titles, with more to come. Not a reimplementation, and not a general PC emulator: the machine
 it presents is tailored to each title it supports. OS-agnostic by design: each host operating
 system is one backend behind one seam (ADR-0001), and macOS is the first.
@@ -18,10 +18,10 @@ _Avoid_: game, ROM, image, guest as a synonym
 
 **Roster**:
 The exact set of five titles the emulator is for: `lego-rock-raiders`,
-`hotwheels-stunt-track-driver`, `lego-alpha-team`, `lego-island`, `lego-racers`. Three are
-supported, each by a crate of its own under `titles/`, and v1 is those three; `lego-island` has its
-crate and is the one in progress (#112), and `lego-racers` has none yet. Support is per title,
-never inferred from a hardware standard.
+`hotwheels-stunt-track-driver`, `lego-alpha-team`, `lego-island`, `lego-racers`. Four are
+supported, each by a crate of its own under `titles/`: v1 is the first three, and `lego-island`
+joined them at its own 1.0.0 (#112). `lego-racers` has no crate yet. Support is per title, never
+inferred from a hardware standard.
 _Avoid_: compatibility list, catalogue, platform support, the collection
 
 **Pressing**:
