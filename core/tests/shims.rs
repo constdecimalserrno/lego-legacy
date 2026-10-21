@@ -183,8 +183,8 @@ fn window(m: &mut Machine, procedure: u32) {
 
 /// A window destroyed is told twice, `WM_DESTROY` and then `WM_NCDESTROY`,
 /// whatever its procedure answers the first, and is then gone: its waiting
-/// messages with it, and a second destroy fails as one of no window does
-/// (#140).
+/// messages with it, and its timers (#138), and a second destroy fails as one
+/// of no window does (#140).
 #[test]
 fn a_destroyed_window_is_told_and_then_gone() {
     const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
@@ -201,9 +201,13 @@ fn a_destroyed_window_is_told_and_then_gone() {
 
     window(&mut m, PROCEDURE);
     assert!(!m.state.messages.is_empty(), "WM_ACTIVATEAPP waits");
+    let set_timer = |m: &mut Machine| call(m, "USER32", "SetTimer", &[WINDOW, 1, 1000, 0]);
+    assert_eq!(set_timer(&mut m), Ok(1));
     let (answer, program) = destroy(&mut m);
     assert_eq!(answer, Ok(1));
     assert!(m.state.messages.is_empty(), "it went with the window");
+    assert!(m.state.timers.is_empty(), "and its timer");
+    assert!(set_timer(&mut m).is_err(), "a window that is gone has none");
     assert_eq!(call(&mut m, "USER32", "GetActiveWindow", &[]), Ok(0));
 
     // The program the machine runs calls the procedure with each message,
@@ -260,11 +264,19 @@ fn a_close_is_a_system_command_and_its_default_sends_wm_close() {
 
 /// A thread that asked to quit is handed `WM_QUIT`, with the code it asked
 /// with and no window, once what was posted to it is taken and before what a
-/// person did, and once (#140).
+/// person did, and once (#140). A timer that has come due is heard last of
+/// all, once nothing else is waiting (#138).
 #[test]
 fn a_thread_that_asked_to_quit_is_handed_wm_quit_after_what_was_posted() {
     let mut m = machine();
     window(&mut m, 0x0040_1000);
+    m.state.timers.push(win32::user32::Timer {
+        window: WINDOW,
+        id: 7,
+        period: 1000,
+        due: 0,
+        callback: 0,
+    });
     win32::user32::deliver(
         &mut m.state,
         Input::Key {
@@ -281,8 +293,13 @@ fn a_thread_that_asked_to_quit_is_handed_wm_quit_after_what_was_posted() {
     }
     assert_eq!(
         taken,
-        [(WINDOW, 0x001c, 1), (0, 0x0012, 3), (WINDOW, 0x0100, 0x20)],
-        "WM_ACTIVATEAPP, then WM_QUIT, then the key"
+        [
+            (WINDOW, 0x001c, 1),
+            (0, 0x0012, 3),
+            (WINDOW, 0x0100, 0x20),
+            (WINDOW, 0x0113, 7)
+        ],
+        "WM_ACTIVATEAPP, then WM_QUIT, then the key, then WM_TIMER"
     );
 }
 

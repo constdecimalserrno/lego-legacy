@@ -20,6 +20,20 @@ the quit door, leaves `G0.GS` and `History.gsi` behind, written as the game clos
 machine and saves the same bytes. In the Information Center with nobody signed, the game leaves
 without saving.
 
+A button held still on the island walks (#138), now that core 1.2.0 sends `WM_TIMER`, where 1.0.0
+stood still under it. At a press with nothing under the pointer to take it the game sets a
+one-second timer (`LEGO1.DLL` 0x1005cfca), and its message, with the button still down and the
+pointer not moved past the drag threshold, starts a drag. A new hand goes out of the door as the
+ride does, presses above the middle of the screen at flip 12400 and holds still for 100 flips. Its
+test runs it to 6,067,000,000: the island stands still for sixty flips, a declared second; the one
+`WM_TIMER` comes after flip 12462, the drag killing its timer; and from there the island goes by.
+The ride's hand is now that hand out of the door and the ride on from it, the same events, so
+`first-ride.route` does not move. No committed route moves, since none holds the button still for
+a second: `maintainer-first-play.route` still ends on its budget with the digest the maintainer's
+run ended with, `db7bd6b2…`. The restless hand's digest moves, `c029337f…` to `99ce5f30…`: two of
+its releases kill a timer that is not there, which is refused with `ERROR_INVALID_PARAMETER`, and
+the C runtime keeps that error.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from

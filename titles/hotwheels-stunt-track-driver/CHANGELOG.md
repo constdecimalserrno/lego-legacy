@@ -23,6 +23,15 @@ Closing its window tells it, as Windows does (#140), where the run stopped at on
 it: it hears `WM_SYSCOMMAND` with `SC_CLOSE` and exits 1, as it always exits. A second close stops
 the run at once. No committed route closes, so no run moves.
 
+Took core 1.2.0's `WM_TIMER` (#138). The title sets a one-second timer as it starts and kills it
+only as it quits, and its window procedure now hears it once a declared second: it latches a frame
+rate nothing in the game reads. The game reads its tick count at 120 places, so its two runs that
+exit move: `first-race.route` ends at 13,462,673,372 where it ended at 13,462,722,543, and the
+escape route at 583,424,086 where it ended at 583,424,325, their flips, declared milliseconds and
+exit code unchanged; core's changelog lists them. The race still finishes, with the same
+`WHEEL.DAT` and `TIMES.DAT` written at the same flips. The maintainer blessed the move on
+2026-10-21. Its runs moved again, so a person should drive the first race before its next release.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

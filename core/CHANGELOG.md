@@ -71,6 +71,63 @@ stub run `stopped.rs` stops with a signal, which has no window to tell, now logs
 `input flip 0 Close` and ends where and as it did. The Windows and X backends are compiled and
 clippy-clean, not run.
 
+`WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
+and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
+the maintainer blessed on 2026-10-21; a person drives Hot Wheels' first race again before its next
+release (golden rule 7).
+
+- `SetTimer` keeps a window's timer: its number, its period, held between `USER_TIMER_MINIMUM`
+  and `USER_TIMER_MAXIMUM`, and when it next comes due on the declared clock. Set again with the
+  same number it is replaced, and comes due a whole period from then. It answers the number. A
+  timer with no window, the thread's own, is a wall, and so is one for a window that is gone: no
+  title sets either.
+- `KillTimer` takes the timer away, and with it any message it had due. A timer that is not there
+  is refused: zero, and `ERROR_INVALID_PARAMETER`. `DestroyWindow` takes the window's timers with
+  it, as Microsoft documents, as it takes the messages waiting for it.
+- `PeekMessageA` makes a timer's `WM_TIMER` only when the filter takes nothing else: after posted
+  messages, `WM_QUIT`, input and `WM_PAINT` (which this machine never makes). A timer has one at
+  most: its number in `wParam`, its callback in `lParam`, and the tick count it was taken at as
+  its time. Looked at, it stays; taken, the timer comes due again on its own beat, the first whole
+  period after it last came due that is still to come, so a title that was late hears it once. As
+  with posted messages (#139), only the thread that made the window takes it.
+- `DispatchMessageA` calls a timer's callback in place of the window procedure, with the window,
+  `WM_TIMER`, the number and the tick count, as a `TimerProc` is called. No title sets one.
+- Sources: Microsoft's documentation of `SetTimer`, `KillTimer`, `WM_TIMER`, `DestroyWindow` and
+  `PeekMessage`'s order (sent, posted, input, `WM_PAINT`, `WM_TIMER`); Wine's `server/queue.c`
+  (`set_win_timer`, `kill_win_timer`, `get_message`, `find_expired_timer`, `restart_timer`) and
+  `dlls/win32u/message.c` (`NtUserSetTimer`, `NtUserDispatchMessage`), read as documentation.
+
+LEGO Island sets a one-second timer at a press of the button with nothing under the pointer to
+take it (`LEGO1.DLL` 0x1005cfca) and kills it at the release. Its `WM_TIMER`, with the button still
+down and the pointer not moved past the drag threshold, starts a drag: a button held still on the
+island walks, from a declared second after the press. Before, the island stood still under it.
+
+Hot Wheels sets a one-second timer as it starts (0x004152bb) and kills it only as it quits, before
+it destroys its window, so its window procedure now hears a `WM_TIMER` once a declared second, 117
+times over `first-race.route`. Its handler (0x41a31c) copies the count of frames drawn since the
+last one (counted at 0x41a5d9) into a word nothing in the program reads, zeroes the count, and
+passes the message to `DefWindowProcA`: a frame rate that is never shown, 52 instructions a
+second. Nothing in the game reads what it writes, but the game reads its tick count at 120 places,
+and every read after the first message lands that much later. Its first race finishes as before:
+the same race, the same `WHEEL.DAT` and `TIMES.DAT`, written at the same flips, 870 and 3728, and
+the quit at flip 3903. Every 25th frame of it compared, the menus, the track, the camera, the race
+clock and the meters are the same throughout; in 46 of the 157 the cars themselves, and the sparks
+they throw, are drawn a pixel or two apart, at most 13,368 pixels a frame, from the drop onto the
+starting line (flip 875) to 1100 and from 2475 to the finish.
+
+The runs that move, against main at `5a775ac`, every other end line and digest unchanged, Rock
+Raiders', Alpha Team's and every one of LEGO Island's committed routes among them:
+
+- Hot Wheels' `first-race.route`: end cursor 13,462,722,543 to 13,462,673,372, the same flip and
+  declared millisecond; digest `d48d8761…` to `ca24a96c…`.
+- Hot Wheels' escape route, written by its test: end cursor 583,424,325 to 583,424,086; digest
+  `8bf567a9…` to `1448924f…`.
+- Hot Wheels' boot to 2,200,000,000: digest `62d6d90b…` to `cb56737b…`.
+- LEGO Island's restless hand: digest `c029337f…` to `99ce5f30…`. Two of its releases, at flips
+  488 and 682, kill a timer that is not there and are refused with `ERROR_INVALID_PARAMETER`,
+  which `LEGO1.DLL`'s C runtime saves and puts back around its thread data (`GetLastError` at
+  0x1008d5f2). Nothing else of the run moves.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

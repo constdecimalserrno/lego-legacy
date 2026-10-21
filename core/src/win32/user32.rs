@@ -59,8 +59,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetDesktopWindow", 0, desktop_window),
     stdcall("USER32", "PostMessageA", 4, post_message),
     stdcall("USER32", "SetActiveWindow", 1, succeed_zero),
-    stdcall("USER32", "SetTimer", 4, succeed),
-    stdcall("USER32", "KillTimer", 2, succeed),
+    stdcall("USER32", "SetTimer", 4, set_timer),
+    stdcall("USER32", "KillTimer", 2, kill_timer),
     // The title's window covers the declared screen from its corner, so
     // a point in it is the same point on the screen.
     stdcall("USER32", "ClientToScreen", 2, succeed),
@@ -308,7 +308,8 @@ const WM_NCDESTROY: u32 = 0x0082;
 /// DestroyWindow(window): the window is gone, and it is told, as Microsoft
 /// documents: `WM_DESTROY` and then `WM_NCDESTROY` are sent to its procedure
 /// and answered before this returns. The messages waiting for it go with it,
-/// and what a person does from then on reaches no window (#140).
+/// and its timers (#138), and what a person does from then on reaches no
+/// window (#140).
 ///
 /// The title's window is the only one the machine makes, so another handle,
 /// or this one once it is gone, fails as Windows fails it, with
@@ -327,6 +328,7 @@ fn destroy_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     ctx.state.window_made = false;
     ctx.state.messages.retain(|m| m.window != window);
+    ctx.state.timers.retain(|t| t.window != window);
     ctx.log.line("window destroyed");
     let procedure = ctx.state.window_procedure;
     super::call_each(
@@ -882,11 +884,130 @@ fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // posted at the flip boundary; a title that finds nothing here gets on
     // with drawing.
     const PM_REMOVE: u32 = 0x0001;
-    Ok(u32::from(take_message(
-        ctx,
-        args,
-        args[4] & PM_REMOVE != 0,
-    )?))
+    let remove = args[4] & PM_REMOVE != 0;
+    Ok(u32::from(
+        take_message(ctx, args, remove)? || take_timer(ctx, args, remove)?,
+    ))
+}
+
+const WM_TIMER: u32 = 0x0113;
+
+/// A timer a title set, which is not a message waiting but a time one comes
+/// due (#138).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timer {
+    pub window: u32,
+    pub id: u32,
+    /// How often it comes due, in declared milliseconds.
+    pub period: u64,
+    /// When it next does, on the declared clock.
+    pub due: u64,
+    /// What `DispatchMessageA` calls for it instead of the window procedure,
+    /// or zero for the window procedure.
+    pub callback: u32,
+}
+
+fn set_timer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetTimer(window, id, elapse, callback). Windows keeps the period
+    // between USER_TIMER_MINIMUM and USER_TIMER_MAXIMUM, and a window's timer
+    // set again with its number is replaced, so comes due a whole period from
+    // now. Hot Wheels sets one as it starts (0x004152bb), and LEGO Island at a
+    // press of the button with nothing under the pointer to take it, to start
+    // a drag if the button is still held a second later (`LEGO1.DLL`
+    // 0x1005cfca).
+    let (window, id, elapse, callback) = (args[0], args[1], args[2], args[3]);
+    if window != WINDOW || !ctx.state.window_made {
+        // A timer with no window is the thread's, numbered by Windows, and a
+        // window that is gone (#140) has none; no title on the roster sets
+        // either.
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!SetTimer: timer {id} of window {window:#x}"),
+            caller: 0,
+        });
+    }
+    let period = u64::from(elapse.clamp(0x0a, 0x7fff_ffff));
+    let timers = &mut ctx.state.timers;
+    timers.retain(|t| (t.window, t.id) != (window, id));
+    timers.push(Timer {
+        window,
+        id,
+        period,
+        due: ctx.clock_millis + period,
+        callback,
+    });
+    Ok(id.max(1))
+}
+
+fn kill_timer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // KillTimer(window, id). A timer that has come due goes with its message:
+    // the message is only made when it is taken, so a killed timer leaves
+    // none to take, as Wine's `kill_win_timer` has it. A timer that is not
+    // there is refused, as Wine refuses it.
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    let timers = &mut ctx.state.timers;
+    let before = timers.len();
+    timers.retain(|t| (t.window, t.id) != (args[0], args[1]));
+    if timers.len() == before {
+        ctx.state.last_error = ERROR_INVALID_PARAMETER;
+        return Ok(0);
+    }
+    Ok(1)
+}
+
+/// The `WM_TIMER` the filter `(msg, window, first, last)` takes, if a timer
+/// has one, written to `msg` as `take_message` writes a message. Whether
+/// there was one.
+fn take_timer(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool, Stop> {
+    // A window's timers are its thread's, as its messages are (#139).
+    if super::kernel32::running_thread(ctx) != ctx.state.window_thread {
+        return Ok(false);
+    }
+    let Some(message) = timer_due(ctx.state, ctx.clock_millis, filter, remove) else {
+        return Ok(false);
+    };
+    if filter[0] != 0 {
+        write_message(ctx, filter[0], &message)?;
+    }
+    Ok(true)
+}
+
+/// The `WM_TIMER` of the timer that came due first of those the filter takes,
+/// at `now`.
+///
+/// Windows makes it when nothing else is waiting: after posted messages,
+/// `WM_QUIT` (#140), input and `WM_PAINT`, so it is asked for last, once
+/// `take_message` has found none of those. A timer has one at most, its
+/// time the tick count when it is taken. Taken, it comes due again at the
+/// first whole period after it last did that is still to come, so a title
+/// that was late hears it once, not once for every period it missed (Wine's
+/// `restart_timer`).
+fn timer_due(
+    state: &mut super::State,
+    now: u64,
+    filter: &[u32],
+    remove: bool,
+) -> Option<super::Message> {
+    let (window, first, last) = (filter[1], filter[2], filter[3]);
+    if !((first == 0 && last == 0) || (first..=last).contains(&WM_TIMER)) {
+        return None;
+    }
+    let point = state.pointer;
+    let timer = state
+        .timers
+        .iter_mut()
+        .filter(|t| t.due <= now && (window == 0 || t.window == window))
+        .min_by_key(|t| t.due)?;
+    if remove {
+        timer.due += ((now - timer.due) / timer.period + 1) * timer.period;
+    }
+    Some(super::Message {
+        window: timer.window,
+        message: WM_TIMER,
+        wparam: timer.id,
+        lparam: timer.callback,
+        time: u32::try_from(now & 0xffff_ffff).unwrap_or(0),
+        point,
+    })
 }
 
 fn translate_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -902,6 +1023,13 @@ fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let at = args[0];
     let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
     let (window, message, wparam, lparam) = (read(0)?, read(4)?, read(8)?, read(12)?);
+    // A timer's message with a callback in it has the callback called
+    // instead, with the tick count, as Windows calls a `TimerProc` (#138).
+    if message == WM_TIMER && lparam != 0 {
+        let tick = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
+        ctx.call_guest = Some((lparam, vec![window, message, wparam, tick]));
+        return Ok(0);
+    }
     let procedure = ctx.state.window_procedure;
     if window != WINDOW || procedure == 0 {
         return Err(Stop::NotWritten {
@@ -1464,8 +1592,9 @@ fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 mod tests {
     use super::WM_ACTIVATEAPP;
     use super::{
-        activate, deliver, key_state_now, virtual_key, DIMOUSE_BUTTON0, DIMOUSE_X, DIMOUSE_Y, DOWN,
-        WINDOW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        activate, deliver, key_state_now, timer_due, virtual_key, Timer, DIMOUSE_BUTTON0,
+        DIMOUSE_X, DIMOUSE_Y, DOWN, WINDOW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        WM_TIMER,
     };
     use crate::host::{Button, Input};
     use crate::win32::State;
@@ -1479,6 +1608,43 @@ mod tests {
         assert_eq!((first.window, first.message), (WINDOW, WM_ACTIVATEAPP));
         assert_eq!(first.wparam, 1, "active, not deactivated");
         assert_eq!(first.time, 7);
+    }
+
+    /// A timer comes due on the declared clock with one message at most,
+    /// which looking at leaves where it is and taking starts again on the
+    /// timer's own beat, however late it was taken (#138).
+    #[test]
+    fn a_timer_comes_due_once_a_period_on_its_own_beat() {
+        let mut state = State::new();
+        state.timers.push(Timer {
+            window: WINDOW,
+            id: 1,
+            period: 1000,
+            due: 1500,
+            callback: 0,
+        });
+        let all = [0, 0, 0, 0];
+        assert_eq!(timer_due(&mut state, 1499, &all, true), None, "not yet");
+        // Keys only, which a timer's message is not.
+        let keys = [0, 0, WM_KEYDOWN, WM_KEYUP];
+        assert_eq!(timer_due(&mut state, 1500, &keys, true), None);
+        let looked = timer_due(&mut state, 1500, &all, false).expect("due");
+        assert_eq!(
+            (
+                looked.window,
+                looked.message,
+                looked.wparam,
+                looked.lparam,
+                looked.time
+            ),
+            (WINDOW, WM_TIMER, 1, 0, 1500)
+        );
+        // Looking left it; taking it, late, takes the one, and the next is
+        // due on the beat after it, not a period from when it was taken.
+        let taken = timer_due(&mut state, 3700, &all, true).expect("still due");
+        assert_eq!(taken.time, 3700);
+        assert_eq!(timer_due(&mut state, 3700, &all, true), None, "once");
+        assert_eq!(state.timers[0].due, 4500);
     }
 
     /// A title that reads its keyboard from its window, as Alpha Team's

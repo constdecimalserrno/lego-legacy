@@ -9,7 +9,8 @@
 //! root; and one whole activity by hand, Nick Brick's pizza taken from the
 //! Pizzeria to the gas station on the skateboard, and the game saved on the
 //! way out; and the maintainer's own play, out on the bicycle to the beach,
-//! replayed to where they closed the window.
+//! replayed to where they closed the window; and a hand out of the door
+//! holding the button still on the island until it walks.
 //!
 //! These need the player's own rip under `game-data/`. Without it the tests
 //! print a skip line and pass, which is a gate that did not run rather than one
@@ -825,17 +826,9 @@ fn signed_as_pepper() -> Hand {
 }
 
 /// Out of the Information Center and onto the island, and away on a bike
-/// (#124). The island will not let anyone out who has not signed its book
-/// and picked who they are: the revolving door checks both (`LEGO1.DLL`
-/// 0x10037b35), and a new name in the book picks nobody.
+/// (#124).
 fn ride() -> Hand {
-    signed_as_pepper()
-        .wait(10000)
-        .click(TO_THE_ELEVATOR)
-        .wait(11000)
-        .click(TO_THE_DOOR)
-        .wait(12000)
-        .click(DOOR)
+    out_of_the_door()
         // Outside: a step forward, a turn left to face the bicycle, and on.
         .wait(13000)
         .hold(KEY_UP, 40)
@@ -845,6 +838,20 @@ fn ride() -> Hand {
         .click(BIKE)
         .wait(13600)
         .hold(KEY_UP, 200)
+}
+
+/// Out of the Information Center by its revolving door, which the island is
+/// through a hundred flips later. The island will not let anyone out who has
+/// not signed its book and picked who they are: the revolving door checks
+/// both (`LEGO1.DLL` 0x10037b35), and a new name in the book picks nobody.
+fn out_of_the_door() -> Hand {
+    signed_as_pepper()
+        .wait(10000)
+        .click(TO_THE_ELEVATOR)
+        .wait(11000)
+        .click(TO_THE_DOOR)
+        .wait(12000)
+        .click(DOOR)
 }
 
 /// The flips the ride is looked at: by the revolving door, the island through
@@ -1755,4 +1762,68 @@ fn the_maintainers_play_replays_to_the_same_machine_every_time() {
         "including what it presented at flip {AT_THE_BEACH}"
     );
     assert!(first.saves == second.saves, "and the same saves");
+}
+
+/// Where the held hand holds the button: above the middle of the screen,
+/// where nothing of the island's own is drawn to be pressed.
+const HELD_AT: (i32, i32) = (320, 120);
+
+/// The flip the held hand presses the button at, outside, and the flip it
+/// lets go at.
+const PRESSED: u64 = 12400;
+const LET_GO: u64 = PRESSED + 100;
+
+/// Out of the door, and the button pressed on the island and held there
+/// without moving.
+fn held() -> Hand {
+    let mut hand = out_of_the_door().wait(12300).glide(HELD_AT).wait(PRESSED);
+    hand.done.push((PRESSED, Input::Down(Button::Left)));
+    hand.done.push((LET_GO, Input::Up(Button::Left)));
+    hand.flip = LET_GO + 1;
+    hand
+}
+
+/// Enough for the held hand to let go: flip 12505 is presented at 6.067
+/// billion.
+const HELD_BUDGET: u64 = 6_067_000_000;
+
+/// A button held still on the island walks (#138). At the press the game
+/// sets a one-second timer (`LEGO1.DLL` 0x1005cfca), and the timer's
+/// `WM_TIMER`, a declared second later with the button still down and the
+/// pointer not moved past the drag threshold, starts a drag, which is how a
+/// person walks by holding the button. A declared second is sixty flips here,
+/// counted from when the game takes the press. Before #138 no `WM_TIMER` was
+/// sent and the island stood still under the held button until it was let
+/// go.
+#[test]
+fn a_button_held_still_for_a_declared_second_starts_a_walk() {
+    static HELD: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let still = PRESSED + 60;
+    let Some(ran) = by_hand(&HELD, held, &[PRESSED + 5, still, LET_GO], HELD_BUDGET) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing the held hand does stops the run"
+    );
+    // One timer's message, a declared second after the press: the drag it
+    // starts kills the timer, so there is no second.
+    let timer = "window procedure given message 0x0113";
+    assert_eq!(ran.log.matches(timer).count(), 1, "one WM_TIMER");
+    let at = ran.flip_before(timer);
+    assert!(
+        (still..=still + 3).contains(&at),
+        "WM_TIMER after flip {at}"
+    );
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+    // Held for a second, the island has not moved; held on, it goes by.
+    assert!(
+        frame(PRESSED + 5).pixels == frame(still).pixels,
+        "still for a second"
+    );
+    assert!(
+        testkit::differing(frame(still), frame(LET_GO), (0, 0, 640, 480)) > 100_000,
+        "the walk"
+    );
 }

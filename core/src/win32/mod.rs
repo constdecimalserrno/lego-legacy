@@ -353,6 +353,8 @@ pub struct State {
     pub cursors: Vec<(u32, u32, crate::host::Cursor)>,
     /// Window messages waiting for the title to take them, oldest first.
     pub messages: VecDeque<Message>,
+    /// The timers a title has set, oldest first (#138).
+    pub timers: Vec<user32::Timer>,
     /// The modal dialog a title has up, while it has one.
     pub dialog: Option<user32::Dialog>,
     /// What a title named its objects, by the object.
@@ -468,6 +470,7 @@ impl State {
             cursor: None,
             cursors: Vec::new(),
             messages: VecDeque::new(),
+            timers: Vec::new(),
             dialog: None,
             names: BTreeMap::new(),
             set_values: BTreeMap::new(),
