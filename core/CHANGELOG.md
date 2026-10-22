@@ -5,6 +5,28 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+LEGO Chess's movies open through AVIFile's C API (#151), which past `AVIFileInit` was a wall.
+`AVIFileOpenA` opens a movie to read it: one that is not there, or on the empty floppy drive, gives
+`AVIERR_FILEOPEN`, which LEGO Chess takes as a movie to skip; one that is there and is not a movie,
+or holds another number of streams than its header says, stops the run at its name, as a damaged
+archive member does (#169); another mode, or a handler named, is a wall. `AVIFileInfoA` answers the
+main header's `AVIFILEINFOA`, with its first stream's time scale and length, as Microsoft's page for
+the structure says a handler's typically are and Wine's `avifile.c`, read as documentation, keeps
+them. `AVIFileGetStream` hands out a stream by number, or by number of its type, the same object
+each time with a reference more, and `AVIERR_NODATA` past the last. `AVIStreamInfoA` answers the
+stream's header as vfw.h's 56-byte `AVIStreamHeader` lays it out, and a video stream's empty frame
+filled from its picture's size as Wine fills it: twenty of LEGO Chess's twenty-two movies write
+their frames as 32-bit edges, which read as vfw.h's 16-bit ones are empty. A stream is named by its
+`strn`, as its bytes, or as AVIFile names one with none, by the file's name, its kind and its number
+of that kind: two of LEGO Chess's movies kept the names their authors' AVIFile gave them, `LMI.avi
+Video #1` and `WL1lose.avi Audio #1`.
+`AVIStreamAddRef` counts a reference, and `AVIStreamReadFormat` answers how long the format is, or
+copies as much as fits and says `AVIERR_BUFFERTOOSMALL` when that is not all of it, as Wine's does.
+The file and its streams are COM objects whose own tables are walls. `avi.rs` reads the rest of each
+stream's header, its name and the main header, and what it read before is unchanged. Rock Raiders
+imports `AVIStreamInfoA` and reaches a stream only through `AVIStreamOpenFromFileA`, still a wall, so
+no released run moves.
+
 A message sent to the title's own window is handed to its procedure, whose answer is
 `SendMessageA`'s, as Microsoft documents a send to a window of the calling thread; it was a wall
 (#147). `InvalidateRect` of the title's window, or of no window, which on this machine is the same

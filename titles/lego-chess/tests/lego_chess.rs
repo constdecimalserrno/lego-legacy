@@ -10,7 +10,7 @@ use lego_chess::LEGO_CHESS as CHESS;
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::{disc, hash, testkit, Title};
+use lego_legacy_core::{avi, disc, hash, sound, testkit, Title};
 
 const ROOT: &str = CHESS.install_dir;
 
@@ -323,15 +323,85 @@ fn the_window_is_told_its_size_painted_and_focused() {
     }
 }
 
+/// Its first movie, the logo, opens through AVIFile (#151): its file and
+/// its two streams, their headers, and its sound's format, which the game
+/// makes its DirectSound buffer in.
+#[test]
+fn its_first_movie_opens_and_its_streams_are_read() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged("movie D:\\intro\\lmi.avi opened through AVIFile: 2 streams")
+        .assert_logged("call AVIFIL32.dll!AVIFileInfoA(")
+        .assert_logged("call AVIFIL32.dll!AVIFileGetStream(")
+        .assert_logged("call AVIFIL32.dll!AVIStreamReadFormat(");
+    for (call, from) in [
+        ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b094"),
+        ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b0db"),
+        ("call IDirectSound::CreateSoundBuffer(", "0x00450a4a"),
+    ] {
+        assert!(
+            ran.log
+                .lines()
+                .any(|l| l.starts_with(call) && l.contains(&format!(" from {from} "))),
+            "{call} from {from}\nlog:\n{}",
+            ran.log
+        );
+    }
+}
+
+/// The three movies the intro plays, as AVIFile reads their headers (#151):
+/// the logo, Krisalis' and the intro. The last two write their frames as
+/// 32-bit edges, which read as vfw.h's 16-bit ones are empty, so AVIFile
+/// gives them their pictures' sizes; the logo's is its own.
+#[test]
+fn the_intro_s_movies_are_indeo_5_at_15_frames_a_second() {
+    if !scratch() {
+        return;
+    }
+    let mut tree = testkit::tree(&CHESS);
+    for (name, size, frames, frame, sound) in [
+        ("lmi", (320, 240), 280, [0, 0, 320, 240], Some((1, 8, 1))),
+        ("krisalis", (320, 240), 38, [0; 4], None),
+        ("intro", (320, 200), 499, [0; 4], Some((2, 16, 4))),
+    ] {
+        let bytes = tree
+            .read(&format!("D:\\intro\\{name}.avi"))
+            .expect("the movie is on the disc");
+        let movie = avi::parse(&bytes).expect("an AVI file");
+        let video = &movie.streams[0];
+        assert_eq!(
+            (&video.kind, &video.handler, video.compression()),
+            (b"vids", b"IV50", *b"IV50"),
+            "{name}"
+        );
+        assert_eq!(
+            (video.picture_size(), video.length, video.rate / video.scale),
+            (size, frames, 15),
+            "{name}"
+        );
+        assert_eq!(video.frame, frame, "{name}");
+        // Its sound, PCM at 22,050 Hz, as channels, bits and the bytes a
+        // sample is, which is what the game reads it in.
+        let heard = movie.streams.get(1).map(|s| {
+            let format = sound::Format::parse(&s.format).expect("a wave format");
+            assert_eq!((s.kind, format.tag, format.rate), (*b"auds", 1, 22_050));
+            (format.channels, format.bits, s.sample_size)
+        });
+        assert_eq!(heard, sound, "{name}");
+    }
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #151's: its first movie, through AVIFile, after its first two flips.
-    ran.assert_flips(2)
-        .assert_logged("end wall: AVIFIL32.dll!AVIFileOpenA");
+    // #151's next: the logo's frames, after its first two flips.
+    ran.assert_flips(2).assert_logged(
+        "end wall: AVIFIL32.dll!AVIStreamGetFrameOpen is imported and not written yet, called \
+         from 0x0044b325",
+    );
 }
 
 #[test]

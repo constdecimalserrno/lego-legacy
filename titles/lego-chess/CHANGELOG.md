@@ -87,4 +87,10 @@ setting the mode (#147). The game's first movie clears the screen twice, its fir
 its message pump takes what waits: the window is the active application's, is active and has the
 keyboard (#196), which the pump waited for, and is painted; its window procedure acquires its
 keyboard and mouse again as it is told it is in front. The game opens `intro\lmi.avi`, and the run
-stops at #151's first wall, `AVIFIL32.dll!AVIFileOpenA`, at cursor 767,882 after two flips.
+stopped at #151's first wall, `AVIFIL32.dll!AVIFileOpenA`, at cursor 767,882 after two flips.
+
+Its first movie, the logo, opens through AVIFile (#151, core 1.2.0). The game reads its two streams'
+headers, a video of 280 frames at 320x240 and 15 a second and its sound, PCM at 22,050 Hz in 8-bit
+mono, reads the sound's format and makes its DirectSound buffer for it, and the run stops at #151's
+next wall, `AVIFIL32.dll!AVIStreamGetFrameOpen`, called from 0x0044B325 at cursor 768,839 after two
+flips.

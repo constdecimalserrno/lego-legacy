@@ -314,6 +314,9 @@ pub struct State {
     pub sound: dsound::Sounds,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
+    /// The movies a title has opened through AVIFile, by the file object it
+    /// holds (#151).
+    pub avi_files: BTreeMap<u32, avifile::File>,
     /// The CD audio device.
     pub cd: winmm::CdAudio,
     /// Which keys are down, as the guest's own device numbers them.
@@ -442,6 +445,7 @@ impl State {
             waited_millis: 0,
             yielded: false,
             players: BTreeMap::new(),
+            avi_files: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
@@ -840,6 +844,8 @@ pub enum ComState {
     MediaStream { owner: u32, video: bool },
     /// A sample that a player's video is updated into: the surface it wraps.
     StreamSample { owner: u32, surface: u32 },
+    /// One stream of an AVIFile movie: the file object, and which stream.
+    AviStream { file: u32, stream: usize },
     /// A three-dimensional device, and the surface it draws into.
     Device3D { surface: u32 },
     /// A buffer of vertices the title fills and then draws from (#57): where
@@ -1214,6 +1220,7 @@ pub fn interfaces() -> Vec<&'static crate::com::Interface> {
     all.extend_from_slice(d3drm::INTERFACES);
     all.extend_from_slice(d3d::INTERFACES);
     all.extend_from_slice(amstream::INTERFACES);
+    all.extend_from_slice(avifile::INTERFACES);
     all
 }
 
