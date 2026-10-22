@@ -5,6 +5,15 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`AVIStreamGetFrameClose` lets a frame getter go, its DIB and its hold on its stream with it,
+answering the references it has left, as Wine's `api.c` releases it, a getter holding its stream
+from its open as Wine's `getframe.c` holds it; `AVIStreamRelease` counts a stream's reference out,
+the file keeping the stream so that asking for it again hands out the same one, and one released
+with none left is a wall; and `AVIFileExit` answers as `AVIFileInit` does, nothing having been
+started (#151). All three were walls. LEGO Chess lets go of each movie this way, and its intro's
+three movies play one after another. Rock Raiders imports `AVIStreamRelease` and reaches a stream
+only through `AVIStreamOpenFromFileA`, still a wall, so no released run moves.
+
 `AVIStreamStart` and `AVIStreamLength` answer a stream's start and length, and `AVIStreamRead` reads
 a stream of fixed-size samples, a sound's, across its chunks, as Wine's `avifile.c`, read as
 documentation, reads one, its samples its format's blocks as `AVIStreamInfoA` says; all three were

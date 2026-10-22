@@ -21,14 +21,17 @@ use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
     stdcall("AVIFIL32", "AVIFileInit", 0, init),
+    stdcall("AVIFIL32", "AVIFileExit", 0, init),
     stdcall("AVIFIL32", "AVIFileOpenA", 4, open),
     stdcall("AVIFIL32", "AVIFileInfoA", 3, file_info),
     stdcall("AVIFIL32", "AVIFileGetStream", 4, get_stream),
     stdcall("AVIFIL32", "AVIStreamInfoA", 3, stream_info),
     stdcall("AVIFIL32", "AVIStreamAddRef", 1, add_ref),
+    stdcall("AVIFIL32", "AVIStreamRelease", 1, release),
     stdcall("AVIFIL32", "AVIStreamReadFormat", 4, read_format),
     stdcall("AVIFIL32", "AVIStreamGetFrameOpen", 2, get_frame_open),
     stdcall("AVIFIL32", "AVIStreamGetFrame", 2, get_frame),
+    stdcall("AVIFIL32", "AVIStreamGetFrameClose", 1, get_frame_close),
     stdcall("AVIFIL32", "AVIStreamStart", 1, stream_start),
     stdcall("AVIFIL32", "AVIStreamLength", 1, stream_length),
     stdcall("AVIFIL32", "AVIStreamRead", 7, stream_read),
@@ -132,6 +135,8 @@ pub struct Getter {
     decoded: Option<usize>,
 }
 
+/// AVIFileInit and AVIFileExit, which start and end the library's use of OLE
+/// on Windows; nothing here is started, so nothing is to end.
 fn init(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
 }
@@ -517,6 +522,27 @@ fn add_ref(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(ctx.state.com_ref(args[0], 1))
 }
 
+fn release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamRelease(stream): the references it has left. The file keeps
+    // the stream, so asking for it again hands out the same one (#151). One
+    // released with none left is a stream the title had let go of, which on
+    // Windows is gone: a wall.
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    stream_of(ctx, "AVIStreamRelease", args[0])?;
+    if ctx.state.com(args[0]).is_some_and(|o| o.refs == 0) {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamRelease: {:#x}, already let go of",
+                args[0]
+            ),
+            caller: 0,
+        });
+    }
+    Ok(ctx.state.com_ref(args[0], -1))
+}
+
 fn read_format(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // AVIStreamReadFormat(stream, position, format, size): how long the
     // format is, asked with no buffer or no room, or as much of it as fits,
@@ -788,6 +814,9 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     ctx.mem.write(dib, &header).map_err(Stop::Fault)?;
     let object = State::make_com(ctx, &GET_FRAME, ComState::None).map_err(Stop::Fault)?;
+    // The getter holds its stream, as Wine's `getframe.c` holds it, until it
+    // is let go of.
+    ctx.state.com_ref(at, 1);
     ctx.state.frame_getters.insert(
         object,
         Getter {
@@ -874,6 +903,27 @@ fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .write(dib + DIB_HEADER_BYTES, &bits)
         .map_err(Stop::Fault)?;
     Ok(dib)
+}
+
+fn get_frame_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamGetFrameClose(getter): the getter let go of, its DIB and its
+    // hold on its stream with it, answering the references it has left,
+    // none, as Wine's `api.c` releases it; 0 for none.
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    let Some(getter) = ctx.state.frame_getters.remove(&args[0]) else {
+        return Err(stranger(
+            "AVIStreamGetFrameClose",
+            "a frame getter",
+            args[0],
+        ));
+    };
+    ctx.state.heap.free(getter.dib);
+    if let Some(stream) = ctx.state.avi_files[&getter.file].streams[getter.stream] {
+        ctx.state.com_ref(stream, -1);
+    }
+    Ok(ctx.state.com_ref(args[0], -1))
 }
 
 /// A picture as the bits of a bottom-up DIB of plain pixels, its rows each

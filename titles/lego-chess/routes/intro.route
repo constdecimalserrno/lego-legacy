@@ -1,0 +1,17 @@
+#lego-legacy-route 1
+# LEGO Chess, from its boot through its intro's first two movies and into the
+# third (#151).
+#
+# Nothing on the way is pressed. The logo, intro\lmi.avi, plays its 280
+# frames through, flips 2 to 281, with its sound; its player clears the
+# screen twice after it and twice before the next, and between them main
+# waits half a second. Krisalis' logo, intro\krisalis.avi, plays its 38
+# frames, flips 286 to 323, with no sound, and the game holds it two seconds;
+# main waits a second more. The intro, intro\intro.avi, 320x200 doubled to
+# 640x400 at y 40, plays its frames from flip 328 with its sound, and the
+# route ends a dozen of them in.
+#
+# The intro is not skipped. The game's own skip is Space, and after a movie it
+# waits for Space to come up again (0x0040D220) in a loop that presents no
+# frame, while a key comes up only at a flip, a route's or a person's; skipped,
+# it would wait there for ever (#215).

@@ -596,6 +596,105 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     }
 }
 
+/// The flips of the intro a person checks by eye (#151): the logo near its
+/// end, its frame 270; Krisalis' logo's last frame, its 37th; and the
+/// intro's frame 10, letterboxed at y 40.
+const LOGO_NEAR_ITS_END: u64 = 272;
+const KRISALIS_LAST: u64 = 323;
+const INTRO_TENTH: u64 = 338;
+
+/// Enough instructions for the logo and Krisalis' logo to play through and
+/// the intro to reach its frame 12, flip 340 at 3,695,170,490, and no more:
+/// every committed route of this title is held to about four billion, since
+/// each is replayed twice by every gate.
+const INTRO_BUDGET: u64 = 3_700_000_000;
+
+/// The committed route through the intro's first two movies and into the
+/// third, replayed, keeping the flips a person checks and writing each as a
+/// picture in its run directory. Two slots, so the determinism gate's two
+/// runs can go side by side.
+fn intro(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    let kept = [LOGO_NEAR_ITS_END, KRISALIS_LAST, INTRO_TENTH];
+    let cli = Cli {
+        route: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/intro.route")),
+        screenshots: Screenshots {
+            at: kept.to_vec(),
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(slot, scratch, &CHESS, &cli, &kept, INTRO_BUDGET)
+}
+
+static INTRO: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// The intro's movies play as the game plays them (#151): each opens, plays a
+/// frame a flip with its sound, and is let go of, and the next opens. The
+/// logo's flips are 0 to 283, its 280 frames and the player's two clears
+/// either side; Krisalis' logo's are 284 to 325; the intro's start at 326,
+/// its frames at 328.
+/// The logo is heard, Krisalis' logo has no sound, and the intro is heard.
+#[test]
+fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
+    let Some(ran) = intro(&INTRO) else { return };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing in the intro stops the run\nlog:\n{}",
+        ran.log
+    );
+    ran.assert_logged("flip 340 cursor 3695170490 640x480x16");
+    // Each opens after the player's two clears before it.
+    assert_eq!(ran.flip_before("movie D:\\intro\\krisalis.avi opened"), 285);
+    assert_eq!(ran.flip_before("movie D:\\intro\\intro.avi opened"), 327);
+    for flip in [LOGO_NEAR_ITS_END, KRISALIS_LAST, INTRO_TENTH] {
+        let frame = ran.host.frame(flip).expect("the flip is kept");
+        assert!(!frame.is_uniform(), "flip {flip} is a picture");
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+    // The intro is 640x400 at y 40, black above and below.
+    let tenth = ran.host.frame(INTRO_TENTH).expect("kept");
+    let row = |y: usize| &tenth.pixels[y * 640 * 4..(y + 1) * 640 * 4];
+    assert!((0..40)
+        .chain(440..480)
+        .all(|y| row(y).chunks(4).all(|p| p[..3] == [0, 0, 0])));
+    assert!(row(240).chunks(4).any(|p| p[..3] != [0, 0, 0]));
+    // The mix, block by block.
+    assert!(
+        ran.loudness(2, 282).iter().any(|r| *r > 0.0),
+        "the logo is heard"
+    );
+    assert!(
+        ran.loudness(286, 324).iter().all(|r| *r == 0.0),
+        "Krisalis' logo has no sound"
+    );
+    assert!(
+        ran.loudness(328, 341).iter().any(|r| *r > 0.0),
+        "the intro is heard"
+    );
+}
+
+#[test]
+fn the_intro_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| intro(&AGAIN));
+        (intro(&INTRO), second.join().expect("the second replay ran"))
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    assert_eq!(
+        first.host.frame(INTRO_TENTH).map(|f| &f.pixels),
+        second.host.frame(INTRO_TENTH).map(|f| &f.pixels),
+        "including what it presented"
+    );
+}
+
 // The machine has the floppy drive its CD check needs: the check at 0x405420
 // looks at no drive without A: (#145). Core's shim tests run its calls on a
 // machine with one and find D:.

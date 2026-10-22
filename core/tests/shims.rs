@@ -3270,3 +3270,79 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
         );
     }
 }
+
+/// A movie lets go of what it handed out as LEGO Chess's close lets go of
+/// it (#151): a stream's references counted down, a frame getter holding
+/// one until it is closed once, with nothing left of it; a stream released
+/// with none left is a wall; the file keeps the stream, so that asking for
+/// it again hands out the same one; and the library's exit.
+#[test]
+fn a_movie_lets_go_of_its_streams_and_its_frame_getter() {
+    const WANTED: u32 = DATA + 0x200;
+    let mut m = machine();
+    m.tree.declare(MOVIE, movie(2));
+    m.arena
+        .write(DATA, format!("{MOVIE}\0").as_bytes())
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    let get = |m: &mut Machine| {
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+            Ok(0)
+        );
+        m.arena.read_u32(OUT).expect("in the arena")
+    };
+    let video = get(&mut m);
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamAddRef", &[video]), Ok(2));
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamRelease", &[video]),
+        Ok(1)
+    );
+    // A getter holds its stream until it is closed.
+    m.arena
+        .write(WANTED, &dib_header(4, 2, 16, 16))
+        .expect("in the arena");
+    let getter = call(
+        &mut m,
+        "AVIFIL32",
+        "AVIStreamGetFrameOpen",
+        &[video, WANTED],
+    )
+    .expect("a getter");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamRelease", &[video]),
+        Ok(1)
+    );
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamGetFrameClose", &[getter]),
+        Ok(0)
+    );
+    let wall = call(&mut m, "AVIFIL32", "AVIStreamGetFrameClose", &[getter]);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("not a frame getter")),
+        "{wall:?}"
+    );
+    let wall = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("not a frame getter")),
+        "{wall:?}"
+    );
+    // With none left, released once more, it is gone; asked for again, it
+    // is the same stream.
+    let wall = call(&mut m, "AVIFIL32", "AVIStreamRelease", &[video]);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("already let go of")),
+        "{wall:?}"
+    );
+    assert_eq!(get(&mut m), video);
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamRelease", &[0]), Ok(0));
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamGetFrameClose", &[0]),
+        Ok(0)
+    );
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIFileExit", &[]), Ok(0));
+}

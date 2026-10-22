@@ -117,6 +117,20 @@ first notices comes at flip 10. The old tree's first light, a chessboard splash,
 the movie; here the movies play, and the splash is the bumper after the intro.
 `routes/first-light.route` is committed with its determinism gate, two replays side by side to flip
 10 and a frame more, 84 million instructions. The boot test now ends by its budget inside the logo's
-first frame. A run with no route goes on: the logo plays its 280 frames to the end, and the run
-stops at #151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
+first frame. A run with no route went on: the logo played its 280 frames to the end, and the run
+stopped at #151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
 2,582,262,607 after 282 flips.
+
+Its intro plays (#151, core 1.2.0). Each movie is let go of as it ends and the next opens: the logo,
+flips 0 to 283, its 280 frames between the player's two clears either side; Krisalis' logo, flips
+284 to 325, its 38 frames with no sound, held two seconds after; and the intro, 320x200 doubled to
+640x400 at y 40, its 499 frames with their sound, flips 328 to 826. `routes/intro.route` plays the
+first two through and the intro's first dozen frames, 3.7 billion instructions, with its determinism
+gate. It does not skip the intro: the game's skip is Space, and after a movie it waits for Space to
+come up in a loop that presents no frame (0x0040D220), while a key comes up only at a flip, a
+route's or a person's. So a person who presses Space to skip a movie at a window hangs the game
+there for now; #215 is to deliver what a person does between flips. Played on with no route, the
+intro plays to its end and the run stops in the bumper, at `IDirect3D2::CreateMaterial`, called from
+0x400027A9 at cursor 8,613,581,999 after 829 flips, #210's. The movies play in real time on the Mac
+mini: the logo's frames take 9.2 million instructions each, 15.1 frames a second at 139 million a
+second, against its 15.
