@@ -43,10 +43,17 @@ Every crate and title is versioned and tagged on its own, meticulously, so each 
 Every ticket runs the `ticket-runbook` skill (the maintainer's rule, 2026-10-21): a `task/<NN-slug>` branch named for its GitHub issue, and a pull request. The maintainer signs each pull request off and merges it, unless they have pre-approved an effort's pull requests, as they did LEGO Chess's on 2026-10-21. Then the lead merges each one by fast-forward once its gate and three reviews pass. These are its settings:
 
 - **Service:** the play kit. `lego-ship` builds every binary in the workspace and publishes them in `play-kit/` (git-ignored). The maintainer's MacBook pulls that before every `lego` run; game data and saves stay there.
+- **Gate (steps 4 and 6):** the maintainer's rule, 2026-10-22: "Save long CIs for version releases."
+  - A pull request runs every step of `scripts/ci.sh` except the four released titles' route replays, which are about 21 of its 22 minutes:
+    - `cargo fmt --all -- --check`;
+    - `cargo clippy --workspace --all-targets -- -D warnings`;
+    - `cargo test --workspace --release --exclude lego-rock-raiders --exclude hotwheels-stunt-track-driver --exclude lego-alpha-team --exclude lego-island`, with the discs;
+    - `cargo test -p lego-legacy-core --lib`.
+  - The full `ci.sh`, with `LEGO_LEGACY_REQUIRE_DISC=1 LEGO_LEGACY_REQUIRE_CORPUS=1`, runs for a version release. It also runs for a change meant to move a released title's runs, whose moves it measures for the blessing.
 - **Deploy (step 11):** `lego-ship`, alone, after the merge, at any time. A ship never touches a game already running, since the MacBook pulls only when a title starts.
-- **Monitor (step 12):** a headless run, from the MacBook's kit, of a committed route of each title the change touches. It must end on the same line as the gate's run of that route.
+- **Monitor (step 12):** a headless run, from the MacBook's kit, of a committed route of each title the change touches. It must end on the same line as the last full `ci.sh` run of that route, or on the line a blessed change moved it to.
 - **Freeze:** none.
-- **Shared code that needs extra care:** `core/`, which every title runs on, above all `core/src/host/` (the host behaves the same for every title) and anything that can move a released title's runs. A move in Rock Raiders', Hot Wheels', Alpha Team's or LEGO Island's runs needs the maintainer's blessing before its merge.
+- **Shared code that needs extra care:** `core/`, which every title runs on, above all `core/src/host/` (the host behaves the same for every title) and anything that can move a released title's runs. A move in Rock Raiders', Hot Wheels', Alpha Team's or LEGO Island's runs needs the maintainer's blessing before its merge. A move that only a version release's full `ci.sh` finds needs it before the tag.
 - **Outages confirmed as expected, and who confirmed them:** none yet.
 
 ## Living doc
