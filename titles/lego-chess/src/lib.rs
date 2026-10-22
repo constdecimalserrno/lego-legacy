@@ -32,14 +32,20 @@ pub const LEGO_CHESS: Title = Title {
         // whether it is NT, through `GetVersionExA`: on NT it would skip its
         // DirectX plugin and read keys with `GetAsyncKeyState`.
         windows: WINDOWS_98_SE,
-        // The roster's baseline Pentium II 450, for now. This title spins on
-        // the clock, half a second and then a second at boot and between its
-        // movies' frames, so what a declared second is worth in work decides
-        // what those waits cost; #147 measures them and settles the value.
-        // It never asks `cpuid`, and its two `rdtsc`s (0x42E1CE, 0x42E1E7) are
-        // in one helper, 0x42E1C0, that nothing calls.
-        hz: lego_legacy_core::clock::DECLARED_HZ,
-        processor: Processor::PentiumII,
+        // A Pentium 166: what this title asks for, in the "Minimum
+        // Specifications" of its own 1998 manual (IB2G-CHE3: "CPU Pentium 166
+        // MHz") and on the backs of its later boxes. It matters here as it
+        // does for Hot Wheels: this title waits by spinning on the clock,
+        // half a second and then a second at boot (0x00408ABA, 0x00408AE3)
+        // and between its movies' frames, so the declared processor decides
+        // how much work a second of waiting costs. Measured at boot (#147):
+        // the two waits are 675 million instructions at the baseline 450 MHz,
+        // nine tenths of the boot, and 249 million at 166.
+        hz: 166_000_000,
+        // And that Pentium is told about as itself, family 5. It never asks
+        // `cpuid`, and its two `rdtsc`s (0x42E1CE, 0x42E1E7) are in one
+        // helper, 0x42E1C0, that nothing calls.
+        processor: Processor::Pentium,
         // The roster's baseline, and never asked: the game imports no
         // `GlobalMemoryStatus`.
         megabytes: 128,
@@ -78,8 +84,8 @@ pub const LEGO_CHESS: Title = Title {
         why: "the roster's baseline, but for what the game itself needs: its disc's long names \
               read through Joliet, the two renderer libraries it asks for and no 1998 machine \
               had, and a floppy drive, without which its CD check looks at no drive. Of its \
-              Windows it asks only whether it is NT, and the processor waits on #147's \
-              measuring the clock waits it spends at boot",
+              Windows it asks only whether it is NT. Its processor is the Pentium 166 its own \
+              manual asks for, since it waits by spinning on the clock",
     },
     // Nothing of the game is loose on its disc. Its setup expands MAIN.Z, an
     // InstallShield 3 archive, into the install directory whole, and copies

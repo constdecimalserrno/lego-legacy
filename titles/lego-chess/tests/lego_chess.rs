@@ -245,15 +245,38 @@ fn the_plugin_walk_gets_direct3d_2() {
         .assert_logged("library missing KLIB_OpenGL_PlugIn.dll");
 }
 
+/// The game's main asks the system's language (#147), finds its disc on D:
+/// with no word to the player (#145's check, 0x004087AF), is told no screen
+/// saver is enabled, and reads its three archives from the disc it found.
+/// Its video setup's own auto-select then picks the DirectX plugin's
+/// Direct3D 2 device on this machine with a 3D card, takes the screen and
+/// makes the device.
+#[test]
+fn the_game_s_main_finds_its_disc_and_picks_direct3d_2() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged("call KERNEL32.dll!GetSystemDefaultLangID() from 0x004086e6")
+        .assert_logged("call USER32.dll!SystemParametersInfoA(0x10, 0x0, ")
+        .assert_logged("file opened D:\\pirates.res")
+        .assert_logged("file opened D:\\tutorial.res")
+        .assert_logged("file opened D:\\western.res")
+        .assert_logged("call IDirectDraw::SetDisplayMode(0x280, 0x1e0, 0x10)")
+        .assert_logged("call IDirect3D2::CreateDevice(");
+    assert!(
+        !ran.log.contains("MessageBoxA"),
+        "the disc is found with no word to the player\nlog:\n{}",
+        ran.log
+    );
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #147's: the game's main asks the system's language.
-    ran.assert_logged("end wall: KERNEL32.dll!GetSystemDefaultLangID")
-        .assert_logged("called from 0x004086e6");
+    // #148's: its Direct3D 2 device's texture formats.
+    ran.assert_logged("end wall: IDirect3DDevice2::EnumTextureFormats");
 }
 
 #[test]

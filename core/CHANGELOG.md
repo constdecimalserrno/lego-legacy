@@ -5,6 +5,15 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`GetSystemDefaultLangID` answers the declared locale, US English, as `GetUserDefaultLangID` does
+(#147). `SystemParametersInfoA` answers two more actions: `SPI_GETSCREENSAVEACTIVE`, no, since the
+declared machine has no screen saver, and fails with nowhere to say so; and
+`SPI_SETSCREENSAVERRUNNING`, kept as Windows 9x keeps it, each setting handing back the one it
+replaced. `timeGetSystemTime` hands `timeGetTime`'s milliseconds back in an `MMTIME` that says
+`TIME_MS`; one smaller than twelve bytes, or none, is left alone and still answered no error, as
+Wine answers it. LEGO Chess calls all of them; no released title calls any, so no released run
+moves.
+
 DirectDraw's `IDirectDraw2` face, the one a DirectX 5 program holds and here the object's
 `IDirectDraw4` face, hands out `IDirect3D2`, as any face of a COM object answers for any other and as
 Wine's ddraw hands Direct3D 2 out from every DirectDraw face, where it refused it (#148). LEGO Chess's

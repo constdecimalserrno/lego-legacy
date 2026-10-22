@@ -1137,14 +1137,41 @@ fn system_metrics(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 ///
 /// Only what a title has been seen to ask is answered; any other action is a
 /// wall that names it, rather than a success the title would believe.
-fn system_parameters(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+fn system_parameters(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // SystemParametersInfoA(action, uiParam, pvParam, fWinIni).
+    const SPI_GETSCREENSAVEACTIVE: u32 = 0x0010;
     const SPI_SETMOUSETRAILS: u32 = 0x005d;
+    const SPI_SETSCREENSAVERRUNNING: u32 = 0x0061;
     match (args[0], args[1]) {
         // Mouse trails off, which Windows spells as a trail of 0 or of 1. This
         // machine draws no trail, so there is nothing to turn off. LEGO Island
         // turns them off before it makes its window (#114).
         (SPI_SETMOUSETRAILS, 0 | 1) => Ok(1),
+        // Whether screen saving is enabled, as a BOOL written where pvParam
+        // points: the declared machine has no screen saver, so it is not.
+        // LEGO Chess asks so it can turn one off for as long as it runs,
+        // and, told there is none, never does (0x004087F5, #147).
+        // Nowhere to write it is a failure.
+        (SPI_GETSCREENSAVEACTIVE, _) if args[2] == 0 => Ok(0),
+        (SPI_GETSCREENSAVEACTIVE, _) => {
+            ctx.mem.write_u32(args[2], 0).map_err(Stop::Fault)?;
+            Ok(1)
+        }
+        // That a screen saver is running, or no longer is, which Windows 9x
+        // keeps, handing back through pvParam the state it replaces. It is
+        // how a program of the time switched off Ctrl+Alt+Del and Alt+Tab,
+        // which this machine does not have, so the state is all there is.
+        // LEGO Chess sets it as it takes the screen (0x0044C455) and clears it
+        // as it lets go (0x0044BD27, #147).
+        (SPI_SETSCREENSAVERRUNNING, running) => {
+            let was = std::mem::replace(&mut ctx.state.screen_saver_running, running != 0);
+            if args[2] != 0 {
+                ctx.mem
+                    .write_u32(args[2], u32::from(was))
+                    .map_err(Stop::Fault)?;
+            }
+            Ok(1)
+        }
         (action, param) => Err(Stop::NotWritten {
             what: format!(
                 "USER32.dll!SystemParametersInfoA: action {action:#06x}, uiParam {param}"

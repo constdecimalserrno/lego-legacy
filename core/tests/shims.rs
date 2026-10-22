@@ -388,12 +388,12 @@ fn mouse_trails_go_off_and_nothing_else_is_answered() {
         &[SPI_SETMOUSETRAILS, 3, 0, 0]
     )
     .is_err());
-    // SPI_GETSCREENSAVEACTIVE, which no title has asked.
+    // SPI_GETDESKWALLPAPER, which no title has asked.
     assert!(call(
         &mut m,
         "USER32",
         "SystemParametersInfoA",
-        &[0x0010, 0, OUT, 0]
+        &[0x0073, 0, OUT, 0]
     )
     .is_err());
 }
@@ -1932,4 +1932,85 @@ fn a_midi_stream_on_a_machine_with_no_port_is_refused() {
         0x5a5a_5a5a,
         "no stream"
     );
+}
+
+/// The system's language is the declared machine's one locale, US English
+/// (#147).
+#[test]
+fn the_system_language_is_the_declared_locale_s() {
+    let mut m = machine();
+    assert_eq!(
+        call(&mut m, "KERNEL32", "GetSystemDefaultLangID", &[]),
+        call(&mut m, "KERNEL32", "GetUserDefaultLangID", &[])
+    );
+    assert_eq!(
+        call(&mut m, "KERNEL32", "GetSystemDefaultLangID", &[]),
+        Ok(0x0409)
+    );
+}
+
+/// The declared machine has no screen saver, so screen saving is not enabled;
+/// and the screen saver a title says is running is kept, each setting handing
+/// back the one it replaced (#147).
+#[test]
+fn no_screen_saver_is_enabled_and_one_said_to_run_is_kept() {
+    const SPI_GETSCREENSAVEACTIVE: u32 = 0x0010;
+    const SPI_SETSCREENSAVERRUNNING: u32 = 0x0061;
+    let mut m = machine();
+    m.arena.write_u32(OUT, 7).expect("in the arena");
+    let spi = |m: &mut Machine, action, param| {
+        call(
+            m,
+            "USER32",
+            "SystemParametersInfoA",
+            &[action, param, OUT, 0],
+        )
+    };
+    assert_eq!(spi(&mut m, SPI_GETSCREENSAVEACTIVE, 0), Ok(1));
+    assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), 0);
+    assert_eq!(
+        call(
+            &mut m,
+            "USER32",
+            "SystemParametersInfoA",
+            &[SPI_GETSCREENSAVEACTIVE, 0, 0, 0]
+        ),
+        Ok(0),
+        "nowhere to say"
+    );
+
+    for (running, was) in [(1, 0), (1, 1), (0, 1), (0, 0)] {
+        m.arena.write_u32(OUT, 7).expect("in the arena");
+        assert_eq!(spi(&mut m, SPI_SETSCREENSAVERRUNNING, running), Ok(1));
+        assert_eq!(
+            m.arena.read_u32(OUT).expect("in the arena"),
+            was,
+            "set to {running}"
+        );
+    }
+}
+
+/// The multimedia system time is `timeGetTime`'s, in an `MMTIME` that says it
+/// holds milliseconds; one too small to hold it is a wall (#147).
+#[test]
+fn the_system_time_is_milliseconds_in_an_mmtime() {
+    const TIME_MS: u32 = 0x0001;
+    let mut m = machine();
+    for offset in [0, 4, 8] {
+        m.arena
+            .write_u32(OUT + offset, 0xdead_beef)
+            .expect("in the arena");
+    }
+    assert_eq!(
+        call(&mut m, "WINMM", "timeGetSystemTime", &[OUT, 12]),
+        Ok(0)
+    );
+    let now = call(&mut m, "WINMM", "timeGetTime", &[]).expect("answered");
+    let read = |o| m.arena.read_u32(OUT + o).expect("in the arena");
+    assert_eq!((read(0), read(4)), (TIME_MS, now));
+    // Too small, or none: left alone, and still no error.
+    m.arena.write_u32(OUT, 0xdead_beef).expect("in the arena");
+    assert_eq!(call(&mut m, "WINMM", "timeGetSystemTime", &[OUT, 8]), Ok(0));
+    assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), 0xdead_beef);
+    assert_eq!(call(&mut m, "WINMM", "timeGetSystemTime", &[0, 12]), Ok(0));
 }

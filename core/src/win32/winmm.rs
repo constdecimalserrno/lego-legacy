@@ -8,6 +8,7 @@ use crate::guest::GuestMem;
 
 pub const SHIMS: &[Shim] = &[
     stdcall("WINMM", "timeGetTime", 0, time_get_time),
+    stdcall("WINMM", "timeGetSystemTime", 2, time_get_system_time),
     stdcall("WINMM", "mixerGetNumDevs", 0, mixer_devices),
     stdcall("WINMM", "mmioOpenA", 3, mmio_open),
     stdcall("WINMM", "mmioDescend", 4, mmio_descend),
@@ -300,6 +301,26 @@ fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Milliseconds on the declared clock, wrapping as the real counter does
     // (ADR-0003).
     Ok((ctx.declared_millis() & 0xffff_ffff) as u32)
+}
+
+/// timeGetSystemTime(time, size): the same milliseconds as `timeGetTime`,
+/// handed back in an `MMTIME` as Microsoft documents it: its `wType`, then
+/// `ms`, with `wType` saying `TIME_MS`, and `TIMERR_NOERROR`. LEGO Chess
+/// reads its clock this way everywhere, its two waits at boot included
+/// (0x0040E200, #147). An `MMTIME` smaller than Win32's twelve bytes, or
+/// none, is left alone and still answered `TIMERR_NOERROR`, as Wine's
+/// `timeGetSystemTime` answers it, read as documentation of what Windows does.
+fn time_get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const TIME_MS: u32 = 0x0001;
+    const MMTIME_BYTES: u32 = 12;
+    let (time, size) = (args[0], args[1]);
+    if time == 0 || size < MMTIME_BYTES {
+        return Ok(0);
+    }
+    let millis = time_get_time(ctx, &[])?;
+    ctx.mem.write_u32(time, TIME_MS).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(time + 4, millis).map_err(Stop::Fault)?;
+    Ok(0)
 }
 
 fn mixer_devices(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

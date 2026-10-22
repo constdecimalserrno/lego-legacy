@@ -54,5 +54,19 @@ was not given: an access violation at 0x400014E1 that nothing took, so the run s
 DirectDraw now hands its DirectX plugin Direct3D 2 (#148), and the plugin lists the machine's device
 from it. The walk goes on through all four plugins: the Glide plugin finds no `glide2x.dll`, the
 Software plugin lists its own driver, and the OpenGL plugin is not there. The game's main starts,
-takes its single-instance mutex, and stops at `KERNEL32.dll!GetSystemDefaultLangID`, called from
-0x004086E6 at cursor 260,309, #147's next wall.
+takes its single-instance mutex, and stopped at `KERNEL32.dll!GetSystemDefaultLangID`, called from
+0x004086E6 at cursor 260,309.
+
+Its main goes on (#147): it is told the system's language is US English, finds its disc on D: with
+no word to the player, which is #145's check passing at 0x004087AF, is told no screen saver is
+enabled, so turns none off, and reads its three `.RES` archives from `D:\`. Its video setup's own
+auto-select picks the DirectX plugin's Direct3D 2 device, as on a 1998 PC with a 3D card, takes the
+screen at 640x480x16 and makes the device, and the run stops at `IDirect3DDevice2::EnumTextureFormats`,
+#148's, at cursor 374,735.
+
+The declared processor is a Pentium 166 (#147), family 5, the minimum the game's own 1998 manual
+gives ("CPU Pentium 166 MHz") and its later boxes repeat, where it was the roster's Pentium II 450.
+The game waits by spinning on the clock, half a second and then a second at boot and between its
+movies' frames, so the processor decides what a second of waiting costs. Measured on a probe that
+skipped the movies: the two boot waits are 675 million instructions at 450 MHz, nine tenths of the
+boot, and 249 million at 166, which ran the boot to its MIDI open in 4 seconds where it took 8.
