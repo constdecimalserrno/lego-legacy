@@ -185,8 +185,9 @@ for one, was never counted (reasoned, not seen at a window). #178's delegate now
 `windowShouldClose(_:)`): it counts one close and answers NO, so the window stays; it is closed when
 the run ends, by `close`, which asks no one (Apple, `close()`). `host::closed` is gone, and nothing
 reads a close from the window's visibility. Command-W and Command-Q are counted by the key as
-before: sent on as `performClose:`, Command-W would sound the alert each time the delegate kept the
-window (Apple, `performClose(_:)`). No route moves; a headless run has no window.
+before, so a key held down repeating is still one close, as Windows counts Alt-F4 by the key; sent
+on as `performClose:`, each repeat would be another close, and the second would stop the run. No
+route moves; a headless run has no window.
 
 The macOS backend sends every message that answers a rectangle through `objc_msgSend_stret` on an
 Intel Mac, so an x86_64 build no longer reads garbage or crashes the first time it asks a window,

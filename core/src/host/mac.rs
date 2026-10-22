@@ -205,7 +205,7 @@ impl Drop for Pool {
 /// (#178), the Dock's Quit, a logout or a restart, and the window's close
 /// button (#183). Its own count, not [`super::CLOSE_ASKED`], which core's
 /// tests of headless runs read, so that the delegate can be tested.
-static CLOSES: AtomicU32 = AtomicU32::new(0);
+static DELEGATE_CLOSES: AtomicU32 = AtomicU32::new(0);
 
 /// `applicationShouldTerminate:`, which AppKit asks the application's
 /// delegate before it quits (Apple, `terminate(_:)`): one close, counted as
@@ -213,7 +213,7 @@ static CLOSES: AtomicU32 = AtomicU32::new(0);
 /// the run ends when it leaves (#140). `NSTerminateLater` would have AppKit
 /// run its own loop until answered, inside `pump`, with the title stopped.
 extern "C" fn should_terminate(_delegate: Id, _cmd: Sel, _app: Id) -> u64 {
-    CLOSES.fetch_add(1, Ordering::Relaxed);
+    DELEGATE_CLOSES.fetch_add(1, Ordering::Relaxed);
     0
 }
 
@@ -223,7 +223,7 @@ extern "C" fn should_terminate(_delegate: Id, _cmd: Sel, _app: Id) -> u64 {
 /// leaves, as on Windows and X, and the run ends when it has (#140, #183).
 /// `close`, which `Drop` sends, does not ask (Apple, `close()`).
 extern "C" fn should_close(_delegate: Id, _cmd: Sel, _window: Id) -> bool {
-    CLOSES.fetch_add(1, Ordering::Relaxed);
+    DELEGATE_CLOSES.fetch_add(1, Ordering::Relaxed);
     false
 }
 
@@ -261,9 +261,7 @@ fn delegate(rt: &Runtime) -> Result<Id, HostError> {
             // The name is taken: by the class an earlier call made.
             class = rt.class("LegoLegacyDelegate");
             if class.is_null() {
-                return Err(HostError::Unsupported(
-                    "the runtime made no application delegate",
-                ));
+                return Err(HostError::Unsupported("the runtime made no delegate"));
             }
         } else {
             add_method(
@@ -800,12 +798,15 @@ impl MacWindow {
         }
     }
 
-    /// How many times the person has asked the window to close, the
-    /// application to quit ([`CLOSES`], #178, #183), or the run to end from
-    /// its terminal ([`super::listen`], #110, #140).
+    /// How many times the person has asked the window to close, by Command-W
+    /// or Command-Q or by its button ([`DELEGATE_CLOSES`], #183), the
+    /// application to quit (#178), or the run to end from its terminal
+    /// ([`super::listen`], #110, #140).
     #[must_use]
     pub fn closes(&self) -> u32 {
-        self.closes + super::CLOSE_ASKED.load(Ordering::Relaxed) + CLOSES.load(Ordering::Relaxed)
+        self.closes
+            + super::CLOSE_ASKED.load(Ordering::Relaxed)
+            + DELEGATE_CLOSES.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through the Mac's output from now on, or say why
@@ -1061,13 +1062,14 @@ impl MacWindow {
                 let ours_alone = matches!(kind, 10 | 11) && !command;
                 // Command-Q and Command-W are how a person quits or closes the
                 // window, and with no main menu nothing in AppKit answers them,
-                // so each is counted here, one close a press, as the delegate
-                // counts the button: a key held down repeating is still the
-                // one close (#140). They
-                // are read by the character the key types, not where it sits,
-                // so they hold on any keyboard layout (#100). Command-W is not
-                // sent on as `performClose:`, which sounds the alert when the
-                // delegate keeps the window (Apple, `performClose(_:)`, #183).
+                // so each is counted here, one close a press: a key held down
+                // repeating is still the one close (#140), where sent on as
+                // `performClose:` each repeat would be another, and a second
+                // close stops the run. Windows counts Alt-F4 by the key the
+                // same way, and its button by `WM_CLOSE`, as the delegate
+                // counts this one's (#183). They are read by the character the
+                // key types, not where it sits, so they hold on any keyboard
+                // layout (#100).
                 if kind == 10 && command {
                     let typed: Id =
                         self.rt.send::<MsgId>()(event, self.rt.sel("charactersIgnoringModifiers"));
@@ -1416,7 +1418,7 @@ impl Host for MacWindow {
 mod tests {
     use super::{
         delegate, direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId,
-        MsgU64, MsgVoid, Point, Rect, Runtime, Sel, CLOSES, PRESENT_BITMAP_INFO,
+        MsgU64, MsgVoid, Point, Rect, Runtime, Sel, DELEGATE_CLOSES, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
     use std::sync::atomic::Ordering;
@@ -1606,14 +1608,15 @@ mod tests {
     #[test]
     fn a_quit_or_a_close_asked_of_the_delegate_is_a_close_and_refused() {
         let rt = Runtime::open().expect("AppKit is on every Mac");
-        let before = CLOSES.load(Ordering::Relaxed);
+        let before = DELEGATE_CLOSES.load(Ordering::Relaxed);
         // The class is made by the first build and found by the second.
         for again in 0..2 {
             let delegate = delegate(&rt).expect("the runtime builds it");
             // Safety: the three methods the delegate's class was given, each
             // answering in the low bits of the return register: an
-            // `NSUInteger`, and a BOOL read through the wider return, its low
-            // byte only, as `ask` reads one; each delegate is released once.
+            // `NSUInteger`, and two BOOLs read through the wider return, the
+            // low byte only, as `ask` reads one; each delegate is released
+            // once.
             let (reply, close, secure) = unsafe {
                 let reply = rt.send::<MsgU64Id>()(
                     delegate,
@@ -1633,7 +1636,7 @@ mod tests {
             assert_eq!(close & 0xff, 0, "the window stays");
             assert_eq!(secure & 0xff, 1, "secure restorable state");
             assert_eq!(
-                CLOSES.load(Ordering::Relaxed),
+                DELEGATE_CLOSES.load(Ordering::Relaxed),
                 before + 2 * (1 + again),
                 "one close each"
             );

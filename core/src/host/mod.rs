@@ -51,8 +51,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// shutdown or restart, but only ever as the first close, never one more
 /// ([`windows_input::session_end`], #184). macOS's request to quit the
 /// application (the Dock's Quit, a logout, a restart, or any other, Activity
-/// Monitor's included) is counted beside these, each one, in the Mac
-/// backend's own count (#178).
+/// Monitor's included, #178) and the Mac window's close button (#183) are
+/// counted beside these, each one, in the Mac backend's own count.
 pub(crate) static CLOSE_ASKED: AtomicU32 = AtomicU32::new(0);
 
 /// Ask the run to end once more, and say how many times it has been asked.
