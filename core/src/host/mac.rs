@@ -201,7 +201,10 @@ extern "C" fn secure_restorable(_delegate: Id, _cmd: Sel, _app: Id) -> bool {
 /// once a process.
 ///
 /// # Errors
-/// When the runtime's functions cannot be found.
+/// When the runtime's functions cannot be found, or the class can be
+/// neither made nor found, as [`ns_cursor`] refuses what AppKit does not
+/// make. An object of a class that is there is not checked: `NSObject`'s
+/// `alloc` and `init` answer nil only with no memory left.
 fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
     // Safety: each function is called through the signature the runtime's
     // headers give it; each method's types say what its function answers,
@@ -216,6 +219,11 @@ fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
         if class.is_null() {
             // The name is taken: by the class an earlier call made.
             class = rt.class("LegoLegacyQuit");
+            if class.is_null() {
+                return Err(HostError::Unsupported(
+                    "the runtime made no application delegate",
+                ));
+            }
         } else {
             add_method(
                 class,
@@ -227,7 +235,14 @@ fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
                 class,
                 rt.sel("applicationSupportsSecureRestorableState:"),
                 secure_restorable as *const c_void,
-                c"B@:@".as_ptr(),
+                // A BOOL is a `bool` on Apple silicon and a `signed char`
+                // on Intel (`objc.h`); either comes back in the low byte.
+                if cfg!(target_arch = "x86_64") {
+                    c"c@:@"
+                } else {
+                    c"B@:@"
+                }
+                .as_ptr(),
             );
             register(class);
         }
@@ -1348,7 +1363,8 @@ mod tests {
 
     use std::ffi::{c_char, c_void};
 
-    /// `applicationShouldTerminate:`'s call shape: an `NSUInteger` back.
+    /// The delegate's methods' call shape: an `NSUInteger` back, or a BOOL in
+    /// its low byte.
     type MsgU64Id = unsafe extern "C" fn(Id, Sel, Id) -> u64;
 
     #[test]
@@ -1528,25 +1544,36 @@ mod tests {
     #[test]
     fn a_quit_asked_of_the_application_is_a_close_and_cancelled() {
         let rt = Runtime::open().expect("AppKit is on every Mac");
-        let delegate = quit_delegate(&rt).expect("the runtime builds it");
         let before = QUITS.load(Ordering::Relaxed);
-        // Safety: the method the delegate's class was given, with the
-        // signature AppKit's header declares; the delegate is released once.
-        let reply = unsafe {
-            let reply =
-                rt.send::<MsgU64Id>()(delegate, rt.sel("applicationShouldTerminate:"), rt.nil());
-            let secure: u64 = rt.send::<MsgU64Id>()(
-                delegate,
-                rt.sel("applicationSupportsSecureRestorableState:"),
-                rt.nil(),
+        // The class is made by the first build and found by the second.
+        for again in 0..2 {
+            let delegate = quit_delegate(&rt).expect("the runtime builds it");
+            // Safety: the two methods the delegate's class was given, each
+            // answering in the low bits of the return register: an
+            // `NSUInteger`, and a BOOL read through the wider return, its low
+            // byte only, as `ask` reads one; each delegate is released once.
+            let (reply, secure) = unsafe {
+                let reply = rt.send::<MsgU64Id>()(
+                    delegate,
+                    rt.sel("applicationShouldTerminate:"),
+                    rt.nil(),
+                );
+                let secure: u64 = rt.send::<MsgU64Id>()(
+                    delegate,
+                    rt.sel("applicationSupportsSecureRestorableState:"),
+                    rt.nil(),
+                );
+                rt.send::<MsgVoid>()(delegate, rt.sel("release"));
+                (reply, secure)
+            };
+            assert_eq!(reply, 0, "NSTerminateCancel");
+            assert_eq!(secure & 0xff, 1, "secure restorable state");
+            assert_eq!(
+                QUITS.load(Ordering::Relaxed),
+                before + 1 + again,
+                "one close each"
             );
-            assert_eq!(secure & 0xff, 1, "secure restorable state, a BOOL");
-            rt.send::<MsgVoid>()(delegate, rt.sel("release"));
-            reply
-        };
-        assert_eq!(reply, 0, "NSTerminateCancel");
-        assert_eq!(QUITS.load(Ordering::Relaxed), before + 1, "one close");
-        assert!(!quit_delegate(&rt).expect("and again").is_null());
+        }
     }
 
     /// What is autoreleased while a pool is open is let go when it is

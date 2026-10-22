@@ -59,8 +59,10 @@ and only the object behind it is kept until the process ends. No route moved.
 Switching to another Space on macOS frees a captured mouse, as losing the front does, and keys
 pressed there no longer reach the game (#176, core 1.2.0). No route moved.
 
-Quitting from the Dock on macOS, or logging out or restarting, closes it as its window's close
-button does, so it saves (#178, core 1.2.0), where the process ended at once. No route moved.
+On macOS, quitting from the Dock closes it as the window's button does, so it saves (#178, core
+1.2.0), where the process ended at once. A logout or restart closes it too, and is interrupted, to
+be asked again once it has left; it saves then unless something else closes it first, such as its
+terminal hanging up as the logout quits it. No route moved.
 
 A long play on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands
 back for a while is let go every frame. No route moved.

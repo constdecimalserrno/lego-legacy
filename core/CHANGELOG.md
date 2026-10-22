@@ -111,17 +111,21 @@ stays captured over them until Escape. No route moves; a headless run has no win
 The Dock's Quit, a logout and a restart reach the title on macOS as the window's close button does
 (#178): one close, delivered at the next flip as `SC_CLOSE` and recorded in the route, and the run
 ends when the title leaves, a second close or the five declared seconds still stopping one that
-never does (#140). They ask the application `terminate:`, which, with no delegate, ended the
-process at once: the title was never told, the run wrote no `end` line, and LEGO Island didn't
-save. The application now has a delegate, a class made at run time through the Objective-C
-runtime's own `objc_allocateClassPair`, `class_addMethod` and `objc_registerClassPair`, with no
-crate. Its `applicationShouldTerminate:` counts the close and answers `NSTerminateCancel` (Apple,
-`terminate(_:)`), as SDL and GLFW do, read as documentation: `NSTerminateLater` would have AppKit
-run its own loop until answered, with the title stopped inside it. So a logout or a restart is
-cancelled, and the person starts it again once the title has left. It also answers
+never does (#140). So does any other request to quit the application, Activity Monitor's Quit and
+AppleScript's `quit` among them. They ask the application `terminate:`, which, with no delegate,
+ended the process at once, inside `pump`'s `nextEventMatchingMask:`: the title was never told, the
+run wrote no `end` line, and LEGO Island didn't save. The application now has a delegate, a class
+made at run time through the Objective-C runtime's own `objc_allocateClassPair`, `class_addMethod`
+and `objc_registerClassPair`, with no crate. Its `applicationShouldTerminate:` counts the close and
+answers `NSTerminateCancel` (Apple, `terminate(_:)`), as SDL and GLFW do, read as documentation:
+`NSTerminateLater` would have AppKit run its own loop until answered, with the title stopped inside
+it. So a logout or a restart is interrupted, and the person asks for it again once the title has
+left; that holds in the "close the window to end" wait too, which a quit ends. A logout also asks
+the run's terminal to quit, and a terminal that hangs up the run without asking is a second close,
+which stops the run before LEGO Island has saved. It also answers
 `applicationSupportsSecureRestorableState:` yes, which spares the terminal AppKit's warning about
-an application delegate without it. A quit in the "close the window to end" wait ends it. No route
-moves; a headless run has no window.
+an application delegate without it. No route moves; a headless run has no window. Windows and X
+are unchanged: a logout there still ends a title untold (#184).
 
 The macOS backend drains an autorelease pool every pump, so a long play no longer grows the
 process's memory (#180). AppKit opens a pool for each turn of its own event loop, and this backend
