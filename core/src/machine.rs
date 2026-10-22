@@ -1836,18 +1836,19 @@ impl Machine {
             self.pointer_shown = shown;
             host.show_pointer(shown);
             // Which pointer a person is looking at, and so which of the two
-            // ways of moving one is in force: where the title draws its own,
-            // the host freezes the person's and steers by how far the mouse
-            // went; where it does not, the pointer is the person's and its
-            // position is its own. A run that feels wrong under the hand is
-            // first of all a question of which of those it was in (#40, #64).
+            // ways of moving one is in force once the mouse is captured
+            // (#141): where the title draws its own, the host freezes the
+            // person's and steers by how far the mouse went; where it does
+            // not, the pointer is the person's and its position is its own. A
+            // run that feels wrong under the hand is first of all a question
+            // of which of those it was in (#40, #64).
             log.line(&format!(
                 "pointer flip {} {}",
                 self.flips,
                 if shown {
                     "the person's own"
                 } else {
-                    "the title draws it, so the host steers by the mouse"
+                    "the title draws it, so a captured mouse is steered"
                 }
             ));
         }

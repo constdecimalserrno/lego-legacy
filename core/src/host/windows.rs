@@ -17,7 +17,7 @@
 //! per pixel.
 
 use super::pace::Pace;
-use super::pointer::{moved, Capture, Moved, Steer};
+use super::pointer::{moved, Capture, Mouse, Moved, Steer};
 use super::stretch::Stretch;
 use super::windows_input::{self as input, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
@@ -398,9 +398,6 @@ pub struct WinWindow {
     /// How many times the person pressed Alt-F4. The close button and the
     /// console count theirs in [`CLOSE_ASKED`] (#140).
     closes: u32,
-    /// Whether the title draws its own pointer, and so wants the host's out
-    /// of the way while the mouse is its own.
-    pointer_hidden: bool,
     /// Whether the person's own pointer is over this window's picture. Asked
     /// of Windows every pump while the pointer is the person's, and never
     /// while it is taken: a taken pointer is frozen, so it is nowhere and
@@ -524,7 +521,6 @@ impl WinWindow {
             held: Vec::new(),
             audio: None,
             closes: 0,
-            pointer_hidden: false,
             pointer_over_us: false,
             pointer_taken: false,
             frozen: Rect::default(),
@@ -625,26 +621,23 @@ impl WinWindow {
     ///
     /// A title that draws its own pointer wants the host's out of the way, but
     /// only while the mouse is its own, which is from a click on the picture
-    /// until Escape or the window leaving the front, as `WM_ACTIVATEAPP`
-    /// tells a window it has ([`Capture`], #141). Anywhere else the pointer is
-    /// the person's and they are using it, and taking it from them there is
-    /// taking their machine. Taken, it is hidden once (`ShowCursor` counts, as
-    /// AppKit does) and frozen where it is, by clipping it to the one pixel
-    /// under it: the mouse then moves the guest's pointer by how far it went
-    /// (#64, #40), read as raw input. A title that shows the host's pointer
-    /// has it clipped to the picture instead.
+    /// until Escape or the window leaving the front, as `GetForegroundWindow`
+    /// says at the end of every pump ([`Capture`], #141). Anywhere else the
+    /// pointer is the person's and they are using it, and taking it from them
+    /// there is taking their machine. Steered, it is hidden once (`ShowCursor`
+    /// counts, as AppKit does) and frozen where it is, by clipping it to the
+    /// one pixel under it: the mouse then moves the guest's pointer by how
+    /// far it went (#64, #40), read as raw input. Kept, for a title that
+    /// shows the host's pointer, it is clipped to the picture instead.
     fn draw_pointer_where_it_belongs(&mut self) {
-        // Safety: user32's own, which takes nothing.
-        let active = unsafe { (self.user.foreground_window)() } == self.window;
-        self.pending.extend(self.capture.front(active));
-        self.title_says();
+        self.caption_says();
         if !self.pointer_taken {
             self.pointer_over_us = self.over_the_picture();
         }
         // The title's shape while the mouse is captured, which is only while
         // the window is in front, and the arrow while it is not (#139, #141).
-        // The class's cursor is what Windows draws
-        // over the client area as the pointer moves, and only there.
+        // The class's cursor is what Windows draws over the client area as
+        // the pointer moves, and only there.
         let want = if self.capture.captured() && !self.shape.is_null() {
             self.shape
         } else {
@@ -660,7 +653,7 @@ impl WinWindow {
                 }
             }
         }
-        let take = self.capture.captured() && self.pointer_hidden;
+        let take = self.capture.mouse() == Mouse::Steered;
         if take != self.pointer_taken {
             self.pointer_taken = take;
             // Safety: user32's own, with a point to write into.
@@ -683,10 +676,10 @@ impl WinWindow {
         // than once, and let go of once. A run that clips the pointer arms
         // the way back, because the pointer belongs to the person and not to
         // the run (#45).
-        let clip = if take {
-            Some(self.frozen)
-        } else {
-            self.capture.captured().then(|| self.picture_on_screen())
+        let clip = match self.capture.mouse() {
+            Mouse::Steered => Some(self.frozen),
+            Mouse::Kept => Some(self.picture_on_screen()),
+            Mouse::Free => None,
         };
         // Safety: a rectangle of ours, or none, for the call's duration.
         unsafe {
@@ -718,15 +711,15 @@ impl WinWindow {
         }
     }
 
-    /// Say in the window's title whose the mouse is, once that has changed
+    /// Say in the window's caption whose the mouse is, once that has changed
     /// (#141).
-    fn title_says(&mut self) {
-        let Some(title) = self.capture.title(&self.name) else {
+    fn caption_says(&mut self) {
+        let Some(caption) = self.capture.caption(&self.name) else {
             return;
         };
-        let title = wide(&title);
+        let caption = wide(&caption);
         // Safety: our own window, and a string that outlives the call.
-        unsafe { (self.user.set_window_text)(self.window, title.as_ptr()) };
+        unsafe { (self.user.set_window_text)(self.window, caption.as_ptr()) };
     }
 
     /// A title's pointer shape as a Windows cursor, or null when Windows will
@@ -757,12 +750,13 @@ impl WinWindow {
     }
 
     /// The person's own pointer moved over the window, to here in the client
-    /// area: the place to hand the guest, unless the title draws its own,
-    /// in which case where the person's pointer is says nothing (#40, #86),
-    /// or the mouse is the person's (#141).
+    /// area: the place to hand the guest while the mouse is kept on the
+    /// picture, and only then: where the person's pointer is says nothing
+    /// while the title draws its own (#40, #86), nor while the mouse is the
+    /// person's (#141).
     fn placed(&mut self, x: i32, y: i32) {
         let (w, h) = self.client_size();
-        if !self.capture.captured() || self.pointer_hidden || x < 0 || y < 0 || x >= w || y >= h {
+        if self.capture.mouse() != Mouse::Kept || x < 0 || y < 0 || x >= w || y >= h {
             return;
         }
         let at = input::guest_point((w, h), self.frame_size, x, y);
@@ -896,7 +890,8 @@ impl WinWindow {
                 if input::closes(msg.message, msg.wparam, lparam) {
                     self.closes += 1;
                 } else if let Some(Input::Key { code, down }) = input::key(msg.message, lparam) {
-                    if self.capture.key(code, down) {
+                    if let Some(let_go) = self.capture.key(code, down) {
+                        self.pending.extend(let_go);
                         self.draw_pointer_where_it_belongs();
                     } else {
                         self.pending
@@ -908,20 +903,18 @@ impl WinWindow {
             // A press on the window's own frame comes as a non-client
             // message, never as one of these: it is the person taking hold
             // of the window, not a click on the title (#49). A press with the
-            // mouse the person's captures it, and is the host's; a title that
-            // shows the host's pointer is told where it is, which no move has
-            // told it since (#141). The button is captured while it is held,
-            // as Windows captures one, so that the release is seen wherever
-            // it happens: a press the guest saw is a button it has to see let
-            // go of, and only that one.
+            // mouse the person's captures it, and is the host's, the click
+            // that brings the window to the front among them, which Windows
+            // hands on (#141); a title that shows the host's pointer is told
+            // where it is at the end of the pump, which no move has told it
+            // since. `SetCapture` holds the button to this window while it is
+            // down, so that its release is seen wherever it happens: a press
+            // the guest saw is a button it has to see let go of, and only
+            // that one.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
                 match self.capture.press(button(msg.message)) {
                     Some(down) => self.pending.push(down),
-                    None => {
-                        let (x, y) = client_xy(msg.lparam);
-                        self.placed(x, y);
-                        self.draw_pointer_where_it_belongs();
-                    }
+                    None => self.draw_pointer_where_it_belongs(),
                 }
                 // Safety: our own window.
                 unsafe { (self.user.set_capture)(self.window) };
@@ -965,6 +958,7 @@ impl WinWindow {
     /// Take everything Windows has for us, turning what a person did into
     /// guest input and noticing a close.
     pub fn pump(&mut self) {
+        let was = self.capture.mouse();
         // Safety: the standard message loop, with Windows' own types; a
         // message is written into `msg` before it is read.
         unsafe {
@@ -978,14 +972,26 @@ impl WinWindow {
         // A key let go while another window has the keyboard is never sent
         // here, so what was held is let go when this one loses it.
         // Safety: user32's own, which takes nothing.
-        if unsafe { (self.user.foreground_window)() } != self.window {
+        let active = unsafe { (self.user.foreground_window)() } == self.window;
+        if !active {
             for code in self.held.drain(..) {
                 self.pending.push(Input::Key { code, down: false });
             }
         }
         // Where the person's pointer is and which window is in front both
         // change without the title being told, so this is settled every time
-        // Windows is asked what happened.
+        // Windows is asked what happened. A title the mouse is newly kept for
+        // is told where the pointer is.
+        self.pending.extend(self.capture.front(active));
+        if self.capture.mouse() == Mouse::Kept && was != Mouse::Kept {
+            let mut at = Point::default();
+            // Safety: user32's own, with a point to write into.
+            unsafe {
+                (self.user.cursor_pos)(&mut at);
+                (self.user.screen_to_client)(self.window, &mut at);
+            }
+            self.placed(at.x, at.y);
+        }
         self.draw_pointer_where_it_belongs();
     }
 }
@@ -1050,7 +1056,7 @@ impl Host for WinWindow {
     }
 
     fn show_pointer(&mut self, show: bool) {
-        self.pointer_hidden = !show;
+        self.capture.pointer_shown(show);
         self.draw_pointer_where_it_belongs();
     }
 

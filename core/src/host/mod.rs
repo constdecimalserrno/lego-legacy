@@ -247,8 +247,8 @@ pub trait Host {
     /// draws its own wants one pointer on the screen, not two. So while the
     /// mouse is captured ([`pointer::Capture`], #141) the person's pointer is
     /// hidden and frozen and the title's steered by how far the mouse goes;
-    /// for a title that shows the host's, it is kept on the picture. A host
-    /// with no window has nothing to do here.
+    /// for a title that shows the host's, it is kept on the picture
+    /// ([`pointer::Mouse`]). A host with no window has nothing to do here.
     fn show_pointer(&mut self, _show: bool) {}
 
     /// The run is over: the mouse is the person's again, and no click
@@ -261,16 +261,19 @@ pub trait Host {
     /// What `SetCursorPos` does. A title that steers by how far the mouse
     /// moved puts the pointer back where it measures from after every frame,
     /// so the pointer the host hands the guest starts again from there and
-    /// the mouse's next move is measured from it (#59, #64). The person's own
-    /// pointer is never moved. A host with no pointer has nothing to do.
+    /// the mouse's next move is measured from it (#59, #64). The title is told
+    /// of that place only while the mouse is captured ([`pointer::Capture`],
+    /// #141). The person's own pointer is never moved. A host with no pointer
+    /// has nothing to do.
     fn put_pointer(&mut self, _x: i32, _y: i32) {}
 
     /// The shape the title set its pointer to, or `None` for the host's own
     /// arrow, which is what Windows' own is drawn as.
     ///
-    /// Drawn only over the picture, and only while the window is in front:
-    /// anywhere else the pointer is the person's, with whatever shape the
-    /// desktop gives it (#111). A host with no pointer has nothing to do.
+    /// Drawn only over the picture, and only while the mouse is captured,
+    /// which is only while the window is in front ([`pointer::Capture`],
+    /// #141): anywhere else the pointer is the person's, with whatever shape
+    /// the desktop gives it (#111). A host with no pointer has nothing to do.
     fn pointer_shape(&mut self, _shape: Option<&Cursor>) {}
 
     /// How many times the person has asked to end the run from outside it,

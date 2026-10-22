@@ -24,7 +24,7 @@
 
 use super::linux_audio::LinuxAudio;
 use super::pace::Pace;
-use super::pointer::{moved, Capture, Moved, Steer};
+use super::pointer::{moved, Capture, Mouse, Moved, Steer};
 use super::stretch::Stretch;
 use super::x11::{self, Held};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
@@ -478,9 +478,6 @@ pub struct LinuxWindow {
     /// Whether Control-Q is down, so that the key repeating is still the one
     /// close: with detectable auto-repeat, a repeat is a press alone.
     quitting: bool,
-    /// Whether the title draws its own pointer, and so wants the host's out
-    /// of the way while the mouse is its own.
-    pointer_hidden: bool,
     /// Whether this window has the keyboard.
     focused: bool,
     /// Whose the mouse is ([`Capture`], #141), and whether the pointer is
@@ -620,7 +617,6 @@ impl LinuxWindow {
                 audio: None,
                 closes: 0,
                 quitting: false,
-                pointer_hidden: false,
                 focused: false,
                 capture: Capture::default(),
                 grabbed: false,
@@ -749,6 +745,7 @@ impl LinuxWindow {
     /// Take everything the X server has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
+        let was = self.capture.mouse();
         // Safety: the display is open, and each event is read as the type
         // its own `kind` says it is.
         unsafe {
@@ -758,10 +755,16 @@ impl LinuxWindow {
                 self.event(&mut event);
             }
         }
-        // Whether the person's pointer is over the window and whether the
-        // window has the keyboard both change without the title being told,
-        // so this is settled every time the server is asked what happened.
+        // Whether the window has the keyboard changes without the title being
+        // told, so whose the mouse is is settled every time the server is
+        // asked what happened. A title the mouse is newly kept for is told
+        // where the pointer is.
+        self.pending.extend(self.capture.front(self.focused));
         self.take_pointer_where_it_belongs();
+        if self.capture.mouse() == Mouse::Kept && was != Mouse::Kept {
+            let (x, y) = self.seen_at;
+            self.moved(x, y);
+        }
         // A taken pointer that has strayed from the middle is moved back
         // there, once every event already sent has been measured.
         if let Some((x, y)) = self.taken.as_mut().and_then(|h| h.stray(self.window_size)) {
@@ -803,7 +806,8 @@ impl LinuxWindow {
                     let Some(code) = x11::direct_input_key(keycode) else {
                         return;
                     };
-                    if self.capture.key(code, down) {
+                    if let Some(let_go) = self.capture.key(code, down) {
+                        self.pending.extend(let_go);
                         self.take_pointer_where_it_belongs();
                     } else if let Some(input) = super::key_change(&mut self.keys, code, down) {
                         self.pending.push(input);
@@ -828,7 +832,7 @@ impl LinuxWindow {
                     } else if let Some(down) = self.capture.press(button) {
                         self.pending.push(down);
                     } else {
-                        self.moved(event.button.x, event.button.y);
+                        self.seen_at = (event.button.x, event.button.y);
                         self.take_pointer_where_it_belongs();
                     }
                 }
@@ -892,7 +896,7 @@ impl LinuxWindow {
             // is where the person's pointer is.
             Moved::Placed => {
                 self.seen_at = (x, y);
-                if self.capture.captured() && !self.pointer_hidden {
+                if self.capture.mouse() == Mouse::Kept {
                     let at = x11::guest_point(self.window_size, self.frame_size, x, y);
                     self.steer.placed(at);
                     self.pending.push(Input::Move { x: at.0, y: at.1 });
@@ -963,12 +967,10 @@ impl LinuxWindow {
     /// with its connection: there is nothing to restore from a signal, as
     /// there is on the Mac (#45).
     fn take_pointer_where_it_belongs(&mut self) {
-        self.pending.extend(self.capture.front(self.focused));
-        self.title_says();
+        self.caption_says();
         // The title's shape while the mouse is captured, which is only while
         // this window has the keyboard, and the desktop's pointer while it is
-        // not (#139, #141). X draws a window's
-        // cursor only over that window.
+        // not (#139, #141). X draws a window's cursor only over that window.
         let shape = if self.capture.captured() {
             self.shape
         } else {
@@ -982,7 +984,7 @@ impl LinuxWindow {
                 (self.x.flush)(self.display);
             }
         }
-        let steered = self.capture.captured() && self.pointer_hidden;
+        let steered = self.capture.mouse() == Mouse::Steered;
         if self.capture.captured() == self.grabbed && steered == self.taken.is_some() {
             return;
         }
@@ -1020,17 +1022,17 @@ impl LinuxWindow {
         }
     }
 
-    /// Say in the window's title whose the mouse is, once that has changed
+    /// Say in the window's caption whose the mouse is, once that has changed
     /// (#141). `XStoreName` takes Latin-1, which has no dash this long.
-    fn title_says(&mut self) {
-        let Some(title) = self.capture.title(&self.name) else {
+    fn caption_says(&mut self) {
+        let Some(caption) = self.capture.caption(&self.name) else {
             return;
         };
-        let title = CString::new(title.replace('—', "-")).unwrap_or_default();
+        let caption = CString::new(caption.replace('—', "-")).unwrap_or_default();
         // Safety: our own window, and a NUL-terminated name that outlives
         // the call.
         unsafe {
-            (self.x.store_name)(self.display, self.window, title.as_ptr());
+            (self.x.store_name)(self.display, self.window, caption.as_ptr());
             (self.x.flush)(self.display);
         }
     }
@@ -1081,7 +1083,7 @@ impl Host for LinuxWindow {
     }
 
     fn show_pointer(&mut self, show: bool) {
-        self.pointer_hidden = !show;
+        self.capture.pointer_shown(show);
         self.take_pointer_where_it_belongs();
     }
 

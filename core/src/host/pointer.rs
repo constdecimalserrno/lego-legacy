@@ -208,30 +208,56 @@ pub fn moved(taken: bool, ours: bool) -> Moved {
 /// DirectInput's number for Escape, the key that frees a captured mouse.
 const ESCAPE: u32 = 0x01;
 
+/// How many pumps a click on a window not in front waits for it to come to
+/// the front, and so capture the mouse: the one it came in and the next.
+/// ponytail: two pumps cover AppKit activating the application as it hands on
+/// the click and an X window manager's `FocusIn` coming after it; a window
+/// slower than that to come to the front takes a second click.
+const WAIT: u8 = 2;
+
+/// What the host does with the mouse now (#141), by whether it is captured
+/// and how the title reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mouse {
+    /// The person's: their pointer goes wherever they take it, and the title
+    /// is told nothing of it.
+    Free,
+    /// Captured by a title that draws its own pointer: the person's is hidden
+    /// and frozen, and the title's steered by how far the mouse goes
+    /// ([`Steer`]).
+    Steered,
+    /// Captured by a title whose pointer is the host's, in the title's shape
+    /// (#139): the person's is kept on the picture ([`back_on_the_picture`]),
+    /// and the title is told where it is.
+    Kept,
+}
+
 /// Whose the mouse is, the same in every title (#141).
 ///
 /// The person's, until they click on the picture: the title sees none of it,
 /// no move and no button, and the person's pointer goes wherever they take it.
 /// That click captures the mouse, and it is the host's, not the title's: it
 /// would otherwise press whatever the title's own pointer happens to be over.
-/// From then on every move and button is the title's, until Escape frees it,
-/// which is the host's too (Hot Wheels quits on Escape), or the window stops
-/// being the one in front. It is never captured again without a click, and
-/// once the run is over not at all (#111). A press on the window's frame is
-/// not a click on the picture, and a backend never hands one here (#49).
+/// A click on a window behind others captures too, once it has come to the
+/// front ([`WAIT`]). From then on every move and button is the title's, until
+/// Escape frees it, which is the host's too (Hot Wheels quits on Escape), or
+/// the window stops being the one in front. It is never captured again
+/// without a click, and once the run is over not at all (#111). A press on
+/// the window's frame is not a click on the picture, and a backend never
+/// hands one here (#49).
 ///
-/// What captured means is the backend's, by how the title reads the mouse. A
-/// title that draws its own pointer has the person's hidden and frozen, and
-/// its own steered by how far the mouse goes ([`Steer`]); one whose pointer is
-/// the host's, in the title's shape (#139), has the person's kept on the
-/// picture.
+/// What captured means comes from how the title reads the mouse, which its
+/// `ShowCursor` count says ([`Capture::pointer_shown`], [`Mouse`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capture {
     captured: bool,
-    /// Whether the window was the one in front when last asked. A click on a
-    /// window that is not only brings it to the front, as a first click does
-    /// on macOS, and the next one captures.
+    /// Whether the window was the one in front at the end of the last pump.
     front: bool,
+    /// How many more pumps a click made while the window was not in front
+    /// still captures the mouse for, if it comes to the front ([`WAIT`]).
+    waiting: u8,
+    /// Whether the title draws its own pointer, having hidden the host's.
+    draws_own: bool,
     /// Whether the run is over.
     over: bool,
     /// The buttons the title has been told are down. A button let go reaches
@@ -244,8 +270,8 @@ pub struct Capture {
     /// title's until it is let go, repeating or not, the mouse captured in
     /// between or not.
     told_escape: bool,
-    /// What the window's title last said after the title's name.
-    shown: &'static str,
+    /// What the window's caption last said after the title's name.
+    said: &'static str,
 }
 
 impl Capture {
@@ -255,12 +281,33 @@ impl Capture {
         self.captured
     }
 
+    /// What the host does with the mouse now.
+    #[must_use]
+    pub fn mouse(&self) -> Mouse {
+        match (self.captured, self.draws_own) {
+            (false, _) => Mouse::Free,
+            (true, true) => Mouse::Steered,
+            (true, false) => Mouse::Kept,
+        }
+    }
+
+    /// The title showed the host's pointer, or hid it to draw its own
+    /// (`ShowCursor`), which changes what a captured mouse is ([`Mouse`]).
+    pub fn pointer_shown(&mut self, shown: bool) {
+        self.draws_own = !shown;
+    }
+
     /// A button pressed on the picture: what the title is told of it, if
-    /// anything. A press while the mouse is the person's captures it, with
-    /// the window in front, and is the host's.
+    /// anything. A press while the mouse is the person's captures it, at once
+    /// with the window in front or once it comes there ([`WAIT`]), and is the
+    /// host's.
     pub fn press(&mut self, button: Button) -> Option<Input> {
         if !self.captured {
-            self.captured = self.front && !self.over;
+            if self.front {
+                self.captured = !self.over;
+            } else {
+                self.waiting = WAIT;
+            }
             return None;
         }
         if !self.held.contains(&button) {
@@ -278,39 +325,52 @@ impl Capture {
         told.then_some(Input::Up(button))
     }
 
-    /// A key pressed or let go, before the title is told of it: whether it is
-    /// the host's instead. Only Escape ever is: pressed while the mouse is
-    /// captured it frees it, and it is the host's until it is let go.
-    pub fn key(&mut self, code: u32, down: bool) -> bool {
+    /// A key pressed or let go, before the title is told of it: nothing when
+    /// it is the title's, and when it is the host's instead, the buttons to
+    /// let go of in the title. Only Escape ever is: pressed while the mouse
+    /// is captured it frees it, and it is the host's until it is let go.
+    pub fn key(&mut self, code: u32, down: bool) -> Option<Vec<Input>> {
         if code != ESCAPE {
-            return false;
+            return None;
         }
         if self.escape {
             self.escape = down;
-            return true;
+            return Some(Vec::new());
         }
         if self.told_escape || !(down && self.captured) {
             self.told_escape = down;
-            return false;
+            return None;
         }
-        self.captured = false;
         self.escape = true;
-        true
+        Some(self.free())
     }
 
-    /// Whether the window is the one in front, asked whenever it may have
-    /// changed, and the buttons to let go of in the title. The mouse is freed
-    /// when it is not, and a button or an Escape held as it went, whose
-    /// release goes to whatever is in front now, is let go of here.
+    /// Whether the window is the one in front, asked once at the end of
+    /// every pump, and the buttons to let go of in the title. A click that
+    /// waited for the window to come to the front captures the mouse now
+    /// that it has. The mouse is freed when it is not in front, and a button
+    /// or an Escape held as it went, whose release goes to whatever is in
+    /// front now, is let go of here.
     #[must_use]
     pub fn front(&mut self, front: bool) -> Vec<Input> {
         self.front = front;
         if front {
+            if self.waiting > 0 {
+                self.captured = !self.over;
+            }
+            self.waiting = 0;
             return Vec::new();
         }
-        self.captured = false;
+        self.waiting = self.waiting.saturating_sub(1);
         self.escape = false;
         self.told_escape = false;
+        self.free()
+    }
+
+    /// The mouse is the person's again, and the title lets go of every
+    /// button it was told is down, whose release it may never be sent.
+    fn free(&mut self) -> Vec<Input> {
+        self.captured = false;
         self.held.drain(..).map(Input::Up).collect()
     }
 
@@ -318,10 +378,11 @@ impl Capture {
     /// longer captures it while the window waits to be closed (#111).
     pub fn end(&mut self) {
         self.captured = false;
+        self.waiting = 0;
         self.over = true;
     }
 
-    /// What the window's title says after the title's name: how to capture
+    /// What the window's caption says after the title's name: how to capture
     /// the mouse, or how to free it, or nothing once the run is over.
     fn hint(&self) -> &'static str {
         match (self.over, self.captured) {
@@ -331,21 +392,38 @@ impl Capture {
         }
     }
 
-    /// The window's title, `name` and whose the mouse is, when that has
+    /// The window's caption, `name` and whose the mouse is, when that has
     /// changed since it was last asked.
-    pub fn title(&mut self, name: &str) -> Option<String> {
+    pub fn caption(&mut self, name: &str) -> Option<String> {
         let hint = self.hint();
-        if hint == self.shown {
+        if hint == self.said {
             return None;
         }
-        self.shown = hint;
+        self.said = hint;
         Some(format!("{name}{hint}"))
     }
 }
 
+/// Where to put the person's pointer back so that it is on the picture, or
+/// nothing when it is on it ([`Mouse::Kept`]): the pointer `at` and the
+/// picture's `origin` and `size` are all in one screen's coordinates, which
+/// count up from the bottom as AppKit's do. A pointer put back is a point
+/// inside each edge, so that the picture's own events place it on the
+/// picture (#141).
+#[must_use]
+pub fn back_on_the_picture(
+    at: (f64, f64),
+    origin: (f64, f64),
+    size: (f64, f64),
+) -> Option<(f64, f64)> {
+    let x = at.0.min(origin.0 + size.0 - 1.0).max(origin.0);
+    let y = at.1.min(origin.1 + size.1 - 1.0).max(origin.1 + 1.0);
+    ((x, y) != at).then_some((x, y))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{moved, Button, Capture, Input, Moved, Steer, ESCAPE};
+    use super::{back_on_the_picture, moved, Button, Capture, Input, Mouse, Moved, Steer, ESCAPE};
 
     /// The mouse of a window in front, which no click has captured yet.
     fn in_front() -> Capture {
@@ -357,18 +435,18 @@ mod tests {
     /// The mouse is the person's until a click on the picture captures it,
     /// and that click is the host's, let go of too; from then on every
     /// button is the title's, and no key but Escape is ever the host's. The
-    /// window's title says which it is, once each time it changes (#141).
+    /// window's caption says which it is, once each time it changes (#141).
     #[test]
     fn a_click_captures_the_mouse_and_is_the_host_s() {
         let mut mouse = in_front();
         assert!(!mouse.captured());
-        assert_eq!(mouse.title("rr").as_deref(), Some("rr — click to play"));
-        assert_eq!(mouse.title("rr"), None, "said once");
+        assert_eq!(mouse.caption("rr").as_deref(), Some("rr — click to play"));
+        assert_eq!(mouse.caption("rr"), None, "said once");
         assert_eq!(mouse.release(Button::Left), None, "nothing was pressed");
         assert_eq!(mouse.press(Button::Left), None, "the click that captures");
         assert!(mouse.captured());
         assert_eq!(
-            mouse.title("rr").as_deref(),
+            mouse.caption("rr").as_deref(),
             Some("rr — Escape frees the mouse")
         );
         assert_eq!(mouse.release(Button::Left), None, "and its release");
@@ -377,9 +455,63 @@ mod tests {
         assert_eq!(mouse.release(Button::Right), Some(Input::Up(Button::Right)));
         assert_eq!(mouse.release(Button::Left), Some(Input::Up(Button::Left)));
         for (code, down) in [(0x1e, true), (0x1e, false), (0x39, true)] {
-            assert!(!mouse.key(code, down), "{code:#x} is the title's");
+            assert_eq!(mouse.key(code, down), None, "{code:#x} is the title's");
         }
         assert!(mouse.captured());
+    }
+
+    /// A click on a window behind others brings it to the front and captures
+    /// the mouse once it is there, without a second click, if it comes within
+    /// the pump the click came in or the next; never later, so the window
+    /// coming to the front some other way never captures by surprise (#141).
+    #[test]
+    fn a_click_on_a_window_behind_captures_once_it_is_in_front() {
+        let mut mouse = Capture::default();
+        assert_eq!(mouse.front(false), []);
+        assert_eq!(mouse.press(Button::Left), None, "the click is the host's");
+        assert!(!mouse.captured(), "not yet in front");
+        assert_eq!(mouse.front(false), [], "the pump it came in ends");
+        assert!(!mouse.captured());
+        assert_eq!(mouse.front(true), [], "in front by the next");
+        assert!(mouse.captured(), "and the one click captured");
+
+        let mut mouse = Capture::default();
+        mouse.press(Button::Left);
+        assert_eq!(mouse.front(true), [], "in front as its pump ends");
+        assert!(mouse.captured());
+
+        let mut mouse = Capture::default();
+        mouse.press(Button::Left);
+        assert_eq!(mouse.front(false), []);
+        assert_eq!(mouse.front(false), []);
+        assert_eq!(mouse.front(true), [], "in front two pumps later");
+        assert!(!mouse.captured(), "too late: it has stopped waiting");
+
+        let mut mouse = Capture::default();
+        mouse.press(Button::Left);
+        mouse.end();
+        assert_eq!(mouse.front(true), []);
+        assert!(!mouse.captured(), "nor once the run is over");
+    }
+
+    /// What a captured mouse is follows how the title reads it, as its
+    /// `ShowCursor` says, whenever that changes: steered while it draws its
+    /// own pointer, kept on the picture while it shows the host's, and free
+    /// whichever it is until a click (#141).
+    #[test]
+    fn a_captured_mouse_is_steered_or_kept_as_the_title_reads_it() {
+        let mut mouse = in_front();
+        assert_eq!(mouse.mouse(), Mouse::Free);
+        mouse.pointer_shown(false);
+        assert_eq!(mouse.mouse(), Mouse::Free, "hidden is not captured");
+        mouse.press(Button::Left);
+        assert_eq!(mouse.mouse(), Mouse::Steered, "it draws its own");
+        mouse.pointer_shown(true);
+        assert_eq!(mouse.mouse(), Mouse::Kept, "it shows the host's");
+        mouse.pointer_shown(false);
+        assert_eq!(mouse.mouse(), Mouse::Steered, "and back");
+        assert!(mouse.key(ESCAPE, true).is_some());
+        assert_eq!(mouse.mouse(), Mouse::Free);
     }
 
     /// Escape frees a captured mouse and is the host's, repeating and let go;
@@ -390,54 +522,59 @@ mod tests {
     fn escape_frees_the_mouse_and_the_next_escape_is_the_title_s() {
         let mut mouse = in_front();
         mouse.press(Button::Left);
-        assert!(mouse.key(ESCAPE, true), "the Escape that frees");
+        assert_eq!(
+            mouse.key(ESCAPE, true),
+            Some(vec![]),
+            "the Escape that frees"
+        );
         assert!(!mouse.captured());
-        assert_eq!(mouse.title("rr").as_deref(), Some("rr — click to play"));
-        assert!(mouse.key(ESCAPE, true), "repeating");
-        assert!(mouse.key(ESCAPE, false), "let go");
-        assert!(!mouse.key(ESCAPE, true), "the next is the title's");
+        assert_eq!(mouse.caption("rr").as_deref(), Some("rr — click to play"));
+        assert_eq!(mouse.key(ESCAPE, true), Some(vec![]), "repeating");
+        assert_eq!(mouse.key(ESCAPE, false), Some(vec![]), "let go");
+        assert_eq!(mouse.key(ESCAPE, true), None, "the next is the title's");
         mouse.press(Button::Left);
         assert!(mouse.captured());
-        assert!(!mouse.key(ESCAPE, true), "repeating, still the title's");
+        assert_eq!(
+            mouse.key(ESCAPE, true),
+            None,
+            "repeating, still the title's"
+        );
         assert!(mouse.captured(), "and it frees nothing");
-        assert!(!mouse.key(ESCAPE, false), "let go in the title");
-        assert!(mouse.key(ESCAPE, true), "a fresh one frees");
+        assert_eq!(mouse.key(ESCAPE, false), None, "let go in the title");
+        assert!(mouse.key(ESCAPE, true).is_some(), "a fresh one frees");
         assert!(!mouse.captured());
     }
 
-    /// A button the title was told is down is let go in the title, even when
-    /// the mouse was freed in between: a press it saw is one it has to see
-    /// let go of (#49).
+    /// The Escape that frees the mouse lets go, in the title, of every button
+    /// it was told is down, as losing the front does: the release may never
+    /// come here, as on X once the grab is gone. One that comes later is the
+    /// host's (#141).
     #[test]
-    fn a_button_the_title_saw_pressed_is_let_go_in_it() {
+    fn escape_lets_go_in_the_title_of_the_buttons_it_holds() {
         let mut mouse = in_front();
         mouse.press(Button::Left);
         mouse.release(Button::Left);
         assert_eq!(mouse.press(Button::Left), Some(Input::Down(Button::Left)));
-        assert!(mouse.key(ESCAPE, true));
-        assert!(!mouse.captured());
+        assert_eq!(mouse.press(Button::Right), Some(Input::Down(Button::Right)));
         assert_eq!(
-            mouse.release(Button::Left),
-            Some(Input::Up(Button::Left)),
-            "let go after the mouse was freed"
+            mouse.key(ESCAPE, true),
+            Some(vec![Input::Up(Button::Left), Input::Up(Button::Right)]),
+            "let go as the mouse is freed"
         );
+        assert!(!mouse.captured());
         assert_eq!(mouse.release(Button::Left), None, "and only once");
+        assert_eq!(mouse.release(Button::Right), None);
     }
 
-    /// A click on a window that is not in front only brings it there. Losing
-    /// the front frees the mouse and lets go of what the title held, whose
-    /// release goes elsewhere, and only a click captures it again. An Escape
-    /// held as the window went is forgotten, so the next Escape frees the
-    /// mouse again (#141).
+    /// Losing the front frees the mouse and lets go of what the title held,
+    /// whose release goes elsewhere, and only a click captures it again. An
+    /// Escape held as the window went is forgotten, so the next Escape frees
+    /// the mouse again (#141).
     #[test]
     fn losing_the_front_frees_the_mouse_until_a_click() {
-        let mut mouse = Capture::default();
-        assert_eq!(mouse.front(false), []);
-        assert_eq!(mouse.press(Button::Left), None, "a click behind");
-        assert!(!mouse.captured(), "captures nothing");
-        assert_eq!(mouse.front(true), []);
-        assert_eq!(mouse.press(Button::Left), None, "one in front");
-        assert!(mouse.captured(), "does");
+        let mut mouse = in_front();
+        assert_eq!(mouse.press(Button::Left), None);
+        assert!(mouse.captured());
         assert_eq!(mouse.front(true), [], "in front, it stays the title's");
         assert!(mouse.captured());
         assert_eq!(mouse.press(Button::Right), Some(Input::Down(Button::Right)));
@@ -449,11 +586,29 @@ mod tests {
         assert_eq!(mouse.press(Button::Right), None, "a click is");
         assert!(mouse.captured());
 
-        assert!(mouse.key(ESCAPE, true));
+        assert!(mouse.key(ESCAPE, true).is_some());
         assert_eq!(mouse.front(false), []);
         assert_eq!(mouse.front(true), []);
         mouse.press(Button::Left);
-        assert!(mouse.key(ESCAPE, true), "a fresh Escape, not a repeat");
+        assert!(
+            mouse.key(ESCAPE, true).is_some(),
+            "a fresh Escape, not a repeat"
+        );
+        assert!(!mouse.captured());
+    }
+
+    /// An Escape the title holds as the window leaves the front is forgotten
+    /// too, since the backend lets the title's keys go then: the next Escape,
+    /// with the mouse captured again, frees it (#141).
+    #[test]
+    fn losing_the_front_forgets_an_escape_the_title_holds() {
+        let mut mouse = in_front();
+        assert_eq!(mouse.key(ESCAPE, true), None, "the title's");
+        assert_eq!(mouse.front(false), []);
+        assert_eq!(mouse.front(true), []);
+        mouse.press(Button::Left);
+        assert!(mouse.captured());
+        assert!(mouse.key(ESCAPE, true).is_some(), "frees");
         assert!(!mouse.captured());
     }
 
@@ -462,18 +617,37 @@ mod tests {
     #[test]
     fn once_the_run_is_over_no_click_captures_the_mouse() {
         let mut mouse = in_front();
-        assert!(mouse.title("rr").is_some());
+        assert!(mouse.caption("rr").is_some());
         mouse.press(Button::Left);
         mouse.end();
         assert!(!mouse.captured());
         assert_eq!(mouse.press(Button::Left), None);
         assert!(!mouse.captured(), "a click no longer captures");
         assert_eq!(
-            mouse.title("rr").as_deref(),
+            mouse.caption("rr").as_deref(),
             Some("rr"),
-            "and the title says nothing of it"
+            "and the caption says nothing of it"
         );
-        assert!(!mouse.key(ESCAPE, true), "and Escape frees nothing");
+        assert_eq!(mouse.key(ESCAPE, true), None, "and Escape frees nothing");
+    }
+
+    /// A pointer kept on the picture is put back at the edge it left by, a
+    /// point inside it, and one on the picture stays where it is (#141).
+    #[test]
+    fn a_pointer_kept_on_the_picture_is_put_back_at_the_edge_it_left_by() {
+        // A picture 640 by 480 points, its bottom left corner at (100, 50) on
+        // the screen, which counts up from the bottom.
+        let back = |at| back_on_the_picture(at, (100.0, 50.0), (640.0, 480.0));
+        assert_eq!(back((300.0, 200.0)), None, "on the picture");
+        assert_eq!(back((90.0, 200.0)), Some((100.0, 200.0)), "off the left");
+        assert_eq!(back((800.0, 200.0)), Some((739.0, 200.0)), "off the right");
+        assert_eq!(
+            back((300.0, 560.0)),
+            Some((300.0, 529.0)),
+            "up on the title bar"
+        );
+        assert_eq!(back((300.0, 10.0)), Some((300.0, 51.0)), "below");
+        assert_eq!(back((0.0, 0.0)), Some((100.0, 51.0)), "a corner");
     }
 
     /// A taken pointer is frozen, so it is nowhere and cannot have left (#40,
