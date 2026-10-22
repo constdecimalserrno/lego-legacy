@@ -5,6 +5,23 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+A DirectDraw surface's `GetDC` hands out a device context of its own, where it answered success and
+wrote nothing, and `ReleaseDC` lets it go (#151): one at a time, whichever face of the surface is
+asked, a second before the first is let go of answering `DDERR_DCALREADYCREATED` and leaving what it
+was handed alone, as ddraw.h's error says and Wine's `surface.c`, read as documentation, answers; a
+surface with none out answers `DDERR_NODC`, and one handed another DC than its own is a wall. What
+draws on one is DrawDib: `DrawDibOpen` hands out the lowest handle not in use, counted from one as
+Wine counts them, `DrawDibClose` answers TRUE, or FALSE for a handle it never gave, and
+`DrawDibDraw` draws a plain bottom-up DIB of 16 or 24 bits whole onto a surface's DC, each pixel
+repeated as many times over as the destination is the DIB's size, from the bottom row up, and what
+falls off the surface left out, as Wine's `drawdib.c` reads its arguments. Each channel is widened
+by repeating its top bits and narrowed to the surface's, as Wine's DIB engine does, so a 555 DIB's
+green gets its sixth bit on a 565 surface from its own top one. A flag, a part of a DIB, a scale
+that is not whole, a codec, an indexed surface, or a top-down DIB, which Wine's DrawDibBegin refuses
+and what Windows does with is not documented, is a wall. LEGO Chess's DirectX plugin draws each
+movie frame this way. No released title imports MSVFW32. A surface's DC changes for every title: a
+released title that took one would now be handed one, a move the full gate measures.
+
 LEGO Chess's movies give up their frames (#151). `AVIStreamGetFrameOpen` makes a getter of a video
 stream's frames as a plain bottom-up DIB in the format the title asks for, 16 bits a pixel, which is
 555, for its movies, or 24 for its Advisors (#152), at the movie's own size, the header asked for

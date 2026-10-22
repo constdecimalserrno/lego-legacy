@@ -304,6 +304,11 @@ pub struct State {
     pub clipped: std::collections::BTreeSet<u32>,
     /// Each clipper's one clip rectangle, by the clipper.
     pub clip_lists: BTreeMap<u32, (i32, i32, i32, i32)>,
+    /// The device contexts surfaces have handed out and not yet had back, by
+    /// the DC, each with the surface it draws on (#151).
+    pub surface_dcs: BTreeMap<u32, u32>,
+    /// The DrawDibs a title has open, by their handles (#151).
+    pub drawdibs: std::collections::BTreeSet<u32>,
     /// The palette the screen is showing through, if any.
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
@@ -476,6 +481,8 @@ impl State {
             color_keys: BTreeMap::new(),
             clipped: std::collections::BTreeSet::new(),
             clip_lists: BTreeMap::new(),
+            surface_dcs: BTreeMap::new(),
+            drawdibs: std::collections::BTreeSet::new(),
             palette: 0,
             present: None,
             keys_down: Vec::new(),

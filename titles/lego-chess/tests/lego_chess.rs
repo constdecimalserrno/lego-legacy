@@ -326,8 +326,8 @@ fn the_window_is_told_its_size_painted_and_focused() {
 /// Its first movie, the logo, opens through AVIFile (#151): its file and
 /// its two streams, their headers, and its sound's format, which the game
 /// makes its DirectSound buffer in. Then it takes the first frame, as a
-/// 16-bit DIB, and hands it to its DirectX plugin to draw on its back
-/// buffer's DC.
+/// 16-bit DIB, and hands it to its DirectX plugin, which draws it doubled
+/// onto its back buffer's DC with DrawDib and lets the DC go.
 #[test]
 fn its_first_movie_opens_and_its_streams_are_read() {
     let Some(ran) = boot() else { return };
@@ -336,7 +336,10 @@ fn its_first_movie_opens_and_its_streams_are_read() {
         .assert_logged("call AVIFIL32.dll!AVIFileInfoA(")
         .assert_logged("call AVIFIL32.dll!AVIFileGetStream(")
         .assert_logged("call AVIFIL32.dll!AVIStreamReadFormat(")
-        .assert_logged("movie D:\\intro\\lmi.avi frames as 16-bit DIBs at ");
+        .assert_logged("movie D:\\intro\\lmi.avi frames as 16-bit DIBs at ")
+        // The whole screen, from the whole 320x240 frame.
+        .assert_logged(", 0x0, 0x0, 0x280, 0x1e0, ")
+        .assert_logged(", 0x0, 0x0, 0x0, 0x140, 0xf0, 0x0) from 0x400040ca ");
     for (call, from) in [
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b094"),
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b0db"),
@@ -344,6 +347,9 @@ fn its_first_movie_opens_and_its_streams_are_read() {
         ("call AVIFIL32.dll!AVIStreamGetFrameOpen(", "0x0044b325"),
         ("call AVIFIL32.dll!AVIStreamGetFrame(", "0x0044b345"),
         ("call IDirectDrawSurface::GetDC(", "0x40004081"),
+        ("call MSVFW32.dll!DrawDibOpen(", "0x4000408d"),
+        ("call MSVFW32.dll!DrawDibClose(", "0x400040d0"),
+        ("call IDirectDrawSurface::ReleaseDC(", "0x400040e0"),
     ] {
         assert!(
             ran.log
@@ -361,11 +367,11 @@ fn its_first_movie_opens_and_its_streams_are_read() {
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #151's next: DrawDib, which the DirectX plugin draws the logo's first
-    // frame with, after the first two flips.
+    // #150's: the logo's sound, read once its first frame is drawn, before
+    // the frame is flipped: still two flips.
     ran.assert_flips(2).assert_logged(
-        "end wall: MSVFW32.dll!DrawDibOpen is imported and not written yet, called from \
-         0x4000408d",
+        "end wall: AVIFIL32.dll!AVIStreamStart is imported and not written yet, called from \
+         0x0044b3a1",
     );
 }
 

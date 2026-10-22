@@ -2852,3 +2852,166 @@ fn the_logo_s_frames_are_bottom_up_555_dibs_decoded_in_order() {
     assert_eq!(frame(&mut m, 280), None);
     assert_eq!(frame(&mut m, -1), None);
 }
+
+/// A surface hands out one device context at a time, whichever of its faces
+/// is asked (#151): a second before the first is let go of is
+/// DDERR_DCALREADYCREATED and leaves what it was handed alone, a surface
+/// with none out answers DDERR_NODC, and another DC than its own is a wall.
+#[test]
+fn a_surface_hands_out_one_dc_at_a_time() {
+    const GET_DC: usize = 17;
+    const RELEASE_DC: usize = 26;
+    let mut m = machine();
+    let (one, two) = (surface(&mut m, PIXELS, 4, 4), surface(&mut m, TEXELS, 4, 4));
+    let read = |m: &Machine| m.arena.read_u32(OUT).expect("in the arena");
+
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", RELEASE_DC, one, &[0x10]),
+        Ok(0x8876_00cb),
+        "DDERR_NODC"
+    );
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, one, &[OUT]),
+        Ok(0)
+    );
+    let dc = read(&m);
+    m.arena.write_u32(OUT, 7).expect("in the arena");
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, one, &[OUT]),
+        Ok(0x8876_026c),
+        "DDERR_DCALREADYCREATED"
+    );
+    assert_eq!(read(&m), 7);
+    // Its DirectX 6 face is the same surface, with the same DC out.
+    let face = with_ctx(&mut m, |ctx| {
+        win32::State::face(ctx, one, &win32::ddraw::DIRECT_DRAW_SURFACE4)
+    })
+    .expect("a face");
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface4", GET_DC, face, &[OUT]),
+        Ok(0x8876_026c)
+    );
+    // Another surface's is another DC.
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, two, &[OUT]),
+        Ok(0)
+    );
+    assert_ne!(read(&m), dc);
+    let other = read(&m);
+    let stranger = com(&mut m, "IDirectDrawSurface", RELEASE_DC, one, &[other]);
+    assert!(
+        matches!(&stranger, Err(Stop::NotWritten { what, .. }) if what.contains("own DC")),
+        "{stranger:?}"
+    );
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface4", RELEASE_DC, face, &[dc]),
+        Ok(0)
+    );
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, one, &[OUT]),
+        Ok(0)
+    );
+    assert_eq!(read(&m), dc, "the DC it let go of, handed out again");
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, two, &[0]),
+        Ok(0x8007_0057)
+    );
+}
+
+/// The 4x4 sixteen-bit surface at `PIXELS`, as its 565 pixels, row by row.
+fn four_by_four(m: &Machine) -> Vec<u16> {
+    m.arena
+        .slice(PIXELS, 32)
+        .expect("in the arena")
+        .chunks(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect()
+}
+
+/// DrawDib draws a plain DIB onto a surface's DC (#151), as LEGO Chess's
+/// DirectX plugin draws each movie frame on its back buffer: whole, each
+/// pixel repeated as many times over as the destination is the DIB's size,
+/// from the bottom row up, and what falls off the surface left out. A 555
+/// pixel's channels are widened by their own top bits on the way to a 565
+/// surface, so green's sixth bit is its top one. A top-down DIB or a scale
+/// that is not whole is a wall, and a handle closed is one no more.
+#[test]
+fn drawdib_draws_a_dib_whole_onto_a_surface_s_dc() {
+    const DIB: u32 = DATA + 0x400;
+    let mut m = machine();
+    let surface = surface(&mut m, PIXELS, 4, 4);
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", 17, surface, &[OUT]),
+        Ok(0)
+    );
+    let dc = m.arena.read_u32(OUT).expect("in the arena");
+    let dd = call(&mut m, "MSVFW32", "DrawDibOpen", &[]).expect("a handle");
+    assert_eq!(dd, 1, "counted from one");
+    // A 2x2 DIB: on top 555's (31, 16, 0) and (0, 15, 31), below (16, 31,
+    // 16) and (1, 1, 1); its bits are the bottom row first.
+    let (a, b, c, d) = (0x7e00u16, 0x01ff, 0x43f0, 0x0421);
+    let bits: Vec<u8> = [c, d, a, b].iter().flat_map(|p| p.to_le_bytes()).collect();
+    m.arena
+        .write(DIB, &[dib_header(2, 2, 16, 8), bits].concat())
+        .expect("in the arena");
+    let draw = |m: &mut Machine, header: u32, (x, y, w, h): (i32, i32, i32, i32)| {
+        call(
+            m,
+            "MSVFW32",
+            "DrawDibDraw",
+            &[
+                dd, dc, x as u32, y as u32, w as u32, h as u32, header, 0, 0, 0, 2, 2, 0,
+            ],
+        )
+    };
+    // The same four in 565, green's sixth bit its top one.
+    let (a, b, c, d) = (0xfc20, 0x03df, 0x87f0, 0x0841);
+
+    assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(1));
+    assert_eq!(
+        four_by_four(&m),
+        [a, a, b, b, a, a, b, b, c, c, d, d, c, c, d, d]
+    );
+    m.arena.write(PIXELS, &[0; 32]).expect("in the arena");
+    assert_eq!(draw(&mut m, DIB, (1, 1, 4, 4)), Ok(1));
+    assert_eq!(
+        four_by_four(&m),
+        [0, 0, 0, 0, 0, a, a, b, 0, a, a, b, 0, c, c, d]
+    );
+
+    m.arena
+        .write_u32(DIB + 8, (-2i32) as u32)
+        .expect("in the arena");
+    let wall = draw(&mut m, DIB, (0, 0, 4, 4));
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("2x-2")),
+        "{wall:?}"
+    );
+    m.arena.write_u32(DIB + 8, 2).expect("in the arena");
+    let wall = draw(&mut m, DIB, (0, 0, 3, 3));
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("onto 3x3")),
+        "{wall:?}"
+    );
+    // A 24-bit DIB's pixel is blue, green and red, its row padded to a word.
+    m.arena
+        .write(
+            DIB + 0x100,
+            &[dib_header(1, 1, 24, 4), vec![0x10, 0x20, 0x30, 0]].concat(),
+        )
+        .expect("in the arena");
+    assert_eq!(
+        call(
+            &mut m,
+            "MSVFW32",
+            "DrawDibDraw",
+            &[dd, dc, 3, 0, 1, 1, DIB + 0x100, 0, 0, 0, 1, 1, 0]
+        ),
+        Ok(1)
+    );
+    assert_eq!(four_by_four(&m)[3], 0x3102);
+
+    assert_eq!(call(&mut m, "MSVFW32", "DrawDibClose", &[dd]), Ok(1));
+    assert_eq!(call(&mut m, "MSVFW32", "DrawDibClose", &[dd]), Ok(0));
+    assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(0));
+}

@@ -97,5 +97,10 @@ flips.
 
 It takes the logo's frames as it asks for them (#151, core 1.2.0), each a 16-bit DIB of 320x240,
 and hands the first to its DirectX plugin, which takes its back buffer's DC to draw it on. The run
-stops at #151's next wall, `MSVFW32.dll!DrawDibOpen`, called from 0x4000408D at cursor 768,882
+stopped at #151's next wall, `MSVFW32.dll!DrawDibOpen`, called from 0x4000408D at cursor 768,882
 after two flips.
+
+Its DirectX plugin draws the logo's first frame doubled onto its back buffer, 640x480 from the
+frame's 320x240, through DrawDib on the buffer's own DC, and lets the DC go (#151, core 1.2.0). The
+run stops at #150's wall, `AVIFIL32.dll!AVIStreamStart`, called from 0x0044B3A1 at cursor 768,941,
+as the game starts the logo's sound, still after two flips.

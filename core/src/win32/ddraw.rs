@@ -111,7 +111,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         method("GetCaps", 1, surface_caps),
         method("GetClipper", 1, ok),
         method("GetColorKey", 2, ok),
-        method("GetDC", 1, ok),
+        method("GetDC", 1, get_dc),
         method("GetFlipStatus", 1, ok),
         method("GetOverlayPosition", 2, ok),
         method("GetPalette", 1, ok),
@@ -120,7 +120,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         method("Initialize", 2, ok),
         method("IsLost", 0, ok),
         method("Lock", 4, lock),
-        method("ReleaseDC", 1, ok),
+        method("ReleaseDC", 1, release_dc),
         method("Restore", 0, ok),
         method("SetClipper", 1, set_clipper),
         method("SetColorKey", 2, set_color_key),
@@ -221,7 +221,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         method("GetCaps", 1, surface_caps),
         method("GetClipper", 1, ok),
         method("GetColorKey", 2, ok),
-        method("GetDC", 1, ok),
+        method("GetDC", 1, get_dc),
         method("GetFlipStatus", 1, ok),
         method("GetOverlayPosition", 2, ok),
         method("GetPalette", 1, ok),
@@ -230,7 +230,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         method("Initialize", 2, ok),
         method("IsLost", 0, ok),
         method("Lock", 4, lock),
-        method("ReleaseDC", 1, ok),
+        method("ReleaseDC", 1, release_dc),
         method("Restore", 0, ok),
         method("SetClipper", 1, set_clipper),
         method("SetColorKey", 2, set_color_key),
@@ -679,6 +679,65 @@ fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool
         )),
         _ => None,
     }
+}
+
+/// Where a surface's device contexts start, a word apart: a range no other
+/// handle here is handed out from, USER32's dialog controls having all of
+/// `0x0002_xxxx`.
+const SURFACE_DC: u32 = 0x0004_0000;
+
+/// `DDERR_INVALIDPARAMS`, `DDERR_DCALREADYCREATED` and `DDERR_NODC`.
+const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+const DDERR_DCALREADYCREATED: u32 = 0x8876_026c;
+const DDERR_NODC: u32 = 0x8876_00cb;
+
+fn get_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetDC(dc out): a device context drawing onto the surface's own pixels,
+    // one at a time, as ddraw.h's DDERR_DCALREADYCREATED says and Wine's
+    // `surface.c`, read as documentation, answers a second without touching
+    // what it was handed. What draws on one is DrawDib (#151); GDI's own
+    // drawing calls are walls.
+    if args[0] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    let surface = ctx.state.identity(this);
+    if ctx.state.surface_dcs.values().any(|s| *s == surface) {
+        return Ok(DDERR_DCALREADYCREATED);
+    }
+    let mut dc = SURFACE_DC;
+    while ctx.state.surface_dcs.contains_key(&dc) {
+        dc += 4;
+    }
+    ctx.mem.write_u32(args[0], dc).map_err(Stop::Fault)?;
+    ctx.state.surface_dcs.insert(dc, surface);
+    Ok(S_OK)
+}
+
+fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // ReleaseDC(dc): the surface's device context let go of. A surface with
+    // none out answers DDERR_NODC, as Wine's does; one handed another DC than
+    // its own is a wall, since what Windows answers for it is not documented.
+    let surface = ctx.state.identity(this);
+    let Some(&dc) = ctx
+        .state
+        .surface_dcs
+        .iter()
+        .find_map(|(dc, s)| (*s == surface).then_some(dc))
+    else {
+        return Ok(DDERR_NODC);
+    };
+    if args[0] != dc {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "{}::ReleaseDC: {:#x}, where the surface's own DC is {dc:#x}",
+                ctx.state.interface_of(this).unwrap_or("IDirectDrawSurface"),
+                args[0]
+            ),
+            caller: 0,
+        });
+    }
+    ctx.state.surface_dcs.remove(&dc);
+    Ok(S_OK)
 }
 
 /// A surface's pixel format.
