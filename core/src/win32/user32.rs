@@ -1033,7 +1033,7 @@ fn update_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let window = args[0];
     let title_s = window == WINDOW && ctx.state.window_made;
     let known = title_s
-        || window == desktop_window(ctx, &[])?
+        || window == DESKTOP
         || ctx
             .state
             .dialog
@@ -1883,10 +1883,12 @@ fn send_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(answer)
 }
 
+/// The declared machine's screen, as a window handle. Distinct from the
+/// title's own so that a guest comparing them can tell them apart.
+const DESKTOP: u32 = 0x0001_0001;
+
 fn desktop_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // The declared machine's screen, as a window handle. Distinct from the
-    // title's own so that a guest comparing them can tell them apart.
-    Ok(0x0001_0001)
+    Ok(DESKTOP)
 }
 
 #[cfg(test)]
