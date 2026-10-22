@@ -7,7 +7,7 @@
 //! that held: `LEGO_LEGACY_REQUIRE_DISC=1` turns the skip into a failure.
 
 use lego_chess::LEGO_CHESS as CHESS;
-use lego_legacy_core::cli::{Cli, Trace};
+use lego_legacy_core::cli::{Cli, Screenshots, Trace};
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::{disc, hash, testkit, Title};
@@ -15,8 +15,9 @@ use lego_legacy_core::{disc, hash, testkit, Title};
 const ROOT: &str = CHESS.install_dir;
 
 /// Enough instructions for the C runtime to start, the game to make its
-/// window and its framework to come up as far as the machine carries it:
-/// the boot stops at a wall well inside this (#147).
+/// window and its framework to come up, and its logo movie to start: the
+/// boot ends by it inside the logo's first frame (#150), waiting on the
+/// clock, which a traced run logs a line of for every read.
 const BOOT_BUDGET: u64 = 1_000_000;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
@@ -368,18 +369,44 @@ fn its_first_movie_opens_and_its_streams_are_read() {
     }
 }
 
-/// Where the boot stops: the wall the machine names next, which each ticket
-/// that answers one moves on.
+/// Its logo's sound starts with its first frame (#150): its start and length
+/// are read, eleven chunks of it, 1,470 samples each, go into the
+/// DirectSound buffer it made, and the buffer plays, looping, at full volume.
 #[test]
-fn the_boot_stops_at_the_wall_it_meets_next() {
+fn its_logo_s_sound_starts_with_its_first_frame() {
     let Some(ran) = boot() else { return };
 
-    // #150's: the logo's sound, read once its first frame is drawn, before
-    // the frame is flipped: still two flips.
-    ran.assert_flips(2).assert_logged(
-        "end wall: AVIFIL32.dll!AVIStreamStart is imported and not written yet, called from \
-         0x0044b3a1",
+    ran.assert_logged("call AVIFIL32.dll!AVIStreamStart(")
+        .assert_logged("call AVIFIL32.dll!AVIStreamLength(")
+        .assert_logged("call IDirectSoundBuffer::Play(0x0, 0x0, 0x1) on ")
+        .assert_logged("call IDirectSoundBuffer::SetVolume(0x0) on ");
+    let reads = ran
+        .log
+        .lines()
+        .filter(|l| {
+            l.starts_with("call AVIFIL32.dll!AVIStreamRead(")
+                && l.contains(", 0x5be, ")
+                && l.contains(" from 0x0044bb10 ")
+        })
+        .count();
+    assert_eq!(reads, 11, "log:\n{}", ran.log);
+}
+
+/// Where the boot stops: by its budget, inside the logo's first frame, its
+/// third flip presented and the game waiting on the clock for the next. What
+/// it meets after that is its routes'.
+#[test]
+fn the_boot_runs_to_its_budget_in_the_logo_s_first_frame() {
+    let Some(ran) = boot() else { return };
+
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "log:\n{}",
+        ran.log
     );
+    ran.assert_flips(3)
+        .assert_logged("flip 2 cursor 770297 640x480x16");
 }
 
 #[test]
@@ -396,6 +423,151 @@ fn the_boot_replays_to_the_same_machine_every_time() {
         return;
     };
     first.assert_same_machine(second);
+}
+
+/// First light (#150): the flip the game's own picture first reaches the
+/// screen at, the first sliver of a brick at the top of the LEGO Media logo
+/// movie. First is decided as every title's is: the first frame that is not
+/// one colour. Flips 0 and 1 are the movie player's two clears; the DirectX
+/// plugin fills its first four flips black whatever was drawn, so flips 2 and
+/// 3, the logo's frames 0 and 1, are black; and the logo's own frames 2 to 4,
+/// flips 4 to 6, are black in the movie. Flip 7 is its frame 5.
+const FIRST_LIGHT: u64 = 7;
+
+/// The first flip a person would notice something on: one grey brick at the
+/// top left, the logo's frame 8, kept for a person to look at.
+const FIRST_BRICK: u64 = 10;
+
+/// Enough instructions for the logo to reach the brick, flip 10 at
+/// 72,761,539, and a movie frame more.
+const FIRST_LIGHT_BUDGET: u64 = 84_000_000;
+
+/// The committed route to first light, replayed, keeping the frame before
+/// first light, first light and the brick, and writing the last two as
+/// pictures in its run directory. Two slots, so the determinism gate's two
+/// runs can go side by side.
+fn first_light(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-light.route"),
+        ),
+        screenshots: Screenshots {
+            at: vec![FIRST_LIGHT, FIRST_BRICK],
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(
+        slot,
+        scratch,
+        &CHESS,
+        &cli,
+        &[FIRST_LIGHT - 1, FIRST_LIGHT, FIRST_BRICK],
+        FIRST_LIGHT_BUDGET,
+    )
+}
+
+static LIT: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// First light, as the conversions #151 wrote make it: the logo's frame 5
+/// decoded, taken as a 555 DIB, drawn doubled onto the 565 back buffer with
+/// green's sixth bit its top one, and presented. Its 52 lit pixels are the
+/// brick's first sliver, greys of no more than #212121, black to the eye; the
+/// presented frame is the bytes predicted from FFmpeg 9.0.1's planes of the
+/// same picture (`work/150-chess-first-light/research.md` §3), and its 565
+/// screen is the old tree's default-boot first light, `28b52ec6`, byte for
+/// byte.
+#[test]
+fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
+    let Some(ran) = first_light(&LIT) else { return };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing on the way to first light stops the run\nlog:\n{}",
+        ran.log
+    );
+    ran.assert_logged("flip 7 cursor 45093881 640x480x16");
+
+    let lit = ran
+        .host
+        .frames
+        .iter()
+        .find(|f| !f.is_uniform())
+        .expect("the game puts a picture on the screen");
+    assert_eq!(
+        lit.flip, FIRST_LIGHT,
+        "first light moved: it is now flip {}",
+        lit.flip
+    );
+    assert_eq!((lit.width, lit.height), (640, 480));
+    let before = ran
+        .host
+        .frame(FIRST_LIGHT - 1)
+        .expect("the frame before it is kept");
+    assert_eq!(before.pixels[..3], [0, 0, 0], "and before it, black");
+    let shown: Vec<(usize, usize)> = lit
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p[..3] != [0, 0, 0])
+        .map(|(i, p)| {
+            assert!(
+                p[..3].iter().all(|c| *c <= 0x21),
+                "{p:?} is a grey of the sliver"
+            );
+            (i % 640, i / 640)
+        })
+        .collect();
+    assert_eq!(shown.len(), 52);
+    assert!(
+        shown
+            .iter()
+            .all(|&(x, y)| (102..=117).contains(&x) && y <= 5),
+        "the sliver is at the top: {shown:?}"
+    );
+    assert_eq!(
+        hash::sha256_hex(&lit.pixels),
+        "6f73eca7d5b907a0900f3c6f45765ecb7fc6c9edd29723dfa6a2fccada780b52"
+    );
+    // The brick a person first notices, and the pictures of both for a
+    // person to look at.
+    assert!(!ran
+        .host
+        .frame(FIRST_BRICK)
+        .expect("the brick is kept")
+        .is_uniform());
+    for flip in [FIRST_LIGHT, FIRST_BRICK] {
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+}
+
+#[test]
+fn the_first_light_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    // The second replay runs beside the first rather than after it.
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| first_light(&AGAIN));
+        (
+            first_light(&LIT),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    for flip in [FIRST_LIGHT, FIRST_BRICK] {
+        assert_eq!(
+            first.host.frame(flip).map(|f| &f.pixels),
+            second.host.frame(flip).map(|f| &f.pixels),
+            "including what it presented at flip {flip}"
+        );
+    }
 }
 
 // The machine has the floppy drive its CD check needs: the check at 0x405420

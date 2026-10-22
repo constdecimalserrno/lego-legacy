@@ -1,0 +1,12 @@
+#lego-legacy-route 1
+# LEGO Chess, from its boot to first light (#150).
+#
+# Nothing on the way is pressed: the logo movie cannot be skipped. The game
+# opens its window and takes the screen, and its movie player clears it
+# twice, flips 0 and 1. It opens intro\lmi.avi, the LEGO Media brick fly-in,
+# and draws its frames doubled to 640x480, one a flip; the DirectX plugin
+# fills its first four flips black whatever was drawn, so flips 2 and 3, the
+# logo's frames 0 and 1, are black, and the logo's own frames 2 to 4, flips 4
+# to 6, are black in the movie. At flip 7 the logo's frame 5 brings in the
+# first sliver of a brick at the top of the screen: the first frame that is
+# not one colour.

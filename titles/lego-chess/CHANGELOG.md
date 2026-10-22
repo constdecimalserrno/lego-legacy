@@ -102,5 +102,21 @@ after two flips.
 
 Its DirectX plugin draws the logo's first frame doubled onto its back buffer, 640x480 from the
 frame's 320x240, through DrawDib on the buffer's own DC, and lets the DC go (#151, core 1.2.0). The
-run stops at #150's wall, `AVIFIL32.dll!AVIStreamStart`, called from 0x0044B3A1 at cursor 768,941,
+run stopped at #150's wall, `AVIFIL32.dll!AVIStreamStart`, called from 0x0044B3A1 at cursor 768,941,
 as the game starts the logo's sound, still after two flips.
+
+First light (#150, core 1.2.0). The logo's sound starts with its first frame: the game reads its
+start and length, puts eleven chunks of it, 1,470 samples each, into its DirectSound buffer and
+plays the buffer looping, then flips. The logo plays a frame a flip, and the first frame that is not
+one colour is flip 7, at cursor 45,093,881: the logo's frame 5, the first sliver of a brick at the
+top of the screen, 52 greys no brighter than #212121 in x 102 to 117 and y 0 to 5, black to the eye.
+It is the bytes predicted from FFmpeg's planes of the same picture, and the old tree's default-boot
+first light byte for byte. Before it come the movie player's two clears, two flips the DirectX
+plugin fills black whatever was drawn, and the logo's own black frames 2 to 4. The brick a person
+first notices comes at flip 10. The old tree's first light, a chessboard splash, came from refusing
+the movie; here the movies play, and the splash is the bumper after the intro.
+`routes/first-light.route` is committed with its determinism gate, two replays side by side to flip
+10 and a frame more, 84 million instructions. The boot test now ends by its budget inside the logo's
+first frame. Played on with no route, the logo plays its 280 frames to the end, and the run stops at
+#151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
+2,582,262,607 after 282 flips.

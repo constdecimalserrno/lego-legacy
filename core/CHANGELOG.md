@@ -5,6 +5,16 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`AVIStreamStart` and `AVIStreamLength` answer a stream's start and length, and `AVIStreamRead` reads
+a stream of fixed-size samples, a sound's, across its chunks, as Wine's `avifile.c`, read as
+documentation, reads one; all three were walls (#150). Both counts it writes are cleared first; a
+start before the stream or past its end is `AVIERR_NODATA`; what is asked for stops at the stream's
+end; -1 samples is as many as fit; no buffer is the counts alone; and what does not fit is
+`AVIERR_BUFFERTOOSMALL`. A stream of whole chunks, a video's, is a wall, since no title reads one,
+and so are a count below -1 and a stream whose chunks hold less than its header says, a damaged rip.
+LEGO Chess fills its movies' DirectSound buffers through it, and with it reaches first light. No
+released title imports any of the three, so no released run moves.
+
 A DirectDraw surface's `GetDC` hands out a device context of its own, where it answered success and
 wrote nothing, and `ReleaseDC` lets it go (#151): one at a time, whichever face of the surface is
 asked, a second before the first is let go of answering `DDERR_DCALREADYCREATED` and leaving what it

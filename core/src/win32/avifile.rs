@@ -29,6 +29,9 @@ pub const SHIMS: &[Shim] = &[
     stdcall("AVIFIL32", "AVIStreamReadFormat", 4, read_format),
     stdcall("AVIFIL32", "AVIStreamGetFrameOpen", 2, get_frame_open),
     stdcall("AVIFIL32", "AVIStreamGetFrame", 2, get_frame),
+    stdcall("AVIFIL32", "AVIStreamStart", 1, stream_start),
+    stdcall("AVIFIL32", "AVIStreamLength", 1, stream_length),
+    stdcall("AVIFIL32", "AVIStreamRead", 7, stream_read),
     stdcall("MSVFW32", "DrawDibOpen", 0, draw_dib_open),
     stdcall("MSVFW32", "DrawDibDraw", 13, draw_dib_draw),
     stdcall("MSVFW32", "DrawDibClose", 1, draw_dib_close),
@@ -540,6 +543,145 @@ fn read_format(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     } else {
         AVIERR_OK
     })
+}
+
+fn stream_start(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamStart(stream): where it starts, in its own units, or 0 for
+    // none (Wine's `api.c`).
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    let (owner, index) = stream_of(ctx, "AVIStreamStart", args[0])?;
+    Ok(ctx.state.avi_files[&owner].avi.streams[index].start)
+}
+
+fn stream_length(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamLength(stream): how long it is, in its own units.
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    let (owner, index) = stream_of(ctx, "AVIStreamLength", args[0])?;
+    Ok(ctx.state.avi_files[&owner].avi.streams[index].length)
+}
+
+fn stream_read(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamRead(stream, start, samples, buffer, room, bytes read, samples
+    // read): a stream of fixed-size samples, a sound's, read across its
+    // chunks as Wine's `avifile.c`, read as documentation, reads one. What
+    // was read is said only after both counts are cleared; a start before
+    // the stream or past its end is AVIERR_NODATA; -1 samples is as many as
+    // fit; what is asked for stops at the stream's end; no buffer is the
+    // counts alone; and what does not fit is AVIERR_BUFFERTOOSMALL. A stream
+    // of whole chunks, a video's, is a wall: no title reads one. So is any
+    // other count below zero, and a stream whose chunks hold less than its
+    // header says, a damaged rip.
+    let [at, start, samples, buffer, room, bytes_out, samples_out] = args else {
+        unreachable!("AVIStreamRead takes seven arguments");
+    };
+    if *at == 0 {
+        return Ok(AVIERR_BADHANDLE);
+    }
+    let (owner, index) = stream_of(ctx, "AVIStreamRead", *at)?;
+    for out in [*bytes_out, *samples_out] {
+        if out != 0 {
+            ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
+        }
+    }
+    let file = &ctx.state.avi_files[&owner];
+    let s = &file.avi.streams[index];
+    if s.sample_size == 0 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamRead: stream {index} of {}, of whole chunks",
+                file.name
+            ),
+            caller: 0,
+        });
+    }
+    let (first, length, size) = (
+        i64::from(s.start),
+        i64::from(s.length),
+        i64::from(s.sample_size),
+    );
+    let (start, room) = (i64::from(*start as i32), i64::from(*room as i32));
+    if start < first || start > first + length {
+        return Ok(AVIERR_NODATA);
+    }
+    let mut samples = i64::from(*samples as i32);
+    if samples < -1 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamRead: {samples} samples of {}",
+                file.name
+            ),
+            caller: 0,
+        });
+    }
+    if samples == -1 {
+        if *bytes_out == 0 && *samples_out == 0 {
+            return Ok(AVIERR_BADPARAM);
+        }
+        samples = room / size;
+    }
+    let samples = samples.clamp(0, length - (start - first));
+    if samples == 0 {
+        return Ok(AVIERR_OK);
+    }
+    let wanted = samples * size;
+    let read = if *buffer == 0 {
+        wanted
+    } else {
+        let offset = ((start - first) * size) as usize;
+        let fits = wanted.min(room.max(0)) as usize;
+        let data = chunk_bytes(&file.bytes, &s.chunks, offset, fits);
+        if data.len() < fits {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "AVIFIL32.dll!AVIStreamRead: stream {index} of {} holds {} bytes from byte \
+                     {offset}, where its header says {fits} more",
+                    file.name,
+                    data.len()
+                ),
+                caller: 0,
+            });
+        }
+        ctx.mem.write(*buffer, &data).map_err(Stop::Fault)?;
+        data.len() as i64
+    };
+    for (out, value) in [(*bytes_out, read), (*samples_out, read / size)] {
+        if out != 0 {
+            ctx.mem.write_u32(out, value as u32).map_err(Stop::Fault)?;
+        }
+    }
+    Ok(if read < wanted {
+        AVIERR_BUFFERTOOSMALL
+    } else {
+        AVIERR_OK
+    })
+}
+
+/// `len` bytes of a stream's data from `offset` into it, read across its
+/// chunks, or as many as it holds.
+fn chunk_bytes(
+    bytes: &[u8],
+    chunks: &[(usize, usize)],
+    mut offset: usize,
+    mut len: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    for &(at, size) in chunks {
+        if len == 0 {
+            break;
+        }
+        if offset >= size {
+            offset -= size;
+            continue;
+        }
+        let take = (size - offset).min(len);
+        out.extend_from_slice(&bytes[at + offset..at + offset + take]);
+        (offset, len) = (0, len - take);
+    }
+    out
 }
 
 /// `BI_RGB`: a DIB of plain pixels, through no codec.

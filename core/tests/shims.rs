@@ -2318,7 +2318,8 @@ fn words(values: &[u32]) -> Vec<u8> {
 /// A movie laid out as LEGO Chess's are (#151): a 4x2 Indeo 5 video of three
 /// frames at 15 a second whose header's frame is written as 32-bit edges, and
 /// so read as vfw.h's 16-bit ones is empty, with a name; and an 8-bit mono
-/// sound at 22,050 Hz with none. Its main header counts four frames and says
+/// sound at 22,050 Hz with none, seven samples in two chunks, 1 to 3 and 4
+/// to 7. Its main header counts four frames and says
 /// it has `streams`.
 fn movie(streams: u32) -> Vec<u8> {
     // MainAVIHeader: microseconds a frame, the most bytes a second, padding,
@@ -2336,7 +2337,7 @@ fn movie(streams: u32) -> Vec<u8> {
     .concat();
     let sound = [
         b"auds\0\0\0\0".to_vec(),
-        words(&[0, 0, 11, 1, 22_050, 0, 4_410, 1_470, 0, 1, 0, 0]),
+        words(&[0, 0, 11, 1, 22_050, 0, 7, 1_470, 0, 1, 0, 0]),
     ]
     .concat();
     // BITMAPINFOHEADER: 4x2, one plane, 24 bits, IV50.
@@ -2364,7 +2365,14 @@ fn movie(streams: u32) -> Vec<u8> {
             riff_list(b"strl", &[riff(b"strh", &sound), riff(b"strf", &pcm)]),
         ],
     );
-    let movi = riff_list(b"movi", &[riff(b"00dc", &[0x1f, 0])]);
+    let movi = riff_list(
+        b"movi",
+        &[
+            riff(b"01wb", &[1, 2, 3]),
+            riff(b"00dc", &[0x1f, 0]),
+            riff(b"01wb", &[4, 5, 6, 7]),
+        ],
+    );
     riff(b"RIFF", &[b"AVI ".to_vec(), header, movi].concat())
 }
 
@@ -3093,4 +3101,159 @@ fn drawdib_draws_a_dib_whole_onto_a_surface_s_dc() {
     // The next handle is the next one up, not the one let go of.
     assert_eq!(call(&mut m, "MSVFW32", "DrawDibOpen", &[]), Ok(2));
     assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(0), "1 is let go of");
+}
+
+/// A sound's samples read across its chunks, as LEGO Chess fills its
+/// DirectSound buffer from its movies' sound (#150): from where it starts,
+/// what is asked for stopping at its end, AVIERR_NODATA before its start or
+/// past its end, the counts alone with no buffer, as many as fit for -1, and
+/// AVIERR_BUFFERTOOSMALL for what does not; its start and length are its
+/// header's. A video stream's chunks are not read this way.
+#[test]
+fn a_sound_is_read_by_the_sample_across_its_chunks() {
+    const BUFFER: u32 = OUT + 0x100;
+    let mut m = machine();
+    // Movies of one stream: 16-bit stereo, a sample four bytes, whose three
+    // start at sample 2, all in one chunk; and one whose header says it has
+    // a sample more than that.
+    let stereo = |length: u32| {
+        let strh = [
+            b"auds\0\0\0\0".to_vec(),
+            words(&[0, 0, 0, 1, 22_050, 2, length, 12, 0, 4, 0, 0]),
+        ]
+        .concat();
+        let pcm = [
+            vec![1, 0, 2, 0],
+            words(&[22_050, 88_200]),
+            vec![4, 0, 16, 0],
+        ]
+        .concat();
+        let header = riff_list(
+            b"hdrl",
+            &[
+                riff(
+                    b"avih",
+                    &words(&[66_667, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+                ),
+                riff_list(b"strl", &[riff(b"strh", &strh), riff(b"strf", &pcm)]),
+            ],
+        );
+        let movi = riff_list(b"movi", &[riff(b"00wb", &(0..12).collect::<Vec<u8>>())]);
+        riff(b"RIFF", &[b"AVI ".to_vec(), header, movi].concat())
+    };
+    m.tree.declare(MOVIE, movie(2));
+    m.tree.declare("C:\\STUB\\STEREO.AVI", stereo(3));
+    m.tree.declare("C:\\STUB\\SHORT.AVI", stereo(4));
+    let stream = |m: &mut Machine, name: &str, n: u32| {
+        m.arena
+            .write(DATA, format!("{name}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, n]),
+            Ok(0)
+        );
+        m.arena.read_u32(OUT).expect("in the arena")
+    };
+    let (mono, stereo) = (
+        stream(&mut m, MOVIE, 1),
+        stream(&mut m, "C:\\STUB\\STEREO.AVI", 0),
+    );
+    let video = stream(&mut m, MOVIE, 0);
+    let short = stream(&mut m, "C:\\STUB\\SHORT.AVI", 0);
+    // What a read answers, the bytes and samples it says it read, and the
+    // bytes in the buffer.
+    let read = |m: &mut Machine, s: u32, start: i32, samples: i32, room: u32| {
+        m.arena.write(BUFFER, &[0xcc; 16]).expect("in the arena");
+        let answer = call(
+            m,
+            "AVIFIL32",
+            "AVIStreamRead",
+            &[s, start as u32, samples as u32, BUFFER, room, OUT, OUT + 4],
+        );
+        let counts = |at| m.arena.read_u32(at).expect("in the arena");
+        let (bytes, samples) = (counts(OUT), counts(OUT + 4));
+        let buffer = m
+            .arena
+            .slice(BUFFER, bytes as usize)
+            .expect("in the arena")
+            .to_vec();
+        (answer, bytes, samples, buffer)
+    };
+
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamStart", &[mono]), Ok(0));
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamLength", &[mono]), Ok(7));
+    assert_eq!(read(&mut m, mono, 2, 3, 16), (Ok(0), 3, 3, vec![3, 4, 5]));
+    assert_eq!(read(&mut m, mono, 5, 10, 16), (Ok(0), 2, 2, vec![6, 7]));
+    assert_eq!(read(&mut m, mono, 7, 1, 16), (Ok(0), 0, 0, vec![]));
+    assert_eq!(
+        read(&mut m, mono, 8, 1, 16).0,
+        Ok(0x8004_4073),
+        "AVIERR_NODATA"
+    );
+    assert_eq!(
+        read(&mut m, mono, 0, 4, 2),
+        (Ok(0x8004_4074), 2, 2, vec![1, 2])
+    );
+    assert_eq!(
+        read(&mut m, mono, 0, -1, 5),
+        (Ok(0), 5, 5, vec![1, 2, 3, 4, 5])
+    );
+    // No buffer: the counts alone.
+    assert_eq!(
+        call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamRead",
+            &[mono, 0, 4, 0, 0, OUT, OUT + 4]
+        ),
+        Ok(0)
+    );
+    assert_eq!(m.arena.slice(OUT, 8).expect("in the arena"), words(&[4, 4]));
+    assert_eq!(
+        call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamRead",
+            &[mono, 0, u32::MAX, BUFFER, 4, 0, 0]
+        ),
+        Ok(0x8004_406a),
+        "-1 with nowhere to say how many is AVIERR_BADPARAM"
+    );
+
+    assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamStart", &[stereo]), Ok(2));
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamLength", &[stereo]),
+        Ok(3)
+    );
+    assert_eq!(
+        read(&mut m, stereo, 2, 1, 16),
+        (Ok(0), 4, 1, vec![0, 1, 2, 3])
+    );
+    assert_eq!(
+        read(&mut m, stereo, 3, 5, 16),
+        (Ok(0), 8, 2, (4..12).collect::<Vec<u8>>())
+    );
+    assert_eq!(read(&mut m, stereo, 1, 1, 16).0, Ok(0x8004_4073));
+
+    for (s, start, samples, says) in [
+        (video, 0, 1, "of whole chunks"),
+        (mono, 0, -2, "-2 samples"),
+        (
+            short,
+            2,
+            4,
+            "holds 12 bytes from byte 0, where its header says 16 more",
+        ),
+    ] {
+        let wall = read(&mut m, s, start, samples, 16).0;
+        assert!(
+            matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains(says)),
+            "{wall:?}"
+        );
+    }
 }
