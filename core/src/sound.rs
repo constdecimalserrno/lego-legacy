@@ -402,11 +402,17 @@ impl Mixer {
 
     /// A short MIDI message, packed as `midiOutShortMsg` takes one, heard
     /// from the frame of the mix a declared time falls in, or from the next
-    /// frame mixed if the mix is past it. A mix with no synth hears nothing.
-    pub fn midi(&mut self, nanos: u64, message: u32) {
-        if let Some(synth) = &mut self.synth {
-            synth.message(frame_at(nanos), message);
-        }
+    /// frame mixed if the mix is past it; and whether a synth heard it. A
+    /// machine without the player's bank has no MIDI device to send through
+    /// (ADR-0008), so a message no synth hears is never dropped as if heard:
+    /// the device that sent it stops the run at a wall (#154).
+    #[must_use]
+    pub fn midi(&mut self, nanos: u64, message: u32) -> bool {
+        let Some(synth) = &mut self.synth else {
+            return false;
+        };
+        synth.message(frame_at(nanos), message);
+        true
     }
 
     /// Stop a sound at a declared time: what the mix has not reached by then
@@ -648,23 +654,26 @@ mod tests {
     fn a_midi_message_is_heard_from_the_frame_its_declared_time_falls_in() {
         let mem = guest(&[]);
         let mut mixer = Mixer::default();
-        // Note on, key 60, channel 1: nothing hears it before there is a
-        // synth.
+        // Note on, key 60, channel 1.
         let note = 0x7f_3c_90;
-        mixer.midi(0, note);
         let bank = crate::dls::Bank::parse(&crate::dls::tiny::bytes()).expect("a bank");
         mixer.open_synth(crate::synth::Synth::new(bank));
         // Program 1, its ramp, at full volume and hard left, a tenth of a
         // block in.
         for message in [0x01_c0, 0x7f_07_b0, 0x00_0a_b0] {
-            mixer.midi(0, message);
+            assert!(mixer.midi(0, message));
         }
         let at = BLOCK_NANOS / 10;
-        mixer.midi(at, note);
+        assert!(mixer.midi(at, note));
         let block = mixer.due(BLOCK_NANOS + 1_000_000, &mem).remove(0);
         let from = frame_at(at) as usize * 2;
         assert!(block[..from].iter().all(|s| *s == 0), "nothing before it");
         assert_eq!(block[from..from + 8], [0, 0, 100, 0, 200, 0, 300, 0]);
+    }
+
+    #[test]
+    fn a_midi_message_with_no_synth_open_says_nothing_heard_it() {
+        assert!(!Mixer::default().midi(0, 0x7f_3c_90));
     }
 
     #[test]

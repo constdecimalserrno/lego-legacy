@@ -10,22 +10,27 @@
 //! its reason:
 //!
 //! - **32 voices**, what the GS Wavetable synth had on Windows 98 Second
-//!   Edition ([`crate::title::WINDOWS_98_SE`]), the first Windows it shipped
-//!   in and the one the titles that play MIDI declare. Microsoft documents no
-//!   count;
-//!   the one account found (gearnews, Robin Vincent, 26 March 2017) has it
-//!   "moving from 32 note polyphony to 64 note polyphony with the arrival of
-//!   Windows XP in 2001". DLS Level 1 and General MIDI Level 1 ask for at
-//!   least 24. LEGO Chess's four tunes reach 40 to 55 at once with every
-//!   release heard to its end, so at 32 some release tails are stolen, as
-//!   they were on that Windows. A voice that has finished frees its place
-//!   before a note looks for one.
+//!   Edition ([`crate::title::WINDOWS_98_SE`]), the Windows the roster
+//!   declares. Microsoft documents no count; the one account found (gearnews,
+//!   Robin Vincent, 26 March 2017) has it "moving from 32 note polyphony to
+//!   64 note polyphony with the arrival of Windows XP in 2001". DLS Level 1
+//!   and General MIDI Level 1 ask for at least 24. LEGO Chess's four tunes
+//!   reach 40 to 55 at once with every release heard to its end. At 32, played
+//!   with the player's bank, they steal 620 times, 611 of them a release
+//!   tail, and 66 notes are never played, 62 of them on channel 16, which may
+//!   take a voice from no other channel: DLS Level 1's rule on a 32-voice
+//!   device. A voice that has finished frees its place before a note looks
+//!   for one.
 //! - **A note past the last voice steals one by DLS Level 1's static channel
 //!   priority:** channel 10, then 1 to 9, then 11 to 16, and never from a
 //!   channel above its own. The specification leaves the choice within a
 //!   channel to the device: a released voice goes before a held one, and the
 //!   oldest first, which loses the least that is still heard. A stolen voice
 //!   stops on the frame the new note starts.
+//! - **A key struck again ends the notes on it that have had no note off,**
+//!   within 15 ms: the specification ends only those, and its errata prefer a
+//!   note ended so to shut down in 15 ms. A note the pedal keeps has had its
+//!   note off, and rings on. A region marked self-nonexclusive ends none.
 //! - **The oscillator draws straight between the two samples either side.**
 //!   Microsoft's own interpolation is not documented; linear is what a
 //!   software synthesiser of 1999 spent on every voice, and what the mix
@@ -37,9 +42,10 @@
 //!   envelope linear in cents throughout. A segment of no time takes no frame.
 //!   A voice whose volume envelope has reached -96 dB is done.
 //! - **The LFO is a sine,** the shape Level 1 asks for, from zero once its
-//!   delay is over, and swings gain as it swings pitch, both ways: the
-//!   connection block's own arithmetic, and the specification's worked
-//!   example, take it so.
+//!   delay is over, and swings gain as it swings pitch, both ways. The
+//!   specification disagrees with itself here: its prose has the LFO move
+//!   attenuation one way only, and its worked example, like the connection
+//!   block's own arithmetic, swings it both. The example is taken.
 //! - **Gain is added up in centibels and stops at 0 dB,** as the
 //!   specification's summing node does, and 0 dB there is full scale: nothing
 //!   further scales the synth in the mix. Pan is the specification's equal
@@ -52,9 +58,13 @@
 //! - **The controllers General MIDI Level 1 names are answered:** modulation,
 //!   volume, pan, expression, sustain, data entry for the pitch bend range and
 //!   fine and coarse tuning, reset all controllers and all notes off, with
-//!   bank select for the GS kits. Key and channel pressure reach no connection
-//!   in DLS Level 1, and nothing else is answered. There is no reverb or
-//!   chorus: Level 1 has none, and Microsoft's own are not documented.
+//!   bank select for the GS kits. MIDI 1.0's other channel mode messages are
+//!   answered as it says: all sound off silences the channel at once, and
+//!   omni off, omni on, mono on and poly on end its notes as all notes off
+//!   does, the synth staying polyphonic. Key and channel pressure reach no
+//!   connection in DLS Level 1, and nothing else is answered. There is no
+//!   reverb or chorus: Level 1 has none, and Microsoft's own are not
+//!   documented.
 //!
 //! **Deterministic by construction.** Every sample is integer arithmetic
 //! from the messages and the frames they come at, so the same messages at the
@@ -62,9 +72,10 @@
 //! things need a transcendental: a ratio from cents, an amplitude from
 //! centibels and the LFO's sine. They read tables built once with
 //! [`crate::cpu::x87::maths`], whose only arithmetic is IEEE-754 addition,
-//! multiplication, division and rounding, which every host core supports
-//! rounds alike and Rust never fuses, and a test pins the tables' hash. A
-//! note let go in its attack finds its decibels with the same maths.
+//! multiplication, division and rounding, which every host's processor rounds
+//! alike and which Rust never fuses, and a test pins the tables' hash. The one
+//! float a note meets is when it is let go in its attack: it finds its
+//! decibels with the same maths.
 
 use crate::dls::{Bank, Envelope, Instrument, Region, NO_TIME};
 use std::collections::VecDeque;
@@ -300,11 +311,16 @@ struct Channel {
     bend: i16,
     /// The registered parameters: the pitch bend range in semitones and
     /// cents, fine tuning as fourteen bits about 8192, and coarse tuning in
-    /// semitones about 64; and which one data entry sets, if any.
+    /// semitones about 64.
     range: (u8, u8),
     fine: u16,
     coarse: u8,
-    rpn: Option<(u8, u8)>,
+    /// The registered parameter number controllers 101 and 100 last chose,
+    /// 127 being none, and whether a non-registered one was chosen since,
+    /// which this synth has none of: MIDI 1.0 keeps each number's controllers
+    /// apart, and data entry goes to whichever kind was chosen last.
+    rpn: (u8, u8),
+    nrpn: bool,
 }
 
 impl Channel {
@@ -322,7 +338,8 @@ impl Channel {
             range: (2, 0),
             fine: 8192,
             coarse: 64,
-            rpn: None,
+            rpn: (127, 127),
+            nrpn: false,
         }
     }
 
@@ -605,15 +622,14 @@ impl Synth {
         if wave.samples.is_empty() {
             return;
         }
-        // A drum ends the others of its key group; a note ends the last one
-        // still held, or kept by the pedal, on its key, unless its region
-        // lets them overlap.
+        // A drum ends the others of its key group, and a note those on its
+        // key that have had no note off, unless their own region lets them
+        // overlap.
         for voice in self.voices.iter_mut().filter(|v| v.channel == channel) {
             let theirs = &self.bank.instruments[voice.instrument].regions[voice.region];
-            if instrument.drums && region.group != 0 && theirs.group == region.group {
+            let grouped = instrument.drums && region.group != 0 && theirs.group == region.group;
+            if grouped || (voice.note == note && voice.held && !theirs.overlaps) {
                 voice.cut();
-            } else if voice.note == note && (voice.held || voice.sustained) && !region.overlaps {
-                voice.release();
             }
         }
         let art = &region.articulation;
@@ -691,27 +707,28 @@ impl Synth {
         let ch = &mut self.channels[channel];
         let was = ch.pan;
         match controller {
-            0 => ch.bank = (u16::from(value) << 7) | (ch.bank & 0x7f),
+            // A controller's high part sets its low part to nothing, as MIDI
+            // 1.0 says.
+            0 => ch.bank = u16::from(value) << 7,
             32 => ch.bank = (ch.bank & !0x7f) | u16::from(value),
             1 => ch.modulation = value,
             7 => ch.volume = value,
             10 => ch.pan = value,
             11 => ch.expression = value,
-            6 => match ch.rpn {
-                Some((0, 0)) => ch.range.0 = value,
-                Some((0, 1)) => ch.fine = (u16::from(value) << 7) | (ch.fine & 0x7f),
-                Some((0, 2)) => ch.coarse = value,
+            6 if !ch.nrpn => match ch.rpn {
+                (0, 0) => ch.range = (value, 0),
+                (0, 1) => ch.fine = u16::from(value) << 7,
+                (0, 2) => ch.coarse = value,
                 _ => {}
             },
-            38 => match ch.rpn {
-                Some((0, 0)) => ch.range.1 = value,
-                Some((0, 1)) => ch.fine = (ch.fine & !0x7f) | u16::from(value),
+            38 if !ch.nrpn => match ch.rpn {
+                (0, 0) => ch.range.1 = value,
+                (0, 1) => ch.fine = (ch.fine & !0x7f) | u16::from(value),
                 _ => {}
             },
-            101 => ch.rpn = Some((value, ch.rpn.map_or(127, |r| r.1))),
-            100 => ch.rpn = Some((ch.rpn.map_or(127, |r| r.0), value)),
-            // A non-registered parameter, which this synth has none of.
-            98 | 99 => ch.rpn = None,
+            101 => (ch.rpn.0, ch.nrpn) = (value, false),
+            100 => (ch.rpn.1, ch.nrpn) = (value, false),
+            98 | 99 => ch.nrpn = true,
             64 => {
                 ch.sustain = value >= 64;
                 if !ch.sustain {
@@ -719,27 +736,27 @@ impl Synth {
                 }
             }
             121 => {
-                // All but volume and pan, and the registered parameters' own
-                // values, unless 127 asks for everything (DLS Level 1, read
-                // with its errata on expression).
+                // All but volume and pan (DLS Level 1, read with its errata on
+                // expression), and bank select and the registered parameters'
+                // own values (General MIDI's RP-015), unless 127 asks for
+                // every power-on value (DLS Level 1).
                 let fresh = Channel::new();
-                (ch.modulation, ch.expression, ch.bend, ch.rpn) = (0, 127, 0, None);
+                (ch.modulation, ch.expression, ch.bend) = (0, 127, 0);
+                (ch.rpn, ch.nrpn) = (fresh.rpn, fresh.nrpn);
                 if value == 127 {
-                    (ch.volume, ch.pan, ch.range, ch.fine, ch.coarse) = (
-                        fresh.volume,
-                        fresh.pan,
-                        fresh.range,
-                        fresh.fine,
-                        fresh.coarse,
-                    );
+                    (ch.volume, ch.pan, ch.bank) = (fresh.volume, fresh.pan, fresh.bank);
+                    (ch.range, ch.fine, ch.coarse) = (fresh.range, fresh.fine, fresh.coarse);
                 }
                 if ch.sustain {
                     ch.sustain = false;
                     self.pedal_up(channel);
                 }
             }
-            // Every key let go, which the pedal may keep.
-            123 => (0..128).for_each(|note| self.note_off(channel, note)),
+            // All sound off: the channel silent at once.
+            120 => self.voices.retain(|v| v.channel != channel),
+            // All notes off, and the modes that end every note as it does:
+            // every key let go, which the pedal may keep.
+            123..=127 => (0..128).for_each(|note| self.note_off(channel, note)),
             _ => {}
         }
         // Pan moves the notes already sounding.
@@ -951,20 +968,112 @@ mod tests {
     }
 
     #[test]
-    fn a_key_struck_again_under_the_pedal_ends_its_last_and_a_system_message_ends_running_status() {
+    fn a_key_struck_again_cuts_its_note_with_no_note_off_and_one_the_pedal_keeps_rings_on() {
+        // Program 0 releases over half a second; 15 ms is 331 frames.
         let mut synth = synth();
-        synth.message(0, cc(1, 64, 127));
         synth.message(0, on(1, 60, 100));
-        synth.message(1, off(1, 60));
-        synth.message(2, on(1, 60, 100));
+        synth.message(1000, on(1, 60, 100));
+        left(&mut synth, 0..1400);
+        assert_eq!(synth.voices.len(), 1, "the first cut, the second on");
+        // Under the pedal, the first note has had its note off.
+        synth.message(1400, cc(2, 64, 127));
+        synth.message(1400, on(2, 60, 100));
+        synth.message(1401, off(2, 60));
+        synth.message(1402, on(2, 60, 100));
+        left(&mut synth, 1400..2000);
+        let pedalled = synth.voices.iter().filter(|v| v.channel == 1);
+        let kept: Vec<_> = pedalled.map(|v| (v.held, v.sustained)).collect();
+        assert_eq!(kept, [(false, true), (true, false)]);
+    }
+
+    #[test]
+    fn a_key_struck_again_asks_the_old_notes_own_region_whether_it_may_overlap() {
+        // Program 0 lets its notes overlap and program 1 does not, over one
+        // steady loop.
+        let looped = [tiny::wsmp(60, 0, 0, Some((0, 64)))];
+        let steady = tiny::wave(22_050, 16, &tiny::samples(&[1000; 64]), &looped);
+        let program_of = |options| {
+            let region = tiny::region((0, 127), options, 0, 0, &[]);
+            tiny::instrument(0, u32::from(options == 0), &[region], &[])
+        };
+        let instruments = [program_of(1), program_of(0)];
+        let bank = Bank::parse(&tiny::bank(&instruments, &[steady], &[0])).expect("a bank");
+        let mut synth = Synth::new(bank);
+        // Channel 1 holds an overlapping note and strikes it again on the
+        // other program; channel 2 the other way round.
+        for (channel, first, then) in [(1, 0, 1), (2, 1, 0)] {
+            synth.message(0, program(channel, first));
+            synth.message(0, on(channel, 60, 100));
+            synth.message(1, program(channel, then));
+            synth.message(1, on(channel, 60, 100));
+        }
+        left(&mut synth, 0..1000);
+        let on_it = |c: usize| synth.voices.iter().filter(|v| v.channel == c).count();
+        assert_eq!((on_it(0), on_it(1)), (2, 1));
+    }
+
+    #[test]
+    fn a_system_message_ends_running_status() {
+        let mut synth = synth();
+        synth.message(0, on(1, 60, 100));
         // Song position, a system common message, and then data bytes with
         // no status of their own.
-        synth.message(3, message(0xf2, 0, 0));
-        synth.message(3, message(62, 100, 0));
-        left(&mut synth, 0..4);
-        let sounding = synth.voices.iter().filter(|v| v.held || v.sustained);
-        assert_eq!(sounding.map(|v| v.note).collect::<Vec<_>>(), [60]);
+        synth.message(0, message(0xf2, 0, 0));
+        synth.message(0, message(62, 100, 0));
+        left(&mut synth, 0..1);
         assert!(synth.voices.iter().all(|v| v.note == 60));
+    }
+
+    #[test]
+    fn all_sound_off_silences_a_channel_at_once_and_the_mode_messages_end_its_notes() {
+        let mut synth = synth();
+        for channel in 1..=7 {
+            synth.message(0, on(channel, 60, 100));
+        }
+        synth.message(1, cc(1, 120, 0));
+        for (channel, controller) in [(2, 123), (3, 124), (4, 125), (5, 126), (6, 127)] {
+            synth.message(1, cc(channel, controller, 0));
+        }
+        left(&mut synth, 0..2);
+        let held = |c: usize| -> Vec<bool> {
+            let on_it = synth.voices.iter().filter(|v| v.channel == c);
+            on_it.map(|v| v.held).collect()
+        };
+        assert!(held(0).is_empty(), "channel 1 silent");
+        for channel in 1..6 {
+            assert_eq!(held(channel), [false], "{channel} let go");
+        }
+        assert_eq!(held(6), [true], "channel 7 untouched");
+    }
+
+    #[test]
+    fn data_entry_goes_to_the_registered_parameter_chosen_last_and_its_high_part_clears_its_low() {
+        let mut synth = synth();
+        let send = |synth: &mut Synth, messages: &[u32]| {
+            for m in messages {
+                synth.message(0, *m);
+            }
+            synth.frame(0);
+            (synth.channels[0].range, synth.channels[0].bank)
+        };
+        let rpn0 = [cc(1, 101, 0), cc(1, 100, 0)];
+        assert_eq!(
+            send(&mut synth, &[rpn0[0], rpn0[1], cc(1, 6, 2), cc(1, 38, 50)]).0,
+            (2, 50)
+        );
+        assert_eq!(send(&mut synth, &[cc(1, 6, 12)]).0, (12, 0));
+        // A non-registered parameter takes data entry, and keeps the
+        // registered number chosen before it.
+        assert_eq!(
+            send(&mut synth, &[cc(1, 99, 0), cc(1, 98, 0), cc(1, 6, 7)]).0,
+            (12, 0)
+        );
+        assert_eq!(send(&mut synth, &[cc(1, 101, 0), cc(1, 6, 7)]).0, (7, 0));
+        // Bank select's high part clears its low part too.
+        assert_eq!(send(&mut synth, &[cc(1, 32, 2), cc(1, 0, 3)]).1, 3 << 7);
+        // Reset all controllers keeps bank select, unless it is 127.
+        assert_eq!(send(&mut synth, &[cc(1, 0, 1), cc(1, 121, 0)]).1, 1 << 7);
+        assert_eq!(send(&mut synth, &[cc(1, 121, 127)]), ((2, 0), 0));
     }
 
     #[test]
@@ -974,7 +1083,7 @@ mod tests {
         // Volume 64 is 40·log10(127/64) dB down: a quarter, near enough.
         synth.message(0, cc(10, 7, 64));
         synth.message(0, on(10, 42, 127));
-        let quarter = 16_384.0 * (64.0f64 / 127.0).powi(2);
+        let quarter = 16_384.0 * (64.0 / 127.0) * (64.0 / 127.0);
         assert!(near(left(&mut synth, 0..10)[9], quarter, 0.005));
         // A range of twelve semitones by RPN 0, and the wheel at the bottom:
         // the ramp an octave down, half a step a frame.

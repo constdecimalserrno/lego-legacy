@@ -1,21 +1,20 @@
 //! The player's own General MIDI bank, Roland's `GM16.DLS`, read off their
-//! LEGO Racers disc and played by the synth (ADR-0008, #155). Without the
+//! Rock Raiders disc and played by the synth (ADR-0008, #155). Without the
 //! rip each test skips, as a disc test does.
 
 use lego_legacy_core::dls::Bank;
 use lego_legacy_core::synth::Synth;
 use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::{disc, hash, testkit};
+use lego_legacy_core::{disc, hash, roster, testkit};
 
 /// The bank, loose in the DirectX 6 redistributable on the Masterpiece
-/// pressing of LEGO Racers.
+/// pressing of Rock Raiders, which the gate already reads; LEGO Racers'
+/// discs carry the same bytes.
 const GM16: EntryImage = EntryImage {
-    disc_dir: "racers",
-    pressing: "masterpiece-racers",
-    path: "REDIST/DIRECTX6/DIRECTX/GM16.DLS",
-    in_cabinet: false,
+    path: "DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS",
     sha256: "3229b09b9d7d9f3f4793b0d9b34fe6abc75cfa4a2503c0c90f43ff651ba7f2c0",
     why: "the bank the Microsoft GS Wavetable SW Synth plays",
+    ..roster::ROCK_RAIDERS.image
 };
 
 fn bank() -> Option<Bank> {

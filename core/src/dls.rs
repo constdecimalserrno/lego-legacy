@@ -5,10 +5,19 @@
 //! Byte in, structure out; [`crate::synth`] plays it. Each region comes out
 //! whole, with the wave it plays, the sample values that play it and the
 //! articulation that shapes it, wherever in the bank each was written.
+//!
+//! A bank that records more than it holds is refused: a chunk past what
+//! holds it, a count past its chunk, a collection or instrument header
+//! counting other than what follows, or waves whose data, added up, is more
+//! than the bank's own bytes. Each wave is read once, however many entries of
+//! the pool table point at it, and in a bank as DLS writes one each wave's
+//! data is its own, so what the synth holds of a bank is at most twice its
+//! size, an eight-bit wave being widened to sixteen.
 
 use crate::pe::{u16_at, u32_at};
 use crate::sound::{Error, Format};
 use crate::win32::winmm::{find_chunk, Chunk, Find};
+use std::sync::Arc;
 
 /// A bank: its instruments, and the waves their regions play, in the order
 /// its pool table lists them.
@@ -70,11 +79,11 @@ impl Default for Sample {
 }
 
 /// A wave of the pool: its rate, and its samples, eight-bit ones widened to
-/// sixteen.
+/// sixteen, shared by every entry of the pool table that points at it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave {
     pub rate: u32,
-    pub samples: Vec<i16>,
+    pub samples: Arc<[i16]>,
 }
 
 /// The time cents DLS writes for no time at all, which nothing added to it
@@ -199,10 +208,11 @@ impl Bank {
         let file = find_chunk(bytes, 0, len, Find::Next)
             .filter(|c| names(c) == (*b"RIFF", *b"DLS "))
             .ok_or_else(|| Error("not a DLS bank".to_owned()))?;
-        let (mut lins, mut ptbl, mut wvpl) = (None, None, None);
+        let (mut colh, mut lins, mut ptbl, mut wvpl) = (None, None, None, None);
         for chunk in children(bytes, &file)? {
             let (id, form) = names(&chunk);
             match (&id, &form) {
+                (b"colh", _) => colh = Some(chunk),
                 (b"LIST", b"lins") => lins = Some(chunk),
                 (b"ptbl", _) => ptbl = Some(chunk),
                 (b"LIST", b"wvpl") => wvpl = Some(chunk),
@@ -210,6 +220,7 @@ impl Bank {
             }
         }
         let missing = |what: &str| Error(format!("a DLS bank with no {what}"));
+        let colh = colh.ok_or_else(|| missing("collection header"))?;
         let lins = lins.ok_or_else(|| missing("instruments"))?;
         let ptbl = ptbl.ok_or_else(|| missing("pool table"))?;
         let wvpl = wvpl.ok_or_else(|| missing("wave pool"))?;
@@ -219,20 +230,33 @@ impl Bank {
         let table = body(bytes, &ptbl)?;
         let (size, count) = (word(table, 0)? as usize, word(table, 4)? as usize);
         let pool_end = end(&wvpl)?;
-        let mut waves = Vec::new();
-        let mut their_samples = Vec::new();
-        for i in 0..count {
-            let at = wvpl
-                .data
-                .saturating_add(4)
-                .saturating_add(word(table, size + 4 * i)?);
+        let cues = (0..count)
+            .map(|i| word(table, size + 4 * i))
+            .collect::<Result<Vec<_>, _>>()?;
+        // In the order the waves start, so the entries that point at one wave
+        // come together and share what it reads as.
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by_key(|i| cues[*i]);
+        let mut pool: Vec<Option<(Wave, Option<Sample>)>> = vec![None; count];
+        let (mut first, mut held) = (None, 0usize);
+        for i in order {
+            if let Some(j) = first.filter(|j: &usize| cues[*j] == cues[i]) {
+                pool[i] = pool[j].clone();
+                continue;
+            }
+            let at = wvpl.data.saturating_add(4).saturating_add(cues[i]);
             let list = find_chunk(bytes, at, pool_end, Find::Next)
                 .filter(|c| names(c) == (*b"LIST", *b"wave") && end(c).is_ok_and(|e| e <= pool_end))
                 .ok_or_else(|| Error(format!("wave {i} of the pool table is not a wave")))?;
-            let (wave, sample) = wave(bytes, &list)?;
-            waves.push(wave);
-            their_samples.push(sample);
+            let (wave, sample, data) = wave(bytes, &list)?;
+            held += data;
+            if held > bytes.len() {
+                return Err(damaged());
+            }
+            pool[i] = Some((wave, sample));
+            first = Some(i);
         }
+        let (waves, their_samples): (Vec<_>, Vec<_>) = pool.into_iter().flatten().unzip();
 
         let mut instruments = Vec::new();
         for list in children(bytes, &lins)? {
@@ -240,12 +264,16 @@ impl Bank {
                 instruments.push(instrument(bytes, &list, &waves, &their_samples)?);
             }
         }
+        if word(body(bytes, &colh)?, 0)? as usize != instruments.len() {
+            return Err(damaged());
+        }
         Ok(Self { instruments, waves })
     }
 }
 
-/// A wave of the pool, and the sample values it carries for itself.
-fn wave(bytes: &[u8], list: &Chunk) -> Result<(Wave, Option<Sample>), Error> {
+/// A wave of the pool, the sample values it carries for itself, and how many
+/// bytes of data it is read from.
+fn wave(bytes: &[u8], list: &Chunk) -> Result<(Wave, Option<Sample>, usize), Error> {
     let (mut format, mut data, mut sample) = (None, None, None);
     for chunk in children(bytes, list)? {
         match &names(&chunk).0 {
@@ -279,6 +307,7 @@ fn wave(bytes: &[u8], list: &Chunk) -> Result<(Wave, Option<Sample>), Error> {
             samples,
         },
         sample,
+        data.len(),
     ))
 }
 
@@ -287,12 +316,17 @@ fn wsmp(b: &[u8]) -> Result<Sample, Error> {
     let size = word(b, 0)? as usize;
     let looped = match word(b, 16)? {
         0 => None,
-        _ if word(b, size + 4)? != 0 => {
+        1 if word(b, size + 4)? != 0 => {
             return Err(Error(
                 "a loop of a type DLS Level 1 does not have".to_owned(),
             ))
         }
-        _ => Some((word(b, size + 8)?, word(b, size + 12)?)),
+        1 => Some((word(b, size + 8)?, word(b, size + 12)?)),
+        loops => {
+            return Err(Error(format!(
+                "a wave sample of {loops} loops, where DLS Level 1 has one at most"
+            )))
+        }
     };
     Ok(Sample {
         unity: half(b, 4)?,
@@ -320,11 +354,14 @@ fn instrument(
     }
     let header = header.ok_or_else(|| Error("an instrument with no header".to_owned()))?;
     let (bank, program) = (word(header, 4)?, word(header, 8)?);
-    let regions = regions
+    let regions: Vec<Region> = regions
         .iter()
         .filter(|c| names(c) == (*b"LIST", *b"rgn "))
         .map(|r| region(bytes, r, articulation, waves, their_samples))
         .collect::<Result<_, _>>()?;
+    if word(header, 0)? as usize != regions.len() {
+        return Err(damaged());
+    }
     Ok(Instrument {
         // Controller 0 is in bits 8 to 14, controller 32 in 0 to 6, and bit
         // 31 says it is a drum kit.
@@ -401,8 +438,17 @@ fn lart(bytes: &[u8], list: &Chunk) -> Result<Articulation, Error> {
                 half(b, at + 4)?,
                 half(b, at + 6)?,
             ];
+            let scale = word(b, at + 8)? as i32;
+            // The key moves the pitch 12,800 cents across the keyboard unless
+            // a bank sets it to nothing, which no bank yet played does.
+            if block == [3, 0, 3, 0] && scale != 12_800 << 16 {
+                return Err(Error(
+                    "a region whose key does not set its pitch, which this synth does not play"
+                        .to_owned(),
+                ));
+            }
             if let Some(slot) = articulation.slot(block) {
-                *slot = word(b, at + 8)? as i32;
+                *slot = scale;
             }
         }
     }
@@ -560,7 +606,12 @@ pub(crate) mod tiny {
             at += w.len() as u32;
         }
         let cues: Vec<u32> = order.iter().map(|i| offsets[*i]).collect();
-        let ptbl = [words(&[8, cues.len() as u32]), words(&cues)].concat();
+        bank_at(instruments, waves, &cues)
+    }
+
+    /// As [`bank`], its pool table pointing where `cues` say.
+    pub fn bank_at(instruments: &[Vec<u8>], waves: &[Vec<u8>], cues: &[u32]) -> Vec<u8> {
+        let ptbl = [words(&[8, cues.len() as u32]), words(cues)].concat();
         let body = [
             b"DLS ".to_vec(),
             chunk(b"colh", &words(&[instruments.len() as u32])),
@@ -660,8 +711,8 @@ mod tests {
         // widened to sixteen bits.
         assert_eq!(bank.waves.len(), 3);
         assert_eq!(bank.waves[0].rate, 11_025);
-        assert_eq!(bank.waves[0].samples, [0, 4096, 8192, 12_288]);
-        assert_eq!(bank.waves[1].samples, [16_384; 64]);
+        assert_eq!(*bank.waves[0].samples, [0, 4096, 8192, 12_288]);
+        assert_eq!(*bank.waves[1].samples, [16_384; 64]);
 
         let [piano, ramps, kit] = &bank.instruments[..] else {
             panic!("three instruments")
@@ -727,5 +778,53 @@ mod tests {
             Bank::parse(&tiny::bank(&[instrument], &[wave(&four, &[])], &[0])).is_err(),
             "a region playing a wave the pool table does not list"
         );
+
+        // A header counting other than what follows it, and a wave sample
+        // of two loops.
+        // Each the first of its kind in the tiny bank, holding the count it
+        // should.
+        let counted = |id: &[u8; 4], at: usize, count: u8| {
+            let mut b = tiny::bytes();
+            let i = b.windows(4).position(|w| w == id).expect("the chunk");
+            assert_eq!(b[i + at], count, "the count of {id:?}");
+            b[i + at] += 1;
+            Bank::parse(&b).is_err()
+        };
+        assert!(counted(b"colh", 8, 3), "the collection's instruments");
+        assert!(counted(b"insh", 8, 1), "an instrument's regions");
+        assert!(counted(b"wsmp", 24, 1), "two loops");
+        // A key that does not move the pitch, which Level 1 allows and no
+        // bank played yet has.
+        let fixed = |scale: i32| {
+            let region = tiny::region((0, 127), 0, 0, 0, &[tiny::art1(&[(3, 0, 3, scale)])]);
+            let instrument = tiny::instrument(0, 0, &[region], &[]);
+            Bank::parse(&tiny::bank(&[instrument], &[wave(&four, &[])], &[0]))
+        };
+        assert!(fixed(0).is_err());
+        assert!(fixed(12_800 << 16).is_ok(), "the keyboard's own scale");
+    }
+
+    #[test]
+    fn pool_entries_pointing_at_one_wave_share_it_and_waves_overlapping_past_the_bank_are_refused()
+    {
+        let one = [tiny::instrument(
+            0,
+            0,
+            &[tiny::region((0, 127), 0, 0, 1, &[])],
+            &[],
+        )];
+        let four = tiny::wave(22_050, 16, &tiny::samples(&[0; 4]), &[]);
+        let bank = Bank::parse(&tiny::bank(&one, &[four], &[0, 0])).expect("a bank");
+        assert!(std::sync::Arc::ptr_eq(
+            &bank.waves[0].samples,
+            &bank.waves[1].samples
+        ));
+        // A wave whose data is itself a wave, which the pool table lists
+        // too: 44 bytes in is past the list's own header, its format and its
+        // data's header. Read whole, the two are more than the bank holds.
+        let inner = tiny::wave(22_050, 8, &[128; 1000], &[]);
+        let outer = [tiny::wave(22_050, 8, &inner, &[])];
+        assert!(Bank::parse(&tiny::bank_at(&one, &outer, &[0, 0])).is_ok());
+        assert!(Bank::parse(&tiny::bank_at(&one, &outer, &[0, 44])).is_err());
     }
 }
