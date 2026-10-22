@@ -115,9 +115,9 @@ pub enum Input {
         down: bool,
     },
     /// The person asked the window to close: its close button, Command-Q or
-    /// -W, Control-Q, Alt-F4, or the run's terminal or console. The title is
-    /// told as Windows tells it, and the run ends when the title leaves
-    /// (#140).
+    /// -W, the Dock's Quit (#178), Control-Q, Alt-F4, or the run's terminal or
+    /// console. The title is told as Windows tells it, and the run ends when
+    /// the title leaves (#140).
     Close,
 }
 

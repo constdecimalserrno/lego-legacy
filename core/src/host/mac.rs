@@ -12,6 +12,7 @@
 use super::pointer::{back_on_the_picture, content_scale, moved, Capture, Mouse, Moved, Steer};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 type Id = *mut c_void;
@@ -60,7 +61,7 @@ struct Point {
 struct Runtime {
     /// Kept open for as long as the runtime is used: closing it would take the
     /// selectors and classes with it.
-    _objc: sys::Library,
+    objc: sys::Library,
     _appkit: sys::Library,
     core_graphics: sys::Library,
     get_class: unsafe extern "C" fn(*const c_char) -> Id,
@@ -88,7 +89,7 @@ impl Runtime {
         };
         let msg = objc.symbol("objc_msgSend")?;
         Ok(Self {
-            _objc: objc,
+            objc,
             _appkit: appkit,
             core_graphics,
             get_class,
@@ -134,6 +135,55 @@ impl Runtime {
     unsafe fn graphics<T: Copy>(&self, name: &str) -> Result<T, HostError> {
         // Safety: as the caller promises.
         unsafe { self.core_graphics.function(name) }
+    }
+}
+
+/// How many times the application was asked to quit (#178): the Dock's Quit,
+/// a logout or a restart. Its own count, not [`super::CLOSE_ASKED`], which
+/// core's tests of headless runs read, so that the delegate can be tested.
+static QUITS: AtomicU32 = AtomicU32::new(0);
+
+/// `applicationShouldTerminate:`, which AppKit asks the application's
+/// delegate before it quits (Apple, `terminate(_:)`): one close, counted as
+/// the window's button is, and `NSTerminateCancel`, so the title is told and
+/// the run ends when it leaves (#140). `NSTerminateLater` would have AppKit
+/// run its own loop until answered, inside `pump`, with the title stopped.
+extern "C" fn should_terminate(_delegate: Id, _cmd: Sel, _app: Id) -> u64 {
+    QUITS.fetch_add(1, Ordering::Relaxed);
+    0
+}
+
+/// The application's delegate, which the caller owns: an object of a class
+/// made here at run time, a subclass of `NSObject` with only
+/// [`should_terminate`] (#178). The class is made once a process.
+///
+/// # Errors
+/// When the runtime's functions cannot be found.
+fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
+    // Safety: each function is called through the signature the runtime's
+    // headers give it; the method's types say what `should_terminate` takes
+    // and answers: an `NSUInteger`, then self, the selector and an object.
+    unsafe {
+        let allocate: unsafe extern "C" fn(Id, *const c_char, usize) -> Id =
+            rt.objc.function("objc_allocateClassPair")?;
+        let add_method: unsafe extern "C" fn(Id, Sel, *const c_void, *const c_char) -> u8 =
+            rt.objc.function("class_addMethod")?;
+        let register: unsafe extern "C" fn(Id) = rt.objc.function("objc_registerClassPair")?;
+        let mut class = allocate(rt.class("NSObject"), c"LegoLegacyQuit".as_ptr(), 0);
+        if class.is_null() {
+            // The name is taken: by the class an earlier call made.
+            class = rt.class("LegoLegacyQuit");
+        } else {
+            add_method(
+                class,
+                rt.sel("applicationShouldTerminate:"),
+                should_terminate as *const c_void,
+                c"Q@:@".as_ptr(),
+            );
+            register(class);
+        }
+        let delegate: Id = rt.send::<MsgId>()(class, rt.sel("alloc"));
+        Ok(rt.send::<MsgId>()(delegate, rt.sel("init")))
     }
 }
 
@@ -516,6 +566,10 @@ impl MacWindow {
             let app: Id = rt.send::<MsgId>()(app_class, rt.sel("sharedApplication"));
             // A regular application: it gets a menu bar and can take focus.
             rt.send::<MsgVoidI64>()(app, rt.sel("setActivationPolicy:"), 0);
+            // The Dock's Quit, a logout and a restart ask the application's
+            // delegate first (#178). It holds the delegate weakly, so this
+            // one is kept, by the retain `alloc` gave, until the process ends.
+            rt.send::<MsgVoidId>()(app, rt.sel("setDelegate:"), quit_delegate(&rt)?);
 
             let frame = Rect {
                 x: 0.0,
@@ -626,11 +680,12 @@ impl MacWindow {
         }
     }
 
-    /// How many times the person has asked the window to close, or the run
-    /// to end from its terminal ([`super::listen`], #110, #140).
+    /// How many times the person has asked the window to close, the
+    /// application to quit ([`QUITS`], #178), or the run to end from its
+    /// terminal ([`super::listen`], #110, #140).
     #[must_use]
     pub fn closes(&self) -> u32 {
-        self.closes + super::CLOSE_ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        self.closes + super::CLOSE_ASKED.load(Ordering::Relaxed) + QUITS.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through the Mac's output from now on, or say why
@@ -1209,12 +1264,16 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId, MsgPoint,
-        MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
+        direct_input_key, direct_input_modifier, guest_point, ns_cursor, quit_delegate, Id, MsgId,
+        MsgPoint, MsgVoid, Point, Rect, Runtime, Sel, PRESENT_BITMAP_INFO, QUITS,
     };
     use crate::host::{sys, Input};
+    use std::sync::atomic::Ordering;
 
     use std::ffi::{c_char, c_void};
+
+    /// `applicationShouldTerminate:`'s call shape: an `NSUInteger` back.
+    type MsgU64Id = unsafe extern "C" fn(Id, Sel, Id) -> u64;
 
     #[test]
     fn a_presented_pixel_reaches_core_graphics_as_the_colour_it_is() {
@@ -1384,6 +1443,28 @@ mod tests {
             ns_cursor(&rt, &short).is_err(),
             "a shape short of its pixels"
         );
+    }
+
+    /// The Dock's Quit, a logout or a restart asks the application's
+    /// delegate whether to terminate: it counts one close and answers
+    /// `NSTerminateCancel`, so the title is told and the run ends when it
+    /// leaves (#178). No window and no application: only the delegate.
+    #[test]
+    fn a_quit_asked_of_the_application_is_a_close_and_cancelled() {
+        let rt = Runtime::open().expect("AppKit is on every Mac");
+        let delegate = quit_delegate(&rt).expect("the runtime builds it");
+        let before = QUITS.load(Ordering::Relaxed);
+        // Safety: the method the delegate's class was given, with the
+        // signature AppKit's header declares; the delegate is released once.
+        let reply = unsafe {
+            let reply =
+                rt.send::<MsgU64Id>()(delegate, rt.sel("applicationShouldTerminate:"), rt.nil());
+            rt.send::<MsgVoid>()(delegate, rt.sel("release"));
+            reply
+        };
+        assert_eq!(reply, 0, "NSTerminateCancel");
+        assert_eq!(QUITS.load(Ordering::Relaxed), before + 1, "one close");
+        assert!(!quit_delegate(&rt).expect("and again").is_null());
     }
 
     #[test]

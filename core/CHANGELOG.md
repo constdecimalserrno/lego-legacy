@@ -100,6 +100,19 @@ frozen, or LEGO Island's pulled back into the window's place. The decision is `h
 with no `cfg`, so every host's tests hold it. Coming back to the Space captures nothing until a
 click, as coming back to the front never does. No route moves; a headless run has no window.
 
+The Dock's Quit, a logout and a restart reach the title on macOS as the window's close button does
+(#178): one close, delivered at the next flip as `SC_CLOSE` and recorded in the route, and the run
+ends when the title leaves, a second close or the five declared seconds still stopping one that
+never does (#140). They ask the application `terminate:`, which, with no delegate, ended the
+process at once: the title was never told, the run wrote no `end` line, and LEGO Island didn't
+save. The application now has a delegate, a class made at run time through the Objective-C
+runtime's own `objc_allocateClassPair`, `class_addMethod` and `objc_registerClassPair`, with no
+crate. Its `applicationShouldTerminate:` counts the close and answers `NSTerminateCancel` (Apple,
+`terminate(_:)`), as SDL and GLFW do, read as documentation: `NSTerminateLater` would have AppKit
+run its own loop until answered, with the title stopped inside it. So a logout or a restart is
+cancelled while the title leaves, and is asked again. A quit in the "close the window to end" wait
+ends it. No route moves; a headless run has no window.
+
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
 the maintainer blessed on 2026-10-21; a person drives Hot Wheels' first race again before its next
