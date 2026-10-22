@@ -191,15 +191,19 @@ route moves; a headless run has no window.
 
 The macOS backend sends every message that answers a rectangle through `objc_msgSend_stret` on an
 Intel Mac, so an x86_64 build no longer reads garbage or crashes the first time it asks a window,
-its view or a screen for its `frame` (#186), at the first click on the picture or the first steered
-move. On x86_64 a struct larger than two eightbytes comes back through memory its caller provides
-(System V AMD64 psABI, 3.2.3), and the runtime has its own entry point for that (`objc/message.h`);
-an `NSRect`, four doubles, is one, and an `NSPoint` or `NSSize`, two, is not, nor is a `CGFloat`, as
-Apple's own compiler sends them. Arm64 has no such entry point and `objc_msgSend` answers any
-struct, so nothing changes on Apple silicon. The decision is `host::in_memory`, with no `cfg`, so
-every host's tests hold it, and every struct-returning send goes through `Runtime::send_struct`.
-Built and clippy-clean for `x86_64-apple-darwin`, not run: there is no Intel Mac here. No route
-moves; a headless run has no window.
+its view or a screen for its `frame` (#186): at any press on the window, a move of the free mouse
+over it, a steered move, or a pump with the mouse kept. On x86_64 a struct larger than two
+eightbytes comes back through memory its caller provides (System V AMD64 psABI, 3.2.3), and the
+runtime has its own entry point for that (`objc/message.h`); an `NSRect`, four doubles, is one, and
+an `NSPoint` or `NSSize`, two, is not, nor is a `CGFloat`, as Apple's own compiler sends them. Arm64
+has no such entry point and `objc_msgSend` answers any struct, so nothing changes on Apple silicon.
+The decision is `host::stret`, with no `cfg`, so every host's tests hold it, and every struct-
+returning send goes through `Runtime::send_struct`, which answers zeros for a message to nil, as
+Apple's compiler does, since the stret entry point writes nothing then (the first screen is nil with
+no display). Built and clippy-clean for `x86_64-apple-darwin`; core's `host` tests, the struct
+path's included, pass as x86_64 under Rosetta on an Apple silicon Mac, and fail without the stret
+entry point (a crash) or without the nil answer. Not played on an Intel Mac. No route moves; a
+headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move

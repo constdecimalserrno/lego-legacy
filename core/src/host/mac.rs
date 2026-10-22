@@ -1,6 +1,7 @@
 //! The macOS backend (ADR-0001).
 //!
-//! Everything here is reached through `dlopen` and `objc_msgSend`: AppKit for
+//! Everything here is reached through `dlopen` and `objc_msgSend`, or
+//! `objc_msgSend_stret` for a struct on Intel (#186): AppKit for
 //! the window and its events, Core Graphics for turning the guest's surface
 //! into something a layer will show. No crate is linked, and nothing outside
 //! the operating system is loaded.
@@ -31,9 +32,10 @@ struct Rect {
 /// `objc_msgSend` has no one signature, so each call shape gets its own.
 ///
 /// Calling it through the wrong one is how a working program starts returning
-/// nonsense on one architecture and not another, which is why there is no
-/// generic sender here. A method answering a struct is sent through
-/// [`Runtime::send_struct`] instead, which picks the entry point too (#186).
+/// nonsense on one architecture and not another, which is why each sender
+/// names its call shape. A method answering a struct is sent through
+/// [`Runtime::send_struct`] instead, which is generic over the struct and
+/// picks the entry point too (#186).
 type MsgId = unsafe extern "C" fn(Id, Sel) -> Id;
 type MsgVoid = unsafe extern "C" fn(Id, Sel);
 type MsgVoidId = unsafe extern "C" fn(Id, Sel, Id);
@@ -67,7 +69,7 @@ struct Runtime {
     sel: unsafe extern "C" fn(*const c_char) -> Sel,
     msg: *mut c_void,
     /// `objc_msgSend_stret` on x86_64, and `objc_msgSend` on arm64, which
-    /// has no other ([`super::in_memory`], #186).
+    /// has no other ([`super::stret`], #186).
     msg_stret: *mut c_void,
 }
 
@@ -134,23 +136,34 @@ impl Runtime {
         unsafe { std::mem::transmute_copy(&self.msg) }
     }
 
-    /// The message send for a method that takes nothing and answers a
-    /// struct `R`: `objc_msgSend_stret` where `R` comes back through memory,
-    /// `objc_msgSend` where it comes back in registers (`objc/message.h`,
-    /// [`super::in_memory`], #186). Rust's call already passes where `R` goes
-    /// as the stret entry point expects it, first; only the entry point
-    /// differs.
+    /// Send a message whose method takes nothing and answers a struct `R`,
+    /// through `objc_msgSend_stret` where Intel returns `R` through memory and
+    /// `objc_msgSend` everywhere else (`objc/message.h`, [`super::stret`],
+    /// #186). Rust's call already passes where `R` goes as the stret entry
+    /// point expects it, first; only the entry point differs.
+    ///
+    /// A message to nil answers zeros, as Apple's compiler makes it: the
+    /// stret entry point writes nothing for nil, where arm64's `objc_msgSend`
+    /// answers zeros itself.
     ///
     /// # Safety
-    /// The method actually being called must answer an `R`.
-    unsafe fn send_struct<R: Copy>(&self) -> unsafe extern "C" fn(Id, Sel) -> R {
-        let entry = if super::in_memory(cfg!(target_arch = "x86_64"), std::mem::size_of::<R>()) {
+    /// The method actually being called must answer an `R`, a `#[repr(C)]`
+    /// struct of doubles ([`super::stret`]), of which all zeros is one.
+    unsafe fn send_struct<R: Copy>(&self, receiver: Id, sel: Sel) -> R {
+        if receiver.is_null() {
+            // Safety: as the caller promises.
+            return unsafe { std::mem::zeroed() };
+        }
+        let entry = if super::stret(cfg!(target_arch = "x86_64"), std::mem::size_of::<R>()) {
             self.msg_stret
         } else {
             self.msg
         };
         // Safety: as the caller promises, and a function pointer is a pointer.
-        unsafe { std::mem::transmute_copy(&entry) }
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel) -> R = std::mem::transmute_copy(&entry);
+            send(receiver, sel)
+        }
     }
 
     /// An autorelease pool, drained when it is dropped, at the end of the
@@ -933,13 +946,13 @@ impl MacWindow {
         // and objects by value; then Core Graphics' warp, which takes a point
         // in its own coordinates, and its switch, which takes a flag.
         unsafe {
-            let at: Point = self.rt.send_struct::<Point>()(
-                self.rt.class("NSEvent"),
-                self.rt.sel("mouseLocation"),
-            );
-            let window: Rect = self.rt.send_struct::<Rect>()(self.window, self.rt.sel("frame"));
-            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-            let content: Rect = self.rt.send_struct::<Rect>()(view, self.rt.sel("frame"));
+            let at: Point = self
+                .rt
+                .send_struct::<Point>(self.rt.class("NSEvent"), self.rt.sel("mouseLocation"));
+            let window: Rect = self
+                .rt
+                .send_struct::<Rect>(self.window, self.rt.sel("frame"));
+            let content = self.content_frame();
             // The content view's frame is the window's own coordinates, which
             // start at the window's bottom left corner on the screen.
             let (left, bottom) = (window.x + content.x, window.y + content.y);
@@ -960,7 +973,7 @@ impl MacWindow {
                 let screens: Id =
                     self.rt.send::<MsgId>()(self.rt.class("NSScreen"), self.rt.sel("screens"));
                 let first: Id = self.rt.send::<MsgId>()(screens, self.rt.sel("firstObject"));
-                let first: Rect = self.rt.send_struct::<Rect>()(first, self.rt.sel("frame"));
+                let first: Rect = self.rt.send_struct::<Rect>(first, self.rt.sel("frame"));
                 (self.cg_warp)(Point {
                     x,
                     y: first.height - y,
@@ -980,6 +993,17 @@ impl MacWindow {
         }
     }
 
+    /// The picture's place in the window: its content view's frame, in the
+    /// window's own coordinates, from its bottom left corner.
+    fn content_frame(&self) -> Rect {
+        // Safety: `contentView` on our own window, which answers its view,
+        // and `frame` on that view, which answers a rectangle.
+        unsafe {
+            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
+            self.rt.send_struct::<Rect>(view, self.rt.sel("frame"))
+        }
+    }
+
     /// Where an event in our window landed on the guest's screen, or nothing
     /// when it landed on the window's frame rather than on the picture: the
     /// title bar, the edges a person resizes by. The frame is the window
@@ -989,9 +1013,10 @@ impl MacWindow {
         // the window's content view; a point and two rectangles come back by
         // value.
         unsafe {
-            let p: Point = self.rt.send_struct::<Point>()(event, self.rt.sel("locationInWindow"));
-            let view: Id = self.rt.send::<MsgId>()(self.window, self.rt.sel("contentView"));
-            let frame: Rect = self.rt.send_struct::<Rect>()(view, self.rt.sel("frame"));
+            let p: Point = self
+                .rt
+                .send_struct::<Point>(event, self.rt.sel("locationInWindow"));
+            let frame = self.content_frame();
             let inside = p.x >= frame.x
                 && p.x < frame.x + frame.width
                 && p.y >= frame.y
@@ -1117,12 +1142,7 @@ impl MacWindow {
                                     self.rt.send::<MsgF64>()(event, self.rt.sel("deltaX"));
                                 let dy: f64 =
                                     self.rt.send::<MsgF64>()(event, self.rt.sel("deltaY"));
-                                let view: Id = self.rt.send::<MsgId>()(
-                                    self.window,
-                                    self.rt.sel("contentView"),
-                                );
-                                let frame: Rect =
-                                    self.rt.send_struct::<Rect>()(view, self.rt.sel("frame"));
+                                let frame = self.content_frame();
                                 if let Some((x, y)) = self.steer.moved(
                                     (dx, dy),
                                     (frame.width, frame.height),
@@ -1582,10 +1602,10 @@ mod tests {
         // Safety: AppKit's own accessors on the cursor just made, which is
         // released once.
         unsafe {
-            let hot: Point = rt.send_struct::<Point>()(cursor, rt.sel("hotSpot"));
+            let hot: Point = rt.send_struct::<Point>(cursor, rt.sel("hotSpot"));
             assert_eq!((hot.x, hot.y), (2.0, 1.0));
             let image: Id = rt.send::<MsgId>()(cursor, rt.sel("image"));
-            let size: Point = rt.send_struct::<Point>()(image, rt.sel("size"));
+            let size: Point = rt.send_struct::<Point>(image, rt.sel("size"));
             assert_eq!((size.x, size.y), (3.0, 2.0));
             rt.send::<MsgVoid>()(cursor, rt.sel("release"));
         }
@@ -1668,9 +1688,13 @@ mod tests {
     }
 
     /// A message answering a rectangle answers it whole, through the entry
-    /// point its architecture returns it by (#186). No window: an `NSValue`.
+    /// point its architecture returns it by, and a message to nil answers
+    /// zeros, on Intel too, where the stret entry point writes nothing for nil
+    /// (#186), as `[[NSScreen screens] firstObject]` is with no display. Both
+    /// asked from one place, so that a send to nil that wrote nothing would
+    /// answer the rectangle again. No window: an `NSValue`.
     #[test]
-    fn a_rectangle_comes_back_from_a_message_whole() {
+    fn a_rectangle_comes_back_whole_and_nil_answers_zeros() {
         let rt = Runtime::open().expect("AppKit is on every Mac");
         let rect = Rect {
             x: 1.0,
@@ -1679,18 +1703,20 @@ mod tests {
             height: 480.0,
         };
         // Safety: NSValue's own `valueWithRect:`, which takes a rectangle,
-        // and `rectValue`, which answers one; the value is autoreleased into
-        // the pool drained at the end.
-        let back: Rect = unsafe {
+        // and `rectValue`, which answers one, sent to the value and to nil;
+        // the value is autoreleased into the pool drained at the end.
+        unsafe {
             let _pool = rt.pool();
             let with: unsafe extern "C" fn(Id, Sel, Rect) -> Id = rt.send();
             let value = with(rt.class("NSValue"), rt.sel("valueWithRect:"), rect);
-            rt.send_struct::<Rect>()(value, rt.sel("rectValue"))
-        };
-        assert_eq!(
-            (back.x, back.y, back.width, back.height),
-            (1.0, 2.0, 640.0, 480.0)
-        );
+            for (receiver, want) in [
+                (value, (1.0, 2.0, 640.0, 480.0)),
+                (rt.nil(), (0.0, 0.0, 0.0, 0.0)),
+            ] {
+                let back: Rect = rt.send_struct(receiver, rt.sel("rectValue"));
+                assert_eq!((back.x, back.y, back.width, back.height), want);
+            }
+        }
     }
 
     #[test]

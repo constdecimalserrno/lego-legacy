@@ -62,9 +62,9 @@ to be let go later is now let go at every pump, twice a flip. No route moved.
 Closing its window on macOS with its button no longer takes the window off the screen at once: it
 stays until the title has left, as on Windows (#183, core 1.2.0). No route moved.
 
-Built for an Intel Mac, it no longer reads garbage or crashes at the first click on its picture or
-the first move of a captured mouse (#186, core 1.2.0); the play kit is still built for Apple silicon
-only. No route moved.
+Built for an Intel Mac, it no longer reads garbage or crashes at any press on its window or a move
+of the free mouse over it (#186, core 1.2.0): built and clippy-clean for Intel, and the struct path
+run as x86_64 under Rosetta, not played on an Intel Mac. No route moved.
 
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees

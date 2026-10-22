@@ -11,8 +11,8 @@
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
 //! pointer a title is handed and whose the mouse is ([`pointer`]), the keys
 //! it is told of ([`key_change`]), whether a window is in front
-//! ([`in_front`]), which struct a message answers through memory
-//! ([`in_memory`]), the pace ([`pace`]), the feed to an audio device
+//! ([`in_front`]), which struct a message is sent for through
+//! `objc_msgSend_stret` ([`stret`]), the pace ([`pace`]), the feed to an audio device
 //! ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys and
 //! scaling ([`windows_input`]), and X's ([`x11`]).
 
@@ -70,15 +70,17 @@ pub fn in_front(visible: bool, minimized: bool, app_active: bool, on_active_spac
     visible && !minimized && app_active && on_active_space
 }
 
-/// Whether a method answering a struct of doubles, `size` bytes of them,
-/// answers it through memory its caller provides, which on macOS is a message
-/// sent through `objc_msgSend_stret` rather than `objc_msgSend` (#186). On
-/// x86_64 a struct larger than two eightbytes is (System V AMD64 psABI,
-/// 3.2.3: class MEMORY), so an `NSRect` is and an `NSPoint` is not; arm64 has
-/// no such entry point (`objc/message.h`: `OBJC_ARM64_UNAVAILABLE`). Only
-/// for doubles: a smaller struct with unaligned fields is MEMORY too.
+/// Whether a message whose method answers a struct of doubles, `size` bytes
+/// of them, is sent through `objc_msgSend_stret` rather than `objc_msgSend`
+/// on macOS (#186). On x86_64 a struct larger than two eightbytes comes back
+/// through memory its caller provides (System V AMD64 psABI, 3.2.3: class
+/// MEMORY), which is that entry point's, so an `NSRect` is sent through it and
+/// an `NSPoint` is not. arm64 returns a large struct through memory too, but
+/// has no such entry point: `objc_msgSend` answers every struct there
+/// (`objc/message.h`: `OBJC_ARM64_UNAVAILABLE`). Only for doubles: a smaller
+/// struct with unaligned fields is MEMORY too.
 #[must_use]
-pub fn in_memory(x86_64: bool, size: usize) -> bool {
+pub fn stret(x86_64: bool, size: usize) -> bool {
     x86_64 && size > 16
 }
 
@@ -344,18 +346,18 @@ pub trait Host {
 
 #[cfg(test)]
 mod tests {
-    use super::{in_front, in_memory, key_change, Input};
+    use super::{in_front, key_change, stret, Input};
 
     /// A rectangle, four doubles, comes back through memory on Intel and in
     /// registers on Apple silicon; a point, two doubles, in registers on
     /// both (#186).
     #[test]
-    fn only_a_struct_too_big_for_registers_on_intel_comes_back_in_memory() {
-        assert!(in_memory(true, 32), "a rectangle on Intel");
-        assert!(in_memory(true, 24), "three doubles on Intel");
-        assert!(!in_memory(true, 16), "a point on Intel");
-        assert!(!in_memory(false, 32), "a rectangle on Apple silicon");
-        assert!(!in_memory(false, 16), "a point on Apple silicon");
+    fn only_a_struct_too_big_for_registers_on_intel_is_sent_through_stret() {
+        assert!(stret(true, 32), "a rectangle on Intel");
+        assert!(stret(true, 24), "three doubles on Intel");
+        assert!(!stret(true, 16), "a point on Intel");
+        assert!(!stret(false, 32), "a rectangle on Apple silicon");
+        assert!(!stret(false, 16), "a point on Apple silicon");
     }
 
     /// A window is in front only on the screen, of the active application,

@@ -43,8 +43,10 @@ lego-legacy is a preservation effort, and eight rules outrank everything else in
 ## What you need
 
 - A Mac, for now. The window, sound and input have a macOS backend (AppKit, Core Graphics and
-  AudioToolbox, reached at run time). Windows (#107) and Linux (#108) backends have been run by
-  machine but **not yet played by a person**, so neither is released (golden rule 7).
+  AudioToolbox, reached at run time). Every released title is played on Apple silicon. Built for an
+  Intel Mac it passes clippy, and the backend's tests pass as x86_64 under Rosetta, but no title has
+  been played on one (#186). Windows (#107) and Linux (#108) backends have been run by machine but
+  **not yet played by a person**, so neither is released (golden rule 7).
 - Windows 10 or 11. A Windows backend (user32, gdi32 and winmm's `waveOut`, reached at run time
   from Windows' own System32) passes the full suite on x86-64 Windows Server 2022, and its
   window, keys, pointer, console and launcher were checked on that machine's desktop. Sound
