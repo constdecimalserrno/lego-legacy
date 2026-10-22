@@ -11,7 +11,7 @@
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
 //! pointer a title is handed and whose the mouse is ([`pointer`]), the keys
 //! it is told of ([`key_change`]), whether a window off the screen is closed
-//! ([`closed`]) and whether one is in front ([`in_front`]), the pace
+//! ([`closed`]) and whether a window is in front ([`in_front`]), the pace
 //! ([`pace`]), the feed to an audio device ([`feed`]) and the stretch of the
 //! mix ([`stretch`]), Windows' keys and scaling ([`windows_input`]), and X's
 //! ([`x11`]).

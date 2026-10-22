@@ -53,8 +53,8 @@ Closing its window on macOS with its button no longer leaves the run messaging a
 have freed while the title leaves (#175, core 1.2.0): the window still goes from the screen at once,
 and only the object behind it is kept until the process ends. No route moved.
 
-Switching to another Space on macOS frees a captured mouse, as losing the front does (#176, core
-1.2.0). No route moved.
+Switching to another Space on macOS frees a captured mouse, as losing the front does, and keys
+pressed there no longer reach the game (#176, core 1.2.0). No route moved.
 
 Quitting from the Dock on macOS, or logging out or restarting, closes it as its window's close
 button does (#178, core 1.2.0), where the process ended at once. No route moved.

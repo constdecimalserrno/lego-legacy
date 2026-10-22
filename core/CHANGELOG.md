@@ -92,13 +92,21 @@ documentation and never seen to crash. The window is now only taken off the scre
 the process ends. No route moves; a headless run has no window.
 
 A window on another Space is not in front on macOS, so switching Spaces frees a captured mouse, as
-losing the front does (#176). #141's front read whether the window was on the screen and not
-minimized and its application active, and a window on another Space is still on the screen, its
-application active when nothing else takes the front there (Apple's `isVisible` and
-`isOnActiveSpace`): the mouse stayed captured with the window out of sight, the pointer hidden and
-frozen, or LEGO Island's pulled back into the window's place. The decision is `host::in_front`,
-with no `cfg`, so every host's tests hold it. Coming back to the Space captures nothing until a
-click, as coming back to the front never does. No route moves; a headless run has no window.
+losing the front does, and the title hears no key there (#176). #141's front read whether the
+window was on the screen, not minimized, and of the active application. A window on another Space
+is still on the screen (Apple's `isVisible`), and, reasoned from the code and not seen at a window,
+its application stays active when nothing else takes the front there: the mouse would stay
+captured with the window out of sight, the pointer hidden and frozen, or LEGO Island's pulled back
+into the window's place. The front now also asks `isOnActiveSpace`; `isVisible` and
+`isMiniaturized` stay, because Apple says a window off the screen answers where it would go. The
+decision is `host::in_front`, with no `cfg`, so every host's tests hold it. Coming back to the
+Space, like coming back to the front, captures nothing until a click (#141). A key pressed while
+the window is not in front is the title's no more, on every backend (`Capture::key`), as Windows
+and X send such a window no keys and macOS sends them on to an application whose window is on
+another Space, where Escape would have reached Hot Wheels and quit it; on macOS the keys the title
+holds are let go when the window leaves the front as well as when it stops being the key window.
+A known limit: Mission Control, App Exposé and Show Desktop change no Space, so a captured mouse
+stays captured over them until Escape. No route moves; a headless run has no window.
 
 The Dock's Quit, a logout and a restart reach the title on macOS as the window's close button does
 (#178): one close, delivered at the next flip as `SC_CLOSE` and recorded in the route, and the run

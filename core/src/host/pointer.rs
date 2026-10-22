@@ -337,10 +337,17 @@ impl Capture {
     }
 
     /// A key pressed or let go, before the title is told of it: nothing when
-    /// it is the title's, and when it is the host's instead, the buttons to
-    /// let go of in the title. Only Escape ever is: pressed while the mouse
-    /// is captured it frees it, and it is the host's until it is let go.
+    /// it is the title's, and when it is not, the buttons to let go of in the
+    /// title. A key pressed while the window is not in front is no one's
+    /// here: Windows and X send such a window no keys, and macOS sends them
+    /// on to an application whose window is on another Space (#176); one let
+    /// go reaches the title only if its press did ([`super::key_change`]).
+    /// Escape pressed while the mouse is captured frees it, and is the host's
+    /// until it is let go.
     pub fn key(&mut self, code: u32, down: bool) -> Option<Vec<Input>> {
+        if down && !self.front {
+            return Some(Vec::new());
+        }
         if code != ESCAPE {
             return None;
         }
@@ -722,6 +729,30 @@ mod tests {
         assert!(mouse.captured());
         assert!(mouse.key(ESCAPE, true).is_some(), "frees");
         assert!(!mouse.captured());
+    }
+
+    /// A key pressed while the window is not in front reaches no one, as
+    /// Windows and X send such a window no keys, though macOS still sends
+    /// them to an application whose window is on another Space (#176); a key
+    /// the title was told of is still let go.
+    #[test]
+    fn a_key_pressed_while_not_in_front_is_not_the_title_s() {
+        let mut mouse = in_front();
+        assert_eq!(mouse.key(0xcb, true), None, "Left, in front: the title's");
+        assert_eq!(mouse.front(false, now()), []);
+        assert_eq!(mouse.key(0xcd, true), Some(vec![]), "Right, not in front");
+        assert_eq!(
+            mouse.key(ESCAPE, true),
+            Some(vec![]),
+            "Escape, which quits Hot Wheels"
+        );
+        assert_eq!(
+            mouse.key(0xcb, false),
+            None,
+            "Left let go: as the title was told"
+        );
+        assert_eq!(mouse.front(true, now()), []);
+        assert_eq!(mouse.key(0xcd, true), None, "back in front: the title's");
     }
 
     /// Once the run is over the mouse is the person's, and no click captures

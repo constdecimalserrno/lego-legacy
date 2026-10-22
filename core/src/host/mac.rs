@@ -1136,15 +1136,6 @@ impl MacWindow {
                 v & 0xff != 0
             };
 
-            // A key let go while another application has the keyboard is
-            // never sent here, so what was held is let go when the window
-            // loses it.
-            if !ask(self.window, "isKeyWindow") {
-                for code in self.held.drain(..) {
-                    self.pending.push(Input::Key { code, down: false });
-                }
-            }
-
             let visible = ask(self.window, "isVisible");
             let miniaturized = ask(self.window, "isMiniaturized");
             if super::closed(visible, miniaturized, ask(self.app, "isHidden")) && !self.gone {
@@ -1159,12 +1150,32 @@ impl MacWindow {
             // its window on the screen: one closed by its button, minimized,
             // or of an application hidden, which is then not the active one,
             // is not in front, and nor is one on another Space (#176).
+            // Apple, `isOnActiveSpace`
+            // (https://developer.apple.com/documentation/appkit/nswindow/isonactivespace):
+            // "For visible windows, this property indicates whether the window
+            // is currently visible on the active space. For nonvisible
+            // windows, it indicates whether ordering the window onscreen would
+            // cause it to be on the active space." So a minimized window can
+            // answer yes, and `isVisible` and `isMiniaturized` stay.
+            // ponytail: Mission Control, App Exposé and Show Desktop change no
+            // Space and leave this application active, so a captured mouse
+            // stays captured over them until Escape; AppKit has no public
+            // signal for them.
             front = super::in_front(
                 visible,
                 miniaturized,
                 ask(self.app, "isActive"),
                 ask(self.window, "isOnActiveSpace"),
             );
+            // A key let go while another application has the keyboard, or
+            // while the window is not in front, is not the title's (`Capture`
+            // takes no key pressed then), so what was held is let go when the
+            // window loses either, as Windows and X let it go (#176).
+            if !front || !ask(self.window, "isKeyWindow") {
+                for code in self.held.drain(..) {
+                    self.pending.push(Input::Key { code, down: false });
+                }
+            }
         }
         self.pending
             .extend(self.capture.front(front, Instant::now()));
