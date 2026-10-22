@@ -91,6 +91,15 @@ closed it again as the run ended: messages to an object it may have freed, read 
 documentation and never seen to crash. The window is now only taken off the screen, and kept until
 the process ends. No route moves; a headless run has no window.
 
+A window on another Space is not in front on macOS, so switching Spaces frees a captured mouse, as
+losing the front does (#176). #141's front read whether the window was on the screen and not
+minimized and its application active, and a window on another Space is still on the screen, its
+application active when nothing else takes the front there (Apple's `isVisible` and
+`isOnActiveSpace`): the mouse stayed captured with the window out of sight, the pointer hidden and
+frozen, or LEGO Island's pulled back into the window's place. The decision is `host::in_front`,
+with no `cfg`, so every host's tests hold it. Coming back to the Space captures nothing until a
+click, as coming back to the front never does. No route moves; a headless run has no window.
+
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
 the maintainer blessed on 2026-10-21; a person drives Hot Wheels' first race again before its next

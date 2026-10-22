@@ -1046,8 +1046,13 @@ impl MacWindow {
             // is put back only while this application is still in front, with
             // its window on the screen: one closed by its button, minimized,
             // or of an application hidden, which is then not the active one,
-            // is not in front.
-            front = visible && !miniaturized && ask(self.app, "isActive");
+            // is not in front, and nor is one on another Space (#176).
+            front = super::in_front(
+                visible,
+                miniaturized,
+                ask(self.app, "isActive"),
+                ask(self.window, "isOnActiveSpace"),
+            );
         }
         self.pending
             .extend(self.capture.front(front, Instant::now()));

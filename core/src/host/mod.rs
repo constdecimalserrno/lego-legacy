@@ -11,9 +11,10 @@
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
 //! pointer a title is handed and whose the mouse is ([`pointer`]), the keys
 //! it is told of ([`key_change`]), whether a window off the screen is closed
-//! ([`closed`]), the pace ([`pace`]), the feed to an audio device
-//! ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys and
-//! scaling ([`windows_input`]), and X's ([`x11`]).
+//! ([`closed`]) and whether one is in front ([`in_front`]), the pace
+//! ([`pace`]), the feed to an audio device ([`feed`]) and the stretch of the
+//! mix ([`stretch`]), Windows' keys and scaling ([`windows_input`]), and X's
+//! ([`x11`]).
 
 pub mod feed;
 pub mod headless;
@@ -63,6 +64,16 @@ pub(crate) fn ask_to_close() -> u32 {
 #[must_use]
 pub fn closed(visible: bool, minimized: bool, app_hidden: bool) -> bool {
     !visible && !minimized && !app_hidden
+}
+
+/// Whether a window is the one in front (#141), for a host that is told it
+/// piece by piece, as macOS's is: on the screen, not minimized, of the active
+/// application, and on the Space the person is looking at. A window on
+/// another Space is still on the screen, and its application can stay
+/// active, but it is out of sight, so it has lost the front (#176).
+#[must_use]
+pub fn in_front(visible: bool, minimized: bool, app_active: bool, on_active_space: bool) -> bool {
+    visible && !minimized && app_active && on_active_space
 }
 
 /// Hear the operating system ask a run to end, from now on. A title's `main`
@@ -323,7 +334,7 @@ pub trait Host {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed, key_change, Input};
+    use super::{closed, in_front, key_change, Input};
 
     #[test]
     fn a_window_off_the_screen_is_closed_only_when_neither_minimized_nor_hidden() {
@@ -331,6 +342,17 @@ mod tests {
         assert!(!closed(true, false, false), "on the screen");
         assert!(!closed(false, true, false), "minimized");
         assert!(!closed(false, false, true), "its application hidden");
+    }
+
+    /// A window is in front only on the screen, of the active application,
+    /// on the Space the person is looking at (#141, #176).
+    #[test]
+    fn a_window_on_another_space_is_not_in_front() {
+        assert!(in_front(true, false, true, true), "in front");
+        assert!(!in_front(false, false, true, true), "off the screen");
+        assert!(!in_front(true, true, true, true), "minimized");
+        assert!(!in_front(true, false, false, true), "another application's");
+        assert!(!in_front(true, false, true, false), "on another Space");
     }
 
     fn down(code: u32) -> Option<Input> {

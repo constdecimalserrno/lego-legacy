@@ -44,6 +44,9 @@ Closing its window on macOS with its button no longer leaves the run messaging a
 have freed while the title leaves (#175, core 1.2.0): the window still goes from the screen at once,
 and only the object behind it is kept until the process ends. No route moved.
 
+Switching to another Space on macOS frees a captured mouse, as losing the front does (#176, core
+1.2.0). No route moved.
+
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees
 moves.
