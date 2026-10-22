@@ -26,6 +26,10 @@ const VERSION_LS: u32 = 0x0000_02bc;
 
 fn info(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetFileVersionInfoA(name, handle, length, data).
+    let name = ctx.string(args[0]).map_err(Stop::Fault)?;
+    if ctx.refuse_on_empty_floppy(&name)? {
+        return Ok(0);
+    }
     if args[2] < BLOCK {
         // ERROR_INSUFFICIENT_BUFFER.
         ctx.state.last_error = 122;

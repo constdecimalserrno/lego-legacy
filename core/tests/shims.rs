@@ -1638,6 +1638,12 @@ fn on_a(m: &mut Machine) -> Vec<(&'static str, &'static str, Vec<u32>, u32)> {
         ("KERNEL32", "SetCurrentDirectoryA", vec![root], 0),
         ("KERNEL32", "SetFileAttributesA", vec![file, 0x80], 0),
         ("KERNEL32", "LoadLibraryA", vec![file], 0),
+        (
+            "VERSION",
+            "GetFileVersionInfoA",
+            vec![file, 0, 0x100, OUT],
+            0,
+        ),
         ("WINMM", "mmioOpenA", vec![file, 0, 0], 0),
         // IAMMultiMediaStream::OpenFile: HRESULT_FROM_WIN32(ERROR_NOT_READY).
         (
@@ -1673,6 +1679,7 @@ fn whatever_looks_on_the_empty_floppy_drive_is_refused() {
     const SEM_FAILCRITICALERRORS: u32 = 1;
     let mut m = machine();
     let calls = on_a(&mut m);
+    let here = m.state.current_directory.clone();
 
     // A title that has not said it takes critical errors itself would be
     // shown Windows' box asking for a disk, which this machine does not
@@ -1704,6 +1711,6 @@ fn whatever_looks_on_the_empty_floppy_drive_is_refused() {
         );
         assert_eq!(m.state.last_error, ERROR_NOT_READY, "{name}");
     }
-    // Nothing was made the current directory.
-    assert_ne!(m.state.current_directory, "A:\\");
+    // Nothing moved where the guest believes it is.
+    assert_eq!(m.state.current_directory, here);
 }

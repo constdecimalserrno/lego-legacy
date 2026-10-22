@@ -3,7 +3,7 @@
 //! Every value a shim hands back is a declared value: chosen for the machine
 //! we say we are, carried with the reason for that value and no other.
 
-use super::{stdcall, Contents, Ctx, Object, Shim, State};
+use super::{stdcall, Contents, Ctx, Object, Shim, State, DRIVE_CDROM};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -2746,7 +2746,7 @@ fn get_volume_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
     if ctx.refuse_on_empty_floppy(&root)? {
         return Ok(0);
     }
-    let is_cd = root.to_ascii_uppercase().starts_with('D');
+    let is_cd = ctx.drive_type(root.bytes().next().unwrap_or(b'C')) == DRIVE_CDROM;
     let label = if is_cd {
         ctx.state.volume_label.clone()
     } else {

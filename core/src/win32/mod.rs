@@ -952,9 +952,12 @@ pub fn call_each(
     Ok(())
 }
 
-/// `GetDriveTypeA`'s answer for a drive with removable media, such as a
-/// floppy drive.
+/// What `GetDriveTypeA` answers: no drive there, one with removable media
+/// such as a floppy drive, a fixed disk, and a CD-ROM.
+const DRIVE_NO_ROOT_DIR: u32 = 1;
 const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
+pub(crate) const DRIVE_CDROM: u32 = 5;
 /// The error mode in which a title takes critical errors itself.
 const SEM_FAILCRITICALERRORS: u32 = 1;
 /// A drive with no disk in it: MS-DOS's critical error 2, "drive not ready",
@@ -1044,22 +1047,26 @@ impl Ctx<'_> {
     /// disk the title is installed on, and the CD-ROM its pressing is in. The
     /// one place they are listed (#145).
     #[must_use]
-    pub fn drives(&self) -> &'static [(u8, u32)] {
+    pub(crate) fn drives(&self) -> &'static [(u8, u32)] {
         if self.title.declared.floppy {
-            &[(b'A', DRIVE_REMOVABLE), (b'C', 3), (b'D', 5)]
+            &[
+                (b'A', DRIVE_REMOVABLE),
+                (b'C', DRIVE_FIXED),
+                (b'D', DRIVE_CDROM),
+            ]
         } else {
-            &[(b'C', 3), (b'D', 5)]
+            &[(b'C', DRIVE_FIXED), (b'D', DRIVE_CDROM)]
         }
     }
 
-    /// What `GetDriveTypeA` answers for a drive letter: `DRIVE_NO_ROOT_DIR`,
-    /// 1, for one the machine does not have.
+    /// What `GetDriveTypeA` answers for a drive letter: `DRIVE_NO_ROOT_DIR`
+    /// for one the machine does not have.
     #[must_use]
-    pub fn drive_type(&self, letter: u8) -> u32 {
+    pub(crate) fn drive_type(&self, letter: u8) -> u32 {
         self.drives()
             .iter()
             .find(|(drive, _)| drive.eq_ignore_ascii_case(&letter))
-            .map_or(1, |&(_, kind)| kind)
+            .map_or(DRIVE_NO_ROOT_DIR, |&(_, kind)| kind)
     }
 
     /// Refuse a call that looks on the machine's floppy drive, which has no
@@ -1072,7 +1079,7 @@ impl Ctx<'_> {
     ///
     /// # Errors
     /// That wall.
-    pub fn refuse_on_empty_floppy(&mut self, path: &str) -> Result<bool, Stop> {
+    pub(crate) fn refuse_on_empty_floppy(&mut self, path: &str) -> Result<bool, Stop> {
         let path = self.absolute(path);
         let drive = path.as_bytes();
         if drive.get(1) != Some(&b':') || self.drive_type(drive[0]) != DRIVE_REMOVABLE {

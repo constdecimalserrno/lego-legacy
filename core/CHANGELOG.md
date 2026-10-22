@@ -385,7 +385,8 @@ an empty drive, through `Ctx::refuse_on_empty_floppy`:
 - KERNEL32's `GetVolumeInformationA`, `CreateFileA`, `OpenFile`, `GetFileAttributesA`,
   `FindFirstFileA`, `DeleteFileA`, `CreateDirectoryA`, `MoveFileA` from or to A:,
   `SetCurrentDirectoryA`, `SetFileAttributesA` and `LoadLibraryA`;
-- WINMM's `mmioOpenA`, and the movie stream's `IAMMultiMediaStream::OpenFile`.
+- VERSION's `GetFileVersionInfoA`, WINMM's `mmioOpenA`, and the movie stream's
+  `IAMMultiMediaStream::OpenFile`.
 
 For a title that has set `SEM_FAILCRITICALERRORS` each fails with `ERROR_NOT_READY` (21); the movie
 stream hands it back as `HRESULT_FROM_WIN32(ERROR_NOT_READY)`. For one that has not, Windows would show its box asking
