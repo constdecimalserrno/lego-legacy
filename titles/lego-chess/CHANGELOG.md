@@ -61,8 +61,8 @@ Its main goes on (#147): it is told the system's language is US English, finds i
 no word to the player, which is #145's check passing at 0x004087AF, is told no screen saver is
 enabled, so turns none off, and reads its three `.RES` archives from `D:\`. Its video setup's own
 auto-select picks the DirectX plugin's Direct3D 2 device, as on a 1998 PC with a 3D card, takes the
-screen at 640x480x16 and makes the device, and the run stops at `IDirect3DDevice2::EnumTextureFormats`,
-#148's, at cursor 374,735.
+screen at 640x480x16 and makes the device, and the run stopped at
+`IDirect3DDevice2::EnumTextureFormats` at cursor 374,735.
 
 The declared processor is a Pentium 166 (#147), family 5, where it was the roster's Pentium II 450:
 the minimum the original pressing's 1998 UK manual gives, IB2G-CHE3, page 5, "CPU Pentium 166 MHz"
@@ -73,3 +73,9 @@ what a second of waiting costs. Measured on a probe that skipped the movies: the
 675 million instructions at 450 MHz, nine tenths of the boot, and 249 million at 166, and the boot
 to its MIDI open took 4 seconds of the Mac mini's wall time where it took 8. No committed run reaches
 the waits yet; their pin comes with #151, the first run to reach them.
+
+Its DirectX plugin now lists the device's texture formats and makes it a viewport (#148), and its
+framework takes the screen (#147): it confines the pointer to it, says a screen saver is running, as
+programs of the time did to keep Alt+Tab away, and tells its own window its size with
+`SendMessageA(WM_SIZE)`, where the run stops, at cursor 376,609. The plugin lists display modes only
+through DirectDraw's first face, so DirectX 5's mode descriptions are not yet asked for.

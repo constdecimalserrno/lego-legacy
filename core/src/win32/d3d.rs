@@ -70,7 +70,7 @@ pub static DEVICE2: Interface = Interface {
         method("AddViewport", 1, add_viewport),
         wall("DeleteViewport", 1),
         wall("NextViewport", 3),
-        wall("EnumTextureFormats", 2),
+        method("EnumTextureFormats", 2, enum_texture_formats2),
         method("BeginScene", 0, begin_scene),
         method("EndScene", 0, end_scene),
         wall("GetDirect3D", 1),
@@ -177,7 +177,10 @@ pub static D3D2: Interface = Interface {
         method("EnumDevices", 2, enum_devices2),
         wall("CreateLight", 2),
         wall("CreateMaterial", 2),
-        wall("CreateViewport", 2),
+        // DirectX 5's viewport, `IDirect3DViewport2`, is DirectX 6's slot for
+        // slot as far as it goes, so the one table answers both. LEGO Chess's
+        // DirectX plugin makes one for its device (#148).
+        method("CreateViewport", 2, create_viewport),
         wall("FindDevice", 2),
         method("CreateDevice", 3, create_device2),
     ],
@@ -706,14 +709,13 @@ fn validate_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
 
 /// The texture formats the declared machine's rasteriser can read.
 ///
-/// Each is a `DDPIXELFORMAT`, and each is one this machine actually samples:
-/// a title picks the closest to what its own data holds and converts into it,
-/// so claiming one that is not read would come back as a wrong-coloured
-/// texture rather than as a wall (#57).
-fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // EnumTextureFormats(callback, context).
+/// Each is one this machine actually samples: a title picks the closest to
+/// what its own data holds and converts into it, so claiming one that is not
+/// read would come back as a wrong-coloured texture rather than as a wall
+/// (#57).
+fn texture_formats() -> [crate::raster::PixelFormat; 6] {
     let format = |bits, masks| crate::raster::PixelFormat { bits, masks };
-    let formats = [
+    [
         // Sixteen bits: five-six-five, and the two with alpha in them.
         format(16, [0xf800, 0x07e0, 0x001f, 0]),
         format(16, [0x7c00, 0x03e0, 0x001f, 0x8000]),
@@ -723,15 +725,54 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
         format(32, [0x00ff_0000, 0xff00, 0xff, 0xff00_0000]),
         // And a byte an entry, looked up in the surface's own palette.
         format(8, [0, 0, 0, 0]),
-    ];
-    let mut calls = Vec::with_capacity(formats.len());
-    for format in formats {
+    ]
+}
+
+/// DirectX 7's, each format a `DDPIXELFORMAT`.
+fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumTextureFormats(callback, context).
+    let mut calls = Vec::new();
+    for format in texture_formats() {
         let at = ctx.state.heap.alloc(32);
         super::ddraw::write_pixel_format(ctx, at, format)?;
         calls.push(vec![at, args[1]]);
     }
     ctx.log
         .line(&format!("d3d7 texture formats: {} of them", calls.len()));
+    super::call_each(ctx, args[0], &calls, true)?;
+    Ok(S_OK)
+}
+
+/// DirectX 5's, the same formats each in a whole `DDSURFACEDESC`, as d3d.h
+/// has `LPD3DENUMTEXTUREFORMATSCALLBACK` take one: its size, flags saying it
+/// holds a pixel format and caps, the format at 72 and a texture's caps at
+/// 104. LEGO Chess's DirectX plugin lists them as it makes its device, and
+/// draws with five-six-five and one-five-five-five (#148).
+fn enum_texture_formats2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // EnumTextureFormats(callback, context).
+    const DDSURFACEDESC_BYTES: u32 = 108;
+    const DDSD_CAPS_PIXELFORMAT: u32 = 0x0000_1001;
+    const DDSCAPS_TEXTURE: u32 = 0x0000_1000;
+    let mut calls = Vec::new();
+    for format in texture_formats() {
+        let at = ctx.state.heap.alloc(DDSURFACEDESC_BYTES);
+        ctx.mem
+            .write(at, &[0; DDSURFACEDESC_BYTES as usize])
+            .map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(at, DDSURFACEDESC_BYTES)
+            .map_err(Stop::Fault)?;
+        ctx.mem
+            .write_u32(at + 4, DDSD_CAPS_PIXELFORMAT)
+            .map_err(Stop::Fault)?;
+        super::ddraw::write_pixel_format(ctx, at + 72, format)?;
+        ctx.mem
+            .write_u32(at + 104, DDSCAPS_TEXTURE)
+            .map_err(Stop::Fault)?;
+        calls.push(vec![at, args[1]]);
+    }
+    ctx.log
+        .line(&format!("d3d2 texture formats: {} of them", calls.len()));
     super::call_each(ctx, args[0], &calls, true)?;
     Ok(S_OK)
 }

@@ -269,14 +269,28 @@ fn the_game_s_main_finds_its_disc_and_picks_direct3d_2() {
     );
 }
 
+/// Its DirectX plugin lists the device's texture formats and makes it a
+/// viewport (#148), and its framework then takes the screen: it confines the
+/// pointer to it and says a screen saver is running, as programs of the time
+/// did to keep Alt+Tab away (#147).
+#[test]
+fn the_device_gets_its_formats_and_viewport_and_the_framework_takes_the_screen() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged("d3d2 texture formats: 6 of them")
+        .assert_logged("call IDirect3D2::CreateViewport(")
+        .assert_logged("call USER32.dll!ClipCursor(")
+        .assert_logged("call USER32.dll!SystemParametersInfoA(0x61, 0x1, ");
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #148's: its Direct3D 2 device's texture formats.
-    ran.assert_logged("end wall: IDirect3DDevice2::EnumTextureFormats");
+    // #147's: its framework tells its own window its size.
+    ran.assert_logged("end wall: USER32.dll!SendMessageA: message 0x0005 to window 0x10010");
 }
 
 #[test]
