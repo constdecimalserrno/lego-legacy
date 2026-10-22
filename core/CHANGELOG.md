@@ -110,8 +110,10 @@ runtime's own `objc_allocateClassPair`, `class_addMethod` and `objc_registerClas
 crate. Its `applicationShouldTerminate:` counts the close and answers `NSTerminateCancel` (Apple,
 `terminate(_:)`), as SDL and GLFW do, read as documentation: `NSTerminateLater` would have AppKit
 run its own loop until answered, with the title stopped inside it. So a logout or a restart is
-cancelled while the title leaves, and is asked again. A quit in the "close the window to end" wait
-ends it. No route moves; a headless run has no window.
+cancelled, and the person starts it again once the title has left. It also answers
+`applicationSupportsSecureRestorableState:` yes, which spares the terminal AppKit's warning about
+an application delegate without it. A quit in the "close the window to end" wait ends it. No route
+moves; a headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move

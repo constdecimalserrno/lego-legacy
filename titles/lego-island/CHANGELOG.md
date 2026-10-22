@@ -59,8 +59,8 @@ and only the object behind it is kept until the process ends. No route moved.
 Switching to another Space on macOS frees a captured mouse, as losing the front does (#176, core
 1.2.0). No route moved.
 
-Quitting from the Dock on macOS, or logging out or restarting, closes it, so it saves as its window's close
-button does (#178, core 1.2.0), where the process ended at once. No route moved.
+Quitting from the Dock on macOS, or logging out or restarting, closes it as its window's close
+button does, so it saves (#178, core 1.2.0), where the process ended at once. No route moved.
 
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees

@@ -153,16 +153,26 @@ extern "C" fn should_terminate(_delegate: Id, _cmd: Sel, _app: Id) -> u64 {
     0
 }
 
+/// `applicationSupportsSecureRestorableState:`: yes. An application delegate
+/// without it has AppKit warn on the terminal that secure coding is not
+/// enabled for restorable state (macOS 14 on, as SDL and GLFW found, read as
+/// documentation). Nothing here is restored, so the answer changes nothing
+/// else (Apple, `NSApplication.h`).
+extern "C" fn secure_restorable(_delegate: Id, _cmd: Sel, _app: Id) -> bool {
+    true
+}
+
 /// The application's delegate, which the caller owns: an object of a class
 /// made here at run time, a subclass of `NSObject` with only
-/// [`should_terminate`] (#178). The class is made once a process.
+/// [`should_terminate`] and [`secure_restorable`] (#178). The class is made
+/// once a process.
 ///
 /// # Errors
 /// When the runtime's functions cannot be found.
 fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
     // Safety: each function is called through the signature the runtime's
-    // headers give it; the method's types say what `should_terminate` takes
-    // and answers: an `NSUInteger`, then self, the selector and an object.
+    // headers give it; each method's types say what its function answers,
+    // an `NSUInteger` or a BOOL, and takes: self, the selector and an object.
     unsafe {
         let allocate: unsafe extern "C" fn(Id, *const c_char, usize) -> Id =
             rt.objc.function("objc_allocateClassPair")?;
@@ -179,6 +189,12 @@ fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
                 rt.sel("applicationShouldTerminate:"),
                 should_terminate as *const c_void,
                 c"Q@:@".as_ptr(),
+            );
+            add_method(
+                class,
+                rt.sel("applicationSupportsSecureRestorableState:"),
+                secure_restorable as *const c_void,
+                c"B@:@".as_ptr(),
             );
             register(class);
         }
@@ -1459,6 +1475,12 @@ mod tests {
         let reply = unsafe {
             let reply =
                 rt.send::<MsgU64Id>()(delegate, rt.sel("applicationShouldTerminate:"), rt.nil());
+            let secure: u64 = rt.send::<MsgU64Id>()(
+                delegate,
+                rt.sel("applicationSupportsSecureRestorableState:"),
+                rt.nil(),
+            );
+            assert_eq!(secure & 0xff, 1, "secure restorable state, a BOOL");
             rt.send::<MsgVoid>()(delegate, rt.sel("release"));
             reply
         };
