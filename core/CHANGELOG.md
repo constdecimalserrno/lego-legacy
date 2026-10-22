@@ -71,25 +71,26 @@ stub run `stopped.rs` stops with a signal, which has no window to tell, now logs
 `input flip 0 Close` and ends where and as it did. The Windows and X backends are compiled and
 clippy-clean, not run.
 
-Minimizing the window on macOS, or hiding the application, is not a close (#173). The macOS
-backend took its window leaving the screen for its close button, and a window minimized into the
-Dock, or one of an application hidden, is off the screen too (Apple's `isVisible`,
-`isMiniaturized` and `hide(_:)`). So, read from the code (#6, `a8fc43a`) and Apple's documentation
-rather than seen at a window, minimizing the window stopped the run in 1.0.0 and 1.1.0, ended the
-"close the window to end" wait after a run, and with the close above would have told the title
-`SC_CLOSE`. Windows answers a minimize with `SC_MINIMIZE` and an iconic window, never `SC_CLOSE`,
-and the Windows and X backends never took one for a close. The decision is `host::closed`, with no
-`cfg`, so every host's tests hold it. On a minimize or a hide the title is told nothing new: no
-`SC_MINIMIZE`, `WM_SIZE`, `WM_ACTIVATE` or `WM_ACTIVATEAPP` FALSE, only the keys and buttons it was
-told are held let go, as for any window not in front (#141), and it runs on, unseen but heard.
-Telling it as Windows does is #177. No route moves; a headless run has no window.
+Minimizing the window on macOS, or hiding the application, is not a close (#173). The macOS backend
+took its window leaving the screen for its close button, and a window minimized into the Dock, or
+one of an application hidden, is off the screen too (Apple's `isVisible`, `isMiniaturized` and
+`hide(_:)`). So, read from the code (#6, `a8fc43a`) and Apple's documentation rather than seen at a
+window, minimizing the window stopped the run in 1.0.0 and 1.1.0, ended the "close the window to
+end" wait after a run, and with the close above would have told the title `SC_CLOSE`. Windows
+answers a minimize with `SC_MINIMIZE` and an iconic window, never `SC_CLOSE`, and the Windows and X
+backends never took one for a close. The decision was `host::closed`, with no `cfg`, until the
+window's delegate took the close from the button itself (#183, below). On a minimize or a hide the
+title is told nothing new: no `SC_MINIMIZE`, `WM_SIZE`, `WM_ACTIVATE` or `WM_ACTIVATEAPP` FALSE,
+only the keys and buttons it was told are held let go, as for any window not in front (#141), and it
+runs on, unseen but heard. Telling it as Windows does is #177. No route moves; a headless run has no
+window.
 
-The macOS window outlives its close button (#175). A window made in code is released when it
-closes, by default (Apple's `isReleasedWhenClosed` and `close()`), and the backend went on asking
-it about itself, setting its caption and drawing into its layer while the title left (#140), and
-closed it again as the run ended: messages to an object it may have freed, read from the
-documentation and never seen to crash. The window is now only taken off the screen, and kept until
-the process ends. No route moves; a headless run has no window.
+The macOS window outlives its close button (#175). A window made in code is released when it closes,
+by default (Apple's `isReleasedWhenClosed` and `close()`), and the backend went on asking it about
+itself, setting its caption and drawing into its layer while the title left (#140), and closed it
+again as the run ended: messages to an object it may have freed, read from the documentation and
+never seen to crash. The window is now kept until the process ends, and since #183, below, its
+button no longer takes it off the screen. No route moves; a headless run has no window.
 
 A window on another Space is not in front on macOS, so switching Spaces frees a captured mouse, as
 losing the front does, and the title hears no key there (#176). #141's front read whether the
@@ -174,6 +175,18 @@ each ends, a panic's unwinding included. What the backend keeps across pumps is 
 autoreleased: the window (#175), the delegate (#178), the title's pointer shape and the window's
 layer, now retained by the backend; the view is the window's and the application AppKit's. No
 route moves; a headless run has no window.
+
+The macOS window's close button reaches the title through the window's delegate, and the window
+stays on the screen until the title has left, as on Windows and X (#183). The button took the window
+off the screen at once, and the backend read the close from the window leaving it (`host::closed`,
+#173), so the title saved and left with nothing in view, and a close of a minimized window, AltTab's
+for one, was never counted (reasoned, not seen at a window). #178's delegate now also answers
+`windowShouldClose:`, which AppKit asks when the person clicks the button (Apple,
+`windowShouldClose(_:)`): it counts one close and answers NO, so the window stays; it is closed when
+the run ends, by `close`, which asks no one (Apple, `close()`). `host::closed` is gone, and nothing
+reads a close from the window's visibility. Command-W and Command-Q are counted by the key as
+before: sent on as `performClose:`, Command-W would sound the alert each time the delegate kept the
+window (Apple, `performClose(_:)`). No route moves; a headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move

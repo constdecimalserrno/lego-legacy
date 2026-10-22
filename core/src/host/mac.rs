@@ -172,10 +172,11 @@ impl Drop for Pool {
     }
 }
 
-/// How many times the application was asked to quit (#178): the Dock's Quit,
-/// a logout or a restart. Its own count, not [`super::CLOSE_ASKED`], which
-/// core's tests of headless runs read, so that the delegate can be tested.
-static QUITS: AtomicU32 = AtomicU32::new(0);
+/// How many closes the delegate was asked for: the application asked to quit
+/// (#178), the Dock's Quit, a logout or a restart, and the window's close
+/// button (#183). Its own count, not [`super::CLOSE_ASKED`], which core's
+/// tests of headless runs read, so that the delegate can be tested.
+static CLOSES: AtomicU32 = AtomicU32::new(0);
 
 /// `applicationShouldTerminate:`, which AppKit asks the application's
 /// delegate before it quits (Apple, `terminate(_:)`): one close, counted as
@@ -183,8 +184,18 @@ static QUITS: AtomicU32 = AtomicU32::new(0);
 /// the run ends when it leaves (#140). `NSTerminateLater` would have AppKit
 /// run its own loop until answered, inside `pump`, with the title stopped.
 extern "C" fn should_terminate(_delegate: Id, _cmd: Sel, _app: Id) -> u64 {
-    QUITS.fetch_add(1, Ordering::Relaxed);
+    CLOSES.fetch_add(1, Ordering::Relaxed);
     0
+}
+
+/// `windowShouldClose:`, which AppKit asks the window's delegate when the
+/// person clicks its close button (Apple, `windowShouldClose(_:)`): one close,
+/// and NO, so the window stays on the screen while the title is told and
+/// leaves, as on Windows and X, and the run ends when it has (#140, #183).
+/// `close`, which `Drop` sends, does not ask (Apple, `close()`).
+extern "C" fn should_close(_delegate: Id, _cmd: Sel, _window: Id) -> bool {
+    CLOSES.fetch_add(1, Ordering::Relaxed);
+    false
 }
 
 /// `applicationSupportsSecureRestorableState:`: yes. An application delegate
@@ -196,17 +207,17 @@ extern "C" fn secure_restorable(_delegate: Id, _cmd: Sel, _app: Id) -> bool {
     true
 }
 
-/// The application's delegate, which the caller owns: an object of a class
-/// made here at run time, a subclass of `NSObject` with only
-/// [`should_terminate`] and [`secure_restorable`] (#178). The class is made
-/// once a process.
+/// The application's and the window's delegate, which the caller owns: an
+/// object of a class made here at run time, a subclass of `NSObject` with
+/// only [`should_terminate`], [`secure_restorable`] (#178) and
+/// [`should_close`] (#183). The class is made once a process.
 ///
 /// # Errors
 /// When the runtime's functions cannot be found, or the class can be
 /// neither made nor found, as [`ns_cursor`] refuses what AppKit does not
 /// make. An object of a class that is there is not checked: `NSObject`'s
 /// `alloc` and `init` answer nil only with no memory left.
-fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
+fn delegate(rt: &Runtime) -> Result<Id, HostError> {
     // Safety: each function is called through the signature the runtime's
     // headers give it; each method's types say what its function answers,
     // an `NSUInteger` or a BOOL, and takes: self, the selector and an object.
@@ -216,10 +227,10 @@ fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
         let add_method: unsafe extern "C" fn(Id, Sel, *const c_void, *const c_char) -> u8 =
             rt.objc.function("class_addMethod")?;
         let register: unsafe extern "C" fn(Id) = rt.objc.function("objc_registerClassPair")?;
-        let mut class = allocate(rt.class("NSObject"), c"LegoLegacyQuit".as_ptr(), 0);
+        let mut class = allocate(rt.class("NSObject"), c"LegoLegacyDelegate".as_ptr(), 0);
         if class.is_null() {
             // The name is taken: by the class an earlier call made.
-            class = rt.class("LegoLegacyQuit");
+            class = rt.class("LegoLegacyDelegate");
             if class.is_null() {
                 return Err(HostError::Unsupported(
                     "the runtime made no application delegate",
@@ -232,18 +243,24 @@ fn quit_delegate(rt: &Runtime) -> Result<Id, HostError> {
                 should_terminate as *const c_void,
                 c"Q@:@".as_ptr(),
             );
+            // A BOOL is a `bool` on Apple silicon and a `signed char` on
+            // Intel (`objc.h`); either comes back in the low byte.
+            let boolean = if cfg!(target_arch = "x86_64") {
+                c"c@:@"
+            } else {
+                c"B@:@"
+            };
             add_method(
                 class,
                 rt.sel("applicationSupportsSecureRestorableState:"),
                 secure_restorable as *const c_void,
-                // A BOOL is a `bool` on Apple silicon and a `signed char`
-                // on Intel (`objc.h`); either comes back in the low byte.
-                if cfg!(target_arch = "x86_64") {
-                    c"c@:@"
-                } else {
-                    c"B@:@"
-                }
-                .as_ptr(),
+                boolean.as_ptr(),
+            );
+            add_method(
+                class,
+                rt.sel("windowShouldClose:"),
+                should_close as *const c_void,
+                boolean.as_ptr(),
             );
             register(class);
         }
@@ -550,11 +567,9 @@ pub struct MacWindow {
     held: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<super::mac_audio::MacAudio>,
-    /// How many times the person asked the window to close (#140).
+    /// How many times the person asked the window to close by Command-W or
+    /// Command-Q (#140).
     closes: u32,
-    /// Whether the window is gone from the screen, closed by its button,
-    /// which is one close however long it stays gone.
-    gone: bool,
     /// Whether the person's own pointer is over this window's picture, where
     /// it takes the title's shape (#139). Starts true, because a window that
     /// has just opened under the pointer has not been told otherwise.
@@ -639,9 +654,11 @@ impl MacWindow {
             // A regular application: it gets a menu bar and can take focus.
             rt.send::<MsgVoidI64>()(app, rt.sel("setActivationPolicy:"), 0);
             // The Dock's Quit, a logout and a restart ask the application's
-            // delegate first (#178). It holds the delegate weakly, so this
-            // one is kept, by the retain `alloc` gave, until the process ends.
-            rt.send::<MsgVoidId>()(app, rt.sel("setDelegate:"), quit_delegate(&rt)?);
+            // delegate first (#178), and the window's close button the
+            // window's (#183): one object. Both hold it weakly, so it is
+            // kept, by the retain `alloc` gave, until the process ends.
+            let delegate = delegate(&rt)?;
+            rt.send::<MsgVoidId>()(app, rt.sel("setDelegate:"), delegate);
 
             let frame = Rect {
                 x: 0.0,
@@ -661,12 +678,14 @@ impl MacWindow {
                 2,
                 false,
             );
-            // Its close button only takes it off the screen. A window made in
-            // code is released when it closes, by default (Apple,
-            // `isReleasedWhenClosed`), and this one is still asked about and
-            // drawn into while the title leaves (#140, #175): it is kept, by
-            // the retain `alloc` gave, until the process ends.
+            // Its close button asks the delegate, which counts the close and
+            // keeps the window on the screen (#183). A window made in code is
+            // released when it closes, by default (Apple,
+            // `isReleasedWhenClosed`), and `Drop`'s `close` asks no one: it
+            // is kept, by the retain `alloc` gave, until the process ends
+            // (#175).
             rt.send::<MsgVoidBool>()(window, rt.sel("setReleasedWhenClosed:"), false);
+            rt.send::<MsgVoidId>()(window, rt.sel("setDelegate:"), delegate);
 
             let title = CString::new(name).unwrap_or_default();
             let string_class = rt.class("NSString");
@@ -732,7 +751,6 @@ impl MacWindow {
                 held: Vec::new(),
                 audio: None,
                 closes: 0,
-                gone: false,
                 pointer_over_us: true,
                 pointer_taken: false,
                 capture: Capture::default(),
@@ -754,11 +772,11 @@ impl MacWindow {
     }
 
     /// How many times the person has asked the window to close, the
-    /// application to quit ([`QUITS`], #178), or the run to end from its
-    /// terminal ([`super::listen`], #110, #140).
+    /// application to quit ([`CLOSES`], #178, #183), or the run to end from
+    /// its terminal ([`super::listen`], #110, #140).
     #[must_use]
     pub fn closes(&self) -> u32 {
-        self.closes + super::CLOSE_ASKED.load(Ordering::Relaxed) + QUITS.load(Ordering::Relaxed)
+        self.closes + super::CLOSE_ASKED.load(Ordering::Relaxed) + CLOSES.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through the Mac's output from now on, or say why
@@ -1012,10 +1030,13 @@ impl MacWindow {
                 let ours_alone = matches!(kind, 10 | 11) && !command;
                 // Command-Q and Command-W are how a person quits or closes the
                 // window, and with no main menu nothing in AppKit answers them,
-                // so they close it here, as its button does, once a press: a
-                // key held down repeating is still the one close (#140). They
+                // so each is counted here, one close a press, as the delegate
+                // counts the button: a key held down repeating is still the
+                // one close (#140). They
                 // are read by the character the key types, not where it sits,
-                // so they hold on any keyboard layout (#100).
+                // so they hold on any keyboard layout (#100). Command-W is not
+                // sent on as `performClose:`, which sounds the alert when the
+                // delegate keeps the window (Apple, `performClose(_:)`, #183).
                 if kind == 10 && command {
                     let typed: Id =
                         self.rt.send::<MsgId>()(event, self.rt.sel("charactersIgnoringModifiers"));
@@ -1162,18 +1183,15 @@ impl MacWindow {
 
             let visible = ask(self.window, "isVisible");
             let miniaturized = ask(self.window, "isMiniaturized");
-            if super::closed(visible, miniaturized, ask(self.app, "isHidden")) && !self.gone {
-                self.gone = true;
-                self.closes += 1;
-            }
             // Where the person's pointer is and which application is in front
             // are both things that change without the title being told, so
             // this is settled every time the window system is asked what
             // happened, the front first, so that a pointer kept on the picture
             // is put back only while this application is still in front, with
-            // its window on the screen: one closed by its button, minimized,
-            // or of an application hidden, which is then not the active one,
-            // is not in front, and nor is one on another Space (#176).
+            // its window on the screen: one minimized, or of an application
+            // hidden, which is then not the active one, is not in front, and
+            // nor is one on another Space (#176). Its close button leaves it
+            // there (#183).
             // Apple, `isOnActiveSpace`
             // (https://developer.apple.com/documentation/appkit/nswindow/isonactivespace):
             // "For visible windows, this property indicates whether the window
@@ -1218,9 +1236,9 @@ impl Drop for MacWindow {
         // without a pointer, or with the title's shape.
         self.free_mouse();
         self.pointer_shape(None);
-        // Safety: closing a window we opened, which is alive even when its
-        // button already closed it (#175), and letting go of the layer
-        // retained in `open`, once.
+        // Safety: closing a window we opened and kept (#175), which asks its
+        // delegate nothing (#183), and letting go of the layer retained in
+        // `open`, once.
         unsafe {
             self.rt.send::<MsgVoid>()(self.window, self.rt.sel("close"));
             self.rt.send::<MsgVoid>()(self.layer, self.rt.sel("release"));
@@ -1366,8 +1384,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_input_key, direct_input_modifier, guest_point, ns_cursor, quit_delegate, Id, MsgId,
-        MsgPoint, MsgU64, MsgVoid, Point, Rect, Runtime, Sel, PRESENT_BITMAP_INFO, QUITS,
+        delegate, direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId,
+        MsgPoint, MsgU64, MsgVoid, Point, Rect, Runtime, Sel, CLOSES, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
     use std::sync::atomic::Ordering;
@@ -1549,39 +1567,43 @@ mod tests {
     }
 
     /// The Dock's Quit, a logout or a restart asks the application's
-    /// delegate whether to terminate: it counts one close and answers
-    /// `NSTerminateCancel`, so the title is told and the run ends when it
-    /// leaves (#178). No window and no application: only the delegate.
+    /// delegate whether to terminate, and the window's close button asks the
+    /// window's whether to close: each counts one close and says no
+    /// (`NSTerminateCancel`, NO), so the title is told and the run ends when
+    /// it leaves (#178, #183). No window and no application: only the
+    /// delegate.
     #[test]
-    fn a_quit_asked_of_the_application_is_a_close_and_cancelled() {
+    fn a_quit_or_a_close_asked_of_the_delegate_is_a_close_and_refused() {
         let rt = Runtime::open().expect("AppKit is on every Mac");
-        let before = QUITS.load(Ordering::Relaxed);
+        let before = CLOSES.load(Ordering::Relaxed);
         // The class is made by the first build and found by the second.
         for again in 0..2 {
-            let delegate = quit_delegate(&rt).expect("the runtime builds it");
-            // Safety: the two methods the delegate's class was given, each
+            let delegate = delegate(&rt).expect("the runtime builds it");
+            // Safety: the three methods the delegate's class was given, each
             // answering in the low bits of the return register: an
             // `NSUInteger`, and a BOOL read through the wider return, its low
             // byte only, as `ask` reads one; each delegate is released once.
-            let (reply, secure) = unsafe {
+            let (reply, close, secure) = unsafe {
                 let reply = rt.send::<MsgU64Id>()(
                     delegate,
                     rt.sel("applicationShouldTerminate:"),
                     rt.nil(),
                 );
+                let close = rt.send::<MsgU64Id>()(delegate, rt.sel("windowShouldClose:"), rt.nil());
                 let secure: u64 = rt.send::<MsgU64Id>()(
                     delegate,
                     rt.sel("applicationSupportsSecureRestorableState:"),
                     rt.nil(),
                 );
                 rt.send::<MsgVoid>()(delegate, rt.sel("release"));
-                (reply, secure)
+                (reply, close, secure)
             };
             assert_eq!(reply, 0, "NSTerminateCancel");
+            assert_eq!(close & 0xff, 0, "the window stays");
             assert_eq!(secure & 0xff, 1, "secure restorable state");
             assert_eq!(
-                QUITS.load(Ordering::Relaxed),
-                before + 1 + again,
+                CLOSES.load(Ordering::Relaxed),
+                before + 2 * (1 + again),
                 "one close each"
             );
         }

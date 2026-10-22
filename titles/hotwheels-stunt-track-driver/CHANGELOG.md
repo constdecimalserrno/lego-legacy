@@ -50,8 +50,8 @@ it is told nothing new beyond the keys and buttons it held let go, runs on unsee
 shown again on restore. No route moved.
 
 Closing its window on macOS with its button no longer leaves the run messaging a window macOS may
-have freed while the title leaves (#175, core 1.2.0): the window still goes from the screen at once,
-and only the object behind it is kept until the process ends. No route moved.
+have freed while the title leaves (#175, core 1.2.0): the object behind the window is kept until the
+process ends. No route moved.
 
 Switching to another Space on macOS frees a captured mouse, as losing the front does, and keys
 pressed there no longer reach the game (#176, core 1.2.0). No route moved.
@@ -67,6 +67,9 @@ itself, Microsoft does not say. "Sign out anyway" there ends it at once. No rout
 
 A long run on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands back
 to be let go later is now let go at every pump, twice a flip. No route moved.
+
+Closing its window on macOS with its button no longer takes the window off the screen at once: it
+stays until the game has left, as on Windows (#183, core 1.2.0). No route moved.
 
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees
