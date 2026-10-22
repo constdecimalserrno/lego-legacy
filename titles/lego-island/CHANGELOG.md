@@ -64,8 +64,8 @@ On macOS, quitting from the Dock closes it as the window's button does, so it sa
 be asked again once it has left; it saves then unless something else closes it first, such as its
 terminal hanging up as the logout quits it. No route moved.
 
-A long play on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands
-back for a while is let go every frame. No route moved.
+A long run on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands back
+to be let go later is now let go at every pump, twice a flip. No route moved.
 
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees

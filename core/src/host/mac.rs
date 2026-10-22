@@ -137,8 +137,8 @@ impl Runtime {
             let pool: Id = self.send::<MsgId>()(self.class("NSAutoreleasePool"), self.sel("alloc"));
             Pool {
                 pool: self.send::<MsgId>()(pool, self.sel("init")),
-                drain: self.send::<MsgVoid>(),
-                sel: self.sel("drain"),
+                send: self.send::<MsgVoid>(),
+                drain: self.sel("drain"),
             }
         }
     }
@@ -158,16 +158,17 @@ impl Runtime {
 }
 
 /// An open autorelease pool ([`Runtime::pool`]), drained once, when dropped.
+#[must_use = "a pool drains when dropped: bind it to a named local"]
 struct Pool {
     pool: Id,
-    drain: MsgVoid,
-    sel: Sel,
+    send: MsgVoid,
+    drain: Sel,
 }
 
 impl Drop for Pool {
     fn drop(&mut self) {
         // Safety: `drain` on the pool `Runtime::pool` opened, once.
-        unsafe { (self.drain)(self.pool, self.sel) }
+        unsafe { (self.send)(self.pool, self.drain) }
     }
 }
 
@@ -538,6 +539,10 @@ pub struct MacWindow {
     rt: Runtime,
     app: Id,
     window: Id,
+    /// The content view's layer, which the guest's frames are drawn into:
+    /// retained here, and let go in `Drop`, so that it is owned as everything
+    /// else kept across pumps is, whatever AppKit does with the view's own
+    /// (#180).
     layer: Id,
     /// Events a person made since the last flip.
     pending: Vec<Input>,
@@ -675,6 +680,7 @@ impl MacWindow {
             let view: Id = rt.send::<MsgId>()(window, rt.sel("contentView"));
             rt.send::<MsgVoidBool>()(view, rt.sel("setWantsLayer:"), true);
             let layer: Id = rt.send::<MsgId>()(view, rt.sel("layer"));
+            let layer: Id = rt.send::<MsgId>()(layer, rt.sel("retain"));
 
             // The layer scales the guest's frame to the window and keeps its
             // aspect, so resizing is the host's business and the guest never
@@ -761,12 +767,15 @@ impl MacWindow {
     /// # Errors
     /// When there is no output to open.
     pub fn open_audio(&mut self) -> Result<(), HostError> {
+        // AudioToolbox autoreleases as it opens and closes the queue (#180).
+        let _pool = self.rt.pool();
         self.audio = Some(super::mac_audio::MacAudio::open()?);
         Ok(())
     }
 
     /// Stop the output, once there is no more mix to hear.
     pub fn close_audio(&mut self) {
+        let _pool = self.rt.pool();
         self.audio = None;
     }
 
@@ -1210,9 +1219,11 @@ impl Drop for MacWindow {
         self.free_mouse();
         self.pointer_shape(None);
         // Safety: closing a window we opened, which is alive even when its
-        // button already closed it (#175).
+        // button already closed it (#175), and letting go of the layer
+        // retained in `open`, once.
         unsafe {
             self.rt.send::<MsgVoid>()(self.window, self.rt.sel("close"));
+            self.rt.send::<MsgVoid>()(self.layer, self.rt.sel("release"));
         }
     }
 }
@@ -1582,6 +1593,9 @@ mod tests {
     #[test]
     fn an_autoreleased_object_is_let_go_when_the_pool_drains() {
         let rt = Runtime::open().expect("AppKit is on every Mac");
+        // Apple says `retainCount` is no use for debugging memory, since
+        // frameworks hold objects of their own; this object is fresh and
+        // nothing else ever sees it, so its count is exactly ours.
         // Safety: NSObject's own methods; the object is let go of as many
         // times as it is held.
         unsafe {

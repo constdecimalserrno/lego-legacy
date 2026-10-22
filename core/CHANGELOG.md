@@ -127,18 +127,21 @@ which stops the run before LEGO Island has saved. It also answers
 an application delegate without it. No route moves; a headless run has no window. Windows and X
 are unchanged: a logout there still ends a title untold (#184).
 
-The macOS backend drains an autorelease pool every pump, so a long play no longer grows the
+The macOS backend drains an autorelease pool every pump, so a long run no longer grows the
 process's memory (#180). AppKit opens a pool for each turn of its own event loop, and this backend
 runs its own loop, so nothing AppKit handed back autoreleased was ever let go: each event, the run
 loop mode and the date asked for every pump, and each new caption (Apple, `NSAutoreleasePool`:
-"If a pool is not available, autoreleased objects do not get released and you leak memory"). A
-probe making the same calls with no window, a million times, grew by 109 MB with no pool and stayed
-flat at 6 MB with one drained each time; with a window each event adds to that. The pool is an
+"If a pool is not available, autoreleased objects do not get released and you leak memory").
+Measured by probes making the same calls with no window, a million times each: a pump with no
+event leaked about 58 bytes, each event fetched about 0.9 KB, and the first probe's loop, which
+also makes a caption and asks for the screens, about 110 bytes a pass, growing by 109 MB with no
+pool and by 1.4 MB with one drained each pass. A pump runs twice a flip. The pool is an
 `NSAutoreleasePool`, opened at every way into the backend that reaches AppKit, `open`, `pump`,
-`present`, the title's pointer calls and `Drop`, and drained as each ends, a panic's unwinding
-included. What the backend keeps across pumps is never only autoreleased: the window (#175), the
-delegate (#178) and the title's pointer shape are owned, the view and layer are the window's, and
-the application is AppKit's. No route moves; a headless run has no window.
+`present`, the title's pointer calls, opening and closing the audio, and `Drop`, and drained as
+each ends, a panic's unwinding included. What the backend keeps across pumps is owned, never only
+autoreleased: the window (#175), the delegate (#178), the title's pointer shape and the window's
+layer, now retained by the backend; the view is the window's and the application AppKit's. No
+route moves; a headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
