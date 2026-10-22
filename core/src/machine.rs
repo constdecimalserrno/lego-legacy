@@ -1096,8 +1096,9 @@ impl Machine {
         hash.update(&self.clock.cursor().to_le_bytes());
         hash.update(&self.flips.to_le_bytes());
 
-        // What a person did that the guest has not taken yet: the devices'
-        // state and the messages still waiting.
+        // What a person did, and what the title set, that the guest has not
+        // taken yet: the devices' state, the messages still waiting, and the
+        // paint and screen saver the title left due.
         let input = &self.state;
         for value in [
             input.pointer.0,
@@ -1129,7 +1130,7 @@ impl Machine {
         }
         // A paint due and a screen saver said to run, likewise hashed only
         // when there is one (#147).
-        if let Some(erase) = input.needs_paint {
+        if let Some(erase) = input.paint_erase {
             hash.update(&[1, u8::from(erase)]);
         }
         if input.screen_saver_running {

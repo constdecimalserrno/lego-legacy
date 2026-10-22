@@ -214,16 +214,15 @@ fn its_input_and_sound_come_up() {
         ran.assert_logged(&format!("dinput {device} at "));
     }
     // Its framework sets each to the foreground, not exclusively, and acquires
-    // it as it starts; its window procedure acquires them again whenever it
-    // is told it is in front (0x0045C646), so only these are counted.
+    // it as it starts, once each; its window procedure acquires them again
+    // whenever it is told it is in front (0x0045C646), from other places.
     let called = |call: &str, from: &str| {
-        assert!(
-            ran.log
-                .lines()
-                .any(|l| l.starts_with(call) && l.contains(&format!(" from {from} "))),
-            "{call} from {from}\nlog:\n{}",
-            ran.log
-        );
+        let times = ran
+            .log
+            .lines()
+            .filter(|l| l.starts_with(call) && l.contains(&format!(" from {from} ")))
+            .count();
+        assert_eq!(times, 1, "{call} from {from}\nlog:\n{}", ran.log);
     };
     let foreground = "call IDirectInputDeviceA::SetCooperativeLevel(0x10010, 0x6)";
     let acquire = "call IDirectInputDeviceA::Acquire()";
@@ -296,14 +295,17 @@ fn the_device_gets_its_formats_and_viewport_and_the_framework_takes_the_screen()
 
 /// Its framework tells its own window its size, and invalidates every window
 /// once the mode is set (#147). The game's first movie clears the screen
-/// twice, its first two frames, and its pump takes what is waiting: the
+/// twice, its first two flips, and its pump takes what is waiting: the
 /// window is the active application's, is active, has the keyboard (#196)
-/// and is painted. Then it opens its first movie.
+/// and is painted.
 #[test]
-fn the_window_is_told_its_size_painted_and_focused_and_the_first_movie_opens() {
+fn the_window_is_told_its_size_painted_and_focused() {
     let Some(ran) = boot() else { return };
 
     ran.assert_logged("call USER32.dll!SendMessageA(0x10010, 0x5, 0x0, 0x1e00280)")
+        .assert_logged(
+            "call USER32.dll!DefWindowProcA(0x10010, 0x5, 0x0, 0x1e00280) from 0x0045c88e",
+        )
         .assert_logged("call USER32.dll!InvalidateRect(0x0, 0x0, 0x1)")
         .assert_logged("call USER32.dll!BeginPaint(0x10010, ")
         .assert_logged("flip 1 cursor ");
@@ -327,7 +329,7 @@ fn the_window_is_told_its_size_painted_and_focused_and_the_first_movie_opens() {
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #151's: its first movie, through AVIFile, after its first two frames.
+    // #151's: its first movie, through AVIFile, after its first two flips.
     ran.assert_flips(2)
         .assert_logged("end wall: AVIFIL32.dll!AVIFileOpenA");
 }

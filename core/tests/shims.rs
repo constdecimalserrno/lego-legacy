@@ -2234,6 +2234,25 @@ fn an_invalidated_window_is_painted_until_it_begins_to_paint() {
         "painted"
     );
 
+    // With nothing due, nothing to draw and nothing to erase.
+    let dc = call(&mut m, "USER32", "BeginPaint", &[WINDOW, DATA]).expect("answered");
+    let paint: Vec<u32> = (0..6)
+        .map(|i| m.arena.read_u32(DATA + 4 * i).expect("in the arena"))
+        .collect();
+    assert_eq!(paint, [dc, 0, 0, 0, 0, 0], "nothing due");
+    // A rectangle of its own is not kept: a wall.
+    assert!(call(&mut m, "USER32", "InvalidateRect", &[WINDOW, DATA, 0]).is_err());
+    // No window, or one never made, is not updated; the desktop is.
+    assert_eq!(call(&mut m, "USER32", "UpdateWindow", &[0]), Ok(0));
+    assert_eq!(
+        call(&mut m, "USER32", "UpdateWindow", &[0x0001_2345]),
+        Ok(0)
+    );
+    assert_eq!(
+        call(&mut m, "USER32", "UpdateWindow", &[0x0001_0001]),
+        Ok(1)
+    );
+
     // A procedure that hands it to `DefWindowProcA` has painted it too.
     assert_eq!(
         call(&mut m, "USER32", "InvalidateRect", &[WINDOW, 0, 0]),

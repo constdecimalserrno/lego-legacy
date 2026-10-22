@@ -7,16 +7,24 @@ One heading per version, newest first. What each part of core's version means is
 
 A message sent to the title's own window is handed to its procedure, whose answer is
 `SendMessageA`'s, as Microsoft documents a send to a window of the calling thread; it was a wall
-(#147). `InvalidateRect` marks the window, the title's whichever window it names or none, and a
-marked window is handed `WM_PAINT` by `PeekMessageA` and `GetMessageA` once nothing else waits, and
-sent it by `UpdateWindow`, until `BeginPaint` unmarks it and says to draw the whole client area,
-its background still to erase if that was asked for, or `DefWindowProcA` is handed the `WM_PAINT`;
-`EndPaint` answers success. A send from a thread other than the window's, or to a window with no
-procedure here, is a wall. `GetMessageA` takes what `PeekMessageA` would and answers zero for
-`WM_QUIT` and -1 with nowhere to put it; with nothing waiting it is a wall, since nothing arrives
-while a title is inside a call. A paint due and a screen saver said to run are part of the machine's
-digest when there is one. LEGO Chess makes all of these calls; no released title makes any, nor
-invalidates its window, so no released run moves.
+(#147). `InvalidateRect` of the title's window, or of no window, which on this machine is the same
+window, marks it with its background to erase, the erase forced with no window as Microsoft and Wine
+say; a rectangle of its own is a wall. A marked window is handed `WM_PAINT` by `PeekMessageA` and
+`GetMessageA` once nothing else waits, in `GetMessage`'s documented order, and sent it by
+`UpdateWindow`, until `BeginPaint` unmarks it and says to draw the whole client area, its background
+still to erase if that was asked for, or `DefWindowProcA` is handed the `WM_PAINT`, which validates
+the region as Microsoft's WM_PAINT page says. `BeginPaint` with nothing due says nothing is to be
+drawn, and `EndPaint` answers success. `UpdateWindow` of no window, or of one the machine never
+made, fails, as Wine's conformance tests record Windows 9x doing; the title's window, the desktop and
+a dialog and its controls are the machine's. A send from a thread other than the window's, or to a
+window with no procedure here, is a wall. `GetMessageA` takes what `PeekMessageA` would and answers
+zero for `WM_QUIT` and -1 with nowhere to put it; with nothing waiting it is a wall, since a wait for
+a timer's hour or another thread's post is not written yet. A paint due and a screen saver said to
+run are part of the machine's digest when there is one. LEGO Chess makes all of these calls. No
+released title invalidates its window, sends its own window a message, or calls `BeginPaint`,
+`EndPaint` or `GetMessageA`; Rock Raiders calls `UpdateWindow` and every title calls `PeekMessageA`,
+and with no window marked both answer as before, so no released run moves. Windows also activates
+and paints a window as it is first shown; #203 is to do that.
 
 `IDirect3DDevice2::EnumTextureFormats` lists the declared device's texture formats, the ones
 `IDirect3DDevice7`'s lists, each in a whole `DDSURFACEDESC` as d3dtypes.h has its callback take one

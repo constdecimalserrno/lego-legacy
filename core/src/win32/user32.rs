@@ -334,7 +334,7 @@ fn destroy_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.state.window_made = false;
     ctx.state.messages.retain(|m| m.window != window);
     ctx.state.timers.retain(|t| t.window != window);
-    ctx.state.needs_paint = None;
+    ctx.state.paint_erase = None;
     ctx.log.line("window destroyed");
     let procedure = ctx.state.window_procedure;
     super::call_each(
@@ -369,9 +369,10 @@ fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             ctx.call_guest = Some((ctx.state.window_procedure, vec![args[0], WM_CLOSE, 0, 0]));
             ctx.answer_is_the_call_s = true;
         }
-        // Painting nothing still paints: the update region is emptied, as
-        // by the `BeginPaint` and `EndPaint` Windows' own procedure makes.
-        (WM_PAINT, _) => ctx.state.needs_paint = None,
+        // Painting nothing still paints: `DefWindowProc` "validates the
+        // update region" (Microsoft's WM_PAINT page), by the `BeginPaint` and
+        // `EndPaint` Wine's `defwnd.c`, read as documentation, makes.
+        (WM_PAINT, _) => ctx.state.paint_erase = None,
         _ => {}
     }
     Ok(0)
@@ -877,7 +878,6 @@ fn write_message(ctx: &mut Ctx<'_>, at: u32, m: &super::Message) -> Result<(), S
 /// it to `msg` unless that is null, and take it off the queue if `remove`.
 /// Whether there was one.
 fn take_message(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool, Stop> {
-    const WM_QUIT: u32 = 0x0012;
     let msg = filter[0];
     let found = waiting(ctx, filter[1], filter[2], filter[3]);
     // A thread that asked to quit is handed `WM_QUIT` after whatever was
@@ -923,32 +923,33 @@ fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // with drawing.
     const PM_REMOVE: u32 = 0x0001;
     let remove = args[4] & PM_REMOVE != 0;
-    Ok(u32::from(
-        take_message(ctx, args, remove)?
-            || take_paint(ctx, args)?
-            || take_timer(ctx, args, remove)?,
-    ))
+    Ok(u32::from(take_next(ctx, args, remove)?))
+}
+
+/// The next message a filter takes, in the order `GetMessage` documents:
+/// what was sent and posted, input, then `WM_PAINT`, then `WM_TIMER`.
+fn take_next(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool, Stop> {
+    Ok(take_message(ctx, filter, remove)?
+        || take_paint(ctx, filter)?
+        || take_timer(ctx, filter, remove)?)
 }
 
 /// GetMessageA(msg, window, first, last): `PeekMessageA` that takes what it
 /// finds, answering zero for `WM_QUIT` and nonzero for anything else, as
 /// Microsoft documents. LEGO Chess's pump takes a message this way once
-/// `PeekMessageA` has said one is waiting (0x0045C4EF, #147). With nothing
-/// waiting Windows would wait, and on this machine nothing arrives while the
-/// title is inside a call (ADR-0005), so that is a wall that names it.
+/// `PeekMessageA` has said one is waiting (the call that returns to
+/// 0x0045C4EF, #147). With nothing waiting Windows would wait for a timer's
+/// hour or another thread's post, and such a wait is not written yet, so it
+/// is a wall that names it.
 fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    const WM_QUIT: u32 = 0x0012;
     // Nowhere to put what it takes is the error Microsoft documents, -1.
     if args[0] == 0 {
         return Ok(u32::MAX);
     }
-    let filter = [args[0], args[1], args[2], args[3], 1];
-    if !(take_message(ctx, &filter, true)?
-        || take_paint(ctx, &filter)?
-        || take_timer(ctx, &filter, true)?)
-    {
+    if !take_next(ctx, &args[..4], true)? {
         return Err(Stop::NotWritten {
-            what: "USER32.dll!GetMessageA: a wait with nothing waiting".to_owned(),
+            what: "USER32.dll!GetMessageA: a wait for a timer's hour or another thread's post"
+                .to_owned(),
             caller: 0,
         });
     }
@@ -959,13 +960,20 @@ fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// What a window is sent, or handed from its queue, to draw itself.
 const WM_PAINT: u32 = 0x000f;
 
+/// What a thread that asked to quit is handed last.
+const WM_QUIT: u32 = 0x0012;
+
 /// The `WM_PAINT` of the title's window, when it has an update region and the
 /// filter takes it: Windows makes one when nothing else is waiting, after the
-/// posted messages and input and before the timers, and keeps making it
-/// until `BeginPaint` empties the region (#147).
+/// posted messages and input and before the timers, as `GetMessage`'s page
+/// orders them, and keeps making it until `BeginPaint` empties the region
+/// (#147).
+// ponytail: only once something invalidates the window. Windows also paints
+// a window as it is first shown, which no title here waits for; #203 is to
+// paint it then.
 fn take_paint(ctx: &mut Ctx<'_>, filter: &[u32]) -> Result<bool, Stop> {
     let (window, first, last) = (filter[1], filter[2], filter[3]);
-    if ctx.state.needs_paint.is_none()
+    if ctx.state.paint_erase.is_none()
         || !ctx.state.window_made
         || super::kernel32::running_thread(ctx) != ctx.state.window_thread
         || (window != 0 && window != WINDOW)
@@ -989,31 +997,53 @@ fn take_paint(ctx: &mut Ctx<'_>, filter: &[u32]) -> Result<bool, Stop> {
 
 /// InvalidateRect(window, rect, erase): the window has something to draw,
 /// and is handed `WM_PAINT` for it. With no window, Microsoft documents every
-/// window as invalidated, which on this machine is the title's alone. LEGO
-/// Chess asks so with no window after it sets a display mode (0x0044C203,
-/// #147).
-// ponytail: the whole client area whatever `rect` says, and without the
-// `WM_NCPAINT` and `WM_ERASEBKGND` Windows sends a window invalidated with
-// none named, or that `BeginPaint` sends for an erase; no title draws a frame
-// or a background through GDI here, so `BeginPaint` says the background is
-// still to be erased, and they wait for a title that reads them.
+/// window as invalidated and erased, which on this machine is the title's
+/// alone, and Wine's `NtUserInvalidateRect` forces the erase then. LEGO Chess
+/// asks so with no window after it sets a display mode (the call that returns
+/// to 0x0044C209, #147). A rectangle of its own is a wall: the whole client
+/// area is the only region kept.
+// ponytail: without the `WM_NCPAINT` and `WM_ERASEBKGND` Windows sends a
+// window invalidated with none named; no title draws a frame or a background
+// through GDI here.
 fn invalidate_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    if !matches!(args[0], 0 | WINDOW) || !ctx.state.window_made {
+    if !matches!(args[0], 0 | WINDOW) || !ctx.state.window_made || args[1] != 0 {
         return Err(Stop::NotWritten {
-            what: format!("USER32.dll!InvalidateRect: window {:#x}", args[0]),
+            what: format!(
+                "USER32.dll!InvalidateRect: window {:#x}, rectangle {:#x}",
+                args[0], args[1]
+            ),
             caller: 0,
         });
     }
-    // An erase asked for stays asked for until the window is painted.
-    let erase = ctx.state.needs_paint.unwrap_or(false) || args[2] != 0;
-    ctx.state.needs_paint = Some(erase);
+    // An erase asked for, or forced, stays asked for until the window is
+    // painted.
+    let erase = ctx.state.paint_erase.unwrap_or(false) || args[2] != 0 || args[0] == 0;
+    ctx.state.paint_erase = Some(erase);
     Ok(1)
 }
 
 /// UpdateWindow(window): a window with something to draw is sent `WM_PAINT`
-/// at once, as Microsoft documents; one with nothing, or the desktop, is not.
+/// at once, as Microsoft documents; one with nothing is not. No window, or
+/// one the machine never made, fails, leaving the last error alone, as Wine's
+/// `msg.c` conformance tests record Windows 9x doing. The machine's windows
+/// are the title's, the desktop, and a dialog and its controls.
+// ponytail: the desktop is answered and never painted, and a window is not
+// painted as it is first shown; #203 is to do both.
 fn update_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    if args[0] == WINDOW && ctx.state.window_made && ctx.state.needs_paint.is_some() {
+    let window = args[0];
+    let title_s = window == WINDOW && ctx.state.window_made;
+    let known = title_s
+        || window == desktop_window(ctx, &[])?
+        || ctx
+            .state
+            .dialog
+            .as_ref()
+            .is_some_and(|d| d.window == window)
+        || control_id(window).is_some();
+    if !known {
+        return Ok(0);
+    }
+    if title_s && ctx.state.paint_erase.is_some() {
         let procedure = own_procedure(ctx, "UpdateWindow")?;
         ctx.call_guest = Some((procedure, vec![WINDOW, WM_PAINT, 0, 0]));
     }
@@ -1046,7 +1076,10 @@ const WINDOW_DC: u32 = 0x0001_0040;
 /// more `WM_PAINT` comes for it, and `PAINTSTRUCT` says what to draw: its
 /// device context, whether its background is still to be erased, which an
 /// erase asked for is, and the whole client area, which is the region
-/// `InvalidateRect` marks (#147).
+/// `InvalidateRect` marks, or nothing when nothing was due (#147).
+// ponytail: a class's background brush is ignored and no `WM_ERASEBKGND` is
+// sent, so an erase due is handed back as still to do; the way past is to
+// send it from here when an erase is due and answer fErase from its result.
 fn begin_paint(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if args[0] != WINDOW || !ctx.state.window_made {
         return Err(Stop::NotWritten {
@@ -1054,14 +1087,16 @@ fn begin_paint(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let erase = ctx.state.needs_paint.take().unwrap_or(false);
+    let due = ctx.state.paint_erase.take();
     let paint = args[1];
     ctx.mem.write(paint, &[0; 64]).map_err(Stop::Fault)?;
     ctx.mem.write_u32(paint, WINDOW_DC).map_err(Stop::Fault)?;
     ctx.mem
-        .write_u32(paint + 4, u32::from(erase))
+        .write_u32(paint + 4, u32::from(due == Some(true)))
         .map_err(Stop::Fault)?;
-    client_rect(ctx, &[WINDOW, paint + 8])?;
+    if due.is_some() {
+        client_rect(ctx, &[WINDOW, paint + 8])?;
+    }
     Ok(WINDOW_DC)
 }
 
