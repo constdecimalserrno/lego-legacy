@@ -268,6 +268,63 @@ will, and no title's run moves.
   with every release tail heard. At 32 they steal 620 times, 611 of them a release tail, and 66
   notes are never played, 62 of them on channel 16, the lowest priority.
 
+The declared CD can answer long names from its Joliet tree, as Windows 95's CDFS does (#144).
+LEGO Chess opens `D:\intro\Chess Bumper01.bmp` after its intro, a name only its disc's Joliet tree
+holds; the primary tree calls the same file `INTRO/CHESSB~1.BMP`.
+
+- `Iso::read_joliet` finds the supplementary volume descriptor whose escape sequences are `%/@`,
+  `%/C` or `%/E` (ECMA-119 8.5.6, the Joliet specification) and answers names from its tree from
+  then on: UCS-2 big-endian, `;1` stripped. `Iso::open` still reads the primary descriptor alone.
+- The primary tree's 8.3 names are not answered on a disc read this way. Nothing public says
+  whether Windows 95's CDFS answers them or 8.3 names of its own making, as NT's does, and the two
+  can differ on the roster's own rips: Chess's `ereg` records `LEGO Chess_EZ.exe` as
+  `LEGOCH~3.EXE` and `LEGO Chess_eReg.exe` as `LEGOCH~2.EXE`, where numbering them in the long
+  names' order swaps the two. A name only the primary tree records is told it is not
+  there, and the machine stops at a wall naming it at the boundary, or as the title loads (golden
+  rule 2); a name neither tree records is not found. No title asks for one. A path that mixes a
+  long directory name and an 8.3 name is in neither tree, so it is not found rather than a wall.
+- A path through a file is no path, in either tree, and is not found: every name on the way but
+  the last must be a directory's, and `Iso::list` lists only a directory. Before, a file's bytes
+  were read as a directory's records.
+- `Declared::joliet` says whether a title's machine reads its disc this way. `load_title` reads
+  the title's image by the primary tree's names, as the launcher does, and then the disc as the
+  title declares; `testkit::tree` reads it the same way. It is a field every title had to add to
+  keep building, so core's next release is a major (ADR-0007, settled on #163); core stays at
+  1.2.0, past its last tag, until then.
+- `FindFirstFileA` on the CD is a wall, for every title, where it looked only at the declared
+  install tree and found nothing, `ERROR_FILE_NOT_FOUND`. No title searches its CD, and what
+  Windows answers for a disc read through its Joliet tree, the 8.3 names included, is not known;
+  it is written when a title's wall names it (golden rule 4). A pattern relative to a directory on
+  the CD walls too. No committed run reaches it: only Alpha Team searches, with patterns relative
+  to its install directory on C:, and its only `_chdir`s sit behind `PackDir` and `LocaleDir`,
+  which its declared `Config.txt` never sets.
+- The gate needs LEGO Chess's rip whenever `LEGO_LEGACY_REQUIRE_DISC=1`: its bumper's test reads
+  the Masterpiece pressing, `game-data/chess/masterpiece-chess`.
+
+Every roster rip has a Joliet tree. Read through it, with `joliet` forced on, Rock Raiders', Hot
+Wheels' and LEGO Island's runs do not move (all 29 of their run lines, measured at `7509b49`):
+their discs answer the same names but for case. Alpha Team's do. Its original pressing's Joliet tree has
+`Strings_en.txt`, the primary tree's `STR_0012.TXT`, the autorun launcher's string table, and
+the title's `MSVCRT.dll` opens `D:\Strings_EN.txt` at boot, which is otherwise missing. Every
+route moves, and every boot run past 2,000,000 instructions; the boots to 100,000, 200,000 and
+20,000,000 instructions and the debugger's quit do not. Measured at `55a3105` (#138 moves none of
+Alpha Team's runs, and it asks for neither of its two 8.3 names that differ):
+
+| Alpha Team run | Off | On |
+|---|---|---|
+| `menu.route` | 2,341 flips, 139,471 ms, `f34a24e8…` | 2,341 flips, 139,470 ms, `101c533b…` |
+| `click-the-intro-300.route` | 1,634 flips, 110,593 ms, `a71a75d7…` | 1,634 flips, 110,591 ms, `5070d423…` |
+| `click-the-intro-600.route` | 605 flips, 41,938 ms, `00c2662d…` | 605 flips, 41,937 ms, `b2d82eff…` |
+| `select-adventure.route` | 4,454 flips, 214,104 ms, `87323b4d…` | 4,454 flips, 214,102 ms, `254746d4…` |
+| `first-mission.route` | 8,054 flips, 331,967 ms, `1b7d7349…` | 8,053 flips, 331,937 ms, `48dfc4dc…` |
+| boot to 1,100,000,000 | 1,634 flips, 111,704 ms, `1a08e772…` | 1,634 flips, 111,703 ms, `624bd32f…` |
+| boot to 600,000,000 | 1,634 flips, 110,593 ms, `198706f8…` | 1,634 flips, 110,592 ms, `17169231…` |
+| boot to 2,000,000 | 0 flips, 4 ms, `e37ef1e8…` | 0 flips, 4 ms, `2d5f0520…` |
+
+So, by #142's rule, `joliet` is declared per title: the four released titles declare `false`,
+their runs unchanged, until the maintainer decides, and LEGO Chess declares `true` with its crate
+(#143).
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

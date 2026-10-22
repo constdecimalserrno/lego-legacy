@@ -340,6 +340,10 @@ pub fn differing(
 pub fn tree(title: &Title) -> Tree {
     let mut iso = disc::open_pressing(title.image.disc_dir, title.image.pressing)
         .expect("the pressing opens");
+    // The disc read as the title's machine reads it (#144).
+    if title.declared.joliet {
+        iso.read_joliet().expect("the descriptors read");
+    }
     let header = iso.read("DATA1.HDR").expect("the cabinet's header reads");
     let mut tree = Tree::new();
     tree.set_cabinet(&header, "DATA", title.install_dir)

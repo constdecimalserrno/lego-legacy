@@ -39,6 +39,13 @@ pub const ROCK_RAIDERS: Title = Title {
         // The screen this title asks for. It renders at one size and scales
         // nothing itself; the window does the scaling (#6).
         modes: &[(640, 480, 16)],
+        // The primary tree's names alone, by #142's rule: Joliet is LEGO
+        // Chess's alone, because Alpha Team's runs move with it, until the
+        // maintainer decides (#144). Nothing in this title asks for it: read
+        // through its Joliet tree, as Windows 98 SE's CDFS reads it, this
+        // disc answers the same names but for case, and none of its runs
+        // moved with it on (measured at 7509b49).
+        joliet: false,
         // Declared rather than the host's own name, for the same reason as
         // everything else here: a recorded run must not depend on the machine
         // it was recorded on.

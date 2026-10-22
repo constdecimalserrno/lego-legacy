@@ -70,6 +70,15 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
         processor: Processor::PentiumII,
         megabytes: 128,
         modes: &[(640, 480, 16)],
+        // The primary tree's names alone, by #142's rule: Joliet is LEGO
+        // Chess's alone, because this title's runs move with it, until the
+        // maintainer decides (#144). Read through its Joliet tree, as Windows
+        // 98 SE's CDFS reads it, this disc also answers `D:\Strings_EN.txt`,
+        // which the primary tree calls `STR_0012.TXT` and the title's runtime
+        // opens at boot, and every route moves, and every boot run past
+        // 2,000,000 instructions (measured at 55a3105; #138 moves none of
+        // this title's runs).
+        joliet: false,
         computer: "LEGO-LEGACY",
         // None: in every gate run it asks only for libraries it ships and the
         // two of Microsoft's core writes, ADVAPI32 and KERNEL32 (#146).

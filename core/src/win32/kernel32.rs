@@ -3018,6 +3018,15 @@ fn find_first_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         Some((dir, glob)) => (dir.to_owned(), glob.to_owned()),
         None => (ctx.state.current_directory.clone(), full.clone()),
     };
+    // No title searches its CD yet, and what Windows answers for a disc read
+    // through its Joliet tree, the 8.3 names included, is not known (#144):
+    // a search of it is a wall until a title asks, not an empty disc.
+    if full.get(..2).is_some_and(|d| d.eq_ignore_ascii_case("D:")) {
+        return Err(Stop::NotWritten {
+            what: format!("KERNEL32!FindFirstFileA({pattern:?}): a search of the CD"),
+            caller: 0,
+        });
+    }
     let matches = ctx.tree.matching(&dir, &glob);
     ctx.log
         .line(&format!("find first {pattern}: {} match", matches.len()));

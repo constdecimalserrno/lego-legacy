@@ -41,6 +41,13 @@ Its declared machine lacks no library (`absent_libraries`, #146): no gate run as
 Took core 1.2.0's mouse (#141): a player clicks on the picture to give the title the mouse, and
 Escape frees it, neither reaching the game. No route records either, so no route moved.
 
+Declares core 1.2.0's `joliet` as `false` (#144), by #142's rule: Joliet is LEGO Chess's alone,
+because Alpha Team's runs move with it, until the maintainer decides. Its disc is read by the
+primary tree's names alone, as before, so no route moved. Nothing in this title asks for the
+Joliet tree: read through it, the disc answers the same names but for case, and none of its runs
+moved with it forced on, measured at `7509b49`. Core's `FindFirstFileA` on the CD is now a
+wall; this title searches only its install directory on C:.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

@@ -71,7 +71,8 @@ impl From<std::io::Error> for DiscError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// The name with its version suffix removed: `LEGORR.EXE`, not
-    /// `LEGORR.EXE;1`.
+    /// `LEGORR.EXE;1`. Read through the disc's Joliet tree, its long name:
+    /// `Chess Bumper01.bmp`.
     pub name: String,
     pub sector: u32,
     pub len: u32,
@@ -85,6 +86,11 @@ pub struct Iso {
     /// How many bytes the image holds, which nothing it records may run past.
     size: u64,
     root: (u32, u32),
+    /// The Joliet tree's root, once the disc is read through it.
+    joliet: Option<(u32, u32)>,
+    /// A name asked of a disc read through its Joliet tree that only the
+    /// primary tree records, until the machine stops at it.
+    wall: Option<String>,
     /// The volume's own name for itself.
     pub label: String,
 }
@@ -117,8 +123,54 @@ impl Iso {
             path: path.to_path_buf(),
             size,
             root,
+            joliet: None,
+            wall: None,
             label,
         })
+    }
+
+    /// Answer the disc's names from its Joliet tree from now on, as Windows
+    /// 95's CDFS does, where the disc has one; whether it has (#144).
+    ///
+    /// The Joliet specification (Microsoft, 1995) records a second tree beside
+    /// the primary one, under a supplementary volume descriptor whose escape
+    /// sequences are `%/@`, `%/C` or `%/E`, its three levels of UCS-2: names
+    /// of up to sixty-four characters, two big-endian bytes each.
+    ///
+    /// The primary tree's 8.3 names are not answered. Nothing public says
+    /// whether Windows 95's CDFS answers them, or 8.3 names of its own making
+    /// as NT's does, and the two differ on the roster's own rips: #144's open
+    /// question q2. A name only the primary tree records is a wall
+    /// ([`Iso::wall`]), not a guess.
+    ///
+    /// # Errors
+    /// When the descriptors run past the image.
+    pub fn read_joliet(&mut self) -> Result<bool, DiscError> {
+        // The descriptors follow the primary one, a sector each, up to a
+        // terminator, type 255 (ECMA-119 6.7.1). A supplementary one is type
+        // 2, with its escape sequences from byte 89 and its root directory's
+        // record from byte 157, as the primary descriptor has its own (8.5).
+        for n in FIRST_DESCRIPTOR + 1.. {
+            let d = self.read_at(n * SECTOR, SECTOR as usize)?;
+            if &d[1..6] != b"CD001" || d[0] == 255 {
+                return Ok(false);
+            }
+            if d[0] == 2 && matches!(&d[88..91], b"%/@" | b"%/C" | b"%/E") {
+                let record = &d[156..190];
+                self.joliet = Some((
+                    u32_at(record, 2).unwrap_or(0),
+                    u32_at(record, 10).unwrap_or(0),
+                ));
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The first name asked of a disc read through its Joliet tree that only
+    /// its primary tree records, once: what the machine stops at (#144).
+    pub fn wall(&mut self) -> Option<String> {
+        self.wall.take()
     }
 
     #[must_use]
@@ -136,7 +188,7 @@ impl Iso {
     /// When the image cannot be read.
     pub fn list(&mut self, dir: &str) -> Result<Vec<Entry>, DiscError> {
         let (sector, len) = self.locate_dir(dir)?;
-        self.read_dir(sector, len)
+        self.read_dir(sector, len, self.joliet.is_some())
     }
 
     /// Read a whole file out of the image.
@@ -208,22 +260,47 @@ impl Iso {
     /// # Errors
     /// When no such entry exists.
     pub fn entry(&mut self, path: &str) -> Result<Entry, DiscError> {
+        let Some(joliet) = self.joliet else {
+            return self.walk(self.root, false, path);
+        };
+        let found = self.walk(joliet, true, path);
+        // ponytail: a path that mixes a long directory name and an 8.3 name
+        // is in neither tree, so it is not found rather than a wall; name it
+        // too when a title asks for one.
+        if matches!(found, Err(DiscError::NoSuchFile { .. }))
+            && self.walk(self.root, false, path).is_ok()
+        {
+            self.wall.get_or_insert_with(|| {
+                format!(
+                    "CDFS: {path:?} on {}, a name only the primary tree records, on a disc \
+                     read through its Joliet tree (#144 q2: whether Windows 95 answers it)",
+                    self.path.display()
+                )
+            });
+        }
+        found
+    }
+
+    /// One entry, walked to from one tree's root. Every name on the way but
+    /// the last is a directory's: a path through a file is no path.
+    fn walk(&mut self, root: (u32, u32), ucs2: bool, path: &str) -> Result<Entry, DiscError> {
         let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
-        let mut here = self.root;
+        let mut here = root;
         let mut found = None;
         while let Some(part) = parts.next() {
-            let entries = self.read_dir(here.0, here.1)?;
+            let last = parts.peek().is_none();
+            let entries = self.read_dir(here.0, here.1, ucs2)?;
             let hit = entries
                 .into_iter()
-                .find(|e| e.name.eq_ignore_ascii_case(part))
+                .find(|e| e.name.eq_ignore_ascii_case(part) && (last || e.is_dir))
                 .ok_or_else(|| DiscError::NoSuchFile {
                     iso: self.path.clone(),
                     path: path.to_owned(),
                 })?;
-            if parts.peek().is_some() {
-                here = (hit.sector, hit.len);
-            } else {
+            if last {
                 found = Some(hit);
+            } else {
+                here = (hit.sector, hit.len);
             }
         }
         found.ok_or_else(|| DiscError::NoSuchFile {
@@ -234,9 +311,15 @@ impl Iso {
 
     fn locate_dir(&mut self, dir: &str) -> Result<(u32, u32), DiscError> {
         if dir.trim_matches('/').is_empty() {
-            return Ok(self.root);
+            return Ok(self.joliet.unwrap_or(self.root));
         }
         let entry = self.entry(dir)?;
+        if !entry.is_dir {
+            return Err(DiscError::NoSuchFile {
+                iso: self.path.clone(),
+                path: dir.to_owned(),
+            });
+        }
         Ok((entry.sector, entry.len))
     }
 
@@ -256,7 +339,9 @@ impl Iso {
         Ok(bytes)
     }
 
-    fn read_dir(&mut self, sector: u32, len: u32) -> Result<Vec<Entry>, DiscError> {
+    /// A directory's records, their names the Joliet tree's UCS-2 where
+    /// `ucs2` says so.
+    fn read_dir(&mut self, sector: u32, len: u32, ucs2: bool) -> Result<Vec<Entry>, DiscError> {
         let data = self.read_at(u64::from(sector) * SECTOR, len as usize)?;
 
         let mut out = Vec::new();
@@ -280,9 +365,19 @@ impl Iso {
             };
             let raw = &record[33..33 + name_len];
             // The first two entries of every directory are itself and its
-            // parent, spelled as a single zero or one byte.
+            // parent, spelled as a single zero or one byte, in both trees.
             if raw != b"\0" && raw != b"\x01" {
-                let name = String::from_utf8_lossy(raw);
+                let name = if ucs2 {
+                    let units: Vec<u16> = raw
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| u16::from_be_bytes(*c))
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                } else {
+                    String::from_utf8_lossy(raw).into_owned()
+                };
                 let name = name.split(';').next().unwrap_or(&name).to_owned();
                 out.push(Entry {
                     name,

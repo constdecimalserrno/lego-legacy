@@ -72,6 +72,10 @@ pub struct Declared {
     pub megabytes: u32,
     /// The screen sizes the machine offers, as width, height and bit depth.
     pub modes: &'static [(u32, u32, u32)],
+    /// Whether the machine's CD-ROM drive answers the disc's long names from
+    /// its Joliet tree, as Windows 95's CDFS does, a name only the primary
+    /// tree records being a wall; or the primary tree's names alone (#144).
+    pub joliet: bool,
     /// What the machine calls itself.
     pub computer: &'static str,
     /// The libraries the machine does not have, each named with its
@@ -232,6 +236,8 @@ impl Title {
             processor: crate::cpu::Processor::PentiumII,
             megabytes: 128,
             modes: &[(640, 480, 16)],
+            // The stub opens no disc.
+            joliet: false,
             computer: "LEGO-LEGACY",
             // What core's own tests ask for as a library this machine lacks.
             absent_libraries: &[(

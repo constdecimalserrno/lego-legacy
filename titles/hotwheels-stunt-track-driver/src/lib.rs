@@ -34,6 +34,13 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
         processor: Processor::Pentium,
         megabytes: 128,
         modes: &[(640, 480, 16)],
+        // The primary tree's names alone, by #142's rule: Joliet is LEGO
+        // Chess's alone, because Alpha Team's runs move with it, until the
+        // maintainer decides (#144). Nothing in this title asks for it: read
+        // through its Joliet tree, as Windows 98 SE's CDFS reads it, this
+        // disc answers the same names but for case, and none of its runs
+        // moved with it on (measured at 7509b49).
+        joliet: false,
         computer: "LEGO-LEGACY",
         // None: no gate run asks for a library, and the one place it can,
         // its C runtime's message box, asks for USER32, which core writes (#146).

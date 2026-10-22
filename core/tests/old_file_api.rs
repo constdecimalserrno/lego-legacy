@@ -1,7 +1,8 @@
 //! The old file API LEGO Island reads its scripts and world through (#116):
 //! `OpenFile`, `_hread`, `_hwrite`, `_llseek` and `_lclose`, with
 //! `GetFileSize` and `SetEndOfFile`, over the handles `CreateFileA` makes; and
-//! `MoveFileA`, which moves its saves from slot to slot (#125).
+//! `MoveFileA`, which moves its saves from slot to slot (#125); and the CD
+//! read through its Joliet tree, with the walls it stops at (#144).
 //!
 //! Each is called across the boundary by a guest of the test's own making, as
 //! LEGO1's `MxIOInfo` calls them, so what is held is what a title would be
@@ -16,6 +17,7 @@ use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::{Machine, Outcome, STACK_TOP};
 use lego_legacy_core::roster::LEGO_ISLAND;
 use lego_legacy_core::runlog::RunLog;
+use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::win32::{Contents, Object};
 use lego_legacy_core::{testkit, Title};
 use std::path::PathBuf;
@@ -561,4 +563,114 @@ fn island_s_world_is_found_and_its_biggest_script_is_read_where_it_lies() {
         panic!("the handle is a file");
     };
     assert_eq!(*contents, Contents::Lies { start, len });
+}
+
+/// A search of the CD is a wall, for every title, until a title asks for one:
+/// none does yet, and what Windows answers for a disc read through its Joliet
+/// tree is not known (#144). A pattern relative to a directory on the CD is a
+/// search of it too, and a search of the declared disc still answers.
+#[test]
+fn a_search_of_the_cd_is_a_wall() {
+    for (current, pattern) in [
+        ("C:\\STUB", "D:\\*"),
+        ("C:\\STUB", "D:*.bmp"),
+        ("D:\\INTRO", "*.bmp"),
+    ] {
+        let mut g = Guest::new();
+        g.machine.state.current_directory = current.to_owned();
+        let (named, found) = (g.text(pattern), g.buffer(0x140));
+        g.call("FindFirstFileA", &[Value(named), Value(found)]);
+        let outcome = g.run();
+        assert!(
+            matches!(&outcome, Outcome::Wall { what } if what.contains("FindFirstFileA")),
+            "{pattern} from {current} ended {outcome}"
+        );
+    }
+    let mut g = Guest::new();
+    let (named, found) = (g.text("C:\\STUB\\*.BIN"), g.buffer(0x140));
+    let search = g.call("FindFirstFileA", &[Value(named), Value(found)]);
+    assert_eq!(g.run(), Outcome::Exited { code: 0 });
+    assert_eq!(g.failed(search), (u32::MAX, ERROR_FILE_NOT_FOUND));
+}
+
+/// After its intro LEGO Chess opens `D:\intro\Chess Bumper01.bmp`, a name only
+/// its disc's Joliet tree has: the primary tree calls the same file
+/// `INTRO/CHESSB~1.BMP` (#144). On the title's own rip, read through its
+/// Joliet tree, the long name opens as the title opens it, and the 8.3 name
+/// stops the run at a wall naming it.
+#[test]
+fn lego_chess_s_bumper_opens_by_its_long_name_on_its_own_disc() {
+    // The pressing #142 takes, before a crate of its own puts it on the
+    // roster.
+    const CHESS: EntryImage = EntryImage {
+        disc_dir: "chess",
+        pressing: "masterpiece-chess",
+        path: "MAIN.Z",
+        in_cabinet: false,
+        sha256: "",
+        why: "LEGO Chess's Masterpiece pressing, read here for its Joliet tree alone",
+    };
+    if !testkit::rips(&CHESS) {
+        return;
+    }
+    let pressing = || disc::open_pressing(CHESS.disc_dir, CHESS.pressing).expect("the pressing");
+    let (bumper, short) = ("intro/Chess Bumper01.bmp", "INTRO/CHESSB~1.BMP");
+    let mut iso = pressing();
+    assert_eq!(
+        iso.has(bumper).ok(),
+        Some(false),
+        "the primary tree has only its 8.3 name"
+    );
+    let at = iso.lies(short).expect("the 8.3 name is the primary tree's");
+    assert_eq!(iso.read_joliet().ok(), Some(true));
+    assert_eq!(
+        iso.lies(bumper).ok(),
+        Some(at),
+        "the long name is the same file"
+    );
+    assert_eq!(at.1, 196_664);
+    assert_eq!(
+        iso.read_range(bumper, 0, 2).ok().as_deref(),
+        Some(&b"BM"[..])
+    );
+    assert!(iso
+        .list("intro")
+        .expect("the directory lists")
+        .iter()
+        .any(|e| e.name == "Chess Bumper01.bmp"));
+
+    for (path, opens) in [
+        ("D:\\intro\\Chess Bumper01.bmp", true),
+        ("D:\\INTRO\\CHESSB~1.BMP", false),
+    ] {
+        let mut iso = pressing();
+        iso.read_joliet().expect("the descriptors read");
+        let mut g = Guest::new();
+        g.machine.tree.set_disc(iso);
+        let named = g.text(path);
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        let file = g.call(
+            "CreateFileA",
+            &[
+                Value(named),
+                Value(0x8000_0000),
+                Value(1),
+                Value(0),
+                Value(3),
+                Value(0),
+                Value(0),
+            ],
+        );
+        let size = g.call("GetFileSize", &[Answer(file), Value(0)]);
+        let outcome = g.run();
+        if opens {
+            assert_eq!(outcome, Outcome::Exited { code: 0 });
+            assert_eq!(g.answer(size), 196_664);
+        } else {
+            assert!(
+                matches!(&outcome, Outcome::Wall { what } if what.contains(short) && what.contains("q2")),
+                "{outcome}"
+            );
+        }
+    }
 }

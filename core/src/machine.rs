@@ -814,7 +814,12 @@ impl Machine {
         // What this title's installer would have put on the machine's disc,
         // declared from the pressing itself rather than by running the
         // installer (#16).
+        // The image was read by the primary tree's names, as the launcher
+        // reads it; the rest of the run reads the disc as the title declares.
         let mut iso = iso;
+        if title.declared.joliet {
+            iso.read_joliet()?;
+        }
         self.state.installed_files = match title.installed {
             crate::title::Installed::Cabinet => {
                 let header = iso.read("DATA1.HDR")?;
@@ -889,6 +894,11 @@ impl Machine {
         };
         self.image = Some(image);
         self.declare_tib()?;
+        // A name the title declares that its disc, read through its Joliet
+        // tree, answers only by its primary tree's 8.3 name (#144).
+        if let Some(wall) = self.tree.wall() {
+            return Err(wall.into());
+        }
         Ok(())
     }
 }
@@ -1028,7 +1038,13 @@ impl Machine {
         });
 
         let mut ctx = self.ctx(log);
-        let answer = match (shim.run)(&mut ctx, &args) {
+        let answered = (shim.run)(&mut ctx, &args);
+        // A name the disc answers only by its primary tree's 8.3 name, which
+        // the call was told is not there (#144), whatever it did next.
+        if let Some(what) = ctx.tree.wall() {
+            return Err(Stop::NotWritten { what, caller });
+        }
+        let answer = match answered {
             // A shim that stops the run cannot see who called it.
             Err(Stop::NotWritten { what, caller: 0 }) => {
                 return Err(Stop::NotWritten { what, caller });
@@ -1330,7 +1346,11 @@ impl Machine {
         });
 
         let mut ctx = self.ctx(log);
-        let answer = match (method.run)(&mut ctx, this, &args) {
+        let answered = (method.run)(&mut ctx, this, &args);
+        if let Some(what) = ctx.tree.wall() {
+            return Err(Stop::NotWritten { what, caller });
+        }
+        let answer = match answered {
             // A slot the header declares and nothing has written: the wall
             // names it the way the interface does.
             Err(Stop::NotWritten { what, .. }) if what.is_empty() => {

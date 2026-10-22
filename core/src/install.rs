@@ -88,6 +88,12 @@ impl Tree {
         self.iso = Some(iso);
     }
 
+    /// A name asked of the disc that only its primary tree records, read
+    /// through its Joliet tree: where the machine stops (#144).
+    pub fn wall(&mut self) -> Option<String> {
+        self.iso.as_mut()?.wall()
+    }
+
     /// Give the tree somewhere to keep what the guest writes.
     pub fn set_profile(&mut self, dir: PathBuf) {
         self.profile = Some(dir);

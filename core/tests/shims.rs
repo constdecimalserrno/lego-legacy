@@ -1,7 +1,7 @@
 //! What KERNEL32, USER32 and retained mode answer, called as a title calls
 //! them but without one: each shim or method run on the stub's machine with
 //! the arguments a title would push, and what it wrote and answered read back
-//! (#114, #117, #118, #119, #120).
+//! (#114, #117, #118, #119, #120, #144).
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
@@ -12,7 +12,7 @@ use lego_legacy_core::machine::Machine;
 use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::win32::{self, user32::WINDOW, Ctx};
-use lego_legacy_core::Title;
+use lego_legacy_core::{disc, Title};
 
 /// Where the tests put what they pass and what is written back.
 const DATA: u32 = 0x0050_0000;
@@ -1268,4 +1268,208 @@ fn a_null_reference_frame_is_the_world() {
         Ok(0)
     );
     assert_eq!(vector(&m, OUT), [-9.0, 2.0, 3.0]);
+}
+
+/// A disc laid out as a Joliet mastering tool lays one out (ECMA-119 and the
+/// Joliet specification): a primary tree of 8.3 names and a Joliet tree of
+/// long ones, two big-endian bytes a character, both recording the same files.
+/// The root holds `Long Folder` (`LONGFO~1`), `Long Name.txt` (`LONGNA~1.TXT`),
+/// `short.txt` and `records.bin`, a file whose bytes are the folder's own
+/// records; the folder holds `Inner Long Name.txt` (`INNERL~1.TXT`).
+fn joliet_disc(name: &str) -> disc::Iso {
+    const SECTOR: usize = 2048;
+    // A directory record: its length, where its extent is and how long, both
+    // ways round, whether it is a directory, and its name, padded to even.
+    fn record(name: &[u8], at: u32, len: u32, dir: bool) -> Vec<u8> {
+        let mut r = vec![0u8; 33];
+        r[2..6].copy_from_slice(&at.to_le_bytes());
+        r[6..10].copy_from_slice(&at.to_be_bytes());
+        r[10..14].copy_from_slice(&len.to_le_bytes());
+        r[14..18].copy_from_slice(&len.to_be_bytes());
+        r[25] = if dir { 2 } else { 0 };
+        r[32] = name.len() as u8;
+        r.extend_from_slice(name);
+        r.resize(r.len().next_multiple_of(2), 0);
+        r[0] = r.len() as u8;
+        r
+    }
+    let ucs2 = |name: &str| -> Vec<u8> { name.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+    // A directory: itself, its parent, then what it holds.
+    let dir = |at: u32, parent: u32, entries: &[(Vec<u8>, u32, u32, bool)]| {
+        let mut bytes = record(&[0], at, 2048, true);
+        bytes.extend(record(&[1], parent, 2048, true));
+        for (name, sector, len, is_dir) in entries {
+            bytes.extend(record(name, *sector, *len, *is_dir));
+        }
+        bytes
+    };
+    let mut image = vec![0u8; 34 * SECTOR];
+    let mut put = |sector: usize, bytes: &[u8]| {
+        image[sector * SECTOR..sector * SECTOR + bytes.len()].copy_from_slice(bytes);
+    };
+    // The primary volume descriptor, Joliet's supplementary one with UCS-2
+    // level 1's escape sequence, and the terminator.
+    for (sector, kind, root) in [(16, 1, 20), (17, 2, 21), (18, 255, 0)] {
+        let mut d = vec![0u8; SECTOR];
+        d[0] = kind;
+        d[1..6].copy_from_slice(b"CD001");
+        d[6] = 1;
+        if kind == 2 {
+            d[88..91].copy_from_slice(b"%/@");
+        }
+        if kind != 255 {
+            d[156..190].copy_from_slice(&record(&[0], root, 2048, true));
+        }
+        put(sector, &d);
+    }
+    let file = |name: Vec<u8>, at: u32, len: u32| (name, at, len, false);
+    put(
+        20,
+        &dir(
+            20,
+            20,
+            &[
+                (b"LONGFO~1".to_vec(), 22, 2048, true),
+                file(b"LONGNA~1.TXT;1".to_vec(), 30, 11),
+                file(b"SHORT.TXT;1".to_vec(), 31, 5),
+                file(b"RECORDS.BIN;1".to_vec(), 22, 2048),
+            ],
+        ),
+    );
+    put(
+        21,
+        &dir(
+            21,
+            21,
+            &[
+                (ucs2("Long Folder"), 23, 2048, true),
+                file(ucs2("Long Name.txt;1"), 30, 11),
+                file(ucs2("short.txt;1"), 31, 5),
+                file(ucs2("records.bin;1"), 23, 2048),
+            ],
+        ),
+    );
+    put(22, &dir(22, 20, &[file(b"INNERL~1.TXT;1".to_vec(), 32, 6)]));
+    put(
+        23,
+        &dir(23, 21, &[file(ucs2("Inner Long Name.txt;1"), 32, 6)]),
+    );
+    put(30, b"hello world");
+    put(31, b"short");
+    put(32, b"inside");
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, image).expect("the rip is written");
+    disc::Iso::open(&path).expect("the rip opens")
+}
+
+/// How long a file `CreateFileA` opens to read is, or nothing when it opens
+/// none.
+fn opened(m: &mut Machine, path: &str) -> Option<u32> {
+    m.arena
+        .write(DATA, format!("{path}\0").as_bytes())
+        .expect("in the arena");
+    // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+    let file = call(
+        m,
+        "KERNEL32",
+        "CreateFileA",
+        &[DATA, 0x8000_0000, 1, 0, 3, 0, 0],
+    )
+    .expect("answered");
+    (file != u32::MAX).then(|| call(m, "KERNEL32", "GetFileSize", &[file, 0]).expect("answered"))
+}
+
+/// A disc read through its Joliet tree, as Windows 95's CDFS reads one
+/// (#144): a file opens by its long name, spelled in any case, in a directory
+/// named by its own.
+#[test]
+fn a_cd_read_through_its_joliet_tree_answers_its_long_names() {
+    let mut iso = joliet_disc("joliet.iso");
+    assert_eq!(iso.read_joliet().ok(), Some(true));
+    let mut m = machine();
+    m.tree.set_disc(iso);
+    for (path, len) in [
+        ("D:\\Long Name.txt", 11),
+        ("D:\\long name.TXT", 11),
+        ("D:\\short.txt", 5),
+        ("D:\\SHORT.TXT", 5),
+        ("D:\\Long Folder\\Inner Long Name.txt", 6),
+    ] {
+        assert_eq!(opened(&mut m, path), Some(len), "{path}");
+    }
+    assert_eq!(opened(&mut m, "D:\\nothing.txt"), None);
+    assert_eq!(m.state.last_error, 2, "ERROR_FILE_NOT_FOUND");
+    assert_eq!(
+        m.tree.wall(),
+        None,
+        "every name asked is the Joliet tree's or no tree's"
+    );
+}
+
+/// The same disc read through its Joliet tree, asked for a name only its
+/// primary tree records: an 8.3 name Windows 95's CDFS may or may not answer
+/// (#144's q2), so the call is told it is not there and the machine stops at
+/// a wall naming it, rather than guessing either way.
+#[test]
+fn a_name_only_the_primary_tree_records_is_a_wall_on_a_disc_read_through_its_joliet_tree() {
+    let mut iso = joliet_disc("aliases.iso");
+    assert_eq!(iso.read_joliet().ok(), Some(true));
+    let mut m = machine();
+    m.tree.set_disc(iso);
+    for path in ["D:\\LONGNA~1.TXT", "D:\\LONGFO~1\\INNERL~1.TXT"] {
+        assert_eq!(opened(&mut m, path), None, "{path}");
+        let wall = m.tree.wall().unwrap_or_default();
+        assert!(
+            wall.contains(&path[3..].replace('\\', "/")) && wall.contains("q2"),
+            "{wall}"
+        );
+        assert_eq!(m.tree.wall(), None, "a wall is taken once");
+    }
+    // The ceiling the code names: a path that mixes the two trees' names is in
+    // neither, and is not found.
+    assert_eq!(opened(&mut m, "D:\\Long Folder\\INNERL~1.TXT"), None);
+    assert_eq!(m.tree.wall(), None);
+}
+
+/// The same disc on a machine that does not read its Joliet tree, as every
+/// released title's does not (#144): the primary tree's names alone, so no
+/// long name opens and no name is a wall.
+#[test]
+fn a_cd_read_without_its_joliet_tree_answers_its_8_3_names_alone() {
+    let mut m = machine();
+    m.tree.set_disc(joliet_disc("primary.iso"));
+    assert_eq!(opened(&mut m, "D:\\Long Name.txt"), None);
+    assert_eq!(m.state.last_error, 2, "ERROR_FILE_NOT_FOUND");
+    assert_eq!(opened(&mut m, "D:\\LONGNA~1.TXT"), Some(11));
+    assert_eq!(opened(&mut m, "D:\\LONGFO~1\\INNERL~1.TXT"), Some(6));
+    assert_eq!(m.tree.wall(), None);
+}
+
+/// A path through a file is no path, as Windows answers one, in either tree:
+/// the file's bytes are not read as a directory's records, even where they are
+/// a directory's records (#144).
+#[test]
+fn a_path_through_a_file_is_no_path() {
+    for joliet in [false, true] {
+        let mut iso = joliet_disc(&format!("through-a-file-{joliet}.iso"));
+        let inner = if joliet {
+            assert_eq!(iso.read_joliet().ok(), Some(true));
+            "records.bin/Inner Long Name.txt"
+        } else {
+            "RECORDS.BIN/INNERL~1.TXT"
+        };
+        assert!(
+            matches!(
+                iso.list("records.bin"),
+                Err(disc::DiscError::NoSuchFile { .. })
+            ),
+            "joliet {joliet}"
+        );
+        assert_eq!(iso.has(inner).ok(), Some(false), "{inner}");
+        let mut m = machine();
+        m.tree.set_disc(iso);
+        let guest = format!("D:\\{}", inner.replace('/', "\\"));
+        assert_eq!(opened(&mut m, &guest), None, "{guest}");
+        assert_eq!(m.tree.wall(), None);
+    }
 }
