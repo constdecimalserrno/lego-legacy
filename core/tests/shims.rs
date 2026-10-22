@@ -357,11 +357,14 @@ fn a_thread_that_asked_to_quit_is_handed_wm_quit_after_what_was_posted() {
         taken,
         [
             (WINDOW, 0x001c, 1),
+            (WINDOW, 0x0006, 1),
+            (WINDOW, 0x0007, 0),
             (0, 0x0012, 3),
             (WINDOW, 0x0100, 0x20),
             (WINDOW, 0x0113, 7)
         ],
-        "WM_ACTIVATEAPP, then WM_QUIT, then the key, then WM_TIMER"
+        "WM_ACTIVATEAPP, WM_ACTIVATE and WM_SETFOCUS (#196), then WM_QUIT, then the key, then \
+         WM_TIMER"
     );
 }
 

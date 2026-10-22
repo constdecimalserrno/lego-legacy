@@ -317,7 +317,7 @@ fn the_route_reaches_first_light_as_the_bricks_start_to_fade_up() {
         lego_legacy_core::machine::Outcome::BudgetExhausted,
         "nothing on the way to first light stops the run"
     );
-    ran.assert_logged("flip 460 cursor 97000702 640x480x16");
+    ran.assert_logged("flip 460 cursor 97000829 640x480x16");
 
     let lit = ran
         .host
@@ -496,7 +496,7 @@ fn the_route_reaches_the_information_centers_idle_loop_and_it_holds() {
     let Some(ran) = world(&WORLD, false) else {
         return;
     };
-    ran.assert_logged("flip 5099 cursor 3952209667 640x480x16");
+    ran.assert_logged("flip 5099 cursor 3952209794 640x480x16");
     let frame = |flip: u64| &ran.host.frame(flip).expect("kept").pixels;
 
     // Its first frame, and one with the brick tipped up, come round again a
@@ -1657,8 +1657,12 @@ const AT_THE_BEACH: u64 = 10666;
 /// Where the maintainer closed the window: their run stopped at instruction
 /// 3,341,815,783, flip 10667, 274,650 declared milliseconds in. The route was
 /// recorded before a route kept the window closing (#140), so the replay is
-/// held to that instruction by its budget.
-const PLAYED_BUDGET: u64 = 3_341_815_783;
+/// held to that moment by its budget. The game's window procedure has since
+/// been told its window is active and has the keyboard as Windows tells it
+/// (#196), which takes its procedure 127 instructions, so the
+/// same moment is 127 instructions later: a move the maintainer blessed on
+/// 2026-10-22.
+const PLAYED_BUDGET: u64 = 3_341_815_783 + 127;
 
 /// The maintainer's play replayed over an empty data root of its own, done
 /// once into its slot.

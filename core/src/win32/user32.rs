@@ -368,26 +368,45 @@ fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
 }
 
-/// What Windows tells a title when its own application becomes the active one.
+/// What Windows tells a title when its own application becomes the active
+/// one, then its window, then that its window has the keyboard.
 const WM_ACTIVATEAPP: u32 = 0x001c;
+const WM_ACTIVATE: u32 = 0x0006;
+const WM_SETFOCUS: u32 = 0x0007;
+/// `WM_ACTIVATE`'s word for a window activated other than by a click.
+const WA_ACTIVE: u32 = 1;
 
-/// Tell the title that its application is the one in front.
+/// Tell the title that its application is the one in front, that its window
+/// is the active one, and that its window has the keyboard.
 ///
 /// The declared machine runs one title and nothing else, so the window it
-/// makes is the active window from the moment it exists, and Windows says so.
-/// A title that is never told believes it is in the background: Hot Wheels
-/// draws a whole race into its own frame buffer and puts none of it on the
-/// screen until it has heard this, which is a black race with its sound
-/// playing (#38).
+/// makes is the active window from the moment it exists, and Windows says so,
+/// in Microsoft's order: `WM_ACTIVATEAPP` as the application is about to be
+/// activated, `WM_ACTIVATE` with `WA_ACTIVE` and no window deactivated, and
+/// `WM_SETFOCUS` once the window has the focus, which Windows gives an
+/// activated window that is not minimized. A title that is never told
+/// believes it is in the background: Hot Wheels draws a whole race into its
+/// own frame buffer and puts none of it on the screen until it has heard the
+/// first (#38), and LEGO Chess's framework spins in its message pump until it
+/// has heard the last (0x0045C626, #196).
+// ponytail: posted, where Windows sends them from `ShowWindow` or a visible
+// `CreateWindowEx`, and without `WM_NCACTIVATE`, which no title reads; both
+// wait for a title that looks.
 fn activate(state: &mut super::State, time: u32) {
-    state.messages.push_back(super::Message {
-        window: WINDOW,
-        message: WM_ACTIVATEAPP,
-        wparam: 1,
-        lparam: 0,
-        time,
-        point: state.pointer,
-    });
+    for (message, wparam) in [
+        (WM_ACTIVATEAPP, 1),
+        (WM_ACTIVATE, WA_ACTIVE),
+        (WM_SETFOCUS, 0),
+    ] {
+        state.messages.push_back(super::Message {
+            window: WINDOW,
+            message,
+            wparam,
+            lparam: 0,
+            time,
+            point: state.pointer,
+        });
+    }
 }
 
 /// Whether a keystroke is one of a window's own accelerators.
@@ -1685,14 +1704,26 @@ mod tests {
     use crate::win32::State;
 
     #[test]
-    fn a_window_made_here_is_the_active_application() {
+    fn a_window_made_here_is_the_active_application_and_has_the_keyboard() {
         let mut state = State::new();
         state.window_made = true;
         activate(&mut state, 7);
-        let first = state.messages[0];
-        assert_eq!((first.window, first.message), (WINDOW, WM_ACTIVATEAPP));
-        assert_eq!(first.wparam, 1, "active, not deactivated");
-        assert_eq!(first.time, 7);
+        let told: Vec<(u32, u32, u32, u32, u32)> = state
+            .messages
+            .iter()
+            .map(|m| (m.window, m.message, m.wparam, m.lparam, m.time))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                // Its application is the active one,
+                (WINDOW, WM_ACTIVATEAPP, 1, 0, 7),
+                // then its window, by no click, with none deactivated,
+                (WINDOW, super::WM_ACTIVATE, super::WA_ACTIVE, 0, 7),
+                // then it has the keyboard, which no window lost.
+                (WINDOW, super::WM_SETFOCUS, 0, 0, 7),
+            ]
+        );
     }
 
     /// A timer comes due on the declared clock with one message at most,
@@ -2017,6 +2048,8 @@ mod tests {
             order,
             [
                 (WM_ACTIVATEAPP, 1),
+                (super::WM_ACTIVATE, super::WA_ACTIVE),
+                (super::WM_SETFOCUS, 0),
                 (0x5400, 1),
                 (0x5400, 2),
                 (0x0200, 0),

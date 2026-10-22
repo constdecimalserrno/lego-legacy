@@ -5,6 +5,16 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+A title's window is told it is the active window and has the keyboard as Windows tells it (#196):
+after `WM_ACTIVATEAPP` come `WM_ACTIVATE` with `WA_ACTIVE` and no window deactivated, and then
+`WM_SETFOCUS` with no window that lost it, in Microsoft's order, posted with it as the window is made.
+LEGO Chess's message pump waits for `WM_SETFOCUS` (0x0045C626) and spun for ever without it. Every
+released title's window procedure now hears two more messages, so every run of a released title that
+makes its window moves, a move the maintainer blessed on 2026-10-22; each title's changelog says how,
+and the runs are listed here:
+
+DIGESTS
+
 `GetSystemDefaultLangID` answers the declared locale, US English, as `GetUserDefaultLangID` does
 (#147). `SystemParametersInfoA` answers two more actions, only as LEGO Chess asks them, anything
 else being a wall: `SPI_GETSCREENSAVEACTIVE`, no, since the declared machine has no screen saver,

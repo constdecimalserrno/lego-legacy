@@ -79,6 +79,13 @@ Declares no floppy drive (#145), core's new required `Declared::floppy` (unrelea
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees
 moves.
 
+Took core 1.2.0's activation (#196): its window procedure is told, after `WM_ACTIVATEAPP`, that its
+window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. Its two
+runs that exit move, their flips, declared milliseconds and exit code unchanged: `first-race.route`
+ends at 13,462,673,233 where it ended at 13,462,673,372, and the escape route at 583,424,170 where it
+ended at 583,424,086. Its two runs held to a budget end in another state; core's changelog lists
+the digests. A move the maintainer blessed on 2026-10-22.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

@@ -74,6 +74,15 @@ Core's declared tree stops the run at a wall naming the file when a rip's cabine
 will not unpack, or unpacks to another size than its header gives (#169, core 1.2.0). The title was told the
 file was missing and ran on. A good rip unpacks every file, so no route moves.
 
+Took core 1.2.0's activation (#196): its window procedure is told, after `WM_ACTIVATEAPP`, that its
+window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. Its
+threads then meet their clock at other instructions, so its runs held to a budget end elsewhere:
+`first-mission.route` with 8,053 flips and 331,938 declared milliseconds where it had 8,054 and
+331,967, `select-adventure.route` with 4,455 and 214,138 where it had 4,454 and 214,104, and
+`menu.route` at 139,469 declared milliseconds where it had 139,471, its flips unchanged. Every other
+run with a window ends in another state at the same flip; core's changelog lists the digests. A
+move the maintainer blessed on 2026-10-22.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main
