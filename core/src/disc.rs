@@ -227,7 +227,7 @@ impl Iso {
     /// memory to unpack one entry.
     ///
     /// # Errors
-    /// When the image holds no such file.
+    /// When the image holds no such file, or ends before the span does.
     pub fn read_range(
         &mut self,
         path: &str,
@@ -237,10 +237,8 @@ impl Iso {
         let entry = self.entry(path)?;
         let start = u64::from(entry.sector) * SECTOR + u64::from(offset);
         let room = (entry.len as usize).saturating_sub(offset as usize);
-        let mut bytes = vec![0u8; len.min(room)];
-        self.file.seek(SeekFrom::Start(start))?;
-        self.file.read_exact(&mut bytes)?;
-        Ok(bytes)
+        // A rip cut short is damaged, not a short read (#169).
+        self.read_at(start, len.min(room))
     }
 
     /// Whether the image holds this path.

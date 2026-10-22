@@ -59,7 +59,7 @@ release is 2.0.0, #163), which is the machine it has always had: C: and D: only.
 moves.
 
 Core's declared tree stops the run at a wall naming the file when a rip's cabinet holds a file that
-will not unpack, or unpacks to another size than its header gives (#169). The title was told the
+will not unpack, or unpacks to another size than its header gives (#169, core 1.2.0). The title was told the
 file was missing and ran on. A good rip unpacks every file, so no route moves.
 
 ## 1.0.0 — 2026-10-18

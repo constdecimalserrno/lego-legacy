@@ -878,8 +878,10 @@ impl Machine {
         };
         self.image = Some(image);
         self.declare_tib()?;
-        // A name the title declares that its disc, read through its Joliet
-        // tree, answers only by its primary tree's 8.3 name (#144).
+        // A wall the declared tree met as the title loaded: an archive member
+        // that would not come out (#169), or a name the title declares that
+        // its disc, read through its Joliet tree, answers only by its primary
+        // tree's 8.3 name (#144).
         if let Some(wall) = self.tree.wall() {
             return Err(wall.into());
         }
@@ -1023,8 +1025,10 @@ impl Machine {
 
         let mut ctx = self.ctx(log);
         let answered = (shim.run)(&mut ctx, &args);
-        // A name the disc answers only by its primary tree's 8.3 name, which
-        // the call was told is not there (#144), whatever it did next.
+        // A wall the declared tree met in the call, whatever it did next: an
+        // archive member that would not come out (#169), or a name the disc
+        // answers only by its primary tree's 8.3 name (#144), each of which
+        // the call was told is not there.
         if let Some(what) = ctx.tree.wall() {
             return Err(Stop::NotWritten { what, caller });
         }

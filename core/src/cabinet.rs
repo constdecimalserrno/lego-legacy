@@ -32,7 +32,8 @@ pub enum CabinetError {
         name: String,
         flags: u16,
     },
-    /// The entry's own data would not decompress.
+    /// The entry's own data would not decompress, or not to the size its
+    /// header gives.
     Corrupt {
         name: String,
         why: String,
@@ -269,8 +270,9 @@ impl Cabinet {
         // A header may name a file it holds no bytes for: version 6 cabinets
         // carry placeholders the installer would have filled in, and Alpha
         // Team's has seven of them. An empty file is what they are, and that
-        // is not a compression scheme to guess at.
-        if entry.compressed == 0 {
+        // is not a compression scheme to guess at. One whose header gives it
+        // bytes it does not hold comes to the wrong size below (#169).
+        if entry.compressed == 0 && entry.expanded == 0 {
             return Ok(Vec::new());
         }
         if entry.flags & !0x0004 != 0 {

@@ -30,6 +30,6 @@ in: they make the check's calls as its code at 0x405420 makes them and find `D:\
 is tested to be `LEGOCHESS`, the label the check compares.
 
 A member of `MAIN.Z` that will not expand, or expands to another size than its table gives, stops
-the run at a wall naming it (#169), where the game was told the file was missing, and a damaged KLIB
-plugin was loaded as one of Microsoft's. All 881 members of a good rip expand, so the run is
-unchanged.
+the run at a wall naming it (#169, core 1.2.0), where the title was told the file was missing, and a
+damaged KLIB plugin stopped at #146's wall, which said it was not the title's own. All 881 members
+of a good rip expand, so the run is unchanged.

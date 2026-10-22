@@ -408,25 +408,24 @@ impl Tree {
                 // file: Alpha Team's game is in DATA2.CAB and only its
                 // installer is in DATA1.CAB.
                 let data_path = format!("{data_stem}{}.CAB", entry.volume);
-                let got = self
-                    .iso
-                    .as_mut()?
-                    .read_range(&data_path, entry.offset, entry.compressed as usize)
-                    .map_err(|e| format!("{} would not read: {e}", entry.name))
-                    .and_then(|span| cabinet.unpack(entry, &span).map_err(|e| e.to_string()));
-                self.member(&data_path, got)
+                Self::member(
+                    self.iso.as_mut()?,
+                    &mut self.wall,
+                    &data_path,
+                    (&entry.name, entry.offset, entry.compressed),
+                    |span| cabinet.unpack(entry, span).map_err(|e| e.to_string()),
+                )
             }
             Some(Source::Imploded(index)) => {
                 let (archive, path) = self.archive.as_ref()?;
                 let member = archive.members().get(index)?;
-                let got = self
-                    .iso
-                    .as_mut()?
-                    .read_range(path, member.offset, member.compressed as usize)
-                    .map_err(|e| format!("{} would not read: {e}", member.path()))
-                    .and_then(|span| member.expand(&span).map_err(|e| e.to_string()));
-                let path = path.clone();
-                self.member(&path, got)
+                Self::member(
+                    self.iso.as_mut()?,
+                    &mut self.wall,
+                    path,
+                    (&member.path(), member.offset, member.compressed),
+                    |span| member.expand(span).map_err(|e| e.to_string()),
+                )
             }
             Some(Source::Disc(path)) => self.iso.as_mut()?.read(&path).ok(),
             None => {
@@ -446,26 +445,40 @@ impl Tree {
         }
     }
 
-    /// A member of the pressing's archive as it came out of `archive`: the
-    /// one place a cabinet's entries and an InstallShield 3 archive's members
-    /// are answered (#169).
+    /// A member of the pressing's archive, read out of `archive` as `name`'s
+    /// span, `len` bytes from `offset`, and expanded: the one place the tree
+    /// answers a cabinet's entries and an InstallShield 3 archive's members
+    /// (#169). The launcher's entry image (`EntryImage::read`) and LEGO
+    /// Chess's `Text.txt` (`beside`) are read elsewhere, and refuse with their
+    /// readers' own errors.
     ///
-    /// One that would not come out, its archive unreadable, its data damaged,
-    /// stored a way the reader was not taught, or another size than the
-    /// archive's table gives, is a wall naming the archive, the image and the
-    /// reader's why, which names the member; and nothing. A member the tree
-    /// says is there is never answered as missing, nor as wrong bytes (golden
-    /// rules 2 and 4). A good rip never comes here.
-    fn member(&mut self, archive: &str, got: Result<Vec<u8>, String>) -> Option<Vec<u8>> {
-        got.map_err(|why| {
-            let image = self
-                .iso
-                .as_ref()
-                .map_or_else(String::new, |iso| iso.path().display().to_string());
-            self.wall
-                .get_or_insert_with(|| format!("{archive} on {image}: {why} (#169)"));
-        })
-        .ok()
+    /// One that will not come out is a wall naming the archive, the image,
+    /// the member and why, and nothing: its span will not read (the image's
+    /// own error, which names it), runs past its archive's end, or will not
+    /// expand, its data damaged, stored a way the reader was not taught, or
+    /// another size than the archive's table gives. A member the tree says is
+    /// there is never answered as missing, nor as wrong bytes (golden rules 2
+    /// and 4). A good rip never comes here.
+    fn member(
+        iso: &mut Iso,
+        wall: &mut Option<String>,
+        archive: &str,
+        (name, offset, len): (&str, u32, u32),
+        expand: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
+    ) -> Option<Vec<u8>> {
+        let image = iso.path().display().to_string();
+        let why = match iso.read_range(archive, offset, len as usize) {
+            Err(e) => format!("{name} would not read out of {archive}: {e}"),
+            Ok(span) if span.len() < len as usize => {
+                format!("{name} would not read: {archive} on {image} ends inside it")
+            }
+            Ok(span) => match expand(&span) {
+                Ok(bytes) => return Some(bytes),
+                Err(why) => format!("{archive} on {image}: {why}"),
+            },
+        };
+        wall.get_or_insert(format!("{why} (#169)"));
+        None
     }
 
     /// Every file the tree holds under a directory whose name matches a

@@ -59,8 +59,10 @@ fn wall_after(tree: &mut Tree, name: &str) -> String {
 
 /// A version 5 cabinet (`DATA1.HDR`'s layout, as `cabinet.rs` reads it) of
 /// `good.txt`, five bytes in one stored deflate block; `bad.txt`, whose one
-/// chunk is a block of the type RFC 1951 reserves; and `long.txt`, `good.txt`'s
-/// data under a header that says six bytes. Its data, `DATA1.CAB`, beside it.
+/// chunk is a block of the type RFC 1951 reserves; `long.txt`, `good.txt`'s
+/// data under a header that says six bytes; `ghost.txt`, no bytes under a
+/// header that says forty; and `past.txt`, whose span runs past the end of its
+/// data, `DATA1.CAB`, which is beside it.
 fn cabinet() -> (Vec<u8>, Vec<u8>) {
     let stored = [1, 5, 0, 0xfa, 0xff, b'h', b'e', b'l', b'l', b'o'];
     let mut good = vec![stored.len() as u8, 0];
@@ -71,14 +73,16 @@ fn cabinet() -> (Vec<u8>, Vec<u8>) {
         data.extend_from_slice(chunks);
         (data.len() - chunks.len(), chunks.len())
     };
-    let entries = [
+    let mut entries = vec![
         ("good.txt", 5, put(&good)),
         ("bad.txt", 5, put(&bad)),
         ("long.txt", 6, put(&good)),
+        ("ghost.txt", 40, put(&[])),
     ];
+    entries.push(("past.txt", 5, (data.len() - 2, good.len())));
 
     let (descriptor, table) = (0x20, 0x60);
-    let mut header = vec![0u8; table + 0x200];
+    let mut header = vec![0u8; table + 0x300];
     let mut u32_at = |at: usize, v: u32| header[at..at + 4].copy_from_slice(&v.to_le_bytes());
     u32_at(0x04, 0x0100_5201);
     u32_at(0x0c, descriptor as u32);
@@ -86,11 +90,11 @@ fn cabinet() -> (Vec<u8>, Vec<u8>) {
     u32_at(descriptor + 0x1c, 1);
     u32_at(descriptor + 0x28, entries.len() as u32);
     // The one directory, the root, is named by an empty string.
-    u32_at(table, 0xf0);
+    u32_at(table, 0x1f0);
     for (i, (_, expanded, (offset, compressed))) in entries.iter().enumerate() {
         let at = 0x40 + i * 0x30;
         u32_at(table + 4 + i * 4, at as u32);
-        u32_at(table + at, (0x100 + i * 0x20) as u32);
+        u32_at(table + at, (0x200 + i * 0x20) as u32);
         u32_at(table + at + 0x0a, *expanded);
         u32_at(table + at + 0x0e, *compressed as u32);
         u32_at(table + at + 0x26, *offset as u32);
@@ -99,7 +103,7 @@ fn cabinet() -> (Vec<u8>, Vec<u8>) {
     for (i, (name, ..)) in entries.iter().enumerate() {
         let at = table + 0x40 + i * 0x30 + 8;
         header[at] = 4;
-        let at = table + 0x100 + i * 0x20;
+        let at = table + 0x200 + i * 0x20;
         header[at..at + name.len()].copy_from_slice(name.as_bytes());
     }
     (header, data)
@@ -140,9 +144,10 @@ fn imploded() -> Vec<u8> {
     bytes
 }
 
-/// A cabinet entry (`Source::Packed`, Alpha Team's arm) that will not inflate,
-/// or inflates to a length its header does not give, stops the run naming
-/// `DATA1.CAB`, the entry and why; a sound one reads (#169).
+/// A cabinet entry (`Source::Packed`, Rock Raiders' and Alpha Team's arm, as a
+/// version 5 cabinet) that will not inflate, inflates to a length its header
+/// does not give, or runs past its data's end, stops the run naming
+/// `DATA1.CAB`, the image, the entry and why; a sound one reads (#169).
 #[test]
 fn a_cabinet_entry_that_will_not_come_out_is_a_wall() {
     let (header, data) = cabinet();
@@ -159,6 +164,8 @@ fn a_cabinet_entry_that_will_not_come_out_is_a_wall() {
     for (name, why) in [
         ("bad.txt", "block type 3 is not one of the three"),
         ("long.txt", "it unpacks to 5 bytes, and the header says 6"),
+        ("ghost.txt", "it unpacks to 0 bytes, and the header says 40"),
+        ("past.txt", "past.txt would not read: DATA1.CAB on "),
     ] {
         let wall = wall_after(&mut tree, name);
         assert!(
@@ -169,6 +176,24 @@ fn a_cabinet_entry_that_will_not_come_out_is_a_wall() {
             "{wall}"
         );
     }
+}
+
+/// A cabinet entry whose data file the rip does not have stops the run at
+/// the image's own error, which names the image once (#169).
+#[test]
+fn a_cabinet_entry_whose_data_is_not_on_the_disc_is_a_wall() {
+    let (header, _) = cabinet();
+    let mut tree = Tree::new();
+    tree.set_cabinet(&header, "DATA", ROOT)
+        .expect("this is a cabinet");
+    tree.set_disc(rip("no-cabinet.iso", &[]));
+    let wall = wall_after(&mut tree, "good.txt");
+    assert!(
+        wall.contains("good.txt would not read out of DATA1.CAB")
+            && wall.contains("holds no DATA1.CAB")
+            && wall.matches("no-cabinet.iso").count() == 1,
+        "{wall}"
+    );
 }
 
 /// An InstallShield 3 member (`Source::Imploded`, LEGO Chess's arm) that will

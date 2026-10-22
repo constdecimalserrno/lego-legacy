@@ -456,15 +456,22 @@ route moves.
 
 A member of the pressing's archive that will not come out stops the run at a wall naming the
 archive, the image, the member and why (#169), where the guest was told the file was missing, a
-file `GetFileAttributesA` and `FindFirstFileA` had just said was there, and `LoadLibraryA` took a
-damaged library for one of Microsoft's. Both kinds of archive are answered in one place,
-`Tree::member`: a cabinet entry (Rock Raiders, Alpha Team) and an InstallShield 3 member (LEGO
-Chess) whose archive will not read, whose data will not decode, that is stored a way the reader
-was not taught, or that comes out another size than its table gives. `Cabinet::unpack` now refuses
-the last as `Corrupt`, as `Member::expand` already did; it handed back whatever its chunks inflated
-to. `Tree::wall` hands the machine this wall as it hands #144's, after the call that met it. A good
-rip never comes here: every one of Rock Raiders' 444 packed entries and Alpha Team's 57 unpacks to
-its header's size, and all 881 of `MAIN.Z`'s members expand to their table's. No route moves.
+file `GetFileAttributesA` and `FindFirstFileA` had just said was there. A damaged import was taken
+at boot for one of Microsoft's, and `LoadLibraryA` of a damaged library stopped at #146's wall,
+which named the title's own library as neither its own nor written. The tree answers both kinds of
+archive in one place, `Tree::member`: a cabinet entry (Rock Raiders, Alpha Team) and an
+InstallShield 3 member (LEGO Chess) whose span will not read or runs past its archive's end, whose
+data will not decode, that is stored a way the reader was not taught, or that comes out another
+size than its table gives. The executable the launcher hashes (`EntryImage::read`) and LEGO Chess's
+`Text.txt` are read elsewhere, and still refuse with their readers' own errors. `Cabinet::unpack`
+now refuses the wrong size as `Corrupt`, as `Member::expand` already did, an entry whose header
+gives bytes it holds none of among them; it handed back whatever its chunks inflated to.
+`Iso::read_range` refuses a span past the image's end as the image damaged, so a rip cut short says
+it has to be ripped again. `Tree::wall` hands the machine this wall as it hands #144's, after the
+call that met it. A good rip never comes here: measured once off the suite, every one of Rock
+Raiders' 444 packed entries and Alpha Team's 57 unpacks to its header's size, and Alpha Team's
+seven placeholders declare none; the suite expands all 881 of `MAIN.Z`'s members to their table's.
+No route moves.
 
 ## 1.1.0 — 2026-10-21
 
