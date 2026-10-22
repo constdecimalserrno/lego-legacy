@@ -178,8 +178,9 @@ pub static D3D2: Interface = Interface {
         wall("CreateLight", 2),
         wall("CreateMaterial", 2),
         // DirectX 5's viewport, `IDirect3DViewport2`, is DirectX 6's slot for
-        // slot as far as it goes, so the one table answers both. LEGO Chess's
-        // DirectX plugin makes one for its device (#148).
+        // slot as far as it goes, as d3d.h declares the two, so the one table
+        // answers both. LEGO Chess's DirectX plugin makes one for its device
+        // (#148).
         method("CreateViewport", 2, create_viewport),
         wall("FindDevice", 2),
         method("CreateDevice", 3, create_device2),
@@ -731,6 +732,9 @@ fn texture_formats() -> [crate::raster::PixelFormat; 6] {
 /// DirectX 7's, each format a `DDPIXELFORMAT`.
 fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // EnumTextureFormats(callback, context).
+    if args[0] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
     let mut calls = Vec::new();
     for format in texture_formats() {
         let at = ctx.state.heap.alloc(32);
@@ -743,24 +747,29 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
     Ok(S_OK)
 }
 
-/// DirectX 5's, the same formats each in a whole `DDSURFACEDESC`, as d3d.h
-/// has `LPD3DENUMTEXTUREFORMATSCALLBACK` take one: its size, flags saying it
-/// holds a pixel format and caps, the format at 72 and a texture's caps at
-/// 104. LEGO Chess's DirectX plugin lists them as it makes its device, and
-/// draws with five-six-five and one-five-five-five (#148).
+/// DirectX 5's, the same formats each in a whole `DDSURFACEDESC`, as
+/// d3dtypes.h has `LPD3DENUMTEXTUREFORMATSCALLBACK` take one, filled as Wine's
+/// `d3d_device2_EnumTextureFormats`, read as documentation, fills it: its
+/// size, flags saying it holds a pixel format and caps, the format at 72 and
+/// a texture's caps at 104. LEGO Chess's DirectX plugin lists them as it makes
+/// its device, and draws with five-six-five and one-five-five-five (#148).
 fn enum_texture_formats2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // EnumTextureFormats(callback, context).
-    const DDSURFACEDESC_BYTES: u32 = 108;
+    // EnumTextureFormats(callback, context). No callback is refused, as Wine's
+    // `device.c` refuses it.
+    use super::ddraw::SURFACE_DESC_BYTES;
     const DDSD_CAPS_PIXELFORMAT: u32 = 0x0000_1001;
     const DDSCAPS_TEXTURE: u32 = 0x0000_1000;
+    if args[0] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
     let mut calls = Vec::new();
     for format in texture_formats() {
-        let at = ctx.state.heap.alloc(DDSURFACEDESC_BYTES);
+        let at = ctx.state.heap.alloc(SURFACE_DESC_BYTES);
         ctx.mem
-            .write(at, &[0; DDSURFACEDESC_BYTES as usize])
+            .write(at, &[0; SURFACE_DESC_BYTES as usize])
             .map_err(Stop::Fault)?;
         ctx.mem
-            .write_u32(at, DDSURFACEDESC_BYTES)
+            .write_u32(at, SURFACE_DESC_BYTES)
             .map_err(Stop::Fault)?;
         ctx.mem
             .write_u32(at + 4, DDSD_CAPS_PIXELFORMAT)
@@ -1157,8 +1166,20 @@ fn get_direct3d3(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     Ok(S_OK)
 }
 
+/// `CLASS_E_NOAGGREGATION`: what a Direct3D object is answered when it is
+/// asked to make a material, a light or a viewport inside another object,
+/// whose outer `IUnknown` DirectX's headers say must be NULL; Wine's
+/// `ddraw.c`, read as documentation, refuses it so.
+fn aggregated(outer: u32) -> Option<u32> {
+    const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
+    (outer != 0).then_some(CLASS_E_NOAGGREGATION)
+}
+
 fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreateMaterial(out, outer).
+    if let Some(refused) = aggregated(args[1]) {
+        return Ok(refused);
+    }
     let object = State::make_com(ctx, &MATERIAL3, ComState::None).map_err(Stop::Fault)?;
     ctx.state.immediate.materials.insert(object, Vec::new());
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
@@ -1166,12 +1187,20 @@ fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, S
 }
 
 fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateLight(out, outer).
+    if let Some(refused) = aggregated(args[1]) {
+        return Ok(refused);
+    }
     let object = State::make_com(ctx, &LIGHT, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateViewport(out, outer).
+    if let Some(refused) = aggregated(args[1]) {
+        return Ok(refused);
+    }
     let object = State::make_com(
         ctx,
         &VIEWPORT3,

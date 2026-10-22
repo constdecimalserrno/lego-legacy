@@ -333,6 +333,10 @@ const OWN: &[(&str, &str)] = &[
     ),
     ("IDirect3DTexture2", "93281502-8cf8-11d0-89ab-00a0c9054129"),
     ("IDirect3DViewport3", "b0ab3b61-33d7-11d1-a981-00c04fd7b174"),
+    // DirectX 5's and DirectX 3's viewports, which the same table answers, as
+    // Wine's `viewport.c`, read as documentation, answers all three (#148).
+    ("IDirect3DViewport3", "93281500-8cf8-11d0-89ab-00a0c9054129"),
+    ("IDirect3DViewport3", "4417c146-33ad-11cf-816f-0000c020156e"),
     ("IDirectDraw", "6c14db80-a733-11ce-a521-0020af0be560"),
     ("IDirectDraw4", "9c59509a-39bd-11d1-8c4a-00c04fd930c5"),
     ("IDirectDrawClipper", "6c14db85-a733-11ce-a521-0020af0be560"),

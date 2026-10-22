@@ -2034,3 +2034,116 @@ fn the_system_time_is_milliseconds_in_an_mmtime() {
     assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), 0xdead_beef);
     assert!(call(&mut m, "WINMM", "timeGetSystemTime", &[0, 12]).is_err());
 }
+
+/// DirectX 5's device lists each texture format in a whole `DDSURFACEDESC`:
+/// its size, flags saying it holds caps and a pixel format, the format at 72
+/// and a texture's caps at 104; with no callback it is refused (#148).
+#[test]
+fn direct3d_2_lists_its_texture_formats_in_surface_descriptions() {
+    const CALLBACK: u32 = 0x0040_2000;
+    let mut m = machine();
+    let list = |m: &mut Machine, callback: u32| {
+        let shim = win32::com_method("IDirect3DDevice2", 9).expect("EnumTextureFormats");
+        with_ctx(m, |ctx| {
+            (
+                (shim.run)(ctx, 0, &[callback, 0x1234]),
+                ctx.call_guest.take(),
+            )
+        })
+    };
+    assert_eq!(list(&mut m, 0).0, Ok(0x8007_0057), "no callback");
+    let (answer, program) = list(&mut m, CALLBACK);
+    assert_eq!(answer, Ok(0));
+    // The program calls the callback with each description, pushed last
+    // first after the context; the first is five-six-five.
+    let (at, _) = program.expect("the callback is called");
+    let code = m.arena.slice(at, 16).expect("in the arena").to_vec();
+    assert_eq!(
+        code[..5],
+        [0x68, 0x34, 0x12, 0, 0],
+        "the context pushed first"
+    );
+    assert_eq!(code[5], 0x68);
+    let desc = u32::from_le_bytes(code[6..10].try_into().expect("four bytes"));
+    let read = |o: u32| m.arena.read_u32(desc + o).expect("in the arena");
+    assert_eq!((read(0), read(4), read(104)), (108, 0x1001, 0x1000));
+    // DDPIXELFORMAT at 72: its size, flags, bits, then the masks.
+    assert_eq!(read(72), 32);
+    assert_eq!(
+        (
+            read(72 + 12),
+            read(72 + 16),
+            read(72 + 20),
+            read(72 + 24),
+            read(72 + 28)
+        ),
+        (16, 0xf800, 0x07e0, 0x001f, 0)
+    );
+}
+
+/// The viewport DirectX 5's Direct3D makes is one its device takes, and is
+/// asked for by its DirectX 5 and DirectX 3 names too; one made inside
+/// another object is refused (#148).
+#[test]
+fn a_direct3d_2_viewport_is_one_its_device_takes() {
+    let mut m = machine();
+    let d3d2 = with_ctx(&mut m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            win32::interface_named("IDirect3D2").expect("written"),
+            win32::ComState::None,
+        )
+    })
+    .expect("made");
+    assert_eq!(
+        method(&mut m, "IDirect3D2", "CreateViewport", d3d2, &[OUT, 1]),
+        Ok(0x8004_0110),
+        "inside another object"
+    );
+    assert_eq!(
+        method(&mut m, "IDirect3D2", "CreateViewport", d3d2, &[OUT, 0]),
+        Ok(0)
+    );
+    let viewport = m.arena.read_u32(OUT).expect("in the arena");
+    let device = with_ctx(&mut m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            win32::interface_named("IDirect3DDevice2").expect("written"),
+            win32::ComState::Device3D { surface: 0 },
+        )
+    })
+    .expect("made");
+    assert_eq!(
+        method(
+            &mut m,
+            "IDirect3DDevice2",
+            "AddViewport",
+            device,
+            &[viewport]
+        ),
+        Ok(0)
+    );
+    for iid in [
+        [
+            0x00, 0x15, 0x28, 0x93, 0xf8, 0x8c, 0xd0, 0x11, 0x89, 0xab, 0x00, 0xa0, 0xc9, 0x05,
+            0x41, 0x29,
+        ],
+        [
+            0x46, 0xc1, 0x17, 0x44, 0xad, 0x33, 0xcf, 0x11, 0x81, 0x6f, 0x00, 0x00, 0xc0, 0x20,
+            0x15, 0x6e,
+        ],
+    ] {
+        m.arena.write(DATA, &iid).expect("in the arena");
+        assert_eq!(
+            method(
+                &mut m,
+                "IDirect3DViewport3",
+                "QueryInterface",
+                viewport,
+                &[DATA, OUT]
+            ),
+            Ok(0)
+        );
+        assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), viewport);
+    }
+}

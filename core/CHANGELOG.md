@@ -6,10 +6,14 @@ One heading per version, newest first. What each part of core's version means is
 ## 1.2.0 — 2026-10-21
 
 `IDirect3DDevice2::EnumTextureFormats` lists the declared device's texture formats, the ones
-`IDirect3DDevice7`'s lists, each in a whole `DDSURFACEDESC` as DirectX 5 hands them out, and
-`IDirect3D2::CreateViewport` makes a viewport, DirectX 5's face being DirectX 6's slot for slot as
-far as it goes; both were walls (#148). LEGO Chess's DirectX plugin calls both as it makes its
-device; no released title calls either, so no released run moves.
+`IDirect3DDevice7`'s lists, each in a whole `DDSURFACEDESC` as d3dtypes.h has its callback take one
+and Wine fills it, and `IDirect3D2::CreateViewport` makes a viewport, DirectX 5's face being DirectX
+6's slot for slot as far as it goes, as d3d.h declares them; both were walls (#148). The viewport
+answers to DirectX 5's and DirectX 3's names too. With no callback, either device's
+`EnumTextureFormats` is refused with `DDERR_INVALIDPARAMS`, and a material, light or viewport made
+inside another object with `CLASS_E_NOAGGREGATION`, as Wine refuses them. LEGO Chess's DirectX plugin
+calls both as it makes its device; no released title passes either refusal's argument, so no
+released run moves.
 
 A title's window is told it is the active window and has the keyboard as Windows tells it (#196):
 after `WM_ACTIVATEAPP` come `WM_ACTIVATE` with `WA_ACTIVE` and no window deactivated, and then

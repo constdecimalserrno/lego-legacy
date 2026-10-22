@@ -76,6 +76,8 @@ the waits yet; their pin comes with #151, the first run to reach them.
 
 Its DirectX plugin now lists the device's texture formats and makes it a viewport (#148), and its
 framework takes the screen (#147): it confines the pointer to it, says a screen saver is running, as
-programs of the time did to keep Alt+Tab away, and tells its own window its size with
-`SendMessageA(WM_SIZE)`, where the run stops, at cursor 376,609. The plugin lists display modes only
-through DirectDraw's first face, so DirectX 5's mode descriptions are not yet asked for.
+programs of the time did to keep Alt+Tab away (Microsoft's Q161133, cited in core), and tells its own
+window its size with `SendMessageA(WM_SIZE)`, where the run stops, at cursor 376,609. Core's
+`IDirectDraw2` is the object's `IDirectDraw4` face, whose `EnumDisplayModes` hands out DirectX 6's
+124-byte `DDSURFACEDESC2` where DirectX 5 hands a 108-byte `DDSURFACEDESC`; the plugin lists modes
+only through DirectDraw's first face, so nothing reaches that yet.

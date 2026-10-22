@@ -1166,7 +1166,7 @@ fn transfer(
 }
 
 /// How long a `DDSURFACEDESC` is, and DirectX 6's `DDSURFACEDESC2`.
-const SURFACE_DESC_BYTES: u32 = 108;
+pub(crate) const SURFACE_DESC_BYTES: u32 = 108;
 const SURFACE_DESC2_BYTES: u32 = 124;
 
 fn enum_display_modes(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
