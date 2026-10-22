@@ -12,6 +12,7 @@
 use super::pointer::{back_on_the_picture, content_scale, moved, Capture, Mouse, Moved, Steer};
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::time::Instant;
 
 type Id = *mut c_void;
 type Sel = *mut c_void;
@@ -831,7 +832,6 @@ impl MacWindow {
     /// Take everything the window system has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
-        let was = self.capture.mouse();
         // Safety: the standard event loop, called with AppKit's own types.
         unsafe {
             loop {
@@ -901,7 +901,7 @@ impl MacWindow {
                     1 | 3 => {
                         if self.on_the_picture(event).is_some() {
                             self.pointer_over_us = true;
-                            match self.capture.press(button(kind)) {
+                            match self.capture.press(button(kind), Instant::now()) {
                                 Some(down) => self.pending.push(down),
                                 None => self.draw_pointer_where_it_belongs(),
                             }
@@ -1036,16 +1036,20 @@ impl MacWindow {
         // both things that change without the title being told, so this is
         // settled every time the window system is asked what happened, the
         // front first, so that a pointer kept on the picture is put back only
-        // while this application is still in front.
+        // while this application is still in front, with its window on the
+        // screen: one closed by its button is not in front.
         // Safety: `isActive` on NSApplication. A BOOL is one byte, and the
         // rest of the register is not ours to read.
         let active = unsafe {
             let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
             v & 0xff != 0
         };
-        self.pending.extend(self.capture.front(active));
+        let front = active && !self.hidden;
+        self.pending
+            .extend(self.capture.front(front, Instant::now()));
+        let tell = self.capture.newly_kept();
         if self.capture.mouse() == Mouse::Kept {
-            self.keep_on_the_picture(was != Mouse::Kept);
+            self.keep_on_the_picture(tell);
         }
         self.draw_pointer_where_it_belongs();
     }

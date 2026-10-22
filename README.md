@@ -110,14 +110,15 @@ mouse is yours and the game sees none of it, and the click that captures it does
 either. Escape frees the mouse again, and while the mouse is captured Escape does not reach the
 game: the next one, with the mouse free, does. Cmd-Tab, or anything else that takes the window out
 of the front, frees it too, and the window's title says which it is. In LEGO Island, whose pointer
-is yours in the game's shape, the captured pointer is put back on the picture once a frame, so it
-can stray past the edge for an instant. Cmd-Q, Cmd-W or the window's close button asks the game to
-close, as Windows does, and the run ends when it leaves; a second close stops the run at once. The
-Linux backend is written to do the same, freeing the mouse when another window takes the keyboard
-and closing on Ctrl-Q or the window's close button; it has not yet been run on Linux. In Hot Wheels,
-Space gets past the splash screens and Escape quits, once the mouse is free. In LEGO Island, closing
-the window saves the game as it leaves, as the quit door does. If the host cannot keep up, the game
-runs in slow motion with its sound stretched to match, rather than skipping.
+is yours in the game's shape, the captured pointer is kept on the picture; on macOS it is put back
+each time the window is pumped, twice a frame, so it can stray past the edge for an instant. Cmd-Q,
+Cmd-W or the window's close button asks the game to close, as Windows does, and the run ends when it
+leaves; a second close stops the run at once. The Linux backend is written to do the same, freeing
+the mouse when another window takes the keyboard and closing on Ctrl-Q or the window's close button;
+it has not yet been run on Linux. In Hot Wheels, Space gets past the splash screens and Escape
+quits, once the mouse is free. In LEGO Island, closing the window saves the game as it leaves, as
+the quit door does. If the host cannot keep up, the game runs in slow motion with its sound
+stretched to match, rather than skipping.
 
 ## Tests
 

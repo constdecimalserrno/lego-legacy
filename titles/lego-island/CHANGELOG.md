@@ -39,7 +39,7 @@ Its declared machine lacks no library (`absent_libraries`, #146): no gate run as
 Took core 1.2.0's mouse (#141): a player clicks on the picture to give the title the mouse, and
 Escape frees it, neither reaching the game. Until that click the island sees no move or button and
 the pointer is the host's arrow; after it the pointer, in the title's shape, is kept on the
-picture (on macOS, put back once a frame). No route records either, so no route moved.
+picture (on macOS, put back each pump, twice a frame). No route records either, so no route moved.
 
 ## 1.0.0 — 2026-10-21
 

@@ -175,9 +175,10 @@ LEGO Island never took it, and was handed every move over its picture.
 - Until a click on the picture the title sees none of the mouse, no move and no button. That
   click captures it and is the host's, and so is its release: it would otherwise press whatever
   the title's own pointer was over. A click on a window behind others captures too, once the
-  window has come to the front, which it must do within the pump the click came in or the next;
-  a window that comes to the front any later, or any other way, captures nothing. A press on the
-  window's frame never captures (#49).
+  window has come to the front, which it must do within two pumps after the one the click came
+  in or half a second, whichever is longer, so that neither a fast host nor a stall cuts it
+  short; a window that comes to the front any later, or any other way, captures nothing. A press
+  on the window's frame never captures (#49).
 - Captured, every move and button is the title's. A title that draws its own pointer (Rock
   Raiders, Hot Wheels, Alpha Team) has the person's hidden and frozen and its own steered by how
   far the mouse goes, as when it was taken. One that shows the host's (LEGO Island, #139) keeps
@@ -187,9 +188,10 @@ LEGO Island never took it, and was handed every move over its picture.
   window's place in front is settled, with the mouse joined to the pointer again straight after
   so that the warp holds no event back. So on macOS the pointer can stray past the edge for a
   frame, or for as long as the title takes to flip, before it is put back, and a pointer that
-  left for a window now in front is not put back. That title is told where the pointer is as the
-  mouse is captured, which no move has told it since. Which of the two a captured mouse is
-  follows the title's `ShowCursor`, whenever it changes.
+  left for a window now in front, or a window closed by its button, is not put back. Which of
+  the two a captured mouse is follows the title's `ShowCursor`, whenever it changes, and a title
+  the mouse comes to be kept for, by a click or by its `ShowCursor`, is told where the pointer is
+  at the end of the pump, held to the picture, which no move has told it since.
 - Escape frees it and is the host's, repeating and let go, so the Escape that frees the mouse
   never quits Hot Wheels; the next one, with the mouse free, reaches the title as any key does,
   and stays the title's, repeating and let go, if a click captures the mouse while it is held.

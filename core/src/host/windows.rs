@@ -23,6 +23,7 @@ use super::windows_input::{self as input, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, W
 use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping, CLOSE_ASKED};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 type Handle = *mut c_void;
 type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -912,7 +913,7 @@ impl WinWindow {
             // the guest saw is a button it has to see let go of, and only
             // that one.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
-                match self.capture.press(button(msg.message)) {
+                match self.capture.press(button(msg.message), Instant::now()) {
                     Some(down) => self.pending.push(down),
                     None => self.draw_pointer_where_it_belongs(),
                 }
@@ -958,7 +959,6 @@ impl WinWindow {
     /// Take everything Windows has for us, turning what a person did into
     /// guest input and noticing a close.
     pub fn pump(&mut self) {
-        let was = self.capture.mouse();
         // Safety: the standard message loop, with Windows' own types; a
         // message is written into `msg` before it is read.
         unsafe {
@@ -981,16 +981,19 @@ impl WinWindow {
         // Where the person's pointer is and which window is in front both
         // change without the title being told, so this is settled every time
         // Windows is asked what happened. A title the mouse is newly kept for
-        // is told where the pointer is.
-        self.pending.extend(self.capture.front(active));
-        if self.capture.mouse() == Mouse::Kept && was != Mouse::Kept {
+        // is told where the pointer is, held to the client area as the clip
+        // is about to hold the pointer itself.
+        self.pending
+            .extend(self.capture.front(active, Instant::now()));
+        if self.capture.newly_kept() {
             let mut at = Point::default();
             // Safety: user32's own, with a point to write into.
             unsafe {
                 (self.user.cursor_pos)(&mut at);
                 (self.user.screen_to_client)(self.window, &mut at);
             }
-            self.placed(at.x, at.y);
+            let (w, h) = self.client_size();
+            self.placed(at.x.clamp(0, w - 1), at.y.clamp(0, h - 1));
         }
         self.draw_pointer_where_it_belongs();
     }

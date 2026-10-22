@@ -31,6 +31,7 @@ use super::{sys, Button, Cursor, Frame, Host, HostError, Input, Mapping};
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_ushort, c_void, CString};
 use std::mem::{offset_of, size_of};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 /// An X connection, which only Xlib looks inside.
 type Display = c_void;
@@ -745,7 +746,6 @@ impl LinuxWindow {
     /// Take everything the X server has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
-        let was = self.capture.mouse();
         // Safety: the display is open, and each event is read as the type
         // its own `kind` says it is.
         unsafe {
@@ -758,12 +758,16 @@ impl LinuxWindow {
         // Whether the window has the keyboard changes without the title being
         // told, so whose the mouse is is settled every time the server is
         // asked what happened. A title the mouse is newly kept for is told
-        // where the pointer is.
-        self.pending.extend(self.capture.front(self.focused));
+        // where the pointer was last seen, held to the window as the grab
+        // holds the pointer; a pointer the grab moved there comes as a move.
+        self.pending
+            .extend(self.capture.front(self.focused, Instant::now()));
         self.take_pointer_where_it_belongs();
-        if self.capture.mouse() == Mouse::Kept && was != Mouse::Kept {
+        if self.capture.newly_kept() {
+            let (w, h) = self.window_size;
+            let (w, h) = (i32::try_from(w).unwrap_or(1), i32::try_from(h).unwrap_or(1));
             let (x, y) = self.seen_at;
-            self.moved(x, y);
+            self.moved(x.clamp(0, w - 1), y.clamp(0, h - 1));
         }
         // A taken pointer that has strayed from the middle is moved back
         // there, once every event already sent has been measured.
@@ -829,7 +833,7 @@ impl LinuxWindow {
                     };
                     if event.kind == BUTTON_RELEASE {
                         self.pending.extend(self.capture.release(button));
-                    } else if let Some(down) = self.capture.press(button) {
+                    } else if let Some(down) = self.capture.press(button, Instant::now()) {
                         self.pending.push(down);
                     } else {
                         self.seen_at = (event.button.x, event.button.y);
