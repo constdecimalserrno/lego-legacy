@@ -1152,11 +1152,31 @@ pub fn com_method(interface: &str, slot: usize) -> Option<&'static crate::com::M
 /// Find the shim behind an import, if one is written.
 #[must_use]
 pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
-    let bare = dll
-        .strip_suffix(".dll")
-        .or_else(|| dll.strip_suffix(".DLL"))
-        .unwrap_or(dll);
-    for table in [
+    written(dll).find(|s| s.name == name)
+}
+
+/// Whether core writes an entry point of a library: what makes a library
+/// `LoadLibraryA` asks for, and the title does not ship, one of Microsoft's
+/// (#146). ADR-0002 takes any library an import names that the tree does not
+/// hold to be Microsoft's, as `Modules::load` does, since a name nothing is
+/// written for is still a wall when it is called; a library asked for at run
+/// time is the title asking whether the machine has it, and `LoadLibraryA`
+/// answers by this and by what the title declares absent.
+#[must_use]
+pub fn supplies(dll: &str) -> bool {
+    written(dll).next().is_some()
+}
+
+/// Every entry point written for one library, named as an import names it,
+/// with its extension or without, whatever their case.
+fn written(dll: &str) -> impl Iterator<Item = &'static Shim> + '_ {
+    // Windows compares library names whatever their case, the extension's too.
+    let at = dll.len().saturating_sub(4);
+    let bare = match dll.get(at..) {
+        Some(ext) if ext.eq_ignore_ascii_case(".dll") => &dll[..at],
+        _ => dll,
+    };
+    [
         kernel32::SHIMS,
         user32::SHIMS,
         msvcrt::SHIMS,
@@ -1170,15 +1190,10 @@ pub fn find(dll: &str, name: &str) -> Option<&'static Shim> {
         ole32::SHIMS,
         version::SHIMS,
         winmm::SHIMS,
-    ] {
-        if let Some(shim) = table
-            .iter()
-            .find(|s| s.dll.eq_ignore_ascii_case(bare) && s.name == name)
-        {
-            return Some(shim);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .flatten()
+    .filter(move |s| s.dll.eq_ignore_ascii_case(bare))
 }
 
 #[cfg(test)]

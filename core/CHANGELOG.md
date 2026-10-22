@@ -128,6 +128,45 @@ Raiders', Alpha Team's and every one of LEGO Island's committed routes among the
   which `LEGO1.DLL`'s C runtime saves and puts back around its thread data (`GetLastError` at
   0x1008d5f2). Nothing else of the run moves.
 
+`LoadLibraryA` answers as Windows does for a library the declared machine does not have, and stops
+at a wall for one it cannot say (#146), where it handed back a module for any name.
+
+- A library is found when the title ships it, in its install directory whatever case it is asked
+  for in, or when core writes an entry point of it. A name with no extension is looked for with
+  `.DLL` added, as Microsoft's `LoadLibraryA` page documents.
+- `Declared` gains `absent_libraries`: the libraries a title's machine does not have, each with
+  why. One of those is answered NULL, with the declared Windows' error: `ERROR_DLL_NOT_FOUND`
+  (1157) on Windows 9x, the answer Wine's conformance test records for 9x (wine-1.0,
+  `dlls/kernel32/tests/module.c`, `testLoadLibraryA_Wrong`: "Expected ERROR_MOD_NOT_FOUND or
+  ERROR_DLL_NOT_FOUND (win9x)"), and `ERROR_MOD_NOT_FOUND` (126) on NT, as Microsoft documents. Every
+  declared Windows today is 9x. The run logs `library missing <name>: <why>`.
+- Anything else stops at a wall that names the library as neither the title's own, nor written,
+  nor declared absent: a library of Microsoft's that core writes nothing of (SHELL32, say), which
+  every Windows 98 has, and a library the title ships only somewhere other than its install
+  directory, the one place a title's library is looked for (a path asked for is cut to its file
+  name). Answering either "not found" would send a title down a fallback
+  no player met (golden rule 2).
+- A library's `.dll` is now matched whatever its case, where only `.dll` and `.DLL` were. This is
+  `find`'s match too, so an import naming `DDraw.Dll` binds to its shims, and `GetProcAddress` on a
+  handle `LoadLibraryA` gave for it finds them, where both missed before. No binary on the roster
+  spells an extension so.
+- A handle for a library core writes is known by the file it names, not the path it was asked
+  for by, so `GetProcAddress` on one asked for by a path finds its shims, where it missed before.
+  No run asks so.
+- `GetProcAddress`'s and `FreeLibrary`'s own code is unchanged: a title given NULL does not call
+  them.
+
+Every released title declares no absent library: in every gate run it asks only for libraries it
+ships and ones core writes. Only Alpha Team calls `LoadLibraryA` in a committed run, for thirteen
+libraries it ships or core writes, so no run moves. LEGO Chess, which is not on `main` yet, will
+declare two when #143 lands: `glide2x.dll`, since its declared machine has no 3dfx card, and
+`KLIB_OpenGL_PlugIn.dll`, a renderer plugin it walks but never shipped. Each is then told it is not
+there, where the game would have called a null hook and its Glide plugin gone on into null `gr*`
+pointers.
+
+`absent_libraries` is a required field every title had to add to build, so it makes core's next
+release a major one (ADR-0007, as #163 settled). Core stays at 1.2.0 until that release.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

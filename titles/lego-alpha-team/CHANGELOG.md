@@ -21,6 +21,8 @@ stopped at once without telling it: at its menu or in a mission it posts its qui
 `Game.txt`, shuts NetImmerse down and exits 0. A second close stops the run at once. No committed
 route closes, and the title never destroys its window in one, so no route moved.
 
+Its declared machine lacks no library (`absent_libraries`, #146): in every gate run it asks `LoadLibraryA` only for libraries it ships and the two of Microsoft's core writes, so no route moves.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

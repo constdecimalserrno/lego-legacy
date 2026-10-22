@@ -2878,16 +2878,30 @@ fn get_system_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(written)
 }
 
+/// What Windows 9x answers for a library the machine does not have: Wine's
+/// conformance test from when it still ran on 9x accepts this or
+/// `ERROR_MOD_NOT_FOUND`, and names this one 9x's (wine-1.0,
+/// `dlls/kernel32/tests/module.c`, `testLoadLibraryA_Wrong`).
+const ERROR_DLL_NOT_FOUND: u32 = 1157;
+/// What Windows NT answers for it, as Microsoft documents.
+const ERROR_MOD_NOT_FOUND: u32 = 126;
+
 fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // A library the title ships is a guest binary and is loaded and run as
-    // one (ADR-0002, #55); one Microsoft wrote that the disc does not carry is
-    // written here and has no image to load. Either way the guest gets a
-    // handle, and what it does with it decides whether the run goes on.
+    // one (ADR-0002, #55), found whatever case it is asked for in; one
+    // Microsoft wrote that the disc does not carry is written here and has no
+    // image to load. One the title declares its machine lacks fails as
+    // Windows fails for a module it cannot find: NULL, and the declared
+    // Windows' error (#146). Anything else is a wall.
     let name = ctx.string(args[0]).map_err(Stop::Fault)?;
     ctx.log.line(&format!("load library {name}"));
     // A path is one the installer would have written; only the file at the end
-    // of it is the title's own.
-    let file = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_owned();
+    // of it is the title's own. A name with no extension is looked for with
+    // ".DLL" added, as Microsoft documents.
+    let mut file = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_owned();
+    if !file.contains('.') {
+        file.push_str(".DLL");
+    }
     if let Some(module) = ctx.modules.base_of_name(&file) {
         return Ok(module);
     }
@@ -2900,7 +2914,35 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             }
             Ok(base)
         }
-        None => Ok(ctx.state.give(Object::Module { name, base: 0 })),
+        // Known by the file it names, as GetProcAddress looks it up.
+        None if super::supplies(&file) => Ok(ctx.state.give(Object::Module {
+            name: file,
+            base: 0,
+        })),
+        None => {
+            let declared = &ctx.title.declared;
+            let Some((_, why)) = declared
+                .absent_libraries
+                .iter()
+                .find(|(absent, _)| absent.eq_ignore_ascii_case(&file))
+            else {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "KERNEL32.dll!LoadLibraryA: {file} is neither the title's own, \
+                         nor written, nor declared absent"
+                    ),
+                    caller: 0,
+                });
+            };
+            ctx.log.line(&format!("library missing {file}: {why}"));
+            // GetVersion's top bit is set on Windows 9x.
+            ctx.state.last_error = if declared.windows.version & 0x8000_0000 != 0 {
+                ERROR_DLL_NOT_FOUND
+            } else {
+                ERROR_MOD_NOT_FOUND
+            };
+            Ok(0)
+        }
     }
 }
 

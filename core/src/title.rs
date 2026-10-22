@@ -74,6 +74,12 @@ pub struct Declared {
     pub modes: &'static [(u32, u32, u32)],
     /// What the machine calls itself.
     pub computer: &'static str,
+    /// The libraries the machine does not have, each named with its
+    /// extension and with why: a card it has not got, or a file the title
+    /// never shipped. `LoadLibraryA` tells a title asking for one that it is
+    /// not there, as Windows does; a library that is not on this list, nor
+    /// the title's own, nor one core writes, is a wall (#146).
+    pub absent_libraries: &'static [(&'static str, &'static str)],
     /// Why these values and no others.
     pub why: &'static str,
 }
@@ -227,6 +233,11 @@ impl Title {
             megabytes: 128,
             modes: &[(640, 480, 16)],
             computer: "LEGO-LEGACY",
+            // What core's own tests ask for as a library this machine lacks.
+            absent_libraries: &[(
+                "glide2x.dll",
+                "3dfx's Glide, and the declared machine has no 3dfx card",
+            )],
             why: "the stub guest asks the machine nothing, and these are the roster's own \
                   baseline values rather than anything measured for it",
         },

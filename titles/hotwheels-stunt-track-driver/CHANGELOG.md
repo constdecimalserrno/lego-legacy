@@ -32,6 +32,8 @@ exit code unchanged; core's changelog lists them. The race still finishes, with 
 `WHEEL.DAT` and `TIMES.DAT` written at the same flips. The maintainer blessed the move on
 2026-10-21. Its runs moved again, so a person should drive the first race before its next release.
 
+Its declared machine lacks no library (`absent_libraries`, #146): no gate run asks `LoadLibraryA` for one, so no route moves.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

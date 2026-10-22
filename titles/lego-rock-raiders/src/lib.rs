@@ -43,6 +43,9 @@ pub const ROCK_RAIDERS: Title = Title {
         // everything else here: a recorded run must not depend on the machine
         // it was recorded on.
         computer: "LEGO-LEGACY",
+        // None: no gate run asks for a library, and the one place it can,
+        // its C runtime's message box, asks for USER32, which core writes (#146).
+        absent_libraries: &[],
         why: "Windows 98 SE is what this pressing shipped against and what its own installer \
               checks for; the rest is the roster's baseline, unmeasured against this title \
               because it has not asked for any of it yet",

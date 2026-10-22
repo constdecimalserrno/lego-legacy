@@ -7,6 +7,7 @@ use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::Stop;
 use lego_legacy_core::guest::GuestMem;
 use lego_legacy_core::host::{headless::Headless, Input};
+use lego_legacy_core::loader::MODULE_BASE;
 use lego_legacy_core::machine::Machine;
 use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
@@ -422,6 +423,73 @@ fn a_region_says_how_much_of_it_is_committed() {
     let release = [base, 0, MEM_RELEASE];
     assert_eq!(call(&mut m, "KERNEL32", "VirtualFree", &release), Ok(1));
     assert!(call(&mut m, "KERNEL32", "VirtualQuery", &[base, OUT, 28]).is_err());
+}
+
+/// The least a library can be and still load: headers and nothing else,
+/// asking for the address the machine puts the first one at, so it is not
+/// moved.
+fn library() -> Vec<u8> {
+    let mut bytes = vec![0u8; 0x200];
+    let mut put = |at: usize, v: &[u8]| bytes[at..at + v.len()].copy_from_slice(v);
+    put(0, b"MZ");
+    put(0x3c, &0x40u32.to_le_bytes());
+    put(0x40, b"PE\0\0");
+    put(0x44, &0x014cu16.to_le_bytes());
+    put(0x54, &0xe0u16.to_le_bytes());
+    put(0x58, &0x010bu16.to_le_bytes());
+    put(0x58 + 28, &MODULE_BASE.to_le_bytes());
+    put(0x58 + 56, &0x1000u32.to_le_bytes());
+    put(0x58 + 60, &0x200u32.to_le_bytes());
+    bytes
+}
+
+/// A library is loaded when the title ships it, whatever case it is asked for
+/// in and with ".DLL" added when it has no extension, and handed out when it
+/// is one this machine writes. One the title declares its machine lacks is not
+/// there, with Windows 98's error, and anything else is a wall, as LEGO
+/// Chess's walk of its renderer plugins finds (#146).
+#[test]
+fn a_library_the_machine_does_not_have_is_not_found() {
+    let mut m = machine();
+    m.tree
+        .declare("C:\\STUB\\KLIB_DirectX_Plugin.dll", library());
+    let load = |m: &mut Machine, name: &str| {
+        m.arena
+            .write(DATA, format!("{name}\0").as_bytes())
+            .expect("in the arena");
+        call(m, "KERNEL32", "LoadLibraryA", &[DATA])
+    };
+    assert_eq!(load(&mut m, "KLIB_DirectX_PlugIn"), Ok(MODULE_BASE));
+    assert_eq!(load(&mut m, "KLIB_DirectX_PlugIn.dll"), Ok(MODULE_BASE));
+    for written in ["ddraw.dll", "DDraw.Dll"] {
+        assert!(
+            load(&mut m, written).is_ok_and(|module| module != 0),
+            "{written}"
+        );
+    }
+    assert!(win32::find("DDraw.Dll", "DirectDrawCreate").is_some());
+    // Asked for by a path, it is known by its file, as its entry points are.
+    let ddraw = load(&mut m, "C:\\WINDOWS\\SYSTEM\\DDRAW.DLL").expect("a handle");
+    m.arena
+        .write(OUT, b"DirectDrawCreate\0")
+        .expect("in the arena");
+    assert_ne!(
+        call(&mut m, "KERNEL32", "GetProcAddress", &[ddraw, OUT]),
+        Ok(0)
+    );
+    // The stub's machine declares it has no 3dfx card, so no Glide:
+    // ERROR_DLL_NOT_FOUND, Windows 9x's answer.
+    m.state.last_error = 0;
+    assert_eq!(load(&mut m, "glide2x.dll"), Ok(0));
+    assert_eq!(m.state.last_error, 1157);
+    // A plugin nobody declared absent, shipped nowhere and written by no one.
+    assert!(
+        matches!(
+            load(&mut m, "KLIB_OpenGL_PlugIn.dll"),
+            Err(Stop::NotWritten { what, .. }) if what.contains("KLIB_OpenGL_PlugIn.dll")
+        ),
+        "a wall"
+    );
 }
 
 /// A module with no table of keys among its resources has none to load, as

@@ -35,6 +35,9 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
         megabytes: 128,
         modes: &[(640, 480, 16)],
         computer: "LEGO-LEGACY",
+        // None: no gate run asks for a library, and the one place it can,
+        // its C runtime's message box, asks for USER32, which core writes (#146).
+        absent_libraries: &[],
         why: "Windows 98 SE is what this pressing shipped against and a Pentium 166 is what \
               its box asks for; the rest is the roster's baseline, unmeasured against this \
               title because it has not asked for any of it yet",

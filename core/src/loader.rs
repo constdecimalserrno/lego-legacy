@@ -102,8 +102,10 @@ impl Modules {
 
     /// Load a binary the title ships, and everything it needs, deepest first.
     ///
-    /// A name the declared tree does not hold is not an error: it is one of
-    /// Microsoft's, and the boundary stands where its exports would be.
+    /// A name the declared tree does not hold is not an error: for an import
+    /// it is one of Microsoft's, and the boundary stands where its exports
+    /// would be (ADR-0002); `LoadLibraryA` decides for itself what else it
+    /// may be (#146).
     ///
     /// # Errors
     /// When the image will not load, or will not go anywhere.

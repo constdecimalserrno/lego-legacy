@@ -34,6 +34,8 @@ run ended with, `db7bd6b2…`. The restless hand's digest moves, `c029337f…` t
 its releases kill a timer that is not there, which is refused with `ERROR_INVALID_PARAMETER`, and
 the C runtime keeps that error.
 
+Its declared machine lacks no library (`absent_libraries`, #146): no gate run asks `LoadLibraryA` for one, so no route moves.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from
