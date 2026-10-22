@@ -28,3 +28,8 @@ that, and finds `CDFS` and `LEGOCHESS` on D:. The run still stops at `GetClipCur
 the check at 0x4087AF, so #148's run is the first to reach it. Until then core's shim tests stand
 in: they make the check's calls as its code at 0x405420 makes them and find `D:\`. The rip's label
 is tested to be `LEGOCHESS`, the label the check compares.
+
+A member of `MAIN.Z` that will not expand, or expands to another size than its table gives, stops
+the run at a wall naming it (#169), where the game was told the file was missing, and a damaged KLIB
+plugin was loaded as one of Microsoft's. All 881 members of a good rip expand, so the run is
+unchanged.

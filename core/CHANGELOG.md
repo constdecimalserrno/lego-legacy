@@ -454,6 +454,18 @@ at a wall that names it. Other drives the machine lacks are not refused yet (#17
 declares the drive. Every released title and the stub declare none and answer as before, so no
 route moves.
 
+A member of the pressing's archive that will not come out stops the run at a wall naming the
+archive, the image, the member and why (#169), where the guest was told the file was missing, a
+file `GetFileAttributesA` and `FindFirstFileA` had just said was there, and `LoadLibraryA` took a
+damaged library for one of Microsoft's. Both kinds of archive are answered in one place,
+`Tree::member`: a cabinet entry (Rock Raiders, Alpha Team) and an InstallShield 3 member (LEGO
+Chess) whose archive will not read, whose data will not decode, that is stored a way the reader
+was not taught, or that comes out another size than its table gives. `Cabinet::unpack` now refuses
+the last as `Corrupt`, as `Member::expand` already did; it handed back whatever its chunks inflated
+to. `Tree::wall` hands the machine this wall as it hands #144's, after the call that met it. A good
+rip never comes here: every one of Rock Raiders' 444 packed entries and Alpha Team's 57 unpacks to
+its header's size, and all 881 of `MAIN.Z`'s members expand to their table's. No route moves.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

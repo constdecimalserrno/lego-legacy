@@ -67,6 +67,9 @@ pub struct Tree {
     /// stands behind them.
     files: BTreeMap<String, Source>,
     iso: Option<Iso>,
+    /// An archive member that would not come out, until the machine stops at
+    /// it (#169).
+    wall: Option<String>,
     /// Where what the guest writes lands, so that a save outlives the run that
     /// made it. Without one the guest's disc is read-only.
     profile: Option<PathBuf>,
@@ -86,6 +89,7 @@ impl Tree {
             archive: None,
             files: BTreeMap::new(),
             iso: None,
+            wall: None,
             profile: None,
         }
     }
@@ -95,10 +99,11 @@ impl Tree {
         self.iso = Some(iso);
     }
 
-    /// A name asked of the disc that only its primary tree records, read
-    /// through its Joliet tree: where the machine stops (#144).
+    /// Where the machine stops, once: an archive member that would not come
+    /// out (#169), or a name asked of the disc that only its primary tree
+    /// records, read through its Joliet tree (#144).
     pub fn wall(&mut self) -> Option<String> {
-        self.iso.as_mut()?.wall()
+        self.wall.take().or_else(|| self.iso.as_mut()?.wall())
     }
 
     /// Give the tree somewhere to keep what the guest writes.
@@ -398,27 +403,30 @@ impl Tree {
             Some(Source::Declared(bytes)) => Some(bytes),
             Some(Source::Packed(index)) => {
                 let (cabinet, data_stem) = self.cabinet.as_ref()?;
-                let entry = cabinet.entries().get(index)?.clone();
+                let entry = cabinet.entries().get(index)?;
                 // An entry names the volume it is in, and the volume names the
                 // file: Alpha Team's game is in DATA2.CAB and only its
                 // installer is in DATA1.CAB.
                 let data_path = format!("{data_stem}{}.CAB", entry.volume);
-                let iso = self.iso.as_mut()?;
-                let span = iso
+                let got = self
+                    .iso
+                    .as_mut()?
                     .read_range(&data_path, entry.offset, entry.compressed as usize)
-                    .ok()?;
-                let (cabinet, _) = self.cabinet.as_ref()?;
-                cabinet.unpack(&entry, &span).ok()
+                    .map_err(|e| format!("{} would not read: {e}", entry.name))
+                    .and_then(|span| cabinet.unpack(entry, &span).map_err(|e| e.to_string()));
+                self.member(&data_path, got)
             }
             Some(Source::Imploded(index)) => {
                 let (archive, path) = self.archive.as_ref()?;
                 let member = archive.members().get(index)?;
-                let span = self
+                let got = self
                     .iso
                     .as_mut()?
                     .read_range(path, member.offset, member.compressed as usize)
-                    .ok()?;
-                member.expand(&span).ok()
+                    .map_err(|e| format!("{} would not read: {e}", member.path()))
+                    .and_then(|span| member.expand(&span).map_err(|e| e.to_string()));
+                let path = path.clone();
+                self.member(&path, got)
             }
             Some(Source::Disc(path)) => self.iso.as_mut()?.read(&path).ok(),
             None => {
@@ -436,6 +444,28 @@ impl Tree {
                 None
             }
         }
+    }
+
+    /// A member of the pressing's archive as it came out of `archive`: the
+    /// one place a cabinet's entries and an InstallShield 3 archive's members
+    /// are answered (#169).
+    ///
+    /// One that would not come out, its archive unreadable, its data damaged,
+    /// stored a way the reader was not taught, or another size than the
+    /// archive's table gives, is a wall naming the archive, the image and the
+    /// reader's why, which names the member; and nothing. A member the tree
+    /// says is there is never answered as missing, nor as wrong bytes (golden
+    /// rules 2 and 4). A good rip never comes here.
+    fn member(&mut self, archive: &str, got: Result<Vec<u8>, String>) -> Option<Vec<u8>> {
+        got.map_err(|why| {
+            let image = self
+                .iso
+                .as_ref()
+                .map_or_else(String::new, |iso| iso.path().display().to_string());
+            self.wall
+                .get_or_insert_with(|| format!("{archive} on {image}: {why} (#169)"));
+        })
+        .ok()
     }
 
     /// Every file the tree holds under a directory whose name matches a

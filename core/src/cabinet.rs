@@ -259,7 +259,7 @@ impl Cabinet {
     ///
     /// # Errors
     /// When the entry is not in the cabinet, is stored a way this reader does
-    /// not know, or will not decompress.
+    /// not know, or will not decompress to the size its header gives.
     pub fn unpack(&self, entry: &Entry, data: &[u8]) -> Result<Vec<u8>, CabinetError> {
         if !entry.in_cabinet() {
             return Err(CabinetError::NotInCabinet {
@@ -301,6 +301,18 @@ impl Cabinet {
             })?;
             out.extend_from_slice(&bytes);
             at += len;
+        }
+        // Chunks that each inflate are still damage when together they come
+        // to another size than the header's (#169).
+        if out.len() != entry.expanded as usize {
+            return Err(CabinetError::Corrupt {
+                name: entry.name.clone(),
+                why: format!(
+                    "it unpacks to {} bytes, and the header says {}",
+                    out.len(),
+                    entry.expanded
+                ),
+            });
         }
         Ok(out)
     }
