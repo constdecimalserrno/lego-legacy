@@ -1979,6 +1979,19 @@ fn no_screen_saver_is_enabled_and_one_said_to_run_is_kept() {
         "nowhere to say"
     );
 
+    // Only what LEGO Chess asks: anything else is a wall.
+    let spi_all =
+        |m: &mut Machine, args: [u32; 4]| call(m, "USER32", "SystemParametersInfoA", &args);
+    for asked in [
+        [SPI_GETSCREENSAVEACTIVE, 1, OUT, 0],
+        [SPI_GETSCREENSAVEACTIVE, 0, OUT, 2],
+        [SPI_SETSCREENSAVERRUNNING, 2, OUT, 0],
+        [SPI_SETSCREENSAVERRUNNING, 1, 0, 0],
+        [SPI_SETSCREENSAVERRUNNING, 1, OUT, 1],
+    ] {
+        assert!(spi_all(&mut m, asked).is_err(), "{asked:x?}");
+    }
+
     for (running, was) in [(1, 0), (1, 1), (0, 1), (0, 0)] {
         m.arena.write_u32(OUT, 7).expect("in the arena");
         assert_eq!(spi(&mut m, SPI_SETSCREENSAVERRUNNING, running), Ok(1));
@@ -2007,10 +2020,14 @@ fn the_system_time_is_milliseconds_in_an_mmtime() {
     );
     let now = call(&mut m, "WINMM", "timeGetTime", &[]).expect("answered");
     let read = |o| m.arena.read_u32(OUT + o).expect("in the arena");
-    assert_eq!((read(0), read(4)), (TIME_MS, now));
-    // Too small, or none: left alone, and still no error.
+    assert_eq!(
+        (read(0), read(4), read(8)),
+        (TIME_MS, now, 0xdead_beef),
+        "the union's other half left alone"
+    );
+    // Too small, or none: a wall, with nothing written.
     m.arena.write_u32(OUT, 0xdead_beef).expect("in the arena");
-    assert_eq!(call(&mut m, "WINMM", "timeGetSystemTime", &[OUT, 8]), Ok(0));
+    assert!(call(&mut m, "WINMM", "timeGetSystemTime", &[OUT, 8]).is_err());
     assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), 0xdead_beef);
-    assert_eq!(call(&mut m, "WINMM", "timeGetSystemTime", &[0, 12]), Ok(0));
+    assert!(call(&mut m, "WINMM", "timeGetSystemTime", &[0, 12]).is_err());
 }

@@ -1150,31 +1150,35 @@ fn system_parameters(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         // Whether screen saving is enabled, as a BOOL written where pvParam
         // points: the declared machine has no screen saver, so it is not.
         // LEGO Chess asks so it can turn one off for as long as it runs,
-        // and, told there is none, never does (0x004087F5, #147).
-        // Nowhere to write it is a failure.
-        (SPI_GETSCREENSAVEACTIVE, _) if args[2] == 0 => Ok(0),
-        (SPI_GETSCREENSAVEACTIVE, _) => {
+        // and, told there is none, never does (the call that returns to
+        // 0x004087F9, #147). Nowhere to write it is a failure, as Wine's
+        // `get_bool_entry` answers it.
+        (SPI_GETSCREENSAVEACTIVE, 0) if args[3] == 0 && args[2] == 0 => Ok(0),
+        (SPI_GETSCREENSAVEACTIVE, 0) if args[3] == 0 => {
             ctx.mem.write_u32(args[2], 0).map_err(Stop::Fault)?;
             Ok(1)
         }
         // That a screen saver is running, or no longer is, which Windows 9x
-        // keeps, handing back through pvParam the state it replaces. It is
-        // how a program of the time switched off Ctrl+Alt+Del and Alt+Tab,
-        // which this machine does not have, so the state is all there is.
-        // LEGO Chess sets it as it takes the screen (0x0044C455) and clears it
-        // as it lets go (0x0044BD27, #147).
-        (SPI_SETSCREENSAVERRUNNING, running) => {
+        // keeps. It is how a program of the time switched off Ctrl+Alt+Del
+        // and Alt+Tab, telling Windows 95, 98 or Me a screen saver was
+        // running (Microsoft's Q161133, "HOWTO: Block CTRL+ALT+DEL & ALT+TAB
+        // in Windows 95 or Windows 98"); this machine has neither key, so the
+        // state is all there is. [inferred] pvParam is handed back the state
+        // it replaces: Q161133 passes one and never reads it. LEGO Chess sets
+        // it as it takes the screen (the call that returns to 0x0044C45B) and
+        // clears it as it lets go (0x0044BD2D, #147), and reads neither back.
+        (SPI_SETSCREENSAVERRUNNING, running @ (0 | 1)) if args[3] == 0 && args[2] != 0 => {
             let was = std::mem::replace(&mut ctx.state.screen_saver_running, running != 0);
-            if args[2] != 0 {
-                ctx.mem
-                    .write_u32(args[2], u32::from(was))
-                    .map_err(Stop::Fault)?;
-            }
+            ctx.mem
+                .write_u32(args[2], u32::from(was))
+                .map_err(Stop::Fault)?;
             Ok(1)
         }
         (action, param) => Err(Stop::NotWritten {
             what: format!(
-                "USER32.dll!SystemParametersInfoA: action {action:#06x}, uiParam {param}"
+                "USER32.dll!SystemParametersInfoA: action {action:#06x}, uiParam {param}, pvParam \
+                 {:#x}, fWinIni {:#x}",
+                args[2], args[3]
             ),
             caller: 0,
         }),

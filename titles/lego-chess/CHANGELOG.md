@@ -10,7 +10,7 @@ InstallShield 3 archive the declared tree expands whole into `C:\Program Files\L
 Chess`, with the game's own strings, `Text.txt`, copied out of `_SETUP.LIB` beside it. A Minimum
 install: the three `.RES` archives stay on the disc and are read where they lie. The declared
 machine is the roster's baseline: Windows 98 SE, 640x480 at sixteen bits, a flip on a sixty-hertz
-refresh, and the baseline processor until #147 measures the game's clock waits. Its CD answers
+refresh, and the baseline processor until #147 measured the game's clock waits. Its CD answers
 long names from its Joliet tree (#144), since its bumper, `D:\intro\Chess Bumper01.bmp`, is named
 only there. It has no `glide2x.dll`, for the machine has no 3dfx card, and no
 `KLIB_OpenGL_PlugIn.dll`, which no pressing shipped: each is told it is not there, as Windows 9x
@@ -25,7 +25,7 @@ The declared machine has a floppy drive, A:, with no disk in it (#145), as a 199
 CD check (0x405420) tests bit 0 of `GetLogicalDrives` once and never shifts, so with no A: it looked
 at no drive and would ask for its disc for ever; with one it asks every letter its type, A: only
 that, and finds `CDFS` and `LEGOCHESS` on D:. The game's main calls `GetSystemDefaultLangID`
-before the check at 0x4087AF, so the first run past that call (#147) is the first to reach it. Until then core's shim tests stand
+before the check at 0x4087AF, so the first run past that call (#147) is the first to reach it. Until then core's shim tests stood
 in: they make the check's calls as its code at 0x405420 makes them and find `D:\`. The rip's label
 is tested to be `LEGOCHESS`, the label the check compares.
 
@@ -64,9 +64,12 @@ auto-select picks the DirectX plugin's Direct3D 2 device, as on a 1998 PC with a
 screen at 640x480x16 and makes the device, and the run stops at `IDirect3DDevice2::EnumTextureFormats`,
 #148's, at cursor 374,735.
 
-The declared processor is a Pentium 166 (#147), family 5, the minimum the game's own 1998 manual
-gives ("CPU Pentium 166 MHz") and its later boxes repeat, where it was the roster's Pentium II 450.
-The game waits by spinning on the clock, half a second and then a second at boot and between its
-movies' frames, so the processor decides what a second of waiting costs. Measured on a probe that
-skipped the movies: the two boot waits are 675 million instructions at 450 MHz, nine tenths of the
-boot, and 249 million at 166, which ran the boot to its MIDI open in 4 seconds where it took 8.
+The declared processor is a Pentium 166 (#147), family 5, where it was the roster's Pentium II 450:
+the minimum the original pressing's 1998 UK manual gives, IB2G-CHE3, page 5, "CPU Pentium 166 MHz"
+(archive.org item `LEGOChess-manual-EU-IB2G-CHE3`), and its later boxes repeat. The Masterpiece's own
+manual and the 2002 US edition have no requirements page. The game waits by spinning on the clock,
+half a second and then a second at boot and between its movies' frames, so the processor decides
+what a second of waiting costs. Measured on a probe that skipped the movies: the two boot waits are
+675 million instructions at 450 MHz, nine tenths of the boot, and 249 million at 166, and the boot
+to its MIDI open took 4 seconds of the Mac mini's wall time where it took 8. No committed run reaches
+the waits yet; their pin comes with #151, the first run to reach them.

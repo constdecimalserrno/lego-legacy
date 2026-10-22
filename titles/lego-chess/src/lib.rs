@@ -33,14 +33,18 @@ pub const LEGO_CHESS: Title = Title {
         // DirectX plugin and read keys with `GetAsyncKeyState`.
         windows: WINDOWS_98_SE,
         // A Pentium 166: what this title asks for, in the "Minimum
-        // Specifications" of its own 1998 manual (IB2G-CHE3: "CPU Pentium 166
-        // MHz") and on the backs of its later boxes. It matters here as it
+        // Specifications" of its original pressing's 1998 UK manual,
+        // IB2G-CHE3, page 5 ("CPU Pentium 166 MHz"; archive.org item
+        // `LEGOChess-manual-EU-IB2G-CHE3`), and on the backs of its later
+        // boxes. The Masterpiece's own manual and the 2002 US edition have no
+        // requirements page. It matters here as it
         // does for Hot Wheels: this title waits by spinning on the clock,
         // half a second and then a second at boot (0x00408ABA, 0x00408AE3)
         // and between its movies' frames, so the declared processor decides
-        // how much work a second of waiting costs. Measured at boot (#147):
-        // the two waits are 675 million instructions at the baseline 450 MHz,
-        // nine tenths of the boot, and 249 million at 166.
+        // how much work a second of waiting costs. Measured on a probe that
+        // skipped the movies (#147): the two waits are 675 million
+        // instructions at the baseline 450 MHz, nine tenths of the boot, and
+        // 249 million at 166. A committed run first reaches them with #151.
         hz: 166_000_000,
         // And that Pentium is told about as itself, family 5. It never asks
         // `cpuid`, and its two `rdtsc`s (0x42E1CE, 0x42E1E7) are in one

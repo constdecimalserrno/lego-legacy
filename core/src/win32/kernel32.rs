@@ -70,7 +70,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "GetUserDefaultLCID", 0, user_default_lcid),
     stdcall("KERNEL32", "GetUserDefaultLangID", 0, user_default_lang_id),
     // The system's language is the user's, as the declared machine has one
-    // locale: LEGO Chess asks it at the top of its main (0x004086E0, #147).
+    // locale: LEGO Chess asks it at the top of its main (the call that returns to 0x004086E6,
+    // #147).
     stdcall(
         "KERNEL32",
         "GetSystemDefaultLangID",

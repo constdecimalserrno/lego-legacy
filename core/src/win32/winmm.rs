@@ -306,16 +306,19 @@ fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 /// timeGetSystemTime(time, size): the same milliseconds as `timeGetTime`,
 /// handed back in an `MMTIME` as Microsoft documents it: its `wType`, then
 /// `ms`, with `wType` saying `TIME_MS`, and `TIMERR_NOERROR`. LEGO Chess
-/// reads its clock this way everywhere, its two waits at boot included
-/// (0x0040E200, #147). An `MMTIME` smaller than Win32's twelve bytes, or
-/// none, is left alone and still answered `TIMERR_NOERROR`, as Wine's
-/// `timeGetSystemTime` answers it, read as documentation of what Windows does.
+/// reads its clock this way for its waits, its two at boot included (the
+/// call that returns to 0x0040E20D, #147). An `MMTIME` smaller than Win32's
+/// twelve bytes, or none, is a wall that names the size: no observed Windows
+/// says what it answers.
 fn time_get_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const TIME_MS: u32 = 0x0001;
     const MMTIME_BYTES: u32 = 12;
     let (time, size) = (args[0], args[1]);
     if time == 0 || size < MMTIME_BYTES {
-        return Ok(0);
+        return Err(Stop::NotWritten {
+            what: format!("WINMM.dll!timeGetSystemTime: an MMTIME at {time:#x} of {size} bytes"),
+            caller: 0,
+        });
     }
     let millis = time_get_time(ctx, &[])?;
     ctx.mem.write_u32(time, TIME_MS).map_err(Stop::Fault)?;
