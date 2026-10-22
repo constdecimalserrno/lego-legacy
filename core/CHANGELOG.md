@@ -5,6 +5,19 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+A message sent to the title's own window is handed to its procedure, whose answer is
+`SendMessageA`'s, as Microsoft documents a send to a window of the calling thread; it was a wall
+(#147). `InvalidateRect` marks the window, the title's whichever window it names or none, and a
+marked window is handed `WM_PAINT` by `PeekMessageA` and `GetMessageA` once nothing else waits, and
+sent it by `UpdateWindow`, until `BeginPaint` unmarks it and says to draw the whole client area,
+its background still to erase if that was asked for, or `DefWindowProcA` is handed the `WM_PAINT`;
+`EndPaint` answers success. A send from a thread other than the window's, or to a window with no
+procedure here, is a wall. `GetMessageA` takes what `PeekMessageA` would and answers zero for
+`WM_QUIT` and -1 with nowhere to put it; with nothing waiting it is a wall, since nothing arrives
+while a title is inside a call. A paint due and a screen saver said to run are part of the machine's
+digest when there is one. LEGO Chess makes all of these calls; no released title makes any, nor
+invalidates its window, so no released run moves.
+
 `IDirect3DDevice2::EnumTextureFormats` lists the declared device's texture formats, the ones
 `IDirect3DDevice7`'s lists, each in a whole `DDSURFACEDESC` as d3dtypes.h has its callback take one
 and Wine fills it, and `IDirect3D2::CreateViewport` makes a viewport, DirectX 5's face being DirectX

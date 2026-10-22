@@ -213,17 +213,28 @@ fn its_input_and_sound_come_up() {
     for device in ["keyboard", "mouse"] {
         ran.assert_logged(&format!("dinput {device} at "));
     }
-    let foreground = ran
-        .log
-        .lines()
-        .filter(|l| l.starts_with("call IDirectInputDeviceA::SetCooperativeLevel(0x10010, 0x6)"))
-        .count();
-    let acquired = ran
-        .log
-        .lines()
-        .filter(|l| l.starts_with("call IDirectInputDeviceA::Acquire()"))
-        .count();
-    assert_eq!((foreground, acquired), (2, 2), "log:\n{}", ran.log);
+    // Its framework sets each to the foreground, not exclusively, and acquires
+    // it as it starts; its window procedure acquires them again whenever it
+    // is told it is in front (0x0045C646), so only these are counted.
+    let called = |call: &str, from: &str| {
+        assert!(
+            ran.log
+                .lines()
+                .any(|l| l.starts_with(call) && l.contains(&format!(" from {from} "))),
+            "{call} from {from}\nlog:\n{}",
+            ran.log
+        );
+    };
+    let foreground = "call IDirectInputDeviceA::SetCooperativeLevel(0x10010, 0x6)";
+    let acquire = "call IDirectInputDeviceA::Acquire()";
+    for (call, from) in [
+        (foreground, "0x00455e6c"),
+        (acquire, "0x00455e9e"),
+        (foreground, "0x00455f6e"),
+        (acquire, "0x00455fad"),
+    ] {
+        called(call, from);
+    }
     ran.assert_logged("call IDirectSound3DListener::SetAllParameters(")
         .assert_logged("mci command 0x0803 to device 516, flags 0x3102, answered 0")
         .assert_logged("mci command 0x080d to device 1, flags 0x402, answered 0");
@@ -283,14 +294,42 @@ fn the_device_gets_its_formats_and_viewport_and_the_framework_takes_the_screen()
         .assert_logged("call USER32.dll!SystemParametersInfoA(0x61, 0x1, ");
 }
 
+/// Its framework tells its own window its size, and invalidates every window
+/// once the mode is set (#147). The game's first movie clears the screen
+/// twice, its first two frames, and its pump takes what is waiting: the
+/// window is the active application's, is active, has the keyboard (#196)
+/// and is painted. Then it opens its first movie.
+#[test]
+fn the_window_is_told_its_size_painted_and_focused_and_the_first_movie_opens() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged("call USER32.dll!SendMessageA(0x10010, 0x5, 0x0, 0x1e00280)")
+        .assert_logged("call USER32.dll!InvalidateRect(0x0, 0x0, 0x1)")
+        .assert_logged("call USER32.dll!BeginPaint(0x10010, ")
+        .assert_logged("flip 1 cursor ");
+    let told: Vec<&str> = ran
+        .log
+        .lines()
+        .filter(|l| l.starts_with("window procedure given message "))
+        .collect();
+    for message in ["0x001c", "0x0006", "0x0007", "0x000f"] {
+        assert!(
+            told.iter().any(|l| l.ends_with(message)),
+            "its window is given {message}\nlog:\n{}",
+            ran.log
+        );
+    }
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #147's: its framework tells its own window its size.
-    ran.assert_logged("end wall: USER32.dll!SendMessageA: message 0x0005 to window 0x10010");
+    // #151's: its first movie, through AVIFile, after its first two frames.
+    ran.assert_flips(2)
+        .assert_logged("end wall: AVIFIL32.dll!AVIFileOpenA");
 }
 
 #[test]

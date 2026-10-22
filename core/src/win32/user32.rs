@@ -14,7 +14,10 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "CreateWindowExA", 12, create_window),
     stdcall("USER32", "DestroyWindow", 1, destroy_window),
     stdcall("USER32", "ShowWindow", 2, succeed),
-    stdcall("USER32", "UpdateWindow", 1, succeed),
+    stdcall("USER32", "UpdateWindow", 1, update_window),
+    stdcall("USER32", "InvalidateRect", 3, invalidate_rect),
+    stdcall("USER32", "BeginPaint", 2, begin_paint),
+    stdcall("USER32", "EndPaint", 2, succeed),
     stdcall("USER32", "SetFocus", 1, succeed),
     stdcall("USER32", "TranslateAcceleratorA", 3, translate_accelerator),
     stdcall("USER32", "LoadAcceleratorsA", 2, load_accelerators),
@@ -22,6 +25,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetActiveWindow", 0, active_window),
     stdcall("USER32", "WaitMessage", 0, wait_message),
     stdcall("USER32", "PeekMessageA", 5, peek_message),
+    stdcall("USER32", "GetMessageA", 4, get_message),
     stdcall("USER32", "TranslateMessage", 1, translate_message),
     stdcall("USER32", "DispatchMessageA", 1, dispatch_message),
     stdcall("USER32", "DefWindowProcA", 4, default_procedure),
@@ -330,6 +334,7 @@ fn destroy_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.state.window_made = false;
     ctx.state.messages.retain(|m| m.window != window);
     ctx.state.timers.retain(|t| t.window != window);
+    ctx.state.needs_paint = None;
     ctx.log.line("window destroyed");
     let procedure = ctx.state.window_procedure;
     super::call_each(
@@ -353,7 +358,8 @@ const SC_CLOSE: u32 = 0xf060;
 /// message a title's procedure hands on. `WM_CLOSE` destroys the window, and
 /// `WM_SYSCOMMAND` with `SC_CLOSE` sends it `WM_CLOSE` and answers what the
 /// window answers, as Microsoft documents and Wine's `defwnd.c` does (#140);
-/// every other message is answered zero.
+/// `WM_PAINT` empties the window's update region (#147); every other message
+/// is answered zero.
 fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     match (args[1], args[2] & 0xfff0) {
         (WM_CLOSE, _) => {
@@ -363,6 +369,9 @@ fn default_procedure(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             ctx.call_guest = Some((ctx.state.window_procedure, vec![args[0], WM_CLOSE, 0, 0]));
             ctx.answer_is_the_call_s = true;
         }
+        // Painting nothing still paints: the update region is emptied, as
+        // by the `BeginPaint` and `EndPaint` Windows' own procedure makes.
+        (WM_PAINT, _) => ctx.state.needs_paint = None,
         _ => {}
     }
     Ok(0)
@@ -829,6 +838,12 @@ fn input(m: &super::Message) -> bool {
     matches!(m.message, 0x0100..=0x0109 | 0x0200..=0x020d)
 }
 
+/// Whether a filter's range of messages, where zero to zero is all of them,
+/// takes this one.
+fn in_range(first: u32, last: u32, message: u32) -> bool {
+    (first == 0 && last == 0) || (first..=last).contains(&message)
+}
+
 /// The first waiting message a filter takes: a window, and a range of
 /// messages where zero to zero is all of them. Every message waiting is the
 /// window's, so only the thread that made it takes any (#139).
@@ -836,10 +851,10 @@ fn waiting(ctx: &Ctx<'_>, window: u32, first: u32, last: u32) -> Option<usize> {
     if super::kernel32::running_thread(ctx) != ctx.state.window_thread {
         return None;
     }
-    ctx.state.messages.iter().position(|m| {
-        (window == 0 || m.window == window)
-            && ((first == 0 && last == 0) || (first..=last).contains(&m.message))
-    })
+    ctx.state
+        .messages
+        .iter()
+        .position(|m| (window == 0 || m.window == window) && in_range(first, last, m.message))
 }
 
 /// Write a `MSG`: window, message, the two parameters, the time, the point.
@@ -909,8 +924,145 @@ fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const PM_REMOVE: u32 = 0x0001;
     let remove = args[4] & PM_REMOVE != 0;
     Ok(u32::from(
-        take_message(ctx, args, remove)? || take_timer(ctx, args, remove)?,
+        take_message(ctx, args, remove)?
+            || take_paint(ctx, args)?
+            || take_timer(ctx, args, remove)?,
     ))
+}
+
+/// GetMessageA(msg, window, first, last): `PeekMessageA` that takes what it
+/// finds, answering zero for `WM_QUIT` and nonzero for anything else, as
+/// Microsoft documents. LEGO Chess's pump takes a message this way once
+/// `PeekMessageA` has said one is waiting (0x0045C4EF, #147). With nothing
+/// waiting Windows would wait, and on this machine nothing arrives while the
+/// title is inside a call (ADR-0005), so that is a wall that names it.
+fn get_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const WM_QUIT: u32 = 0x0012;
+    // Nowhere to put what it takes is the error Microsoft documents, -1.
+    if args[0] == 0 {
+        return Ok(u32::MAX);
+    }
+    let filter = [args[0], args[1], args[2], args[3], 1];
+    if !(take_message(ctx, &filter, true)?
+        || take_paint(ctx, &filter)?
+        || take_timer(ctx, &filter, true)?)
+    {
+        return Err(Stop::NotWritten {
+            what: "USER32.dll!GetMessageA: a wait with nothing waiting".to_owned(),
+            caller: 0,
+        });
+    }
+    let message = ctx.mem.read_u32(args[0] + 4).map_err(Stop::Fault)?;
+    Ok(u32::from(message != WM_QUIT))
+}
+
+/// What a window is sent, or handed from its queue, to draw itself.
+const WM_PAINT: u32 = 0x000f;
+
+/// The `WM_PAINT` of the title's window, when it has an update region and the
+/// filter takes it: Windows makes one when nothing else is waiting, after the
+/// posted messages and input and before the timers, and keeps making it
+/// until `BeginPaint` empties the region (#147).
+fn take_paint(ctx: &mut Ctx<'_>, filter: &[u32]) -> Result<bool, Stop> {
+    let (window, first, last) = (filter[1], filter[2], filter[3]);
+    if ctx.state.needs_paint.is_none()
+        || !ctx.state.window_made
+        || super::kernel32::running_thread(ctx) != ctx.state.window_thread
+        || (window != 0 && window != WINDOW)
+        || !in_range(first, last, WM_PAINT)
+    {
+        return Ok(false);
+    }
+    if filter[0] != 0 {
+        let paint = super::Message {
+            window: WINDOW,
+            message: WM_PAINT,
+            wparam: 0,
+            lparam: 0,
+            time: u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0),
+            point: ctx.state.pointer,
+        };
+        write_message(ctx, filter[0], &paint)?;
+    }
+    Ok(true)
+}
+
+/// InvalidateRect(window, rect, erase): the window has something to draw,
+/// and is handed `WM_PAINT` for it. With no window, Microsoft documents every
+/// window as invalidated, which on this machine is the title's alone. LEGO
+/// Chess asks so with no window after it sets a display mode (0x0044C203,
+/// #147).
+// ponytail: the whole client area whatever `rect` says, and without the
+// `WM_NCPAINT` and `WM_ERASEBKGND` Windows sends a window invalidated with
+// none named, or that `BeginPaint` sends for an erase; no title draws a frame
+// or a background through GDI here, so `BeginPaint` says the background is
+// still to be erased, and they wait for a title that reads them.
+fn invalidate_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if !matches!(args[0], 0 | WINDOW) || !ctx.state.window_made {
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!InvalidateRect: window {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    // An erase asked for stays asked for until the window is painted.
+    let erase = ctx.state.needs_paint.unwrap_or(false) || args[2] != 0;
+    ctx.state.needs_paint = Some(erase);
+    Ok(1)
+}
+
+/// UpdateWindow(window): a window with something to draw is sent `WM_PAINT`
+/// at once, as Microsoft documents; one with nothing, or the desktop, is not.
+fn update_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == WINDOW && ctx.state.window_made && ctx.state.needs_paint.is_some() {
+        let procedure = own_procedure(ctx, "UpdateWindow")?;
+        ctx.call_guest = Some((procedure, vec![WINDOW, WM_PAINT, 0, 0]));
+    }
+    Ok(1)
+}
+
+/// The title's window procedure, for a message sent to its window by the
+/// thread that made it. A send from another thread waits, on Windows, for the
+/// window's own thread to take it, which this machine does not do, and a
+/// window with no procedure here has nothing to send to: both are walls.
+fn own_procedure(ctx: &Ctx<'_>, call: &str) -> Result<u32, Stop> {
+    let procedure = ctx.state.window_procedure;
+    if procedure == 0 || super::kernel32::running_thread(ctx) != ctx.state.window_thread {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "USER32.dll!{call}: a message for the title's window from another thread, or \
+                 to a window with no procedure here"
+            ),
+            caller: 0,
+        });
+    }
+    Ok(procedure)
+}
+
+/// The device context `BeginPaint` hands out for the title's window: a handle
+/// the title only ever passes back.
+const WINDOW_DC: u32 = 0x0001_0040;
+
+/// BeginPaint(window, paint): the window's update region is emptied, so no
+/// more `WM_PAINT` comes for it, and `PAINTSTRUCT` says what to draw: its
+/// device context, whether its background is still to be erased, which an
+/// erase asked for is, and the whole client area, which is the region
+/// `InvalidateRect` marks (#147).
+fn begin_paint(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] != WINDOW || !ctx.state.window_made {
+        return Err(Stop::NotWritten {
+            what: format!("USER32.dll!BeginPaint: window {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    let erase = ctx.state.needs_paint.take().unwrap_or(false);
+    let paint = args[1];
+    ctx.mem.write(paint, &[0; 64]).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(paint, WINDOW_DC).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(paint + 4, u32::from(erase))
+        .map_err(Stop::Fault)?;
+    client_rect(ctx, &[WINDOW, paint + 8])?;
+    Ok(WINDOW_DC)
 }
 
 const WM_TIMER: u32 = 0x0113;
@@ -1011,7 +1163,7 @@ fn timer_due(
     remove: bool,
 ) -> Option<super::Message> {
     let (window, first, last) = (filter[1], filter[2], filter[3]);
-    if !((first == 0 && last == 0) || (first..=last).contains(&WM_TIMER)) {
+    if !in_range(first, last, WM_TIMER) {
         return None;
     }
     let point = state.pointer;
@@ -1606,12 +1758,19 @@ fn dialog_item(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 /// A message sent to a window and answered before the call returns.
 ///
-/// A dialog's controls are answered here, as the control classes would: list
-/// boxes keep their strings and selection, buttons their check. The title's
-/// own window is not sent messages this way on the boot path; asking is a wall
-/// rather than a zero it would believe.
+/// The title's own window is handed it by its procedure, whose answer is the
+/// call's, as Microsoft documents `SendMessage` for a window of the calling
+/// thread: LEGO Chess tells its window its size as it takes the screen
+/// (0x0044C5EF, #147). A dialog's controls are answered here, as the control
+/// classes would: list boxes keep their strings and selection, buttons their
+/// check. Any other window is a wall rather than a zero it would believe.
 fn send_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
+    if window == WINDOW && ctx.state.window_made {
+        ctx.call_guest = Some((own_procedure(ctx, "SendMessageA")?, args[..4].to_vec()));
+        ctx.answer_is_the_call_s = true;
+        return Ok(0);
+    }
     let text = if matches!(message, 0x000c | 0x0180) && lparam != 0 {
         ctx.string(lparam).map_err(Stop::Fault)?
     } else {

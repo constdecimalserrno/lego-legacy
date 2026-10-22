@@ -2147,3 +2147,133 @@ fn a_direct3d_2_viewport_is_one_its_device_takes() {
         assert_eq!(m.arena.read_u32(OUT).expect("in the arena"), viewport);
     }
 }
+
+/// A message sent to the title's own window is its procedure's to answer, and
+/// its answer is the call's (#147): LEGO Chess tells its window its size.
+#[test]
+fn a_message_sent_to_the_title_s_window_is_its_procedure_s_to_answer() {
+    const PROCEDURE: u32 = 0x0040_1000;
+    const WM_SIZE: u32 = 0x0005;
+    let mut m = machine();
+    let send = |m: &mut Machine| {
+        let shim = win32::find("USER32", "SendMessageA").expect("written");
+        with_ctx(m, |ctx| {
+            let answer = (shim.run)(ctx, &[WINDOW, WM_SIZE, 0, 0x01e0_0280]);
+            (
+                answer.is_ok(),
+                ctx.call_guest.take(),
+                ctx.answer_is_the_call_s,
+            )
+        })
+    };
+    assert!(!send(&mut m).0, "no window yet: a wall");
+    window(&mut m, PROCEDURE);
+    assert_eq!(
+        send(&mut m),
+        (
+            true,
+            Some((PROCEDURE, vec![WINDOW, WM_SIZE, 0, 0x01e0_0280])),
+            true
+        )
+    );
+}
+
+/// A window invalidated is handed `WM_PAINT` once nothing else waits, by
+/// `PeekMessageA` and `GetMessageA` alike, and again until `BeginPaint`
+/// empties it; `UpdateWindow` sends it at once while there is one (#147).
+#[test]
+fn an_invalidated_window_is_painted_until_it_begins_to_paint() {
+    const PROCEDURE: u32 = 0x0040_1000;
+    const WM_PAINT: u32 = 0x000f;
+    let mut m = machine();
+    window(&mut m, PROCEDURE);
+    let message = |m: &Machine| m.arena.read_u32(OUT + 4).expect("in the arena");
+    // What making the window posted comes first.
+    while call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]) == Ok(1) {}
+    let update = |m: &mut Machine| {
+        let shim = win32::find("USER32", "UpdateWindow").expect("written");
+        with_ctx(m, |ctx| ((shim.run)(ctx, &[WINDOW]), ctx.call_guest.take()))
+    };
+    assert_eq!(update(&mut m), (Ok(1), None), "nothing to draw");
+    assert!(
+        call(&mut m, "USER32", "GetMessageA", &[OUT, 0, 0, 0]).is_err(),
+        "nothing waits: a wall, not a wait for ever"
+    );
+
+    // No window named is every window, which here is the title's.
+    assert_eq!(call(&mut m, "USER32", "InvalidateRect", &[0, 0, 1]), Ok(1));
+    assert_eq!(
+        update(&mut m),
+        (Ok(1), Some((PROCEDURE, vec![WINDOW, WM_PAINT, 0, 0])))
+    );
+    assert_eq!(
+        call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]),
+        Ok(1)
+    );
+    assert_eq!(message(&m), WM_PAINT);
+    assert_eq!(
+        call(&mut m, "USER32", "GetMessageA", &[OUT, 0, 0, 0]),
+        Ok(1)
+    );
+    assert_eq!(message(&m), WM_PAINT, "taken, it is still there");
+
+    let dc = call(&mut m, "USER32", "BeginPaint", &[WINDOW, DATA]).expect("answered");
+    assert_ne!(dc, 0);
+    let paint: Vec<u32> = (0..6)
+        .map(|i| m.arena.read_u32(DATA + 4 * i).expect("in the arena"))
+        .collect();
+    assert_eq!(
+        paint,
+        [dc, 1, 0, 0, 640, 480],
+        "its background still to erase"
+    );
+    assert_eq!(call(&mut m, "USER32", "EndPaint", &[WINDOW, DATA]), Ok(1));
+    assert_eq!(
+        call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]),
+        Ok(0),
+        "painted"
+    );
+
+    // A procedure that hands it to `DefWindowProcA` has painted it too.
+    assert_eq!(
+        call(&mut m, "USER32", "InvalidateRect", &[WINDOW, 0, 0]),
+        Ok(1)
+    );
+    assert_eq!(
+        call(
+            &mut m,
+            "USER32",
+            "DefWindowProcA",
+            &[WINDOW, WM_PAINT, 0, 0]
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]),
+        Ok(0),
+        "painted by Windows' own procedure"
+    );
+}
+
+/// `GetMessageA` answers zero for the quit a thread asked for, and nonzero
+/// for anything else (#147).
+#[test]
+fn get_message_answers_zero_for_a_quit() {
+    const PROCEDURE: u32 = 0x0040_1000;
+    let mut m = machine();
+    window(&mut m, PROCEDURE);
+    assert_eq!(
+        call(&mut m, "USER32", "GetMessageA", &[OUT, 0, 0, 0]),
+        Ok(1)
+    );
+    assert_eq!(call(&mut m, "USER32", "PostQuitMessage", &[3]), Ok(0));
+    // The rest of what making the window posted, then the quit.
+    while call(&mut m, "USER32", "GetMessageA", &[OUT, 0, 0, 0]) == Ok(1) {}
+    assert_eq!(m.arena.read_u32(OUT + 4).expect("in the arena"), 0x0012);
+    assert_eq!(m.arena.read_u32(OUT + 8).expect("in the arena"), 3);
+    assert_eq!(
+        call(&mut m, "USER32", "GetMessageA", &[0, 0, 0, 0]),
+        Ok(u32::MAX),
+        "nowhere to put it"
+    );
+}

@@ -348,6 +348,10 @@ pub struct State {
     /// Whether the title has told Windows a screen saver is running, which
     /// Windows 9x keeps to hand back as the one it replaces (#147).
     pub screen_saver_running: bool,
+    /// Whether the title's window has an update region, which Windows
+    /// answers with `WM_PAINT` once its queue has nothing else, and whether
+    /// its background is to be erased (#147).
+    pub needs_paint: Option<bool>,
     /// Where the title last asked that the pointer be put, until the machine
     /// has told the host about it (#59).
     pub pointer_put: Option<(i32, i32)>,
@@ -476,6 +480,7 @@ impl State {
             double_clicks: false,
             clip: None,
             screen_saver_running: false,
+            needs_paint: None,
             cursor_shown: 0,
             cursor: None,
             cursors: Vec::new(),

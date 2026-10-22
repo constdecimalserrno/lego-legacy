@@ -1127,6 +1127,14 @@ impl Machine {
             hash.update(&thread.to_le_bytes());
             hash.update(&code.to_le_bytes());
         }
+        // A paint due and a screen saver said to run, likewise hashed only
+        // when there is one (#147).
+        if let Some(erase) = input.needs_paint {
+            hash.update(&[1, u8::from(erase)]);
+        }
+        if input.screen_saver_running {
+            hash.update(&[2]);
+        }
 
         // The regions anything writes to, which are the ones a snapshot
         // carries.

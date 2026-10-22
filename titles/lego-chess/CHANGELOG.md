@@ -77,7 +77,14 @@ the waits yet; their pin comes with #151, the first run to reach them.
 Its DirectX plugin now lists the device's texture formats and makes it a viewport (#148), and its
 framework takes the screen (#147): it confines the pointer to it, says a screen saver is running, as
 programs of the time did to keep Alt+Tab away (Microsoft's Q161133, cited in core), and tells its own
-window its size with `SendMessageA(WM_SIZE)`, where the run stops, at cursor 376,609. Core's
+window its size with `SendMessageA(WM_SIZE)`, where the run stopped, at cursor 376,609. Core's
 `IDirectDraw2` is the object's `IDirectDraw4` face, whose `EnumDisplayModes` hands out DirectX 6's
 124-byte `DDSURFACEDESC2` where DirectX 5 hands a 108-byte `DDSURFACEDESC`; the plugin lists modes
 only through DirectDraw's first face, so nothing reaches that yet.
+
+Its window is told its size, and is painted once its framework invalidates every window after
+setting the mode (#147). The game's first movie clears the screen twice, its first two flips, and
+its message pump takes what waits: the window is the active application's, is active and has the
+keyboard (#196), which the pump waited for, and is painted; its window procedure acquires its
+keyboard and mouse again as it is told it is in front. The game opens `intro\lmi.avi`, and the run
+stops at #151's first wall, `AVIFIL32.dll!AVIFileOpenA`, at cursor 767,882 after two flips.
