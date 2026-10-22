@@ -7,17 +7,21 @@ One heading per version, newest first. What each part of core's version means is
 
 LEGO Chess's movies give up their frames (#151). `AVIStreamGetFrameOpen` makes a getter of a video
 stream's frames as a plain bottom-up DIB in the format the title asks for, 16 bits a pixel, which is
-555, or 24, at the movie's own size, the header asked for followed by its bits; a stream that is not
-video gets none, as Wine's `getframe.c`, read as documentation, refuses one, and the decompressor's
-own format, another depth or size, a colour table, or a codec other than Indeo 5 is a wall.
-`AVIStreamGetFrame` decodes the pictures in order up to the one asked for, a null picture keeping
-the last, and answers the DIB with it in: the same frame again is the DIB as it is, one before the
-last decoded starts again from the first, and one before the first or past the last is none.
-LEGO Chess's logo's frames 5 and 8 are the DIBs predicted from FFmpeg's planes of the same pictures.
-The conversion from YUV to RGB moved from DirectShow's movies into `iv50.rs` as `Picture::rgb`,
-unchanged, and both now call it. Rock Raiders imports both calls and reaches a stream only through
-`AVIStreamOpenFromFileA`, still a wall, so no released run moves; its movies' tests and its
-first-light route end as they did.
+555, for its movies, or 24 for its Advisors (#152), at the movie's own size, the header asked for
+followed by its bits; a stream that is not video gets none, as Wine's `getframe.c`, read as
+documentation, refuses one, and the decompressor's own format, another depth or size, a colour
+table, or a codec other than Indeo 5 is a wall, as is a picture too big for memory, which only a
+damaged rip's header could say. `AVIStreamGetFrame` decodes the pictures in order up to the one
+asked for, a null picture keeping the last, and answers the DIB with it in: the same frame again is
+the DIB as it is, one before the last decoded starts again from the first, and one before the
+stream's start or past its last is none. LEGO Chess's logo's frames 5 and 8 are the DIBs a reference
+decoder's pictures give, FFmpeg 9.0.1's, turned into DIBs the same way, as the test beside them
+records. Every open of a movie file shares one copy of its bytes, since the game opens each movie
+anew every time it plays it and never lets go of a file. The conversion from YUV to RGB, BT.601 in
+the integer form Microsoft documents and not FFmpeg's, moved from DirectShow's movies into `iv50.rs`
+as `Picture::rgb`, unchanged, and both now call it; NOTICE says it is this project's own. Rock
+Raiders imports both calls and reaches a stream only through `AVIStreamOpenFromFileA`, still a wall,
+so no released run moves; its movies' tests and its first-light route end as they did.
 
 LEGO Chess's movies open through AVIFile's C API (#151), which past `AVIFileInit` was a wall.
 `AVIFileOpenA` opens a movie to read it: one that is not there, or on the empty floppy drive, gives

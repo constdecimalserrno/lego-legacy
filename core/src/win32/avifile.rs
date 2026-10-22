@@ -47,15 +47,11 @@ const CAPS: u32 = 0x3;
 const FILE_INFO_BYTES: u32 = 108;
 const STREAM_INFO_BYTES: u32 = 140;
 
-/// A movie a title opened, held while it is open: its bytes, its structure,
-/// and the streams handed out of it.
-// ponytail: the whole file is held, and LEGO Chess never lets go of one
-// (its close releases the streams and not the file), so every movie it
-// plays stays in host memory for the run, 12 MB for its intro. Read through
-// `Tree::lies` when a session's movies add up to too much.
+/// A movie a title opened, held while it is open: its bytes, which every open
+/// of the same file shares, its structure, and the streams handed out of it.
 pub struct File {
     name: String,
-    bytes: Vec<u8>,
+    bytes: std::rc::Rc<[u8]>,
     avi: crate::avi::Avi,
     /// Each stream's object, once `AVIFileGetStream` has handed it out: the
     /// same one every time, as AVIFile hands out the one stream.
@@ -184,9 +180,20 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if ctx.refuse_on_empty_floppy(&name)? {
         return Ok(AVIERR_FILEOPEN);
     }
-    let Some(bytes) = ctx.open_guest_file(&name) else {
-        ctx.log.line(&format!("movie {name} missing"));
-        return Ok(AVIERR_FILEOPEN);
+    // ponytail: one copy of each movie file is held for the run, shared by
+    // every open of it, as LEGO Chess never lets go of a file (its close
+    // releases the streams and not the file): its 22 movies come to 172 MB in
+    // a run that plays them all. Let a copy go once no open file holds it,
+    // when `AVIFileRelease` is written.
+    let path = ctx.absolute(&name).to_uppercase();
+    let bytes: std::rc::Rc<[u8]> = if let Some(bytes) = ctx.state.movie_bytes.get(&path) {
+        bytes.clone()
+    } else {
+        let Some(bytes) = ctx.open_guest_file(&name) else {
+            ctx.log.line(&format!("movie {name} missing"));
+            return Ok(AVIERR_FILEOPEN);
+        };
+        bytes.into()
     };
     // One that is there and is not a movie is a damaged rip, which stops the
     // run at its name as a damaged archive member does (#169, #190).
@@ -211,6 +218,11 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     avi.streams.truncate(counted);
     name_streams(&mut avi, &name);
+    // Only a movie that opens is kept.
+    ctx.state
+        .movie_bytes
+        .entry(path)
+        .or_insert_with(|| bytes.clone());
     let object = State::make_com(ctx, &AVI_FILE, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
@@ -575,8 +587,9 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     };
     let bits = u16::from_le_bytes([header[14], header[15]]);
     // A plain DIB the movie's own size, of one plane, bottom-up, at 16 or 24
-    // bits and with no colour table, is what is written: what LEGO Chess's
-    // movies ask for.
+    // bits and with no colour table, is what is written: what LEGO Chess asks
+    // for, 16 bits for its movies (0x0044B2F2) and 24 for its Advisors (#152,
+    // set at 0x004010FD before their open at 0x00401131).
     let plain = word(0) == DIB_HEADER_BYTES
         && word(12) & 0xffff == 1
         && word(16) == BI_RGB
@@ -598,11 +611,28 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let image = (width * u32::from(bits) / 8).next_multiple_of(4) * height;
+    // A picture too big for memory to hold, which only a damaged rip's header
+    // could say, stops the run at its size, as a damaged archive member does.
+    let too_big = || Stop::NotWritten {
+        what: format!(
+            "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} is a {width}x{height} picture, more than \
+             memory holds as a {bits}-bit DIB"
+        ),
+        caller: 0,
+    };
+    let image = width
+        .checked_mul(u32::from(bits) / 8)
+        .and_then(|row| row.checked_next_multiple_of(4))
+        .and_then(|stride| stride.checked_mul(height))
+        .filter(|image| image.checked_add(DIB_HEADER_BYTES).is_some())
+        .ok_or_else(too_big)?;
     if word(20) == 0 {
         header[20..24].copy_from_slice(&image.to_le_bytes());
     }
     let dib = ctx.state.heap.alloc(DIB_HEADER_BYTES + image);
+    if dib == 0 {
+        return Err(too_big());
+    }
     ctx.mem.write(dib, &header).map_err(Stop::Fault)?;
     let object = State::make_com(ctx, &GET_FRAME, ComState::None).map_err(Stop::Fault)?;
     ctx.state.frame_getters.insert(

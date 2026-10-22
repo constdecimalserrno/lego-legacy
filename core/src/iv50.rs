@@ -68,7 +68,10 @@ impl Picture {
     }
 }
 
-/// ITU-R BT.601 at studio range, in fixed point.
+/// ITU-R BT.601 at studio range, in the integer form Microsoft documents, in
+/// "Converting 8-bit YUV to RGB888" on its page "Recommended 8-Bit YUV
+/// Formats for Video Rendering". It is not derived from FFmpeg, whose own
+/// converter gives other values (NOTICE).
 fn bt601(y: i32, u: i32, v: i32) -> (u8, u8, u8) {
     let c = (y - 16) * 298;
     let (d, e) = (u - 128, v - 128);

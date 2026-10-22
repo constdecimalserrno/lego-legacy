@@ -9,7 +9,10 @@ Indeo Video 5 decoder
 core/src/iv50.rs and everything under core/src/iv50/ are derived from FFmpeg's
 Indeo Video Interactive 5 decoder (libavcodec/indeo5.c, indeo5data.h, ivi.c,
 ivi.h, ivi_dsp.c, ivi_dsp.h): its codebooks, run-value maps, scan orders and
-dequantisation tables, and the structure of its inverse transforms.
+dequantisation tables, and the structure of its inverse transforms. Not so
+`Picture::rgb` and `bt601` in core/src/iv50.rs: they turn a decoded picture
+into RGB in the integer form of BT.601 that Microsoft documents, and are this
+project's own, as the rest of it is.
 
   Copyright (c) 2009-2011 Maxim Poliakovski and the FFmpeg developers
 

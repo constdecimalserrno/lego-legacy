@@ -2622,7 +2622,10 @@ fn a_movie_not_there_cannot_be_opened_and_a_damaged_one_is_a_wall() {
         "{wall:?}"
     );
     // A header that counts one stream of two: one stream.
-    m.tree.declare(MOVIE, movie(1));
+    m.tree.declare("C:\\STUB\\ONE.AVI", movie(1));
+    m.arena
+        .write(DATA, b"C:\\STUB\\ONE.AVI\0")
+        .expect("in the arena");
     assert_eq!(
         call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
         Ok(0)
@@ -2715,13 +2718,79 @@ fn a_frame_getter_is_for_a_video_stream_in_a_plain_dib() {
     );
 }
 
+/// A movie opened again is the same bytes, held once however often it is
+/// opened (#151): LEGO Chess opens each of its movies anew every time it plays
+/// one, and never lets go of a file. A picture too big for memory, which only
+/// a damaged header could say, stops at a wall that names it.
+#[test]
+fn a_movie_opened_again_is_held_once_and_a_huge_picture_is_a_wall() {
+    const WANTED: u32 = DATA + 0x200;
+    let mut m = machine();
+    // The picture's BITMAPINFOHEADER says 4 wide and 0x0FFF_FFFF high.
+    let mut huge = movie(2);
+    let header = huge
+        .windows(12)
+        .position(|w| w == words(&[40, 4, 2]))
+        .expect("in the movie");
+    huge[header + 8..header + 12].copy_from_slice(&0x0fff_ffff_u32.to_le_bytes());
+    m.tree.declare(MOVIE, huge);
+    m.arena
+        .write(DATA, format!("{MOVIE}\0").as_bytes())
+        .expect("in the arena");
+    for _ in 0..2 {
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+    }
+    assert_eq!(m.state.movie_bytes.len(), 1);
+    let bytes = m.state.movie_bytes.values().next().expect("one copy");
+    assert_eq!(
+        std::rc::Rc::strong_count(bytes),
+        3,
+        "the map's and the two files'"
+    );
+
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+        Ok(0)
+    );
+    let video = m.arena.read_u32(OUT).expect("in the arena");
+    m.arena
+        .write(WANTED, &dib_header(4, 0x0fff_ffff, 16, 0))
+        .expect("in the arena");
+    let wall = call(
+        &mut m,
+        "AVIFIL32",
+        "AVIStreamGetFrameOpen",
+        &[video, WANTED],
+    );
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("more than memory holds")),
+        "{wall:?}"
+    );
+}
+
 /// LEGO Chess's logo movie, off the disc, frame by frame as the game asks for
 /// it (#151): each one a bottom-up 555 DIB behind the header it asked for,
 /// decoded in order across its null pictures (frames 1 and 3), a frame
 /// before the last one decoded starting again from the first, and the same
-/// frame again the DIB as it is. Frames 5 and 8 are the bits predicted from
-/// FFmpeg 9.0.1's planes of the same pictures through BT.601 and a 555 pixel
-/// that drops each channel's low bits (`work/150-chess-first-light/research.md`).
+/// frame again the DIB as it is.
+///
+/// The pinned bits are a reference decoder's pictures turned into the DIB the
+/// way `Picture::rgb` and `dib_bits` turn one: FFmpeg 9.0.1, run once by hand
+/// on a copy of the disc's `INTRO\LMI.AVI`,
+///
+///   ffmpeg -i LMI.AVI -map 0:v:0 -f rawvideo -pix_fmt yuv410p
+///     -fps_mode passthrough -
+///
+/// writes the 278 pictures it shows of the 280 (frames 1 and 3 are null), so
+/// frame 5 is the fourth it writes and frame 8 the seventh. Each pixel goes
+/// through BT.601 at studio range in Microsoft's integer form, its chroma from
+/// its 4x4 block, and is narrowed to 555 by dropping each channel's low bits;
+/// the rows go bottom-up, padded to a word; and the digest is the sha256 of
+/// the DIB's 153,600 bytes of bits.
 #[test]
 fn the_logo_s_frames_are_bottom_up_555_dibs_decoded_in_order() {
     const WANTED: u32 = DATA + 0x200;

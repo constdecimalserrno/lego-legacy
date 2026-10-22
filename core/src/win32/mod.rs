@@ -317,6 +317,9 @@ pub struct State {
     /// The movies a title has opened through AVIFile, by the file object it
     /// holds (#151).
     pub avi_files: BTreeMap<u32, avifile::File>,
+    /// The bytes of each movie file a title has opened through AVIFile, by its
+    /// path as the machine reads it: one copy, however often it is opened.
+    pub movie_bytes: BTreeMap<String, std::rc::Rc<[u8]>>,
     /// The frame getters a title has opened on their streams, by the getter
     /// it holds.
     pub frame_getters: BTreeMap<u32, avifile::Getter>,
@@ -449,6 +452,7 @@ impl State {
             yielded: false,
             players: BTreeMap::new(),
             avi_files: BTreeMap::new(),
+            movie_bytes: BTreeMap::new(),
             frame_getters: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             mixer: crate::sound::Mixer::default(),
