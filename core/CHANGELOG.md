@@ -126,25 +126,38 @@ which stops the run before LEGO Island has saved. It also answers
 `applicationSupportsSecureRestorableState:` yes, which spares the terminal AppKit's warning about
 an application delegate without it. No route moves; a headless run has no window.
 
-A Windows logoff, shutdown or restart reaches the title as a close too (#184), where the window
+A Windows sign-out, shutdown or restart reaches the title as a close too (#184), where the window
 handed `WM_QUERYENDSESSION` to `DefWindowProcW`, whose TRUE let the session end the process with the
-title untold. The window counts it as its close button does and holds the session while the title
-leaves: Windows wants the answer at once and the title runs on the window's own thread, so it is
-held as Microsoft documents for a window that learns only then that it must block ("Application
-Shutdown Changes in Windows Vista", usage model 2): `ShutdownBlockReasonCreate` with "The game is
-closing.", then FALSE. Windows shows that on its shutdown screen while the title leaves; whether the
-screen then goes on by itself or the person asks again, Microsoft does not say. A session end asked
-again meanwhile is held again and is not a second close, so it never stops the title before it is
-done. One Windows forces, "Log out anyway" on that screen (`ENDSESSION_CRITICAL`), cannot be held:
-it is answered TRUE, and Windows ends the process once `WM_ENDSESSION` is answered, the title untold
-and the run with no `end` line, as a forced logoff (`EWX_FORCE`) ends it without asking at all. The
-reason is withdrawn as the window goes. `WM_ENDSESSION` is still `DefWindowProcW`'s, which answers
-zero as documented. A run that is loading and not pumping answers only when it next pumps, and
-Windows lists it meanwhile without the reason. X is unchanged and needs nothing yet: the session's
-`SIGTERM` from systemd-logind and a desktop's `WM_DELETE_WINDOW` are already closes (#140), and only
-a client registered through libSM is asked by a session manager; a display that goes first still
-ends the process through Xlib's I/O error handler, untold. No route moves; a headless run has no
-window.
+title untold. The window holds the session while the title leaves: Windows wants the answer at once
+and the title runs on the window's own thread, so it is held as Microsoft documents for a window
+that learns only then that it must block ("Application Shutdown Changes in Windows Vista", usage
+model 2): `ShutdownBlockReasonCreate` with "The game is closing.", then FALSE. Windows shows that on
+its screen while the title leaves; whether the screen then goes on by itself or the person asks
+again, Microsoft does not say. The process asks to be asked first, at the top of the "Application
+reserved first shutdown range" (`SetProcessShutdownParameters(0x3FF, 0)`; every process starts at
+0x280, and Windows asks from high to low), so its FALSE ends the round before Windows Terminal, the
+default console on Windows 11, is asked: Terminal quits at any `WM_ENDSESSION`, and the title's
+console closing would be a second close that stops it before it is done.
+
+It is at most one close, unlike a quit on macOS, which counts each (#178): a sign-out after the
+close button, Alt-F4 or Ctrl-C, or one asked again while the title leaves, adds none. Alt-F4 now
+counts in `CLOSE_ASKED` with the rest, where the window kept its own count. The Restart Manager's
+session end (`ENDSESSION_CLOSEAPP`) is answered TRUE and counts no close, as `DefWindowProcW`
+answered it: its guidelines ask for TRUE and for shutting down only at `WM_ENDSESSION`, and the
+`WM_CLOSE` it sends a window still there is the close. A forced one, Windows' "Sign out anyway",
+"Shut down anyway" or "Restart anyway", or `ENDSESSION_CRITICAL`, cannot be refused: Windows ends
+the process, the title untold and the run with no `end` line, as a forced sign-out (`EWX_FORCE`)
+ends it without asking at all. So does a run that has answered none of its window's messages for
+five seconds when the session ends, such as one loading without pumping: Windows ends it as not
+responding, untold, as before. The reason is withdrawn as the window goes. `WM_ENDSESSION` is still
+`DefWindowProcW`'s, which answers zero as documented.
+
+X is unchanged. systemd-logind's `KillUserProcesses=` is set when systemd is built: upstream's
+default is yes, but Debian, Ubuntu, Fedora and Arch build it no. There a logout sends no `SIGTERM`,
+and the display going away ends the process through Xlib's I/O error handler, the title untold and
+the run with no `end` line. Where it is yes, the session's `SIGTERM` is a close (#140), and so is a
+desktop's `WM_DELETE_WINDOW`. A session manager asks only a client registered through libSM. No
+route moves; a headless run has no window.
 
 The macOS backend drains an autorelease pool every pump, so a long run no longer grows the
 process's memory (#180). AppKit opens a pool for each turn of its own event loop, and this backend

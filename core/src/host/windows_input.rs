@@ -9,6 +9,7 @@
 
 use super::pointer::content_scale;
 use super::Input;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The key messages: pressed and let go, and the same with Alt held or for
 /// F10, which Windows sends as system keys.
@@ -81,18 +82,33 @@ pub fn closes(message: u32, wparam: usize, lparam: u32) -> bool {
         && lparam & (1 << 30) == 0
 }
 
-/// A session end Windows forces, by its `lParam` (winuser.h).
+/// A session end Windows forces, and the Restart Manager's, by the bits of
+/// their `lParam` (winuser.h).
 const ENDSESSION_CRITICAL: usize = 0x4000_0000;
+const ENDSESSION_CLOSEAPP: usize = 0x0000_0001;
 
-/// Whether a `WM_QUERYENDSESSION` may be held while the title leaves (#184):
-/// any but one with [`ENDSESSION_CRITICAL`] in its `lParam`,
-/// which Windows forces and lets nothing hold (Microsoft, `WM_QUERYENDSESSION`
-/// and "Application Shutdown Changes in Windows Vista"). A logoff
-/// (`ENDSESSION_LOGOFF`), a shutdown or restart (0) and the Restart Manager's
-/// close (`ENDSESSION_CLOSEAPP`) are each held.
+/// Whether a `WM_QUERYENDSESSION` is held while the title leaves (#184): a
+/// logoff (`ENDSESSION_LOGOFF`), or a shutdown or restart (0). Not one
+/// Windows forces ([`ENDSESSION_CRITICAL`]), which nothing may refuse
+/// ("Application Shutdown Changes in Windows Vista"), nor the Restart
+/// Manager's ([`ENDSESSION_CLOSEAPP`]): its guidelines ask for TRUE, and for
+/// shutting down only at `WM_ENDSESSION`, and it sends a `WM_CLOSE` of its own
+/// to a window still there, which is the close ("Guidelines for
+/// Applications"). Each of those is answered TRUE, as `DefWindowProcW` did,
+/// and counts no close.
 #[must_use]
 pub fn holds_session(lparam: isize) -> bool {
-    lparam as usize & ENDSESSION_CRITICAL == 0
+    lparam as usize & (ENDSESSION_CRITICAL | ENDSESSION_CLOSEAPP) == 0
+}
+
+/// Count a session end the window holds (#184) among the closes asked so far
+/// ([`super::CLOSE_ASKED`]): at least one, and never one more. The first
+/// close tells the title, and a second would stop it before it is done
+/// (#140), so a sign-out after Alt-F4, the close button or the console, or
+/// one Windows asks again while the title leaves, adds nothing. macOS counts
+/// each of its quits instead (#178).
+pub fn session_end(asked: &AtomicU32) {
+    asked.fetch_max(1, Ordering::Relaxed);
 }
 
 /// Where the picture goes in a window's client area, as `(x, y, width,
@@ -189,8 +205,9 @@ pub fn cursor_bitmaps(shape: &super::Cursor) -> Option<(Vec<u8>, Vec<u8>)> {
 mod tests {
     use super::{
         closes, cursor_bitmaps, direct_input_key, guest_point, holds_session, key, picture,
-        raw_moved, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        raw_moved, session_end, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A pointer shape reaches Windows as its colours, blue first, and a mask
     /// of the pixels it does not draw, each row padded to a word (#139).
@@ -377,18 +394,41 @@ mod tests {
         assert_eq!(last, None);
     }
 
-    /// A session's end is held while the title leaves, a logoff, a shutdown
-    /// or restart and the Restart Manager's close alike, but not one Windows
-    /// forces, which it lets nothing hold (#184).
+    /// A session's end is held while the title leaves, a logoff and a
+    /// shutdown or restart alike, but not one Windows forces, which nothing
+    /// may refuse, nor the Restart Manager's, whose own `WM_CLOSE` is the
+    /// close (#184).
     #[test]
-    fn a_session_end_is_held_unless_it_is_forced() {
-        // `ENDSESSION_LOGOFF`, a shutdown or restart, `ENDSESSION_CLOSEAPP`.
-        for lparam in [0x8000_0000_u32 as isize, 0, 1] {
+    fn a_session_end_is_held_unless_it_is_forced_or_the_restart_manager_s() {
+        // `ENDSESSION_LOGOFF`, and a shutdown or restart.
+        for lparam in [0x8000_0000_u32 as isize, 0] {
             assert!(holds_session(lparam), "{lparam:#x}");
         }
-        // `ENDSESSION_CRITICAL`, alone and with `ENDSESSION_LOGOFF`.
-        for lparam in [0x4000_0000, 0xc000_0000_u32 as isize] {
+        // `ENDSESSION_CRITICAL`, alone and with `ENDSESSION_LOGOFF`, and
+        // `ENDSESSION_CLOSEAPP`.
+        for lparam in [0x4000_0000, 0xc000_0000_u32 as isize, 1] {
             assert!(!holds_session(lparam), "{lparam:#x}");
         }
+    }
+
+    /// A session end held is at most one close: the first, if nothing has
+    /// asked yet, and none more after Alt-F4, the close button or the
+    /// console, or when Windows asks again while the title leaves, since a
+    /// second close would stop the title before it is done (#140, #184).
+    #[test]
+    fn a_session_end_is_at_most_one_close() {
+        let asked = AtomicU32::new(0);
+        session_end(&asked);
+        session_end(&asked);
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "asked twice, one close");
+        // Alt-F4 counts as the close button does, then a sign-out.
+        let asked = AtomicU32::new(0);
+        asked.fetch_add(1, Ordering::Relaxed);
+        session_end(&asked);
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "Alt-F4, then a sign-out");
+        // A second close already asked stays the second.
+        asked.fetch_add(1, Ordering::Relaxed);
+        session_end(&asked);
+        assert_eq!(asked.load(Ordering::Relaxed), 2);
     }
 }

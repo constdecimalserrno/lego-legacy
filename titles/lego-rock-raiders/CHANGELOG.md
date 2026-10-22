@@ -63,9 +63,10 @@ On macOS, quitting from the Dock, logging out or restarting closes it as the win
 (#178, core 1.2.0), where the process ended at once; a logout or restart is interrupted, and asked
 again once the title has left. No route moved.
 
-On Windows, logging off, shutting down or restarting closes it as the window's button does (#184,
-core 1.2.0), where the process ended at once; Windows holds the logoff on its screen, saying "The
-game is closing.", while the title leaves. "Log out anyway" there ends it at once. No route moved.
+On Windows, signing out, shutting down or restarting closes it as the window's button does (#184,
+core 1.2.0), where the process ended at once; Windows holds the sign-out, shutdown or restart on
+its screen, saying "The game is closing.", while the title leaves, and whether it then goes on by
+itself, Microsoft does not say. "Sign out anyway" there ends it at once. No route moved.
 
 A long run on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands back
 to be let go later is now let go at every pump, twice a flip. No route moved.

@@ -208,6 +208,7 @@ fn wide(s: &str) -> Vec<u16> {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn SetProcessShutdownParameters(level: u32, flags: u32) -> i32;
 }
 
 /// The user32 entry points the window uses, with the signatures winuser.h
@@ -370,22 +371,24 @@ unsafe extern "system" fn window_proc(
         super::ask_to_close();
         return 0;
     }
-    // A logoff, shutdown or restart is a close too, as on macOS (#178, #184),
-    // and is held while the title leaves. Windows wants the answer at once,
-    // and the title runs on this thread, so the hold is Microsoft's own for
-    // one that knows only now that it must block: a reason, then FALSE
-    // ("Application Shutdown Changes in Windows Vista", usage model 2). The
-    // person sees the reason on Windows' screen while the title leaves. A
-    // session end asked again meanwhile is held again, never a second close
-    // that would stop the title before it is done. One Windows forces ("Log
-    // out anyway", `ENDSESSION_CRITICAL`) cannot be held: it is answered TRUE,
-    // and Windows ends the process once `DefWindowProcW` has answered its
-    // `WM_ENDSESSION` zero, the title untold, as any forced logoff ends it.
+    // A sign-out, shutdown or restart is a close too (#184), as a quit is on
+    // macOS (#178), and is held while the title leaves. Windows wants the
+    // answer at once, and the title runs on this thread, so the hold is
+    // Microsoft's own for one that knows only now that it must block: a
+    // reason, then FALSE ("Application Shutdown Changes in Windows Vista",
+    // usage model 2). The person sees the reason on Windows' screen while the
+    // title leaves. It is at most one close ([`input::session_end`]), where
+    // the Mac counts each quit. One Windows forces, or the Restart Manager's,
+    // is answered TRUE and counts none ([`input::holds_session`]). A forced
+    // one cannot be refused: Windows ends the process once `DefWindowProcW`
+    // has answered its `WM_ENDSESSION` zero, the title untold, and this
+    // backend cannot use the time Windows gives that answer, since the title
+    // runs on this thread.
     if message == WM_QUERYENDSESSION {
         if !input::holds_session(lparam) {
             return 1;
         }
-        CLOSE_ASKED.fetch_max(1, Ordering::Relaxed);
+        input::session_end(&CLOSE_ASKED);
         // Safety: user32's `ShutdownBlockReasonCreate`, stored before the
         // window was made, called on the thread that made it, with a
         // NUL-terminated string live for the call.
@@ -432,9 +435,6 @@ pub struct WinWindow {
     held: Vec<u32>,
     /// Where the mix is heard, when `--audio` asked for it.
     audio: Option<super::windows_audio::WinAudio>,
-    /// How many times the person pressed Alt-F4. The close button and the
-    /// console count theirs in [`CLOSE_ASKED`] (#140).
-    closes: u32,
     /// Whether the person's own pointer is over this window's picture. Asked
     /// of Windows every pump while the pointer is the person's, and never
     /// while it is taken: a taken pointer is frozen, so it is nowhere and
@@ -492,6 +492,19 @@ impl WinWindow {
         let gdi = Gdi32::open()?;
         DEF_WINDOW_PROC.store(user.def_window_proc as usize, Ordering::Relaxed);
         BLOCK_REASON.store(user.block_reason as usize, Ordering::Relaxed);
+        // Asked first at a sign-out, shutdown or restart, so the hold comes
+        // before any other application can end or block it (#184): "The
+        // system shuts down processes from high dwLevel values to low", 0x3FF
+        // is the top of the "Application reserved first shutdown range", and
+        // "All processes start at shutdown level 0x280"
+        // (`SetProcessShutdownParameters`). Windows Terminal is one of those:
+        // asked before the title, it quits, and the title's console closing
+        // is a second close that stops it before it is done. The title's
+        // FALSE ends the round: "The system stops sending WM_QUERYENDSESSION
+        // messages as soon as one application returns zero". A failure leaves
+        // the default order, which is no reason not to run.
+        // Safety: kernel32's own, with the types its header gives.
+        unsafe { SetProcessShutdownParameters(0x3ff, 0) };
         let class_name = wide("lego-legacy");
         let title = wide(name);
         let (w, h) = (
@@ -558,7 +571,6 @@ impl WinWindow {
             pending: Vec::new(),
             held: Vec::new(),
             audio: None,
-            closes: 0,
             pointer_over_us: false,
             pointer_taken: false,
             frozen: Rect::default(),
@@ -598,12 +610,14 @@ impl WinWindow {
     }
 
     /// How many times the person has asked the window, or the console, to
-    /// close. Read from the console's own thread as it is asked, not at the
-    /// next pump: a run that is loading does not pump, and a closing console
-    /// waits only five seconds for the run to end.
+    /// close, all in [`CLOSE_ASKED`]: the close button and Alt-F4, the
+    /// console, and a sign-out, shutdown or restart, which is at most one
+    /// close (#184). Read from the console's own thread as it is asked, not
+    /// at the next pump: a run that is loading does not pump, and a closing
+    /// console waits only five seconds for the run to end.
     #[must_use]
     pub fn closes(&self) -> u32 {
-        self.closes + CLOSE_ASKED.load(Ordering::Relaxed)
+        CLOSE_ASKED.load(Ordering::Relaxed)
     }
 
     /// Let the mix be heard through Windows' default output from now on, or
@@ -926,7 +940,7 @@ impl WinWindow {
             // and is the host's (#141).
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 if input::closes(msg.message, msg.wparam, lparam) {
-                    self.closes += 1;
+                    super::ask_to_close();
                 } else if let Some(Input::Key { code, down }) = input::key(msg.message, lparam) {
                     if let Some(let_go) = self.capture.key(code, down) {
                         self.pending.extend(let_go);

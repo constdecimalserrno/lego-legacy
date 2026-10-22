@@ -47,9 +47,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Windows (#107, #110). Every host's [`Host::closes`] counts them, so each
 /// is answered as the window's close button is: the first is the title's to
 /// answer, and a second ends the run there and then, with its `end` line and
-/// digest (#140). macOS's request to quit the application (the Dock's Quit, a
-/// logout, a restart, or any other, Activity Monitor's included) is counted
-/// beside these, in the Mac backend's own count (#178).
+/// digest (#140). Alt-F4 is counted here too, and so is a Windows sign-out,
+/// shutdown or restart, but only ever as the first close, never one more
+/// ([`windows_input::session_end`], #184). macOS's request to quit the
+/// application (the Dock's Quit, a logout, a restart, or any other, Activity
+/// Monitor's included) is counted beside these, each one, in the Mac
+/// backend's own count (#178).
 pub(crate) static CLOSE_ASKED: AtomicU32 = AtomicU32::new(0);
 
 /// Ask the run to end once more, and say how many times it has been asked.
@@ -118,9 +121,10 @@ pub enum Input {
     },
     /// The person asked the window to close: its close button, Command-Q or
     /// -W, macOS's request to quit the application (the Dock's Quit, a
-    /// logout, a restart, or any other, #178), Control-Q, Alt-F4, or the run's
-    /// terminal or console. The title is told as Windows tells it, and the run ends when
-    /// the title leaves (#140).
+    /// logout, a restart, or any other, #178), a Windows sign-out, shutdown or
+    /// restart (#184), Control-Q, Alt-F4, or the run's terminal or console.
+    /// The title is told as Windows tells it, and the run ends when the title
+    /// leaves (#140).
     Close,
 }
 
@@ -304,9 +308,10 @@ pub trait Host {
 
     /// How many times the person has asked to end the run from outside it,
     /// by closing the window, by quitting the application on macOS (#178),
-    /// or by what [`listen`] hears. A host with no window has only the
-    /// last. The first close is delivered to the title
-    /// at the next flip, as [`Input::Close`]; a second stops the run (#140).
+    /// by signing out, shutting down or restarting Windows (#184, at most the
+    /// first close), or by what [`listen`] hears. A host with no window has
+    /// only the last. The first close is delivered to the title at the next
+    /// flip, as [`Input::Close`]; a second stops the run (#140).
     /// A window minimized, or one of an application hidden, is not closed
     /// ([`closed`], #173).
     fn closes(&self) -> u32 {

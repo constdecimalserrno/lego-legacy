@@ -64,10 +64,12 @@ On macOS, quitting from the Dock closes it as the window's button does, so it sa
 be asked again once it has left; it saves then unless something else closes it first, such as its
 terminal hanging up as the logout quits it. No route moved.
 
-On Windows, logging off, shutting down or restarting closes it as the window's button does, so it
-saves (#184, core 1.2.0), where the process ended at once; Windows holds the logoff on its screen,
-saying "The game is closing.", while it leaves. It saves unless something ends it first: "Log out
-anyway" on that screen, or its console being closed. No route moved.
+On Windows, signing out, shutting down or restarting closes it as the window's button does, so it
+saves (#184, core 1.2.0), where the process ended at once; Windows holds the sign-out, shutdown or
+restart on its screen, saying "The game is closing.", while it leaves, and whether it then goes on
+by itself, Microsoft does not say. It saves unless something ends it first: "Sign out anyway" (or
+its shutdown and restart twins) there, or a long load that has answered no window message for five
+seconds. No route moved.
 
 A long run on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands back
 to be let go later is now let go at every pump, twice a flip. No route moved.
