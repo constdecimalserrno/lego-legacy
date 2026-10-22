@@ -124,23 +124,23 @@ impl Runtime {
         unsafe { std::mem::transmute_copy(&self.msg) }
     }
 
-    /// An autorelease pool, open until [`Runtime::drain`] (#180). AppKit
-    /// opens one for each turn of its own event loop, and this backend runs
-    /// its own, so it opens its own: every object AppKit hands back
+    /// An autorelease pool, drained when it is dropped, at the end of the
+    /// scope that opened it, a panic's included (#180). AppKit opens one for
+    /// each turn of its own event loop, and this backend runs its own, so
+    /// every way into it opens its own: every object AppKit hands back
     /// autoreleased is let go when the pool drains, and without one never is
     /// (Apple, `NSAutoreleasePool`).
-    fn pool(&self) -> Id {
-        // Safety: NSAutoreleasePool's own `alloc` and `init`.
+    fn pool(&self) -> Pool {
+        // Safety: NSAutoreleasePool's own `alloc` and `init`, and `drain`'s
+        // call shape.
         unsafe {
             let pool: Id = self.send::<MsgId>()(self.class("NSAutoreleasePool"), self.sel("alloc"));
-            self.send::<MsgId>()(pool, self.sel("init"))
+            Pool {
+                pool: self.send::<MsgId>()(pool, self.sel("init")),
+                drain: self.send::<MsgVoid>(),
+                sel: self.sel("drain"),
+            }
         }
-    }
-
-    /// Drain a pool [`Runtime::pool`] opened, in the same function.
-    fn drain(&self, pool: Id) {
-        // Safety: `drain` on the pool, once.
-        unsafe { self.send::<MsgVoid>()(pool, self.sel("drain")) }
     }
 
     fn nil(&self) -> Id {
@@ -154,6 +154,20 @@ impl Runtime {
     unsafe fn graphics<T: Copy>(&self, name: &str) -> Result<T, HostError> {
         // Safety: as the caller promises.
         unsafe { self.core_graphics.function(name) }
+    }
+}
+
+/// An open autorelease pool ([`Runtime::pool`]), drained once, when dropped.
+struct Pool {
+    pool: Id,
+    drain: MsgVoid,
+    sel: Sel,
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Safety: `drain` on the pool `Runtime::pool` opened, once.
+        unsafe { (self.drain)(self.pool, self.sel) }
     }
 }
 
@@ -593,6 +607,9 @@ impl MacWindow {
         pointer_speed: (f64, f64),
     ) -> Result<Self, HostError> {
         let rt = Runtime::open()?;
+        // What opening autoreleases, the strings and whatever AppKit makes,
+        // is let go once it is open; everything kept is owned (#180).
+        let _pool = rt.pool();
 
         // Safety: each call below is made through the signature its own
         // method has, with arguments of the types AppKit declares.
@@ -808,9 +825,6 @@ impl MacWindow {
             return;
         };
         let caption = CString::new(caption).unwrap_or_default();
-        // A caption can change outside a pump, when the title shows its
-        // pointer or the run ends, so it has a pool of its own (#180).
-        let pool = self.rt.pool();
         // Safety: an NSString made from a NUL-terminated string, and
         // `setTitle:` on our own window, which copies it.
         unsafe {
@@ -821,7 +835,6 @@ impl MacWindow {
             );
             self.rt.send::<MsgVoidId>()(self.window, self.rt.sel("setTitle:"), caption);
         }
-        self.rt.drain(pool);
     }
 
     /// The title's pointer is the person's own and it is here on the guest's
@@ -934,20 +947,20 @@ impl MacWindow {
     pub fn pump(&mut self) {
         // What AppKit hands back autoreleased here, each event, the run loop
         // mode, the date, is let go as the pump ends (#180). Nothing kept
-        // across pumps is only autoreleased: the window, its view and layer
-        // and the application are owned (#175).
-        let pool = self.rt.pool();
+        // across pumps is only autoreleased: the window is owned (#175), its
+        // view and layer are the window's, and the application is AppKit's.
+        let _pool = self.rt.pool();
         let front;
         // Safety: the standard event loop, called with AppKit's own types.
         unsafe {
+            let distant_past: Id =
+                self.rt.send::<MsgId>()(self.rt.class("NSDate"), self.rt.sel("distantPast"));
+            let mode: Id = self.rt.send::<MsgIdCharPtr>()(
+                self.rt.class("NSString"),
+                self.rt.sel("stringWithUTF8String:"),
+                c"kCFRunLoopDefaultMode".as_ptr(),
+            );
             loop {
-                let distant_past: Id =
-                    self.rt.send::<MsgId>()(self.rt.class("NSDate"), self.rt.sel("distantPast"));
-                let mode: Id = self.rt.send::<MsgIdCharPtr>()(
-                    self.rt.class("NSString"),
-                    self.rt.sel("stringWithUTF8String:"),
-                    c"kCFRunLoopDefaultMode".as_ptr(),
-                );
                 let event: Id = self.rt.send::<MsgIdEvent>()(
                     self.app,
                     self.rt
@@ -1160,12 +1173,12 @@ impl MacWindow {
             self.keep_on_the_picture(tell);
         }
         self.draw_pointer_where_it_belongs();
-        self.rt.drain(pool);
     }
 }
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
+        let _pool = self.rt.pool();
         // A run that ended with the mouse captured would leave a person
         // without a pointer, or with the title's shape.
         self.free_mouse();
@@ -1193,6 +1206,8 @@ impl Host for MacWindow {
         let Some(bytes) = frame.pixels.get(..len) else {
             return;
         };
+        // Handing the layer its contents is AppKit's work too (#180).
+        let _pool = self.rt.pool();
         self.frame_size = (frame.width, frame.height);
         let copy: Box<Vec<u8>> = Box::new(bytes.to_vec());
         let pixels = copy.as_ptr();
@@ -1245,16 +1260,21 @@ impl Host for MacWindow {
     }
 
     fn show_pointer(&mut self, show: bool) {
+        // The title's calls reach AppKit between pumps: the caption, the
+        // cursor (#180).
+        let _pool = self.rt.pool();
         self.capture.pointer_shown(show);
         self.draw_pointer_where_it_belongs();
     }
 
     fn free_mouse(&mut self) {
+        let _pool = self.rt.pool();
         self.capture.end();
         self.draw_pointer_where_it_belongs();
     }
 
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        let _pool = self.rt.pool();
         // Safety: the cursor is one this window made, released once.
         unsafe {
             if !self.shape.is_null() {
@@ -1532,7 +1552,7 @@ mod tests {
             rt.send::<MsgId>()(object, rt.sel("retain"));
             let pool = rt.pool();
             rt.send::<MsgId>()(object, rt.sel("autorelease"));
-            rt.drain(pool);
+            drop(pool);
             let held: u64 = rt.send::<MsgU64>()(object, rt.sel("retainCount"));
             assert_eq!(held, 1, "the autorelease was let go");
             rt.send::<MsgVoid>()(object, rt.sel("release"));

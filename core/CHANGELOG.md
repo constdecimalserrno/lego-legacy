@@ -122,10 +122,11 @@ loop mode and the date asked for every pump, and each new caption (Apple, `NSAut
 "If a pool is not available, autoreleased objects do not get released and you leak memory"). A
 probe making the same calls with no window, a million times, grew by 109 MB with no pool and stayed
 flat at 6 MB with one drained each time; with a window each event adds to that. The pool is an
-`NSAutoreleasePool`, opened as `pump` starts and drained as it ends, and one around a caption,
-which can change outside a pump. What the backend keeps across pumps is owned, never only
-autoreleased: the window (#175), its view and layer, the application, the delegate (#178) and the
-title's pointer shape. No route moves; a headless run has no window.
+`NSAutoreleasePool`, opened at every way into the backend that reaches AppKit, `open`, `pump`,
+`present`, the title's pointer calls and `Drop`, and drained as each ends, a panic's unwinding
+included. What the backend keeps across pumps is never only autoreleased: the window (#175), the
+delegate (#178) and the title's pointer shape are owned, the view and layer are the window's, and
+the application is AppKit's. No route moves; a headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
