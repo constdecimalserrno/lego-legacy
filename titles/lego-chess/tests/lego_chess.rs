@@ -89,8 +89,14 @@ fn its_machine_reads_long_names_and_lacks_glide_and_the_opengl_plugin() {
         .collect();
     absent.sort_unstable();
     assert_eq!(absent, ["KLIB_OpenGL_PlugIn.dll", "glide2x.dll"]);
-    // The label the game's CD check compares, byte for byte, at 0x4054E2
-    // (#145).
+}
+
+#[test]
+fn its_disc_carries_the_label_its_cd_check_compares() {
+    if !scratch() {
+        return;
+    }
+    // Byte for byte, at 0x4054E2 (#145).
     let iso = disc::open_pressing(CHESS.image.disc_dir, CHESS.image.pressing)
         .expect("the pressing opens");
     assert_eq!(iso.label, "LEGOCHESS");
