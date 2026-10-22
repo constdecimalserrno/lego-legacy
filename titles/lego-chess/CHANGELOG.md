@@ -121,16 +121,21 @@ first frame. A run with no route went on: the logo played its 280 frames to the 
 stopped at #151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
 2,582,262,607 after 282 flips.
 
-Its intro plays (#151, core 1.2.0). Each movie is let go of as it ends and the next opens: the logo,
-flips 0 to 283, its 280 frames between the player's two clears either side; Krisalis' logo, flips
-284 to 325, its 38 frames with no sound, held two seconds after; and the intro, 320x200 doubled to
-640x400 at y 40, its 499 frames with their sound, flips 328 to 826. `routes/intro.route` plays the
-first two through and the intro's first dozen frames, 3.7 billion instructions, with its determinism
-gate. It does not skip the intro: the game's skip is Space, and after a movie it waits for Space to
-come up in a loop that presents no frame (0x0040D220), while a key comes up only at a flip, a
-route's or a person's. So a person who presses Space to skip a movie at a window hangs the game
-there for now; #215 is to deliver what a person does between flips. Played on with no route, the
-intro plays to its end and the run stops in the bumper, at `IDirect3D2::CreateMaterial`, called from
-0x400027A9 at cursor 8,613,581,999 after 829 flips, #210's. The movies play in real time on the Mac
-mini: the logo's frames take 9.2 million instructions each, 15.1 frames a second at 139 million a
-second, against its 15.
+Its intro plays (#151, core 1.2.0). As each movie ends its streams and frame getter are let go of,
+its file staying open as the game never releases one, and the next opens: the logo, flips 0 to 283,
+its 280 frames between the player's two clears either side; Krisalis' logo, flips 284 to 325, its 38
+frames with no sound, held two seconds after; and the intro, 320x200 doubled to 640x400 at y 40, its
+499 frames with their sound, flips 328 to 826. `routes/intro.route` plays the first two through and
+the intro's first dozen frames, 3.7 billion instructions, with its determinism gate. It ends there
+for two reasons, which its comment gives: every gate replays a committed route twice, and the lead
+holds this title's routes to about four billion instructions a run for that, where the intro played
+whole is 8.6 billion; and it cannot skip the intro, since the game's skip is Space, and after a
+movie it waits for Space to come up in a loop that presents no frame (0x0040D220), while a key comes
+up only at a flip, a route's or a person's. So a person who presses Space to skip a movie at a
+window hangs the game there for now; #215 is to deliver what a person does between flips, and then a
+route can skip with Space. A run with no route goes on: the intro plays to its end and the run stops
+in the bumper, at `IDirect3D2::CreateMaterial`, called from 0x400027A9 at cursor 8,613,581,999 after
+829 flips, #210's. Headless and untraced on the Mac mini, the logo played in real time, with 0.7% to
+spare: its frames take 9.2 million instructions each, 15.1 frames a second at 139 million a second,
+against its 15. The intro did not: its frames take 10.1 million each, 13.7 frames a second at 138
+million a second, 0.91 of real time. The MacBook is not measured.

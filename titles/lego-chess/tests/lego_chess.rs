@@ -605,8 +605,7 @@ const INTRO_TENTH: u64 = 338;
 
 /// Enough instructions for the logo and Krisalis' logo to play through and
 /// the intro to reach its frame 12, flip 340 at 3,695,170,490, and no more:
-/// every committed route of this title is held to about four billion, since
-/// each is replayed twice by every gate.
+/// the route's cap, as its own comment gives it.
 const INTRO_BUDGET: u64 = 3_700_000_000;
 
 /// The committed route through the intro's first two movies and into the
@@ -667,9 +666,10 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
         ran.loudness(2, 282).iter().any(|r| *r > 0.0),
         "the logo is heard"
     );
+    let krisalis = ran.loudness(286, 324);
     assert!(
-        ran.loudness(286, 324).iter().all(|r| *r == 0.0),
-        "Krisalis' logo has no sound"
+        !krisalis.is_empty() && krisalis.iter().all(|r| *r == 0.0),
+        "Krisalis' logo is mixed, and has no sound"
     );
     assert!(
         ran.loudness(328, 341).iter().any(|r| *r > 0.0),
@@ -688,11 +688,13 @@ fn the_intro_route_replays_to_the_same_machine_every_time() {
         return;
     };
     first.assert_same_machine(second);
-    assert_eq!(
-        first.host.frame(INTRO_TENTH).map(|f| &f.pixels),
-        second.host.frame(INTRO_TENTH).map(|f| &f.pixels),
-        "including what it presented"
-    );
+    for flip in [LOGO_NEAR_ITS_END, KRISALIS_LAST, INTRO_TENTH] {
+        assert_eq!(
+            first.host.frame(flip).map(|f| &f.pixels),
+            second.host.frame(flip).map(|f| &f.pixels),
+            "including what it presented at flip {flip}"
+        );
+    }
 }
 
 // The machine has the floppy drive its CD check needs: the check at 0x405420

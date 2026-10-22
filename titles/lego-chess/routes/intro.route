@@ -9,9 +9,13 @@
 # frames, flips 286 to 323, with no sound, and the game holds it two seconds;
 # main waits a second more. The intro, intro\intro.avi, 320x200 doubled to
 # 640x400 at y 40, plays its frames from flip 328 with its sound, and the
-# route ends a dozen of them in.
+# route ends a dozen of them in, at 3.7 billion instructions.
 #
-# The intro is not skipped. The game's own skip is Space, and after a movie it
-# waits for Space to come up again (0x0040D220) in a loop that presents no
-# frame, while a key comes up only at a flip, a route's or a person's; skipped,
-# it would wait there for ever (#215).
+# It ends there for two reasons. Every gate replays a committed route twice,
+# and the lead holds this title's routes to about four billion instructions a
+# run for that, where the intro played whole is 8.6 billion. And the intro is
+# not skipped: the game's own skip is Space, and after a movie it waits for
+# Space to come up again (0x0040D220) in a loop that presents no frame, while
+# a key comes up only at a flip, a route's or a person's; skipped, it would
+# wait there for ever. Once #215 delivers what a person does between flips, a
+# route can skip it with Space.

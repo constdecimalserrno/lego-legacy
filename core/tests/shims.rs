@@ -3274,8 +3274,8 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
 /// A movie lets go of what it handed out as LEGO Chess's close lets go of
 /// it (#151): a stream's references counted down, a frame getter holding
 /// one until it is closed once, with nothing left of it; a stream released
-/// with none left is a wall; the file keeps the stream, so that asking for
-/// it again hands out the same one; and the library's exit.
+/// with none left answering -1; the file keeping the stream, so that asking
+/// for it again hands out the same one; and the library's exit.
 #[test]
 fn a_movie_lets_go_of_its_streams_and_its_frame_getter() {
     const WANTED: u32 = DATA + 0x200;
@@ -3331,12 +3331,12 @@ fn a_movie_lets_go_of_its_streams_and_its_frame_getter() {
         matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("not a frame getter")),
         "{wall:?}"
     );
-    // With none left, released once more, it is gone; asked for again, it
-    // is the same stream.
-    let wall = call(&mut m, "AVIFIL32", "AVIStreamRelease", &[video]);
-    assert!(
-        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("already let go of")),
-        "{wall:?}"
+    // With none left, released once more, it answers -1 and is still there,
+    // as Wine's `test_default_data` finds on Windows: asked for again, it is
+    // the same stream.
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamRelease", &[video]),
+        Ok(u32::MAX)
     );
     assert_eq!(get(&mut m), video);
     assert_eq!(call(&mut m, "AVIFIL32", "AVIStreamRelease", &[0]), Ok(0));
@@ -3345,4 +3345,98 @@ fn a_movie_lets_go_of_its_streams_and_its_frame_getter() {
         Ok(0)
     );
     assert_eq!(call(&mut m, "AVIFIL32", "AVIFileExit", &[]), Ok(0));
+}
+
+/// LEGO Chess's intro movie, off the disc, as the game plays it (#151): its
+/// pictures decoded through to the last, and its whole sound read a chunk's
+/// worth at a time, as the game reads it, to its end.
+///
+/// The pinned bits are a reference decoder's pictures turned into the DIB the
+/// way `Picture::rgb` and `dib_bits` turn one: FFmpeg 9.0.1, run once by hand
+/// on a copy of the disc's `INTRO\INTRO.AVI`,
+///
+///   ffmpeg -i INTRO.AVI -map 0:v:0 -f rawvideo -pix_fmt yuv410p
+///     -fps_mode passthrough -
+///
+/// writes all 499 of its pictures, none being null. Each pixel goes through
+/// BT.601 at studio range in Microsoft's integer form, its chroma from its
+/// 4x4 block, and is narrowed to 555 by dropping each channel's low bits; the
+/// rows go bottom-up; and the digest is the sha256 of the DIB's 128,000 bytes
+/// of bits.
+#[test]
+fn the_intro_movie_decodes_to_its_last_picture_and_its_sound_to_its_end() {
+    const WANTED: u32 = DATA + 0x200;
+    const BUFFER: u32 = 0x0060_0000;
+    let image = &roster::LEGO_CHESS.image;
+    if !testkit::rips(image) {
+        return;
+    }
+    let mut m = machine();
+    m.tree
+        .set_disc(disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens"));
+    m.arena
+        .write(DATA, b"D:\\INTRO\\INTRO.AVI\0")
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    let stream = |m: &mut Machine, n: u32| {
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, n]),
+            Ok(0)
+        );
+        m.arena.read_u32(OUT).expect("in the arena")
+    };
+    let (video, sound) = (stream(&mut m, 0), stream(&mut m, 1));
+
+    m.arena
+        .write(WANTED, &dib_header(320, 200, 16, 128_000))
+        .expect("in the arena");
+    let getter = call(
+        &mut m,
+        "AVIFIL32",
+        "AVIStreamGetFrameOpen",
+        &[video, WANTED],
+    )
+    .expect("a getter");
+    let bits = |m: &mut Machine, n: u32| {
+        let dib = call(m, "AVIFIL32", "AVIStreamGetFrame", &[getter, n]).expect("answered");
+        assert_ne!(dib, 0, "frame {n}");
+        hash::sha256_hex(m.arena.slice(dib + 40, 128_000).expect("in the arena"))
+    };
+    assert_eq!(
+        bits(&mut m, 150),
+        "4c882e29d0e67c99f02560f2ba01747ca9b6cf18230f8d21e731aa1ddbc7250f"
+    );
+    assert_eq!(
+        bits(&mut m, 498),
+        "5f3506c8cbc653dd2f620fdb149d945d967546ada494df315b4ec4decfe4de67"
+    );
+
+    // Its sound, 16-bit stereo, four bytes a sample: read 1,470 samples at a
+    // time, a frame's worth at 15 a second, as the game reads it, it is every
+    // byte of its 499 chunks, 733,515 samples, the last read cut at its end.
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIStreamLength", &[sound]),
+        Ok(733_515)
+    );
+    let (mut at, mut bytes) = (0u32, 0u32);
+    loop {
+        let answer = call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamRead",
+            &[sound, at, 1_470, BUFFER, 5_880, OUT, OUT + 4],
+        );
+        assert_eq!(answer, Ok(0), "at sample {at}");
+        let read = m.arena.read_u32(OUT + 4).expect("in the arena");
+        bytes += m.arena.read_u32(OUT).expect("in the arena");
+        if read == 0 {
+            break;
+        }
+        at += read;
+    }
+    assert_eq!((at, bytes), (733_515, 2_934_060));
 }

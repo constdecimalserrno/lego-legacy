@@ -135,8 +135,8 @@ pub struct Getter {
     decoded: Option<usize>,
 }
 
-/// AVIFileInit and AVIFileExit, which start and end the library's use of OLE
-/// on Windows; nothing here is started, so nothing is to end.
+/// AVIFileInit and AVIFileExit, which start and end the library's use, as
+/// Microsoft's pages say; nothing here needs either.
 fn init(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
 }
@@ -524,23 +524,18 @@ fn add_ref(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // AVIStreamRelease(stream): the references it has left. The file keeps
-    // the stream, so asking for it again hands out the same one (#151). One
-    // released with none left is a stream the title had let go of, which on
-    // Windows is gone: a wall.
+    // the stream, so asking for it again hands out the same one (#151), and
+    // one released with none left answers -1 and is still there, as Wine's
+    // conformance test `test_default_data`, which passes on Windows, finds it.
     if args[0] == 0 {
         return Ok(0);
     }
     stream_of(ctx, "AVIStreamRelease", args[0])?;
-    if ctx.state.com(args[0]).is_some_and(|o| o.refs == 0) {
-        return Err(Stop::NotWritten {
-            what: format!(
-                "AVIFIL32.dll!AVIStreamRelease: {:#x}, already let go of",
-                args[0]
-            ),
-            caller: 0,
-        });
-    }
-    Ok(ctx.state.com_ref(args[0], -1))
+    let Some(stream) = ctx.state.com_mut(args[0]) else {
+        return Ok(0);
+    };
+    stream.refs -= 1;
+    Ok(stream.refs as u32)
 }
 
 fn read_format(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

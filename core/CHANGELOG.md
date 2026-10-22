@@ -9,10 +9,12 @@ One heading per version, newest first. What each part of core's version means is
 answering the references it has left, as Wine's `api.c` releases it, a getter holding its stream
 from its open as Wine's `getframe.c` holds it; `AVIStreamRelease` counts a stream's reference out,
 the file keeping the stream so that asking for it again hands out the same one, and one released
-with none left is a wall; and `AVIFileExit` answers as `AVIFileInit` does, nothing having been
-started (#151). All three were walls. LEGO Chess lets go of each movie this way, and its intro's
-three movies play one after another. Rock Raiders imports `AVIStreamRelease` and reaches a stream
-only through `AVIStreamOpenFromFileA`, still a wall, so no released run moves.
+with none left answers -1 and is still there, as Wine's conformance test `test_default_data` finds
+it on Windows; and `AVIFileExit` answers as `AVIFileInit` does (#151). All three were walls. LEGO
+Chess lets go of each movie's streams and frame getter this way, its file staying open as the game
+never releases one, and its intro's three movies play one after another. Rock Raiders imports
+`AVIStreamRelease` and reaches a stream only through `AVIStreamOpenFromFileA`, still a wall; no
+released title imports the other two; so no released run moves.
 
 `AVIStreamStart` and `AVIStreamLength` answer a stream's start and length, and `AVIStreamRead` reads
 a stream of fixed-size samples, a sound's, across its chunks, as Wine's `avifile.c`, read as
