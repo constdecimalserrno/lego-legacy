@@ -103,6 +103,11 @@ pub struct Declared {
     /// not there, as Windows does; a library that is not on this list, nor
     /// the title's own, nor one core writes, is a wall (#146).
     pub absent_libraries: &'static [(&'static str, &'static str)],
+    /// Whether the machine has a floppy drive, A:, with no disk in it: a
+    /// drive `GetLogicalDrives` and `GetDriveTypeA` name, and one that
+    /// fails what reads it as an empty drive does (#145). Beside it the
+    /// machine always has its fixed disk, C:, and its CD-ROM, D:.
+    pub floppy: bool,
     /// Why these values and no others.
     pub why: &'static str,
 }
@@ -271,6 +276,7 @@ impl Title {
                 "glide2x.dll",
                 "3dfx's Glide, and the declared machine has no 3dfx card",
             )],
+            floppy: false,
             why: "the stub guest asks the machine nothing, and these are the roster's own \
                   baseline values rather than anything measured for it",
         },

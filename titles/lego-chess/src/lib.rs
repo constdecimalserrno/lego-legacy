@@ -70,8 +70,14 @@ pub const LEGO_CHESS: Title = Title {
                  shipped",
             ),
         ],
-        why: "the roster's baseline: this title asks its Windows only whether it is NT, and \
-              the processor waits on #147's measuring the clock waits it spends at boot",
+        // A 1998 PC had a floppy drive, and the game's CD check (0x405420)
+        // needs one: it tests bit 0 of `GetLogicalDrives`, A:, once and never
+        // shifts, so with no A: it looks at no drive and asks for its disc
+        // for ever. With one it reaches D: (#145). It asks A: only its type.
+        floppy: true,
+        why: "the roster's baseline, and a floppy drive, without which its CD check looks at \
+              no drive: this title asks its Windows only whether it is NT, and the processor \
+              waits on #147's measuring the clock waits it spends at boot",
     },
     // Nothing of the game is loose on its disc. Its setup expands MAIN.Z, an
     // InstallShield 3 archive, into the install directory whole, and copies

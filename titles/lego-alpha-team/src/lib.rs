@@ -83,6 +83,9 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
         // None: in every gate run it asks only for libraries it ships and the
         // two of Microsoft's core writes, ADVAPI32 and KERNEL32 (#146).
         absent_libraries: &[],
+        // None, as every released title's machine has had since its routes were
+        // recorded: C: and D: only.
+        floppy: false,
         why: "Windows 98 SE is what this pressing shipped against, and the rest is the \
               roster's baseline; the processor is the one value this title reads back as a \
               measurement of its own rather than asking for it",

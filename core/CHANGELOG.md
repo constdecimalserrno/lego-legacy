@@ -373,6 +373,18 @@ says why. Its bumper and its plugin table are not reached yet: the run stops at 
 
 No other title's route moves.
 
+A title can declare a floppy drive, A:, with no disk in it (#145). `Declared` gains the required
+field `floppy`, which every title crate had to add to build, so by ADR-0007 this makes core's next
+release a major. `GetLogicalDrives` sets bit 0 for the drive, which Microsoft documents as A:,
+`GetLogicalDriveStringsA` names `A:\` first, and `GetDriveTypeA("A:\")` answers `DRIVE_REMOVABLE`
+(2). Whatever looks on the drive fails as on an empty drive: `GetVolumeInformationA`, a
+`CreateFileA` or `OpenFile` open, `GetFileAttributesA`, `FindFirstFileA`, `DeleteFileA`,
+`CreateDirectoryA`, and `MoveFileA` from or to A:. For a title that has set `SEM_FAILCRITICALERRORS`
+each fails with `ERROR_NOT_READY` (21). For one that has not, Windows would show its box asking for
+a disk (`GetVolumeInformationA`'s remarks), and this machine has no such box, so the run stops at a
+wall that names it. Only LEGO Chess declares the drive. Every released title and the stub declare
+none and answer as before, so no route moves.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

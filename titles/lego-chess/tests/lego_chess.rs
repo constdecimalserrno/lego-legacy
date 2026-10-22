@@ -188,3 +188,8 @@ fn the_boot_replays_to_the_same_machine_every_time() {
     };
     first.assert_same_machine(second);
 }
+
+// The machine has the floppy drive its CD check needs: the check at 0x405420
+// looks at no drive without A: (#145). Core's shim tests run its calls on a
+// machine with one and find D:.
+const _: () = assert!(CHESS.declared.floppy);

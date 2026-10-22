@@ -77,6 +77,9 @@ pub const LEGO_ISLAND: Title = Title {
         // None: no gate run asks for a library, and the two places it can,
         // the C runtimes' message boxes, ask for USER32, which core writes (#146).
         absent_libraries: &[],
+        // None, as every released title's machine has had since its routes were
+        // recorded: C: and D: only.
+        floppy: false,
         why: "Windows 95 is what this pressing shipped against; the rest is the roster's \
               baseline, unmeasured against this title because it has not asked for any of it \
               yet",

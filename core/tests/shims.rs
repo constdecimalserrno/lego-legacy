@@ -11,6 +11,7 @@ use lego_legacy_core::loader::MODULE_BASE;
 use lego_legacy_core::machine::Machine;
 use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
+use lego_legacy_core::title::Declared;
 use lego_legacy_core::win32::{self, user32::WINDOW, Ctx};
 use lego_legacy_core::{disc, Title};
 
@@ -50,12 +51,21 @@ fn com(
 }
 
 fn with_ctx<T>(machine: &mut Machine, run: impl FnOnce(&mut Ctx<'_>) -> T) -> T {
+    as_title(machine, &Title::STUB, run)
+}
+
+/// As [`with_ctx`], on `title`'s declared machine.
+fn as_title<T>(
+    machine: &mut Machine,
+    title: &'static Title,
+    run: impl FnOnce(&mut Ctx<'_>) -> T,
+) -> T {
     let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
     let mut ctx = Ctx {
         cpu: &mut machine.cpu,
         mem: &mut machine.arena,
         state: &mut machine.state,
-        title: &Title::STUB,
+        title,
         log: &mut log,
         tree: &mut machine.tree,
         modules: &mut machine.modules,
@@ -1472,4 +1482,148 @@ fn a_path_through_a_file_is_no_path() {
         assert_eq!(opened(&mut m, &guest), None, "{guest}");
         assert_eq!(m.tree.wall(), None);
     }
+}
+/// The stub's machine with a floppy drive, as LEGO Chess declares one (#145).
+static FLOPPY: Title = Title {
+    declared: Declared {
+        floppy: true,
+        ..Title::STUB.declared
+    },
+    ..Title::STUB
+};
+
+/// Call `KERNEL32!name` on `title`'s machine.
+fn kernel32(m: &mut Machine, title: &'static Title, name: &str, args: &[u32]) -> Result<u32, Stop> {
+    let shim =
+        win32::find("KERNEL32", name).unwrap_or_else(|| panic!("KERNEL32!{name} is written"));
+    as_title(m, title, |ctx| (shim.run)(ctx, args))
+}
+
+/// LEGO Chess's CD check, `0x405420`, as it makes its calls: it tests bit 0
+/// of `GetLogicalDrives` once and never shifts, then asks each of 32 letters
+/// its type, and of each CD-ROM its volume, which must be `CDFS` and
+/// `LEGOCHESS`. The root of the last one that is, or none.
+fn chess_cd_check(m: &mut Machine, title: &'static Title) -> Option<String> {
+    let mask = kernel32(m, title, "GetLogicalDrives", &[]).expect("answered");
+    let mut found = None;
+    for letter in (b'A'..).take(32) {
+        if mask & 1 == 0 {
+            continue;
+        }
+        m.arena
+            .write(DATA, &[letter, b':', b'\\', 0])
+            .expect("in the arena");
+        if kernel32(m, title, "GetDriveTypeA", &[DATA]) != Ok(5) {
+            continue;
+        }
+        let (label, system) = (OUT, OUT + 0x100);
+        let asked = [
+            DATA,
+            label,
+            0x100,
+            OUT + 0x200,
+            OUT + 0x204,
+            OUT + 0x208,
+            system,
+            0x100,
+        ];
+        if kernel32(m, title, "GetVolumeInformationA", &asked) == Ok(0) {
+            continue;
+        }
+        if text(m, system) == "CDFS" && text(m, label) == "LEGOCHESS" {
+            found = Some(text(m, DATA));
+        }
+    }
+    found
+}
+
+#[test]
+fn the_chess_cd_check_finds_its_disc_past_a_floppy_drive() {
+    let mut m = machine();
+    m.state.volume_label = "LEGOCHESS".to_owned();
+    assert_eq!(chess_cd_check(&mut m, &FLOPPY), Some("D:\\".to_owned()));
+    // With no A: it looks at no drive at all, which is the game's own bug.
+    assert_eq!(chess_cd_check(&mut m, &Title::STUB), None);
+}
+
+#[test]
+fn a_floppy_drive_is_removable_and_empty() {
+    const ERROR_NOT_READY: u32 = 21;
+    const SEM_FAILCRITICALERRORS: u32 = 1;
+    let mut m = machine();
+    m.arena.write(DATA, b"A:\\\0").expect("in the arena");
+    m.arena
+        .write(DATA + 16, b"A:\\SAVE.DAT\0")
+        .expect("in the arena");
+    let volume = [DATA, OUT, 0x100, 0, 0, 0, OUT + 0x100, 0x100];
+    let open = [DATA + 16, 0x8000_0000, 1, 0, 3, 0x80, 0];
+
+    // Bit 0 is A:, and it is named first among the roots.
+    assert_eq!(
+        kernel32(&mut m, &FLOPPY, "GetLogicalDrives", &[]),
+        Ok(0b1101)
+    );
+    assert_eq!(
+        kernel32(&mut m, &FLOPPY, "GetLogicalDriveStringsA", &[0x100, OUT]),
+        Ok(12)
+    );
+    assert_eq!(
+        m.arena.slice(OUT, 13).expect("in the arena"),
+        b"A:\\\0C:\\\0D:\\\0\0"
+    );
+    // DRIVE_REMOVABLE.
+    assert_eq!(kernel32(&mut m, &FLOPPY, "GetDriveTypeA", &[DATA]), Ok(2));
+
+    // A title that has not said it takes critical errors itself would be
+    // shown Windows' box asking for a disk, which this machine does not have.
+    assert!(matches!(
+        kernel32(&mut m, &FLOPPY, "GetVolumeInformationA", &volume),
+        Err(Stop::NotWritten { .. })
+    ));
+    assert!(matches!(
+        kernel32(&mut m, &FLOPPY, "CreateFileA", &open),
+        Err(Stop::NotWritten { .. })
+    ));
+    // One that has is told the drive is not ready.
+    kernel32(&mut m, &FLOPPY, "SetErrorMode", &[SEM_FAILCRITICALERRORS]).expect("answered");
+    assert_eq!(
+        kernel32(&mut m, &FLOPPY, "GetVolumeInformationA", &volume),
+        Ok(0)
+    );
+    assert_eq!(m.state.last_error, ERROR_NOT_READY);
+    // And so is everything else that looks on the drive.
+    m.arena
+        .write(DATA + 32, b"C:\\SAVE.DAT\0")
+        .expect("in the arena");
+    for (name, args, failed) in [
+        ("CreateFileA", &open[..], 0xffff_ffff),
+        ("GetFileAttributesA", &[DATA + 16], 0xffff_ffff),
+        ("FindFirstFileA", &[DATA + 16, OUT], 0xffff_ffff),
+        ("DeleteFileA", &[DATA + 16], 0),
+        ("CreateDirectoryA", &[DATA + 16, 0], 0),
+        ("MoveFileA", &[DATA + 32, DATA + 16], 0),
+    ] {
+        m.state.last_error = 0;
+        assert_eq!(kernel32(&mut m, &FLOPPY, name, args), Ok(failed), "{name}");
+        assert_eq!(m.state.last_error, ERROR_NOT_READY, "{name}");
+    }
+
+    // A machine with no floppy drive answers as it always has.
+    assert_eq!(
+        kernel32(&mut m, &Title::STUB, "GetLogicalDrives", &[]),
+        Ok(0b1100)
+    );
+    assert_eq!(
+        kernel32(&mut m, &Title::STUB, "GetDriveTypeA", &[DATA]),
+        Ok(1)
+    );
+    assert_eq!(
+        kernel32(
+            &mut m,
+            &Title::STUB,
+            "GetLogicalDriveStringsA",
+            &[0x100, OUT]
+        ),
+        Ok(8)
+    );
 }

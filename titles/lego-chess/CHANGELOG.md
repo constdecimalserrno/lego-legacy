@@ -19,3 +19,10 @@ tells it (#146).
 Started, its C runtime runs, its framework registers its class and makes its window, and the run
 stops at its first wall, `USER32.dll!GetClipCursor`, called from 0x0045AC3C at cursor 15,940 with
 nothing presented (#147). Untagged until its release (#162).
+
+The declared machine has a floppy drive, A:, with no disk in it (#145), as a 1998 PC had. The game's
+CD check (0x405420) tests bit 0 of `GetLogicalDrives` once and never shifts, so with no A: it looked
+at no drive and would ask for its disc for ever; with one it asks every letter its type, A: only
+that, and finds `CDFS` and `LEGOCHESS` on D:. The run still stops at `GetClipCursor` at cursor
+15,940, before the check. Until #147's run reaches it, core's shim tests stand in: they make the
+check's calls as its code at 0x405420 makes them and find `D:\`.
