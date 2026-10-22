@@ -37,7 +37,17 @@ of a good rip expand, so the run is unchanged.
 
 Its framework asks where the pointer is confined as it starts (#147), and is told the whole screen,
 as Windows tells a program whose pointer is confined nowhere; it keeps the rectangle to hand back to
-`ClipCursor` as it leaves. What `ClipCursor` is given is now kept and read back, as Windows does. It goes on to its DirectInput devices and its sound, and
-the run stops at #149's first wall, the 3D listener's `SetAllParameters`, called from 0x0044FE17 at
-cursor 214,521, still with nothing presented. Its boot test now runs to that wall, on a budget of a
-million instructions where it was a hundred thousand.
+`ClipCursor` as it leaves. What `ClipCursor` is given is now kept and read back, as Windows does.
+It goes on to its DirectInput devices and its sound, and the run stopped at #149's first wall, the
+3D listener's `SetAllParameters`, called from 0x0044FE17 at cursor 214,521, still with nothing
+presented. Its boot test now runs to the wall it stops at, on a budget of a million instructions
+where it was a hundred thousand.
+
+Its input and sound come up (#149). Its keyboard and mouse are set to the foreground, not
+exclusively, and acquired, as the machine already answered. Its listener is set all at once, and
+the CD audio device it opens by number opens with its data disc in the drive, as Windows' does, and
+counts in tracks; it will be stopped and closed as the game leaves. Its music's stream will be
+refused for want of a MIDI port, which it takes as no music, until #154. Its plugin walk then loads
+the DirectX plugin, which asks DirectDraw for Direct3D 2 and, refused, calls through the pointer it
+was not given: an access violation at 0x400014E1 that nothing takes, so the run stops at
+`KERNEL32.dll!UnhandledExceptionFilter` at cursor 230,008, #148's to answer.

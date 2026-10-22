@@ -1754,3 +1754,182 @@ fn whatever_looks_on_the_empty_floppy_drive_is_refused() {
     // Nothing moved where the guest believes it is.
     assert_eq!(m.state.current_directory, here);
 }
+
+/// One `DS3DLISTENER` sets every value the listener has, and the single
+/// getters read back what it set; one DirectSound refuses is refused, and
+/// nothing of it kept (#149). LEGO Chess sets its listener this way as its
+/// sound comes up.
+#[test]
+fn a_listener_set_all_at_once_reads_back_one_value_at_a_time() {
+    const DSERR_INVALIDPARAM: u32 = 0x8007_0057;
+    const LISTENER: &str = "IDirectSound3DListener";
+    let mut m = machine();
+    let set = |m: &mut Machine, words: [f32; 15], size: u32, apply: u32| {
+        m.arena.write_u32(DATA, size).expect("in the arena");
+        for (i, w) in words.iter().enumerate() {
+            m.arena
+                .write_u32(DATA + 4 + 4 * i as u32, w.to_bits())
+                .expect("in the arena");
+        }
+        method(m, LISTENER, "SetAllParameters", 0, &[DATA, apply])
+    };
+    let good: [f32; 15] = [
+        1.0, 2.0, 3.0, // position
+        9.0, 9.0, 9.0, // velocity
+        0.0, 0.0, -1.0, // front
+        0.0, 1.0, 0.0, // top
+        2.0, 0.5, 3.0, // distance, rolloff and Doppler factors
+    ];
+    assert_eq!(set(&mut m, good, 64, 0), Ok(0));
+
+    let read = |m: &Machine, n: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| f32::from_bits(m.arena.read_u32(OUT + 4 * i).expect("in the arena")))
+            .collect()
+    };
+    let check = |m: &mut Machine| {
+        assert_eq!(method(m, LISTENER, "GetPosition", 0, &[OUT]), Ok(0));
+        assert_eq!(read(m, 3), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            method(m, LISTENER, "GetOrientation", 0, &[OUT, OUT + 12]),
+            Ok(0)
+        );
+        assert_eq!(read(m, 6), [0.0, 0.0, -1.0, 0.0, 1.0, 0.0]);
+        for (name, value) in [
+            ("GetDistanceFactor", 2.0),
+            ("GetRolloffFactor", 0.5),
+            ("GetDopplerFactor", 3.0),
+        ] {
+            assert_eq!(method(m, LISTENER, name, 0, &[OUT]), Ok(0));
+            assert_eq!(read(m, 1), [value], "{name}");
+        }
+    };
+    check(&mut m);
+
+    // Refused, and the listener is as it was.
+    let with = |at: usize, value: f32| {
+        let mut words = good;
+        words[at] = value;
+        words
+    };
+    for (words, size, apply) in [
+        (good, 60, 0),
+        (good, 64, 2),
+        (with(12, 0.0), 64, 1),
+        (with(13, 10.5), 64, 1),
+        (with(14, -1.0), 64, 1),
+    ] {
+        assert_eq!(set(&mut m, words, size, apply), Ok(DSERR_INVALIDPARAM));
+    }
+    assert_eq!(
+        method(&mut m, LISTENER, "SetAllParameters", 0, &[0, 0]),
+        Ok(DSERR_INVALIDPARAM)
+    );
+    check(&mut m);
+}
+
+/// The CD audio device opened by its type's number, as LEGO Chess's framework
+/// opens it, opens with no Red Book pressing, the title's data disc in the
+/// drive, as Windows' mcicda opens it; it counts in tracks, and is stopped
+/// and closed. Opened by name it opens the same. Another of its type, or a
+/// command it is not given here, is a wall (#149).
+#[test]
+fn cd_audio_opens_on_a_data_disc_by_number_and_by_name() {
+    const MCI_OPEN: u32 = 0x0803;
+    const MCI_CLOSE: u32 = 0x0804;
+    const MCI_STOP: u32 = 0x0808;
+    const MCI_SET: u32 = 0x080d;
+    const MCI_STATUS: u32 = 0x0814;
+    const MCI_WAIT: u32 = 0x0002;
+    const MCI_OPEN_SHAREABLE: u32 = 0x0100;
+    const MCI_OPEN_TYPE_ID: u32 = 0x1000;
+    const MCI_OPEN_TYPE: u32 = 0x2000;
+    const MCI_SET_TIME_FORMAT: u32 = 0x0400;
+    const MCI_DEVTYPE_CD_AUDIO: u32 = 0x0204;
+    const MCI_FORMAT_TMSF: u32 = 10;
+    let mut m = machine();
+    let opening = |m: &mut Machine, kind: u32| {
+        // MCI_OPEN_PARMS: callback, the device id it answers, then the type.
+        for (offset, word) in [(0, 0), (4, 0), (8, kind), (12, 0), (16, 0)] {
+            m.arena
+                .write_u32(DATA + offset, word)
+                .expect("in the arena");
+        }
+        let flags = MCI_OPEN_TYPE | MCI_OPEN_TYPE_ID | MCI_OPEN_SHAREABLE | MCI_WAIT;
+        call(m, "WINMM", "mciSendCommandA", &[0, MCI_OPEN, flags, DATA])
+    };
+    assert!(
+        opening(&mut m, 1 << 16 | MCI_DEVTYPE_CD_AUDIO).is_err(),
+        "a second drive"
+    );
+    assert_eq!(opening(&mut m, MCI_DEVTYPE_CD_AUDIO), Ok(0));
+    let device = m.arena.read_u32(DATA + 4).expect("in the arena");
+    assert_ne!(device, 0);
+
+    // MCI_SET_PARMS: callback, then the time format.
+    m.arena
+        .write_u32(DATA + 4, MCI_FORMAT_TMSF)
+        .expect("in the arena");
+    let set = [device, MCI_SET, MCI_SET_TIME_FORMAT | MCI_WAIT, DATA];
+    assert_eq!(call(&mut m, "WINMM", "mciSendCommandA", &set), Ok(0));
+    assert!(call(
+        &mut m,
+        "WINMM",
+        "mciSendCommandA",
+        &[device, MCI_STATUS, 0x100, DATA]
+    )
+    .is_err());
+    for message in [MCI_STOP, MCI_CLOSE] {
+        let command = [device, message, MCI_WAIT, DATA];
+        assert_eq!(call(&mut m, "WINMM", "mciSendCommandA", &command), Ok(0));
+    }
+    let stop = [device, MCI_STOP, MCI_WAIT, DATA];
+    assert!(
+        call(&mut m, "WINMM", "mciSendCommandA", &stop).is_err(),
+        "closed"
+    );
+
+    m.arena.write(OUT, b"open cdaudio\0").expect("in the arena");
+    assert_eq!(
+        call(&mut m, "WINMM", "mciSendStringA", &[OUT, 0, 0, 0]),
+        Ok(0),
+        "as the device opened by name"
+    );
+}
+
+/// A MIDI stream on a machine with no MIDI port is out of range, the mapper
+/// included, as `midiStreamOpen`'s page lists and every Windows Wine's
+/// conformance tests ran on answers; a stream of two devices, or with
+/// nowhere to say which, is invalid; and no stream is handed back (#149).
+#[test]
+fn a_midi_stream_on_a_machine_with_no_port_is_refused() {
+    const MIDI_MAPPER: u32 = 0xffff_ffff;
+    const CALLBACK_FUNCTION: u32 = 0x0003_0000;
+    const MMSYSERR_BADDEVICEID: u32 = 2;
+    const MMSYSERR_INVALPARAM: u32 = 11;
+    let mut m = machine();
+    m.arena.write_u32(OUT, 0x5a5a_5a5a).expect("in the arena");
+    let open = [OUT, DATA, 1, 0x0041_3d70, 0, CALLBACK_FUNCTION];
+    for device in [MIDI_MAPPER, 0] {
+        m.arena.write_u32(DATA, device).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "WINMM", "midiStreamOpen", &open),
+            Ok(MMSYSERR_BADDEVICEID),
+            "device {device:#x}"
+        );
+    }
+    for asked in [[OUT, DATA, 2], [OUT, 0, 1], [0, DATA, 1]] {
+        let mut wrong = open;
+        wrong[..3].copy_from_slice(&asked);
+        assert_eq!(
+            call(&mut m, "WINMM", "midiStreamOpen", &wrong),
+            Ok(MMSYSERR_INVALPARAM),
+            "{asked:x?}"
+        );
+    }
+    assert_eq!(
+        m.arena.read_u32(OUT).expect("in the arena"),
+        0x5a5a_5a5a,
+        "no stream"
+    );
+}

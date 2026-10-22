@@ -5,6 +5,31 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+The 3D listener's `SetAllParameters` sets every value at once from a `DS3DLISTENER`, as dsound.h
+lays it out, dropping the velocity as `SetVelocity` does, where it was a wall (#149). Another size,
+an apply that is neither immediate nor deferred, a distance factor not above zero, or a rolloff or
+Doppler factor outside 0 to 10 is refused with `DSERR_INVALIDPARAM` and nothing kept, as DirectSound
+documents. LEGO Chess sets its listener so at boot; Alpha Team's A3D (`a3dapi.dll` 0x1001FD34)
+would, on a renderer none of its runs takes.
+
+The `cdaudio` device opens for a title with no Red Book audio, its own data disc in the drive, as
+Windows' mcicda opens it, where it was not ready: Wine's conformance tests, which run on Windows 9x
+too, record the open succeeding with a data-only disc and with none (#149). Both faces of MCI share
+the one open. `mciSendCommandA`, MCI's numeric face, opens the device by its type's number, the
+first of its type only, sets its time format to tracks, minutes, seconds and frames, and stops and
+closes it, each logged with its answer as the string face's are; any other command, device or
+flag is a wall. Rock Raiders, the only released title that imports MCI, has Red Book audio, so its
+open is the one it always was.
+
+`midiStreamOpen` is refused with `MMSYSERR_BADDEVICEID`, the mapper included: the machine has no
+MIDI port until #154 gives it one, and none after that whenever the player has no bank (ADR-0008).
+`midiStreamOpen`'s own page lists that answer, and Wine's conformance tests record every Windows they
+ran on answering it for the mapper with no port. A stream of other than one device, or with nowhere
+to say which, is refused as invalid; each answer is logged. LEGO Island's `LEGO1.DLL` imports it,
+behind a `midiOutGetNumDevs` that is still a wall, so no run reaches it.
+
+No released run reaches any of the three, so none moves.
+
 `GetClipCursor` answers where the pointer is confined, as Microsoft documents (#147): the
 rectangle `ClipCursor` was last given, which it now keeps, cut to the screen, until it is given none,
 or the declared screen, in the mode it is in, while it is confined nowhere; with nowhere to write it,
@@ -496,7 +521,7 @@ Nothing of that game is loose on its disc, so core reads the archives its setup 
 LEGO Chess's machine reads its disc through its Joliet tree from its install on (#144), and is the
 first to declare absent libraries (#146), Glide's runtime and its OpenGL plugin; its own changelog
 says why. Its bumper and its plugin table were not reached then: the run stopped at
-`GetClipCursor`, which #147 answers above.
+`GetClipCursor`, which #147 answers above; #149's run reaches the plugin table.
 `install::Tree::install` is now the one way a title's tree is built, by the machine and by
 `testkit::tree` alike, where each had its own copy of the step and Chess's test a third.
 

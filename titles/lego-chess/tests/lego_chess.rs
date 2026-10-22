@@ -201,16 +201,47 @@ fn the_framework_reads_where_the_pointer_is_confined() {
     );
 }
 
+/// Its input and its sound come up (#149). DirectInput's keyboard and mouse
+/// are each set to `DISCL_NONEXCLUSIVE|DISCL_FOREGROUND` and acquired, which
+/// the machine already answered. Its 3D listener is set all at once, and the
+/// CD audio device it opens by number opens, with its data disc in the
+/// drive, as Windows' does, and counts in tracks.
+#[test]
+fn its_input_and_sound_come_up() {
+    let Some(ran) = boot() else { return };
+
+    for device in ["keyboard", "mouse"] {
+        ran.assert_logged(&format!("dinput {device} at "));
+    }
+    let foreground = ran
+        .log
+        .lines()
+        .filter(|l| l.starts_with("call IDirectInputDeviceA::SetCooperativeLevel(0x10010, 0x6)"))
+        .count();
+    let acquired = ran
+        .log
+        .lines()
+        .filter(|l| l.starts_with("call IDirectInputDeviceA::Acquire()"))
+        .count();
+    assert_eq!((foreground, acquired), (2, 2), "log:\n{}", ran.log);
+    ran.assert_logged("call IDirectSound3DListener::SetAllParameters(")
+        .assert_logged("mci command 0x0803 to device 516, flags 0x3102, answered 0")
+        .assert_logged("mci command 0x080d to device 1, flags 0x402, answered 0");
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #149's: its sound's 3D listener, set all at once.
-    ran.assert_logged(
-        "end wall: IDirectSound3DListener::SetAllParameters (called from 0x0044fe17)",
-    );
+    // #148's: its plugin walk loads the DirectX plugin, which asks DirectDraw
+    // for Direct3D 2 and, refused, calls through the pointer it was not
+    // given, an access violation nothing takes.
+    ran.assert_logged("load library KLIB_DirectX_PlugIn.dll")
+        .assert_logged("was asked for 6aae1ec1-662a-11d0-889d-00aa00bbb76a and refused")
+        .assert_logged("an access violation reading 0x00000000 at 0x400014e1")
+        .assert_logged("end wall: KERNEL32.dll!UnhandledExceptionFilter");
 }
 
 #[test]

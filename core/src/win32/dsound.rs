@@ -324,7 +324,44 @@ pub static DIRECT_SOUND_3D_LISTENER: Interface = Interface {
             write_float(ctx, args[0], value)
         }),
         wall("GetVelocity", 1),
-        wall("SetAllParameters", 2),
+        // SetAllParameters(listener, apply): every value at once, from a
+        // `DS3DLISTENER` as dsound.h lays it out: its size, then position,
+        // velocity, front and top, then the distance, rolloff and Doppler
+        // factors. The velocity is dropped, as `SetVelocity` drops it: the
+        // mix makes no Doppler shift. Refused with `DSERR_INVALIDPARAM`, and
+        // nothing kept, as DirectSound documents it: another size, an apply
+        // that is neither `DS3D_IMMEDIATE` nor `DS3D_DEFERRED`, a distance
+        // factor that is not above zero, or a rolloff or Doppler factor
+        // outside 0 to 10 (`DS3D_MINROLLOFFFACTOR` to `DS3D_MAXDOPPLERFACTOR`).
+        // LEGO Chess sets its listener this way as its sound comes up, and so
+        // would Alpha Team's A3D on a renderer no run of it takes (`a3dapi.dll`
+        // 0x1001FD34, #149).
+        method("SetAllParameters", 2, |ctx, _, args| {
+            let (at, apply) = (args[0], args[1]);
+            let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
+            if at == 0 || apply > 1 || read(0)? != 64 {
+                return Ok(DSERR_INVALIDPARAM);
+            }
+            let f = |o: u32| read(o).map(float);
+            let vector = |o: u32| -> Result<[f32; 3], Stop> { Ok([f(o)?, f(o + 4)?, f(o + 8)?]) };
+            let listener = Listener {
+                position: vector(4)?,
+                front: vector(28)?,
+                top: vector(40)?,
+                distance_factor: f(52)?,
+                rolloff_factor: f(56)?,
+                doppler_factor: f(60)?,
+            };
+            let factor = 0.0..=10.0;
+            if !(listener.distance_factor > 0.0
+                && factor.contains(&listener.rolloff_factor)
+                && factor.contains(&listener.doppler_factor))
+            {
+                return Ok(DSERR_INVALIDPARAM);
+            }
+            ctx.state.sound.listener = listener;
+            Ok(S_OK)
+        }),
         method("SetDistanceFactor", 2, |ctx, _, args| {
             ctx.state.sound.listener.distance_factor = float(args[0]);
             Ok(S_OK)

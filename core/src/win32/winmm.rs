@@ -20,13 +20,17 @@ pub const SHIMS: &[Shim] = &[
     stdcall("WINMM", "mmioClose", 2, mmio_close),
     stdcall("WINMM", "mciSendStringA", 4, mci_send_string),
     stdcall("WINMM", "mciGetErrorStringA", 3, mci_error_string),
+    stdcall("WINMM", "mciSendCommandA", 4, mci_send_command),
+    stdcall("WINMM", "midiStreamOpen", 6, midi_stream_open),
 ];
 
-/// The `cdaudio` device: the title's Red Book pressing, once it is open;
-/// whether it counts positions in tracks; and the sector it started playing
-/// from and the declared millisecond it started at, while it plays.
+/// The `cdaudio` device: whether it is open; the title's Red Book pressing,
+/// once it is open, if the title has one; whether it counts positions in
+/// tracks; and the sector it started playing from and the declared
+/// millisecond it started at, while it plays.
 #[derive(Default)]
 pub struct CdAudio {
+    open: bool,
     disc: Option<crate::disc::RedBook>,
     tracks: bool,
     playing: Option<(u64, u64)>,
@@ -51,6 +55,31 @@ const MCIERR_OUTOFRANGE: u32 = 282;
 /// zero.
 const CD_VOICE: u32 = 0;
 
+/// Open the `cdaudio` device, for either face of MCI.
+///
+/// A title with a Red Book pressing has its tracks in the drive; a missing
+/// rip is a drive with no disc of audio in it, which is not ready, and one
+/// that cannot be read has a problem. A title with none has its own data disc
+/// in the drive, and the device opens all the same, as Windows' mcicda opens
+/// it: Wine's conformance tests (`dlls/winmm/tests/mcicda.c`), which run on
+/// Windows 9x too, record `open cdaudio` succeeding with a data-only disc in
+/// the drive and with none, and failing only with no drive or one already
+/// taken (#149).
+fn open_cdaudio(ctx: &mut Ctx<'_>) -> Result<(), u32> {
+    let red_book = ctx
+        .title
+        .red_book
+        .map(|pressing| crate::disc::open_red_book(ctx.title.image.disc_dir, pressing));
+    match red_book {
+        None => {}
+        Some(Err(crate::disc::DiscError::Missing(_))) => return Err(MCIERR_DEVICE_NOT_READY),
+        Some(Err(_)) => return Err(MCIERR_HARDWARE),
+        Some(Ok(disc)) => ctx.state.cd.disc = Some(disc),
+    }
+    ctx.state.cd.open = true;
+    Ok(())
+}
+
 fn mci_send_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // mciSendStringA(command, answer, answer length, window). The commands a
     // title of this era plays its Red Book audio with: open the drive, count
@@ -65,24 +94,7 @@ fn mci_send_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let millis = ctx.clock_millis;
     let nanos = millis * 1_000_000;
     let answer = match words[..] {
-        ["open", "cdaudio"] => {
-            let red_book = ctx
-                .title
-                .red_book
-                .map(|pressing| crate::disc::open_red_book(ctx.title.image.disc_dir, pressing));
-            match red_book {
-                // A drive with no disc of audio in it is not ready; one whose
-                // rip cannot be read has a problem.
-                None | Some(Err(crate::disc::DiscError::Missing(_))) => {
-                    Err(MCIERR_DEVICE_NOT_READY)
-                }
-                Some(Err(_)) => Err(MCIERR_HARDWARE),
-                Some(Ok(disc)) => {
-                    ctx.state.cd.disc = Some(disc);
-                    Ok(String::new())
-                }
-            }
-        }
+        ["open", "cdaudio"] => open_cdaudio(ctx).map(|()| String::new()),
         // Tracks, minutes, seconds and frames: a position is a track.
         ["set", "cdaudio", "time", "format", "tmsf"] => {
             ctx.state.cd.tracks = true;
@@ -167,7 +179,7 @@ fn mci_send_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn mci_error_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // mciGetErrorStringA(error, buffer, length): what an error code says, in
     // the words Windows uses for it. A title asks when a command failed, as
-    // `open cdaudio` does with no Red Book pressing to play from.
+    // `open cdaudio` does when its Red Book pressing's rip is missing.
     let text = match args[0] {
         MCIERR_HARDWARE => "There is a problem with your media device.",
         MCIERR_DEVICE_NOT_READY => "The device is not ready.",
@@ -177,6 +189,111 @@ fn mci_error_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.write_string(args[1], args[2], text)
         .map_err(Stop::Fault)?;
     Ok(1)
+}
+
+/// The device id the `cdaudio` device answers to once it is open: the first
+/// MCI hands out, and the machine has no other device.
+const CD_DEVICE: u32 = 1;
+
+/// mciSendCommandA(device, message, flags, parameters): the numeric face of
+/// MCI, on the same `cdaudio` device as the string face. LEGO Chess's
+/// framework opens it by its type's number (0x0044EBEB), counts in tracks,
+/// minutes, seconds and frames, and stops and closes it as it leaves
+/// (0x0044ECF0): those are answered as the string face answers them. Its
+/// other CD routines (0x0044EEB0–0x0044F6F0) are never called, so a status,
+/// a play or anything else, a device other than the first of its type, or a
+/// notification asked for, is a wall that names it (#149).
+fn mci_send_command(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const MCI_OPEN: u32 = 0x0803;
+    const MCI_CLOSE: u32 = 0x0804;
+    const MCI_STOP: u32 = 0x0808;
+    const MCI_SET: u32 = 0x080d;
+    const MCI_NOTIFY: u32 = 0x0001;
+    const MCI_WAIT: u32 = 0x0002;
+    const MCI_OPEN_SHAREABLE: u32 = 0x0100;
+    const MCI_OPEN_TYPE_ID: u32 = 0x1000;
+    const MCI_OPEN_TYPE: u32 = 0x2000;
+    const MCI_SET_TIME_FORMAT: u32 = 0x0400;
+    const MCI_DEVTYPE_CD_AUDIO: u32 = 0x0204;
+    const MCI_FORMAT_TMSF: u32 = 10;
+    let (device, message, flags, parameters) = (args[0], args[1], args[2], args[3]);
+    let read = |o: u32| ctx.mem.read_u32(parameters + o).map_err(Stop::Fault);
+    let open = ctx.state.cd.open && device == CD_DEVICE;
+    let answer = match message {
+        // MCI_OPEN_PARMS: the callback, the device id answered, then the
+        // type, its low word the type and its high word which of its devices.
+        MCI_OPEN
+            if flags & !(MCI_WAIT | MCI_OPEN_SHAREABLE) == MCI_OPEN_TYPE | MCI_OPEN_TYPE_ID
+                && parameters != 0
+                && read(8)? == MCI_DEVTYPE_CD_AUDIO =>
+        {
+            match open_cdaudio(ctx) {
+                Ok(()) => {
+                    ctx.mem
+                        .write_u32(parameters + 4, CD_DEVICE)
+                        .map_err(Stop::Fault)?;
+                    0
+                }
+                Err(code) => code,
+            }
+        }
+        // MCI_SET_PARMS: the callback, then the time format.
+        MCI_SET
+            if open
+                && flags & !MCI_WAIT == MCI_SET_TIME_FORMAT
+                && parameters != 0
+                && read(4)? == MCI_FORMAT_TMSF =>
+        {
+            ctx.state.cd.tracks = true;
+            0
+        }
+        MCI_STOP | MCI_CLOSE if open && flags & MCI_NOTIFY == 0 => {
+            ctx.state.cd.playing = None;
+            ctx.state.mixer.stop(CD_VOICE, ctx.clock_millis * 1_000_000);
+            if message == MCI_CLOSE {
+                ctx.state.cd = CdAudio::default();
+            }
+            0
+        }
+        _ => {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "WINMM.dll!mciSendCommandA: message {message:#06x} to device {device}, \
+                     flags {flags:#x}"
+                ),
+                caller: 0,
+            })
+        }
+    };
+    // As the string face does: what a person asks first when what is heard
+    // is wrong.
+    ctx.log.line(&format!(
+        "mci command {message:#06x} to device {device}, flags {flags:#x}, answered {answer}"
+    ));
+    Ok(answer)
+}
+
+/// midiStreamOpen(stream, device, count, callback, instance, flags): the
+/// declared machine has no MIDI port, until #154 gives it one and whenever
+/// the player has no bank after that (ADR-0008), so no device is in range,
+/// the mapper included: `MMSYSERR_BADDEVICEID`, which `midiStreamOpen`'s own
+/// page lists, and which Wine's conformance tests (`dlls/winmm/tests/midi.c`,
+/// `test_midi_outfns`) record every Windows they ran on answering for the
+/// mapper with no port. A stream of other than one device, or with nowhere to
+/// say which, is refused as invalid, as the same page lists. None is handed
+/// back: LEGO Chess takes any refusal as no music (0x0041360C), and its tune
+/// player opens it again while it has none (0x00413B6D).
+fn midi_stream_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const MMSYSERR_BADDEVICEID: u32 = 2;
+    const MMSYSERR_INVALPARAM: u32 = 11;
+    let (stream, device, count) = (args[0], args[1], args[2]);
+    let answer = if stream == 0 || device == 0 || count != 1 {
+        MMSYSERR_INVALPARAM
+    } else {
+        MMSYSERR_BADDEVICEID
+    };
+    ctx.log.line(&format!("midi stream open answered {answer}"));
+    Ok(answer)
 }
 
 fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
