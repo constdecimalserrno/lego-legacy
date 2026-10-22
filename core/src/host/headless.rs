@@ -135,6 +135,9 @@ impl Host for Headless {
     }
 
     fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+        // Asked between flips, with the flip before (#215), it has nothing to
+        // hand over: that flip's events went at the flip, and a later flip's
+        // wait for theirs.
         let take = self.pending.partition_point(|(f, _)| *f <= flip);
         self.pending.drain(..take).map(|(_, e)| e).collect()
     }

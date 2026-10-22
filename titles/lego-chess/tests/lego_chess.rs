@@ -697,6 +697,92 @@ fn the_intro_route_replays_to_the_same_machine_every_time() {
     }
 }
 
+/// Krisalis' logo's fifth frame, where the skip route presses Space, and the
+/// intro's tenth frame after the skip, where it ends (#215).
+const KRISALIS_FIFTH: u64 = 290;
+const SKIPPED_TO_THE_TENTH: u64 = 305;
+
+/// Enough instructions for the logo to play through, Krisalis' logo to be
+/// skipped, and the intro to reach its frame 10, flip 305 at 2,971,328,901,
+/// and no more.
+const SKIP_BUDGET: u64 = 2_975_000_000;
+
+/// The committed route that skips Krisalis' logo with Space, replayed, keeping
+/// the intro's tenth frame and writing it as a picture in its run directory.
+/// Two slots, so the determinism gate's two runs can go side by side.
+fn skipped(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    let kept = [SKIPPED_TO_THE_TENTH];
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/skip-krisalis.route"),
+        ),
+        screenshots: Screenshots {
+            at: kept.to_vec(),
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(slot, scratch, &CHESS, &cli, &kept, SKIP_BUDGET)
+}
+
+static SKIPPED: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// Space skips a movie the game lets be skipped, and let go between flips it
+/// gets the game past the wait after the movie (#215). Pressed at Krisalis'
+/// logo's fifth frame, it ends the movie and its two-second hold; let go at
+/// the 300th poll after that flip, inside the wait at 0x0040D220, which
+/// presents nothing, it lets the game go on, and the intro opens after flip
+/// 294, where with Krisalis' logo played through it opened after flip 327.
+#[test]
+fn space_skips_krisalis_logo_and_let_go_between_flips_gets_past_the_wait() {
+    let Some(ran) = skipped(&SKIPPED) else { return };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing after the skip stops the run\nlog:\n{}",
+        ran.log
+    );
+    ran.assert_logged(&format!(
+        "input flip {KRISALIS_FIFTH} Key {{ code: 57, down: true }}"
+    ))
+    .assert_logged(&format!(
+        "input flip {KRISALIS_FIFTH} poll 300 Key {{ code: 57, down: false }}"
+    ))
+    .assert_logged("flip 305 cursor 2971328901 640x480x16");
+    // The two clears follow at once: the hold was over as Space was seen.
+    ran.assert_logged("flip 291 cursor 2706376505 640x480x16");
+    assert_eq!(ran.flip_before("movie D:\\intro\\intro.avi opened"), 294);
+    let tenth = ran.host.frame(SKIPPED_TO_THE_TENTH).expect("kept");
+    assert!(!tenth.is_uniform(), "the intro plays");
+    let shot = ran
+        .dir
+        .join(format!("shots/{SKIPPED_TO_THE_TENTH:010}.png"));
+    assert!(shot.is_file(), "{} is written", shot.display());
+}
+
+#[test]
+fn the_skip_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| skipped(&AGAIN));
+        (
+            skipped(&SKIPPED),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    assert_eq!(
+        first.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels),
+        second.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels),
+        "including what it presented at flip {SKIPPED_TO_THE_TENTH}"
+    );
+}
+
 // The machine has the floppy drive its CD check needs: the check at 0x405420
 // looks at no drive without A: (#145). Core's shim tests run its calls on a
 // machine with one and find D:.

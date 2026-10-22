@@ -2,7 +2,8 @@
 //!
 //! The declared machine has one window, because every title on the roster has
 //! one. What a person does reaches it through the host, is delivered at the
-//! flip boundary, and is read back by the guest as messages.
+//! flip boundary or at one of the title's own input polls between flips
+//! (#215), and is read back by the guest as messages.
 
 use super::{cdecl, stdcall, Ctx, Object, Shim};
 use crate::cpu::Stop;
@@ -919,8 +920,8 @@ fn take_message(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool,
 
 fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // PeekMessageA(msg, window, first, last, remove). What a person did is
-    // posted at the flip boundary; a title that finds nothing here gets on
-    // with drawing.
+    // posted at the flip boundary, or before a poll like this one between
+    // flips (#215); a title that finds nothing here gets on with drawing.
     const PM_REMOVE: u32 = 0x0001;
     let remove = args[4] & PM_REMOVE != 0;
     Ok(u32::from(take_next(ctx, args, remove)?))
@@ -1313,10 +1314,11 @@ pub fn set_pointer_back(state: &mut super::State, (x, y): (i32, i32)) {
 }
 
 fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // Waiting for a message would wait forever: this machine delivers input at
-    // a flip, and a title that is inside a call is not flipping. It comes back
-    // at once and the title looks at its queue, which is what it would have
-    // done anyway.
+    // Waiting here could wait for ever: a title inside a call is not
+    // flipping, and between flips what a person did comes only before an
+    // input poll, which this call is, once a frame has stood a tenth of a
+    // second (#215). It comes back at once and the title looks at its queue,
+    // which is what it would have done anyway.
     Ok(1)
 }
 

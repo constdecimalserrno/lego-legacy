@@ -137,15 +137,23 @@ One execution of a title, live or replayed, with its own run directory holding i
 _Avoid_: session, launch, play
 
 **Flip**:
-One presentation of a frame by the guest. The unit a route is keyed to.
+One presentation of a frame by the guest. The unit a route is keyed to, with a poll for an event
+that falls between two.
 _Avoid_: frame as a count, vsync, tick
+
+**Poll**:
+A guest call that reads the keyboard, the mouse or the message queue, such as `PeekMessageA` or
+DirectInput's `GetDeviceState`. Counted from the flip before it, it is where an event between flips
+reaches the guest (ADR-0003).
+_Avoid_: tick, sample, read
 
 **Cursor**:
 The count of instructions the machine has retired; names one moment in a run.
 _Avoid_: timestamp, tick, PC
 
 **Route**:
-An input script, authored or recorded, that drives a title from boot to a named state.
+An input script, authored or recorded, that drives a title from boot to a named state. Each event
+is keyed to a flip, or to a poll after one.
 _Avoid_: test script, macro, TAS as a noun, session log
 
 **Snapshot**:

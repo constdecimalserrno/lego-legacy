@@ -139,3 +139,18 @@ in the bumper, at `IDirect3D2::CreateMaterial`, called from 0x400027A9 at cursor
 spare: its frames take 9.2 million instructions each, 15.1 frames a second at 139 million a second,
 against its 15. The intro did not: its frames take 10.1 million each, 13.7 frames a second at 138
 million a second, 0.91 of real time. The MacBook is not measured.
+
+Space skips its movies (#215, core 1.2.0). The game ends a movie it lets be skipped, Krisalis' logo,
+the intro and the story movies, when Space is down at its check after a frame's flip (0x0044B47C),
+and then waits for Space and the left button to come up (0x0040D220), presenting nothing, where it
+waited for ever, since a key came up only at a flip. The wait reads its pump, its keyboard and its
+mouse each turn, and core now delivers what a person does at a title's own polls between flips, so
+Space let go there is seen. `routes/skip-krisalis.route` plays the logo through, presses Space at
+Krisalis' logo's fifth frame, flip 290, and lets it go at the 300th poll after it, in the wait's
+98th turn: Krisalis' two-second hold is over at once, the game goes on, and the intro opens after
+flip 294, where with Krisalis' logo played through it opened after flip 327. Its frame 10, flip
+305, is byte for byte the frame `intro.route` presents at flip 338. The route ends there, at 2,975
+million instructions, with its determinism gate. At a window, Space should skip a movie without
+hanging the game once it is let go and the frame has stood a tenth of a second, which a person has
+yet to try on the MacBook. By their code, its 16 waits for an arrow key to come up (0x457200) read
+the keyboard the same way, so a key let go between flips reaches them too.

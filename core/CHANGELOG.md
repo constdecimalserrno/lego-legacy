@@ -5,6 +5,28 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+What a person does reaches a title between flips too, at its own input polls (#215), where it
+reached it only at a flip. A poll is a call that reads the keyboard, the mouse or the message queue,
+and every reader core has written is one: `PeekMessageA`, `GetMessageA`, `WaitMessage`,
+`GetCursorPos`, `GetAsyncKeyState`, and DirectInput's `GetDeviceState` and `GetDeviceData`, on every
+thread and whatever they filter, each counted from the flip before it. A route keys an event between
+flips as `flip N poll K`, delivered as the guest makes its Kth poll after flip N, before the poll
+answers, or at the first point after it if the guest makes fewer. An event with no `poll` is the
+flip's own, as every route's are, so every route reads as it did, and an older build refuses a
+`poll` line by its number. A run at a window asks the host at every flip, as before, and between
+flips at the first poll once the frame has stood a tenth of a declared second since the flip or
+since the host was last asked (`ASK_BETWEEN_FLIPS_MILLIS`), and records what it heard at that poll;
+a run replaying a route drains the host there and drops what it has, as at a flip. A tenth of a
+second because no released title's ordinary frame stands that long, so at a window only their
+loads, boot and finish take a person's input between flips; the maintainer may yet choose once a
+refresh, which would also need the steered pointer's put-back kept across an ask. The headless
+host has nothing to hand over between flips, its events for a flip going at the flip, and the
+polls are counted outside the digest, so no committed route moves: the full gate's lines for the
+released titles are the last full gate's. `route undelivered` counts the events after the last
+flip or poll a run reached, so a run that presents nothing counts its first flip's too. LEGO Chess,
+which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
+gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
+
 `AVIStreamGetFrameClose` lets a frame getter go, its DIB and its hold on its stream with it,
 answering the references it has left, as Wine's `api.c` releases it, a getter holding its stream
 from its open as Wine's `getframe.c` holds it; `AVIStreamRelease` counts a stream's reference out,

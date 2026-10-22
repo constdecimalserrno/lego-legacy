@@ -89,6 +89,10 @@ two moved routes still reach the states they are named for, the first mission pl
 Adventure open, which is why ADR-0007 makes this a patch. A move the maintainer blessed on
 2026-10-22. A person should play it on the MacBook before its next release.
 
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
+tenth of a second or more, as its loads do, reaches it at the frame's next input poll rather than at
+its flip. No route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

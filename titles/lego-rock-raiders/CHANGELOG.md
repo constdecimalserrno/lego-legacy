@@ -96,6 +96,10 @@ run that makes its window ends in another state at the same instruction, flip an
 millisecond; core's changelog lists the digests. A move the maintainer blessed on 2026-10-22. A
 person should play it on the MacBook before its next release.
 
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
+tenth of a second or more, as its loads do, reaches it at the frame's next input poll rather than at
+its flip. It polls at a frame's end, just before the flip. No route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

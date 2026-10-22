@@ -1,9 +1,12 @@
 //! Routes: what a person did, written down.
 //!
-//! One line per event, keyed to the flip it belongs to, in a format a person
-//! can write by hand and the recorder can produce. A route is the only
-//! recorded input a run has (ADR-0003): the clock is not recorded, because it
-//! follows from the instructions retired.
+//! One line per event, keyed to the flip it follows and, for an event between
+//! flips, to the count of the guest's own input polls since that flip (#215),
+//! in a format a person can write by hand and the recorder can produce. A
+//! route is the only recorded input a run has (ADR-0003): the clock is not
+//! recorded, because it follows from the instructions retired, and neither is
+//! when the host was asked, because the polls are counted on the declared
+//! machine.
 
 use crate::host::{Button, Input};
 use std::fmt;
@@ -145,6 +148,16 @@ fn named(button: Button) -> &'static str {
 /// this machine's pointer has.
 const BUTTON: &str = "`down` and `up` end with `left`, `right`, or nothing";
 
+/// How a route, and a run's log, name where an event is delivered: `flip N`,
+/// and `flip N poll K` between flips (#215).
+#[must_use]
+pub fn point((flip, poll): (u64, u64)) -> String {
+    match poll {
+        0 => format!("flip {flip}"),
+        poll => format!("flip {flip} poll {poll}"),
+    }
+}
+
 /// The name a route writes a key under.
 #[must_use]
 pub fn key_name(code: u32) -> Option<&'static str> {
@@ -169,9 +182,13 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Everything a person did, in the order they did it.
+///
+/// Each event is keyed to where a run delivers it, as `(flip, poll)`: the flip
+/// it follows, and the count of the guest's input polls since that flip, zero
+/// being the flip itself (#215).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Route {
-    events: Vec<(u64, Input)>,
+    events: Vec<((u64, u64), Input)>,
 }
 
 impl Route {
@@ -180,10 +197,10 @@ impl Route {
         Self::default()
     }
 
-    /// Add one event, keeping the route in flip order.
-    pub fn push(&mut self, flip: u64, event: Input) {
-        self.events.push((flip, event));
-        self.events.sort_by_key(|(f, _)| *f);
+    /// Add one event, keeping the route in (flip, poll) order.
+    pub fn push(&mut self, at: (u64, u64), event: Input) {
+        self.events.push((at, event));
+        self.events.sort_by_key(|(at, _)| *at);
     }
 
     #[must_use]
@@ -196,24 +213,26 @@ impl Route {
         self.events.is_empty()
     }
 
-    /// Everything that belongs to one flip, in the order it was written.
+    /// Everything that belongs to one flip, at it and at the polls after it,
+    /// in the order it was written.
     #[must_use]
     pub fn at(&self, flip: u64) -> Vec<Input> {
         self.events
             .iter()
-            .filter(|(f, _)| *f == flip)
+            .filter(|((f, _), _)| *f == flip)
             .map(|(_, e)| *e)
             .collect()
     }
 
-    /// Events naming a flip the run never reached.
+    /// The events from the `from`th on that are due by a point: each one keyed
+    /// at or before it, in order. So an event keyed to a poll the guest never
+    /// made is delivered at the first point after it, the next flip at the
+    /// latest (#215). Only as far as the first event not yet due is looked at:
+    /// a title can poll eighty thousand times a frame.
     #[must_use]
-    pub fn after(&self, flip: u64) -> Vec<(u64, Input)> {
-        self.events
-            .iter()
-            .filter(|(f, _)| *f > flip)
-            .copied()
-            .collect()
+    pub fn due(&self, from: usize, at: (u64, u64)) -> &[((u64, u64), Input)] {
+        let rest = self.events.get(from..).unwrap_or_default();
+        &rest[..rest.iter().take_while(|(due, _)| *due <= at).count()]
     }
 
     /// Read a route from its file.
@@ -253,7 +272,21 @@ impl Route {
                 .ok_or_else(|| fail("`flip` needs a number"))?
                 .parse()
                 .map_err(|_| fail("a flip is a whole number"))?;
-            let verb = words.next().ok_or_else(|| fail("an event needs a verb"))?;
+            let mut verb = words.next().ok_or_else(|| fail("an event needs a verb"))?;
+            // Between flips, at the guest's own input polls since the flip,
+            // counted from one: the flip itself is poll zero, and is written
+            // without one (#215).
+            let mut poll = 0;
+            if verb == "poll" {
+                poll = words
+                    .next()
+                    .ok_or_else(|| fail("`poll` needs a number"))?
+                    .parse()
+                    .ok()
+                    .filter(|k| *k > 0)
+                    .ok_or_else(|| fail("a poll is a whole number, counted from one"))?;
+                verb = words.next().ok_or_else(|| fail("an event needs a verb"))?;
+            }
             let event = match verb {
                 "move" => {
                     let x = words
@@ -292,9 +325,9 @@ impl Route {
             if words.next().is_some() {
                 return Err(fail("an event ends where its own words end"));
             }
-            route.events.push((flip, event));
+            route.events.push(((flip, poll), event));
         }
-        route.events.sort_by_key(|(f, _)| *f);
+        route.events.sort_by_key(|(at, _)| *at);
         Ok(route)
     }
 
@@ -303,19 +336,17 @@ impl Route {
     pub fn to_text(&self) -> String {
         let mut out = String::from(MAGIC);
         out.push('\n');
-        for (flip, event) in &self.events {
+        for (at, event) in &self.events {
+            let at = point(*at);
             let line = match event {
-                Input::Move { x, y } => format!("flip {flip} move {x} {y}"),
-                Input::Down(b) => format!("flip {flip} down{}", named(*b)),
-                Input::Up(b) => format!("flip {flip} up{}", named(*b)),
+                Input::Move { x, y } => format!("{at} move {x} {y}"),
+                Input::Down(b) => format!("{at} down{}", named(*b)),
+                Input::Up(b) => format!("{at} up{}", named(*b)),
                 Input::Key { code, down } => {
                     let key = key_name(*code).map_or_else(|| code.to_string(), str::to_owned);
-                    format!(
-                        "flip {flip} key {key} {}",
-                        if *down { "down" } else { "up" }
-                    )
+                    format!("{at} key {key} {}", if *down { "down" } else { "up" })
                 }
-                Input::Close => format!("flip {flip} close"),
+                Input::Close => format!("{at} close"),
             };
             out.push_str(&line);
             out.push('\n');
@@ -332,24 +363,24 @@ mod tests {
     #[test]
     fn a_route_survives_being_written_and_read_back() {
         let mut route = Route::new();
-        route.push(0, Input::Down(Button::Left));
-        route.push(9000, Input::Move { x: 320, y: 213 });
+        route.push((0, 0), Input::Down(Button::Left));
+        route.push((9000, 0), Input::Move { x: 320, y: 213 });
         route.push(
-            9012,
+            (9012, 0),
             Input::Key {
                 code: 0x01,
                 down: true,
             },
         );
         route.push(
-            9012,
+            (9012, 0),
             Input::Key {
                 code: 0xff,
                 down: false,
             },
         );
-        route.push(9013, Input::Up(Button::Left));
-        route.push(9014, Input::Close);
+        route.push((9013, 0), Input::Up(Button::Left));
+        route.push((9014, 0), Input::Close);
 
         let text = route.to_text();
         assert_eq!(
@@ -416,6 +447,17 @@ mod tests {
                 "an event ends where its own words end",
             ),
             ("press 3 up\n", "an event starts with `flip`"),
+            ("flip 3 poll\n", "`poll` needs a number"),
+            (
+                "flip 3 poll up\n",
+                "a poll is a whole number, counted from one",
+            ),
+            (
+                "flip 3 poll 0 up\n",
+                "a poll is a whole number, counted from one",
+            ),
+            ("flip 3 poll 2\n", "an event needs a verb"),
+            ("flip 3 poll 2 poll 4 up\n", "no such event"),
         ] {
             let err = Route::parse(text).expect_err("this line is not an event");
             assert_eq!(
@@ -457,9 +499,62 @@ mod tests {
         );
         assert_eq!(route.at(2), []);
         assert_eq!(
-            route.after(1).len(),
-            2,
-            "what a run stopping at flip 1 never delivered"
+            route.due(0, (1, 0)).len(),
+            1,
+            "what a run has delivered by flip 1"
         );
+        assert_eq!(route.due(1, (5, 0)).len(), 2, "and by flip 5");
+    }
+
+    /// Between flips an event is keyed to the guest's own input polls since
+    /// the flip, counted from one (#215). A route that has none reads as it
+    /// always did, and writes back as it was written.
+    #[test]
+    fn an_event_between_flips_names_its_poll_and_reads_back() {
+        let space = |down| Input::Key { code: 0x39, down };
+        let mut route = Route::new();
+        route.push((290, 41), space(false));
+        route.push((290, 0), space(true));
+        route.push((291, 0), Input::Up(Button::Right));
+        route.push((290, 3), Input::Move { x: 1, y: 2 });
+        let text = route.to_text();
+        assert_eq!(
+            text,
+            "#lego-legacy-route 1\n\
+             flip 290 key Space down\n\
+             flip 290 poll 3 move 1 2\n\
+             flip 290 poll 41 key Space up\n\
+             flip 291 up right\n",
+            "in (flip, poll) order, the flip's own first"
+        );
+        assert_eq!(
+            Route::parse(&text).expect("what we wrote reads back"),
+            route
+        );
+        assert_eq!(
+            route.at(290),
+            [space(true), Input::Move { x: 1, y: 2 }, space(false)],
+            "a flip's events, at it and after it"
+        );
+    }
+
+    /// An event is delivered at the first point at or after the one it
+    /// names: a poll the guest never made is the next flip's (#215).
+    #[test]
+    fn an_event_is_due_at_the_first_point_at_or_after_its_own() {
+        let route = Route::parse("flip 0 poll 5 down\nflip 1 up\nflip 1 poll 2 down\n")
+            .expect("this reads");
+        assert_eq!(route.due(0, (0, 4)), []);
+        assert_eq!(
+            route.due(0, (1, 0)),
+            [
+                ((0, 5), Input::Down(Button::Left)),
+                ((1, 0), Input::Up(Button::Left))
+            ],
+            "the fifth poll never came, so the flip after it has it"
+        );
+        assert_eq!(route.due(2, (1, 1)), []);
+        assert_eq!(route.due(2, (1, 9)).len(), 1);
+        assert_eq!(route.due(3, (9, 9)), [], "nothing is left");
     }
 }

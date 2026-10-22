@@ -183,8 +183,8 @@ pub(crate) fn wrap_up(
             title.key, finish.cursor, finish.flips
         );
         let mut route = crate::route::Route::new();
-        for (flip, event) in &machine.input {
-            route.push(*flip, *event);
+        for (at, event) in &machine.input {
+            route.push(*at, *event);
         }
         report.push('\n');
         report.push_str(&route.to_text());
@@ -199,18 +199,15 @@ pub(crate) fn wrap_up(
         }
     }
 
-    // What the route asked for after the run's last flip was never delivered,
-    // and saying so is the difference between a route that ended and one that
-    // was cut short.
-    if let Some(route) = &machine.route {
-        let undelivered = route.after(finish.flips.saturating_sub(1));
-        if !undelivered.is_empty() {
-            log.line(&format!(
-                "route undelivered {} events after flip {}",
-                undelivered.len(),
-                finish.flips
-            ));
-        }
+    // What the route asked for after the last flip or poll the run reached
+    // was never delivered, and saying so is the difference between a route
+    // that ended and one that was cut short.
+    let undelivered = machine.undelivered();
+    if undelivered > 0 {
+        log.line(&format!(
+            "route undelivered {undelivered} events after flip {}",
+            finish.flips
+        ));
     }
     if let Some(recording) = &machine.recording {
         let path = log.dir().join("route");

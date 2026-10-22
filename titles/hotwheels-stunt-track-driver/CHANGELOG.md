@@ -88,6 +88,10 @@ the digests. Its procedure hands both to `DefWindowProcA`, and its first pump ru
 and 100, so the flips before it are unchanged. A move the maintainer blessed on 2026-10-22. A person
 should drive the first race again on the MacBook before its next release.
 
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
+tenth of a second or more, as its boot and the race's finish do, reaches it at the frame's next input
+poll rather than at its flip. No route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

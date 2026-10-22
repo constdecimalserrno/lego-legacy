@@ -11,11 +11,11 @@
 # 640x400 at y 40, plays its frames from flip 328 with its sound, and the
 # route ends a dozen of them in, at 3.7 billion instructions.
 #
-# It ends there for two reasons. Every gate replays a committed route twice,
-# and the lead holds this title's routes to about four billion instructions a
-# run for that, where the intro played whole is 8.6 billion. And the intro is
-# not skipped: the game's own skip is Space, and after a movie it waits for
-# Space to come up again (0x0040D220) in a loop that presents no frame, while
-# a key comes up only at a flip, a route's or a person's; skipped, it would
-# wait there for ever. Once #215 delivers what a person does between flips, a
-# route can skip it with Space.
+# It ends there because every gate replays a committed route twice, and the
+# lead holds this title's routes to about four billion instructions a run for
+# that, where the intro played whole is 8.6 billion. It does not skip the
+# intro: the game's own skip is Space, after which it waits for Space to come
+# up again (0x0040D220) in a loop that presents no frame, and until #215 a key
+# came up only at a flip, so skipped, it waited there for ever. Now a key comes
+# up at the game's own polls between flips too, and skip-krisalis.route skips
+# with Space.

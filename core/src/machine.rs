@@ -65,6 +65,22 @@ impl fmt::Display for Outcome {
 /// on the same instruction every time it is replayed.
 pub const CLOSE_GRACE_MILLIS: u64 = 5_000;
 
+/// How long a frame stands, in declared milliseconds, before the host is
+/// asked at the title's next input poll for what a person did, and again
+/// each time as long again goes by before the next flip (#215, ADR-0003).
+///
+/// A tenth of a second, so that a title waiting on a key without flipping,
+/// as LEGO Chess waits after a movie it skipped, hears a person within it,
+/// while no released title's ordinary frame stands that long: LEGO Island's
+/// longest is 47 ms, and the 99th percentile is Hot Wheels' 53, Rock Raiders'
+/// 23 and Alpha Team's 13.5. So at a window their play takes a person's input
+/// between flips only in their loads, boot and finish. Once a refresh would
+/// be closer to Windows, but would ask the host in most of Hot Wheels'
+/// frames, and each ask starts again the put-back its steered pointer is
+/// measured by (`Steer::drained`). It moves only where a person's input
+/// lands, never what a route replays.
+pub const ASK_BETWEEN_FLIPS_MILLIS: u64 = 100;
+
 /// A run that has ended, and what it spent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finish {
@@ -102,8 +118,9 @@ pub struct Machine {
     pub tree: crate::install::Tree,
     /// The title this machine was built for.
     title: &'static Title,
-    /// Everything delivered to the guest, in order.
-    pub input: Vec<(u64, crate::host::Input)>,
+    /// Everything delivered to the guest, in order, each at its flip and
+    /// poll (#215).
+    pub input: Vec<((u64, u64), crate::host::Input)>,
     /// Where a guest frame is turned into something the host can show.
     present_buffer: Vec<u8>,
     /// How many times the title put the pointer, and how many of those the
@@ -130,9 +147,10 @@ pub struct Machine {
     /// Which parked calls answer for themselves, by their depth (#60).
     pass_through: Vec<usize>,
     /// What each boundary slot was found to stand for the first time it was
-    /// called, by the slot: looking a shim or a method up by its name on every
-    /// call is most of what a call costs.
-    bound: Vec<Option<Bound>>,
+    /// called, by the slot, and whether it is an input poll (#215): looking a
+    /// shim or a method up by its name on every call is most of what a call
+    /// costs.
+    bound: Vec<Option<(Bound, bool)>>,
     /// Which parked calls are a render pass's turns, by their depth, with
     /// where the stack stood before the pass's first call: the title's
     /// callbacks leave their arguments for the caller to take.
@@ -153,6 +171,14 @@ pub struct Machine {
     /// The declared millisecond the run stops at as the person stopping it,
     /// once a close has been delivered (#140).
     close_by: Option<u64>,
+    /// How many input polls the guest has made since the last flip (#215).
+    polls: u64,
+    /// The declared cycle from which the host is asked again at a poll: the
+    /// frame has stood [`ASK_BETWEEN_FLIPS_MILLIS`] since the flip, or since
+    /// the host was last asked (#215).
+    ask_at: u64,
+    /// How many of the route's events have been delivered (#215).
+    delivered: usize,
 }
 
 /// Where the machine is in the one schedule every run keeps (#131).
@@ -212,6 +238,9 @@ impl Machine {
             next_snapshot: None,
             turn: Turn::Top,
             close_by: None,
+            polls: 0,
+            ask_at: 0,
+            delivered: 0,
         })
     }
 
@@ -308,31 +337,102 @@ impl Machine {
     }
 
     /// Hand the guest what a person did while the frame was on screen, at the
-    /// flip boundary (#10).
+    /// flip boundary (#10), and count the next frame's polls from here (#215).
+    fn deliver_input(&mut self, host: &mut dyn Host, log: &mut RunLog) {
+        let at = (self.flips, 0);
+        let events = self.input_at(at, true, host);
+        self.deliver(at, events, log);
+        self.polls = 0;
+        self.ask_again();
+    }
+
+    /// The guest is making an input poll: a call that reads the keyboard, the
+    /// mouse or the message queue, about to answer (#215, ADR-0003). It is
+    /// counted from the flip before it, and what is due by it is delivered
+    /// first: the route's events, and what the host has once the frame has
+    /// stood [`ASK_BETWEEN_FLIPS_MILLIS`] since the flip or since the host was
+    /// last asked.
+    // ponytail: from the first flip on. A poll before it is neither counted
+    // nor handed anything, so a title that waited on a key before its first
+    // frame would wait for ever; none on the roster does.
+    fn poll(&mut self, host: &mut dyn Host, log: &mut RunLog) {
+        let Some(flip) = self.flips.checked_sub(1) else {
+            return;
+        };
+        self.polls += 1;
+        let at = (flip, self.polls);
+        let ask = self.clock.cycles() >= self.ask_at;
+        // Most polls have nothing due and nothing to ask: Hot Wheels makes
+        // eighty thousand a frame.
+        if !ask
+            && self
+                .route
+                .as_ref()
+                .is_none_or(|route| route.due(self.delivered, at).is_empty())
+        {
+            return;
+        }
+        if ask {
+            self.ask_again();
+        }
+        let events = self.input_at(at, ask, host);
+        self.deliver(at, events, log);
+    }
+
+    /// The host is next asked between flips once the frame has stood
+    /// [`ASK_BETWEEN_FLIPS_MILLIS`] from now (#215).
+    // ponytail: asked by declared time, and not paced in between: the wall
+    // clock is caught up with at the next flip, as `Pace::hold` adds up, and
+    // a frame that stands without polling still pumps no window. Upgrade
+    // path: hold the pace when the host is asked here too.
+    fn ask_again(&mut self) {
+        self.ask_at = self.clock.cycles() + ASK_BETWEEN_FLIPS_MILLIS * self.clock.hz() / 1000;
+    }
+
+    /// What reaches the guest at a flip or a poll, with the host asked or not.
     ///
     /// A replaying run takes its input from the route rather than from the
     /// person, and the person's own input is not mixed in: a route replays
-    /// what it says and nothing else.
-    fn deliver_input(&mut self, host: &mut dyn Host, log: &mut RunLog) {
+    /// what it says and nothing else. A route that has run out hands the
+    /// machine to the person: what it was for was getting here, and from here
+    /// on the mouse and the keyboard are theirs. Headless, the host has
+    /// nothing to say and the run reads as it always did (#86).
+    fn input_at(
+        &mut self,
+        at: (u64, u64),
+        ask: bool,
+        host: &mut dyn Host,
+    ) -> Vec<crate::host::Input> {
+        let heard = if ask {
+            host.poll_input(at.0)
+        } else {
+            Vec::new()
+        };
         let mut events = match &self.route {
-            // A route that has run out hands the machine to the person: what
-            // it was for was getting here, and from here on the mouse and the
-            // keyboard are theirs. Headless, the host has nothing to say and
-            // the run reads as it always did (#86).
-            Some(route)
-                if !route.at(self.flips).is_empty() || !route.after(self.flips).is_empty() =>
-            {
-                let _ = host.poll_input(self.flips);
-                route.at(self.flips)
+            Some(route) if self.delivered < route.len() => {
+                let due = route.due(self.delivered, at);
+                self.delivered += due.len();
+                due.iter().map(|(_, event)| *event).collect()
             }
-            _ => host.poll_input(self.flips),
+            _ => heard,
         };
         // The person's close is theirs whether or not a route is replaying,
-        // and is delivered once, at the flip, as everything a person does is,
-        // so a route that records it closes where they did (#140).
-        if host.closes() > 0 && self.close_by.is_none() {
+        // and is delivered once, when the host is asked, as everything a
+        // person does is, so a route that records it closes where they did
+        // (#140).
+        if ask && host.closes() > 0 && self.close_by.is_none() {
             events.push(crate::host::Input::Close);
         }
+        events
+    }
+
+    /// Deliver what came at a flip or a poll: logged, recorded there, kept for
+    /// the wall report, and set down where the guest reads it.
+    fn deliver(&mut self, at: (u64, u64), events: Vec<crate::host::Input>, log: &mut RunLog) {
+        if events.is_empty() {
+            return;
+        }
+        let point = crate::route::point(at);
         let millis = u32::try_from(self.clock.millis() & 0xffff_ffff).unwrap_or(0);
         for event in events {
             // A title told it was closed is given its grace to leave; one with
@@ -345,11 +445,11 @@ impl Machine {
                 };
                 self.close_by = Some(self.clock.millis() + grace);
             }
-            log.line(&format!("input flip {} {event:?}", self.flips));
+            log.line(&format!("input {point} {event:?}"));
             if let Some(recording) = &mut self.recording {
-                recording.push(self.flips, event);
+                recording.push(at, event);
             }
-            self.input.push((self.flips, event));
+            self.input.push((at, event));
             crate::win32::user32::deliver(&mut self.state, event, millis);
             // A title that listens for a key to get past its own intro, and
             // not for the mouse, is handed that key when a person clicks
@@ -367,10 +467,7 @@ impl Machine {
                 },
             ) {
                 if self.state.movie_running() {
-                    log.line(&format!(
-                        "input flip {} click as key {code:#04x}",
-                        self.flips
-                    ));
+                    log.line(&format!("input {point} click as key {code:#04x}"));
                     crate::win32::user32::deliver(
                         &mut self.state,
                         crate::host::Input::Key { code, down },
@@ -379,6 +476,14 @@ impl Machine {
                 }
             }
         }
+    }
+
+    /// How many of the route's events the run has not reached.
+    #[must_use]
+    pub fn undelivered(&self) -> usize {
+        self.route
+            .as_ref()
+            .map_or(0, |route| route.len() - self.delivered)
     }
 
     /// Take the machine one instruction or one call further, or say why it
@@ -405,7 +510,7 @@ impl Machine {
         // to 0.10 ms against a 36 ms frame. The crossing is not where a flip's
         // time goes.
         if self.boundary.holds(self.cpu.eip) {
-            return match self.cross(log) {
+            return match self.cross(host, log) {
                 Ok(()) => None,
                 Err(Stop::Exited { code }) => Some(Outcome::Exited { code }),
                 // A thread ending is not the run ending: the machine leaves it
@@ -710,6 +815,31 @@ enum Bound {
     Method(Option<&'static crate::com::Method>),
 }
 
+/// The calls that read what a person did: the keyboard, the mouse or the
+/// message queue. They are a title's input polls, where what a person did
+/// between flips reaches it (#215), and they are every input reader core has
+/// written, on every thread and whatever they filter. A reader written later
+/// joins them; until then a call to one is a wall.
+const POLLS: &[&str] = &[
+    "PeekMessageA",
+    "GetMessageA",
+    "WaitMessage",
+    "GetCursorPos",
+    "GetAsyncKeyState",
+    // `IDirectInputDeviceA`'s, the keyboard's and the mouse's.
+    "GetDeviceState",
+    "GetDeviceData",
+];
+
+/// Whether what a slot stands for is an input poll (#215).
+fn polls(bound: Bound) -> bool {
+    match bound {
+        Bound::Shim(Some(shim)) => POLLS.contains(&shim.name),
+        Bound::Method(Some(method)) => POLLS.contains(&method.name),
+        _ => false,
+    }
+}
+
 /// Where the guest's stack lives, and how much of it there is.
 ///
 /// A declared value: the address is chosen, not measured, and it sits below
@@ -928,11 +1058,11 @@ impl Machine {
     /// The arguments are where the calling convention says they are, the
     /// answer goes back in `eax`, and the stack is left as the real library
     /// would have left it.
-    fn cross(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+    fn cross(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Result<(), Stop> {
         use crate::shim::{Entry, THUNK_BASE, THUNK_STRIDE};
         let addr = self.cpu.eip;
         let index = (addr.wrapping_sub(THUNK_BASE) / THUNK_STRIDE) as usize;
-        let bound = match self.bound.get(index).copied().flatten() {
+        let (bound, poll) = match self.bound.get(index).copied().flatten() {
             Some(bound) => bound,
             None => {
                 let bound = match self.boundary.at(addr) {
@@ -978,6 +1108,7 @@ impl Machine {
                         })
                     }
                 };
+                let bound = (bound, polls(bound));
                 if self.bound.len() <= index {
                     self.bound.resize(index + 1, None);
                 }
@@ -985,6 +1116,10 @@ impl Machine {
                 bound
             }
         };
+        // What a person did since the flip reaches a title as it asks (#215).
+        if poll {
+            self.poll(host, log);
+        }
         let found = match bound {
             Bound::Method(method) => {
                 let Some(Entry::Method { interface, slot }) = self.boundary.at(addr) else {
@@ -1242,9 +1377,10 @@ impl Machine {
     }
 
     /// Put the machine back where a snapshot left it: its processor, declared
-    /// clock, flips and guest memory. The Win32 state and the x87's status
-    /// word and stack top stay as this machine already has them, so only the
-    /// stub, which keeps no Win32 state, resumes whole (`snap`).
+    /// clock, flips and guest memory. The Win32 state, the x87's status word
+    /// and stack top, and how far the route has been delivered (#215) stay as
+    /// this machine already has them, so only the stub, which keeps no Win32
+    /// state and reads no input, resumes whole (`snap`).
     ///
     /// # Errors
     /// When the snapshot came from another build, title or route, or when it

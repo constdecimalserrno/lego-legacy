@@ -107,7 +107,8 @@ pub struct Frame<'a> {
     pub pixels: &'a [u8],
 }
 
-/// One thing a person did, delivered to the guest at a flip boundary.
+/// One thing a person did, delivered to the guest at a flip boundary, or at
+/// one of its own input polls between flips (#215).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     Move {
@@ -263,7 +264,11 @@ pub trait Host {
     /// the guest never learns the window's size.
     fn present(&mut self, frame: &Frame<'_>);
 
-    /// What a person did since the last flip.
+    /// What a person did since the host was last asked: at every flip, and
+    /// between flips at the title's next input poll once a frame has stood
+    /// [`crate::machine::ASK_BETWEEN_FLIPS_MILLIS`] (#215). `flip` is the
+    /// flip it follows. A host with a window pumps it here, which keeps the
+    /// window answering while a title waits on a person without flipping.
     fn poll_input(&mut self, flip: u64) -> Vec<Input>;
 
     /// Take one block of mixed audio. Mixing always runs; whether these
@@ -313,8 +318,9 @@ pub trait Host {
     /// by closing the window, by quitting the application on macOS (#178),
     /// by signing out, shutting down or restarting Windows (#184, at most the
     /// first close), or by what [`listen`] hears. A host with no window has
-    /// only the last. The first close is delivered to the title at the next
-    /// flip, as [`Input::Close`]; a second stops the run (#140).
+    /// only the last. The first close is delivered to the title as
+    /// [`Input::Close`] the next time the host is asked
+    /// ([`Host::poll_input`]); a second stops the run (#140).
     /// Minimizing a window, or hiding its application, is not a close
     /// (#173).
     fn closes(&self) -> u32 {
