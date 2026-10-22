@@ -13,7 +13,44 @@ released title's window procedure now hears two more messages, so every run of a
 makes its window moves, a move the maintainer blessed on 2026-10-22; each title's changelog says how,
 and the runs are listed here:
 
-DIGESTS
+- hotwheels-stunt-track-driver, `first-race.route` (exits): cursor 13,462,673,372 → 13,462,673,233, digest `ca24a96c` → `4fc367fd`;
+- hotwheels-stunt-track-driver, `hot-wheels-escape.route` (exits): cursor 583,424,086 → 583,424,170, digest `1448924f` → `929363be`;
+- hotwheels-stunt-track-driver, a run with no route (held to 100,000): digest `c4eae7cb` → `bf20b397`;
+- hotwheels-stunt-track-driver, a run with no route (held to 2,200,000,000): digest `cb56737b` → `638636af`;
+- lego-alpha-team, `click-the-intro-300.route` (held to 600,000,000): digest `a71a75d7` → `f486059d`;
+- lego-alpha-team, `click-the-intro-600.route` (held to 600,000,000): digest `00c2662d` → `2f818e98`;
+- lego-alpha-team, `first-mission.route` (held to 23,400,000,000): flips 8,054 → 8,053, ms 331,967 → 331,938, digest `1b7d7349` → `dea8cb61`;
+- lego-alpha-team, `menu.route` (held to 5,400,000,000): ms 139,471 → 139,469, digest `f34a24e8` → `ec35babc`;
+- lego-alpha-team, a run with no route (held to 1,100,000,000): digest `1a08e772` → `da79732d`;
+- lego-alpha-team, a run with no route (held to 2,000,000): digest `e37ef1e8` → `e8b61fb0`;
+- lego-alpha-team, a run with no route (held to 600,000,000): digest `198706f8` → `80389ef1`;
+- lego-alpha-team, `select-adventure.route` (held to 14,000,000,000): flips 4,454 → 4,455, ms 214,104 → 214,138, digest `87323b4d` → `9dbb0afd`;
+- lego-island, `first-light.route` (held to 98,000,000): digest `e753e559` → `1295656d`;
+- lego-island, `first-ride.route` (held to 6,350,000,000): digest `e08fb5c1` → `d4014002`;
+- lego-island, `first-save.route` (held to 6,030,000,000): digest `cbc3eae1` → `b299dcd3`;
+- lego-island, `first-save.route` (exits): cursor 13,071,129,606 → 13,071,129,733, digest `cce081c4` → `a8f05879`;
+- lego-island, `information-center.route` (held to 3,965,000,000): digest `93ac795c` → `d74f0616`;
+- lego-island, a run with no route (held to 320,000,000): digest `99ce5f30` → `8d7906a2`;
+- lego-island, a run with no route (held to 4,490,000,000): digest `0851a9b9` → `9b73e5c5`;
+- lego-island, a run with no route (held to 5,571,000): digest `da6e3642` → `a39bb4f2`;
+- lego-island, a run with no route (held to 6,030,000,000): digest `cbc3eae1` → `b299dcd3`;
+- lego-island, a run with no route (held to 6,067,000,000): digest `f108f2f8` → `4fc2975c`;
+- lego-island, a run with no route (held to 6,350,000,000): digest `e08fb5c1` → `d4014002`;
+- lego-island, a run with no route (exits): cursor 10,657,537,575 → 10,657,537,702, digest `3d447ba5` → `d65d776f`;
+- lego-island, a run with no route (exits): cursor 4,998,298,712 → 4,998,298,839, digest `038ebb6b` → `895d407d`;
+- lego-island, `pizza-delivery.route` (exits): cursor 10,657,537,575 → 10,657,537,702, digest `3d447ba5` → `d65d776f`;
+- lego-island, `route` (exits): cursor 4,998,298,712 → 4,998,298,839, digest `038ebb6b` → `895d407d`;
+- lego-rock-raiders, `click-the-intro.route` (held to 150,000,000): digest `b1c537af` → `0447048c`;
+- lego-rock-raiders, `first-light.route` (held to 8,010,000,000): digest `322ab7a0` → `704487cb`;
+- lego-rock-raiders, `first-mission.route` (held to 14,500,000,000): digest `4888818a` → `27d40ec6`;
+- lego-rock-raiders, `level-select.route` (held to 8,035,000,000): digest `49e57d12` → `df1a6347`;
+- lego-rock-raiders, a run with no route (held to 400,000,000): digest `6714ce40` → `e76c516d`;
+- lego-rock-raiders, a run with no route (held to 61,000,000): digest `3e8b8a38` → `f53901b5`;
+- lego-rock-raiders, `skip-the-intro.route` (held to 150,000,000): digest `315d3880` → `b0ab6356`;
+- lego-island, `maintainer-first-play.route`: replayed to 3,341,815,910 where it was held to 3,341,815,783, the same moment 127 instructions later, ending at flip 10,667 and 274,650 ms as before; digest `db7bd6b2` → `6b5eca98`.
+
+LEGO Chess's run ends at the same wall, cursor and flips, its digest `52a34d88` → `7fcea288`: its
+window's three messages wait in its queue, which it has not reached.
 
 `GetSystemDefaultLangID` answers the declared locale, US English, as `GetUserDefaultLangID` does
 (#147). `SystemParametersInfoA` answers two more actions, only as LEGO Chess asks them, anything
