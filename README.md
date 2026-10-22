@@ -12,7 +12,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
 | LEGO Island | **Playable**: Nick Brick's pizza delivery plays from the intro to a save and its own exit, and a person has signed it off |
-| LEGO Chess | In progress ([#142](https://github.com/constdecimalserrno/lego-legacy/issues/142)): it starts, makes its window, and stops at its first wall |
+| LEGO Chess | In progress ([#142](https://github.com/constdecimalserrno/lego-legacy/issues/142)): it starts, makes its window, and stops at a wall |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own

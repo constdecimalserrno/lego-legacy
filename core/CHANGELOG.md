@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`GetClipCursor` answers the declared screen, in the mode it is in, and success (#147): the
+pointer is confined nowhere on this machine, since `ClipCursor` keeps nothing, and Microsoft
+documents the screen as the answer for a pointer that is not confined. LEGO Chess's framework asks
+as it starts; no released title imports it, so no released run moves.
+
 `DestroyWindow` tells the window it destroys, as Microsoft documents, where it answered success and
 told it nothing (#140). Its procedure is sent `WM_DESTROY` and then `WM_NCDESTROY`, whatever it
 answers the first, through the program `call_each` writes, which no longer has to stop at a zero.

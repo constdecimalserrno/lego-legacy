@@ -52,6 +52,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetAsyncKeyState", 1, async_key_state),
     stdcall("USER32", "SetCursorPos", 2, set_cursor_pos),
     stdcall("USER32", "ClipCursor", 1, succeed),
+    stdcall("USER32", "GetClipCursor", 1, clip_cursor),
     stdcall("USER32", "DialogBoxParamA", 5, dialog_box),
     stdcall("USER32", "EndDialog", 2, end_dialog),
     stdcall("USER32", "GetDlgItem", 2, dialog_item),
@@ -1374,6 +1375,15 @@ fn client_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
     }
     Ok(1)
+}
+
+/// GetClipCursor(rect): where the pointer is confined. Nowhere, on this
+/// machine: `ClipCursor` keeps nothing, so the answer is the screen, which is
+/// what Microsoft documents for a pointer that is not confined. LEGO Chess's
+/// framework reads it as it starts (0x0045AC36) and hands it back to
+/// `ClipCursor` as it leaves (#147).
+fn clip_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    client_rect(ctx, &[WINDOW, args[0]])
 }
 
 fn cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

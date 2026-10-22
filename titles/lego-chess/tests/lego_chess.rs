@@ -14,10 +14,10 @@ use lego_legacy_core::{disc, hash, testkit, Title};
 
 const ROOT: &str = CHESS.install_dir;
 
-/// Enough instructions for the C runtime to start and the game to make its
-/// window, and no more: what it asks for after that is the next tickets'
-/// (#144–#147).
-const BOOT_BUDGET: u64 = 100_000;
+/// Enough instructions for the C runtime to start, the game to make its
+/// window and its framework to come up as far as the machine carries it:
+/// the boot stops at a wall well inside this (#147).
+const BOOT_BUDGET: u64 = 1_000_000;
 
 /// Point the run at the checkout's rips and keep run directories out of it.
 fn scratch() -> bool {
@@ -182,6 +182,25 @@ fn the_game_loads_out_of_main_z_and_makes_its_window() {
         .assert_logged("call KERNEL32.dll!GetVersion() from 0x00471300")
         // Then its framework registers its class and makes its window.
         .assert_logged("call USER32.dll!CreateWindowExA(0x0, 0x487ba8, 0x0, 0x86c80000");
+}
+
+/// Its framework reads where the pointer is confined as it starts, to put it
+/// back as it leaves, and is told the whole screen (#147). It goes on to its
+/// input and its sound, and stops at #149's first wall: the 3D listener's
+/// `SetAllParameters`.
+#[test]
+fn the_framework_reads_the_pointer_s_clip_and_stops_at_the_3d_listener() {
+    let Some(ran) = boot() else { return };
+
+    assert!(
+        ran.log
+            .lines()
+            .any(|l| l.starts_with("call USER32.dll!GetClipCursor(")
+                && l.contains(" from 0x0045ac3c ")),
+        "its framework asks where the pointer is confined\nlog:\n{}",
+        ran.log
+    );
+    ran.assert_logged("end wall: IDirectSound3DListener::SetAllParameters");
 }
 
 #[test]

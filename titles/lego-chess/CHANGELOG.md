@@ -23,9 +23,9 @@ nothing presented (#147). Untagged until its release (#162).
 The declared machine has a floppy drive, A:, with no disk in it (#145), as a 1998 PC had. The game's
 CD check (0x405420) tests bit 0 of `GetLogicalDrives` once and never shifts, so with no A: it looked
 at no drive and would ask for its disc for ever; with one it asks every letter its type, A: only
-that, and finds `CDFS` and `LEGOCHESS` on D:. The run still stops at `GetClipCursor` at cursor
-15,940, before the check, and #147's boot reaches its first DirectDraw call before the game calls
-the check at 0x4087AF, so #148's run is the first to reach it. Until then core's shim tests stand
+that, and finds `CDFS` and `LEGOCHESS` on D:. The run stops before the check, and the boot reaches
+its first DirectDraw call before the game calls the check at 0x4087AF, so #148's run is the first
+to reach it. Until then core's shim tests stand
 in: they make the check's calls as its code at 0x405420 makes them and find `D:\`. The rip's label
 is tested to be `LEGOCHESS`, the label the check compares.
 
@@ -33,3 +33,10 @@ A member of `MAIN.Z` that will not expand, or expands to another size than its t
 the run at a wall naming it (#169, core 1.2.0), where the title was told the file was missing, and a
 damaged KLIB plugin stopped at #146's wall, which said it was not the title's own. All 881 members
 of a good rip expand, so the run is unchanged.
+
+Its framework asks where the pointer is confined as it starts (#147), and is told the whole screen,
+0,0 to 640,480, as Windows tells a program whose pointer is confined nowhere; it keeps the rectangle
+to hand back to `ClipCursor` as it leaves. It goes on to its DirectInput devices and its sound, and
+the run stops at #149's first wall, the 3D listener's `SetAllParameters`, called from 0x0044FE17 at
+cursor 214,521, still with nothing presented. Its boot test now runs to that wall, on a budget of a
+million instructions where it was a hundred thousand.

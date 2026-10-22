@@ -193,6 +193,25 @@ fn a_window_style_and_instance_are_the_ones_it_was_made_with() {
     assert!(call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_USERDATA]).is_err());
 }
 
+/// The pointer is confined nowhere on this machine, so where it is confined
+/// is the whole declared screen, in the mode the screen is in, as Microsoft
+/// documents for a pointer that is not confined (#147).
+#[test]
+fn a_pointer_never_confined_is_confined_to_the_screen() {
+    let mut m = machine();
+    let rect = |m: &Machine| -> Vec<u32> {
+        (0..4)
+            .map(|i| m.arena.read_u32(OUT + 4 * i).expect("in the arena"))
+            .collect()
+    };
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
+    assert_eq!(rect(&m), [0, 0, 640, 480]);
+
+    m.state.display_mode = (800, 600, 16);
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
+    assert_eq!(rect(&m), [0, 0, 800, 600]);
+}
+
 /// Make the title's window, with its procedure at `procedure`.
 fn window(m: &mut Machine, procedure: u32) {
     m.arena.write(DATA, b"LEGO\0").expect("in the arena");
