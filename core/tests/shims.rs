@@ -13,7 +13,7 @@ use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::title::Declared;
 use lego_legacy_core::win32::{self, user32::WINDOW, Ctx};
-use lego_legacy_core::{disc, roster, testkit, Title};
+use lego_legacy_core::{disc, hash, roster, testkit, Title};
 
 /// Where the tests put what they pass and what is written back.
 const DATA: u32 = 0x0050_0000;
@@ -2632,4 +2632,154 @@ fn a_movie_not_there_cannot_be_opened_and_a_damaged_one_is_a_wall() {
         call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 1]),
         Ok(0x8004_4073)
     );
+}
+
+/// A BITMAPINFOHEADER asking for a plain DIB: its size, the picture's, one
+/// plane, so many bits, no codec, and the image's size.
+fn dib_header(width: u32, height: u32, bits: u32, image: u32) -> Vec<u8> {
+    [
+        words(&[40, width, height, 1 | bits << 16, 0, image]),
+        vec![0; 16],
+    ]
+    .concat()
+}
+
+/// A frame getter is for a video stream, in a plain DIB the movie's size
+/// (#151): a sound stream has none, and the decompressor's own format or a
+/// depth other than 16 or 24 bits is not one this machine chooses. A frame
+/// before the first or past the last is none, and one whose picture will not
+/// decode is a wall that names it.
+#[test]
+fn a_frame_getter_is_for_a_video_stream_in_a_plain_dib() {
+    const WANTED: u32 = DATA + 0x200;
+    let mut m = machine();
+    m.tree.declare(MOVIE, movie(2));
+    m.arena
+        .write(DATA, format!("{MOVIE}\0").as_bytes())
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    let stream = |m: &mut Machine, n: u32| {
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT + 4, 0, n]),
+            Ok(0)
+        );
+        m.arena.read_u32(OUT + 4).expect("in the arena")
+    };
+    let (video, sound) = (stream(&mut m, 0), stream(&mut m, 1));
+    let open = |m: &mut Machine, stream: u32, header: &[u8]| {
+        m.arena.write(WANTED, header).expect("in the arena");
+        call(m, "AVIFIL32", "AVIStreamGetFrameOpen", &[stream, WANTED])
+    };
+
+    assert_eq!(open(&mut m, sound, &dib_header(4, 2, 16, 16)), Ok(0));
+    for (header, says) in [
+        (dib_header(4, 2, 32, 32), "a 32-bit DIB"),
+        (dib_header(8, 2, 16, 32), "8x2"),
+        (
+            [words(&[40, 4, 2, 16 << 16]), vec![0; 24]].concat(),
+            "in 0 planes",
+        ),
+        (dib_header(4, 2, 24, 0), ""),
+    ] {
+        let answer = open(&mut m, video, &header);
+        if says.is_empty() {
+            assert!(matches!(answer, Ok(g) if g != 0), "{answer:?}");
+            continue;
+        }
+        assert!(
+            matches!(&answer, Err(Stop::NotWritten { what, .. }) if what.contains(says)),
+            "{answer:?}"
+        );
+    }
+    let own = call(&mut m, "AVIFIL32", "AVIStreamGetFrameOpen", &[video, 0]);
+    assert!(
+        matches!(&own, Err(Stop::NotWritten { what, .. }) if what.contains("own format")),
+        "{own:?}"
+    );
+
+    let getter = open(&mut m, video, &dib_header(4, 2, 16, 16)).expect("a getter");
+    let frame =
+        |m: &mut Machine, n: i32| call(m, "AVIFIL32", "AVIStreamGetFrame", &[getter, n as u32]);
+    // The movie has one chunk, which is no picture.
+    assert_eq!(frame(&mut m, -1), Ok(0));
+    assert_eq!(frame(&mut m, 1), Ok(0));
+    let wall = frame(&mut m, 0);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. })
+            if what.contains("frame 0 of C:\\STUB\\MOVIE.AVI: IV50")),
+        "{wall:?}"
+    );
+}
+
+/// LEGO Chess's logo movie, off the disc, frame by frame as the game asks for
+/// it (#151): each one a bottom-up 555 DIB behind the header it asked for,
+/// decoded in order across its null pictures (frames 1 and 3), a frame
+/// before the last one decoded starting again from the first, and the same
+/// frame again the DIB as it is. Frames 5 and 8 are the bits predicted from
+/// FFmpeg 9.0.1's planes of the same pictures through BT.601 and a 555 pixel
+/// that drops each channel's low bits (`work/150-chess-first-light/research.md`).
+#[test]
+fn the_logo_s_frames_are_bottom_up_555_dibs_decoded_in_order() {
+    const WANTED: u32 = DATA + 0x200;
+    let image = &roster::LEGO_CHESS.image;
+    if !testkit::rips(image) {
+        return;
+    }
+    let mut m = machine();
+    m.tree
+        .set_disc(disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens"));
+    m.arena
+        .write(DATA, b"D:\\INTRO\\LMI.AVI\0")
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+        Ok(0)
+    );
+    let video = m.arena.read_u32(OUT).expect("in the arena");
+    m.arena
+        .write(WANTED, &dib_header(320, 240, 16, 153_600))
+        .expect("in the arena");
+    let getter = call(
+        &mut m,
+        "AVIFIL32",
+        "AVIStreamGetFrameOpen",
+        &[video, WANTED],
+    )
+    .expect("a getter");
+    assert_ne!(getter, 0);
+
+    let frame = |m: &mut Machine, n: i32| {
+        let dib = call(m, "AVIFIL32", "AVIStreamGetFrame", &[getter, n as u32]).expect("answered");
+        (dib != 0).then(|| {
+            let header = m.arena.slice(dib, 40).expect("in the arena").to_vec();
+            assert_eq!(header, dib_header(320, 240, 16, 153_600));
+            let bits = m.arena.slice(dib + 40, 153_600).expect("in the arena");
+            (dib, hash::sha256_hex(bits))
+        })
+    };
+    const FIVE: &str = "27b8b87b4b8533454a7fd956d5072a712cc39310fc2b6ac092378e8f10736224";
+    const EIGHT: &str = "25ab8cbaed07d27fb4a4af1282dcfaa3c6a81b0496696d146629e9bce61786d1";
+    let (dib, five) = frame(&mut m, 5).expect("frame 5");
+    assert_eq!(five, FIVE);
+    assert_eq!(frame(&mut m, 5), Some((dib, five)));
+    assert_eq!(
+        frame(&mut m, 8).map(|(_, bits)| bits).as_deref(),
+        Some(EIGHT)
+    );
+    assert_eq!(
+        frame(&mut m, 5).map(|(_, bits)| bits).as_deref(),
+        Some(FIVE)
+    );
+    assert!(frame(&mut m, 279).is_some());
+    assert_eq!(frame(&mut m, 280), None);
+    assert_eq!(frame(&mut m, -1), None);
 }

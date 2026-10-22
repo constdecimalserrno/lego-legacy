@@ -51,6 +51,33 @@ impl Picture {
     pub fn chroma_size(&self) -> (usize, usize) {
         (self.width.div_ceil(4), self.height.div_ceil(4))
     }
+
+    /// One pixel's colour, as red, green and blue: what a codec of this era
+    /// turned its pictures into for an RGB screen. The one conversion every
+    /// movie path takes, DirectShow's (#9) and AVIFile's (#151). Chroma is
+    /// taken from the sample its pixel sits in, without interpolation.
+    #[must_use]
+    pub fn rgb(&self, x: usize, y: usize) -> (u8, u8, u8) {
+        let (cw, _) = self.chroma_size();
+        let at = (y / 4) * cw + x / 4;
+        bt601(
+            i32::from(self.y[y * self.width + x]),
+            i32::from(self.u[at]),
+            i32::from(self.v[at]),
+        )
+    }
+}
+
+/// ITU-R BT.601 at studio range, in fixed point.
+fn bt601(y: i32, u: i32, v: i32) -> (u8, u8, u8) {
+    let c = (y - 16) * 298;
+    let (d, e) = (u - 128, v - 128);
+    let clip = |x: i32| ((x + 128) >> 8).clamp(0, 255) as u8;
+    (
+        clip(c + 409 * e),
+        clip(c - 100 * d - 208 * e),
+        clip(c + 516 * d),
+    )
 }
 
 const INTRA: u8 = 0;
@@ -1301,7 +1328,39 @@ fn copy_plane(band: &Band, dst: usize, out: &mut [u8], width: usize, height: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{signed, Bits, Codebook, Decoder, Picture};
+    use super::{bt601, signed, Bits, Codebook, Decoder, Picture};
+
+    #[test]
+    fn studio_black_and_white_are_the_ends_of_the_range_and_grey_has_no_colour() {
+        assert_eq!(bt601(16, 128, 128), (0, 0, 0));
+        assert_eq!(bt601(235, 128, 128), (255, 255, 255));
+        let (r, g, b) = bt601(126, 128, 128);
+        assert!(r == g && g == b, "grey came out as {r},{g},{b}");
+    }
+
+    #[test]
+    fn full_red_and_blue_chroma_lean_the_way_bt601_says() {
+        // Studio red is Y 81, U 90, V 240; studio blue is Y 41, U 240, V 110.
+        let (r, g, b) = bt601(81, 90, 240);
+        assert!(r > 250 && g < 5 && b < 5, "red came out as {r},{g},{b}");
+        let (r, g, b) = bt601(41, 240, 110);
+        assert!(r < 5 && g < 5 && b > 250, "blue came out as {r},{g},{b}");
+    }
+
+    /// A pixel's colour takes its chroma from the four by four block it is
+    /// in: an 8x4 picture has two, side by side.
+    #[test]
+    fn a_pixel_takes_its_chroma_from_its_own_block() {
+        let picture = Picture {
+            width: 8,
+            height: 4,
+            y: vec![81; 32],
+            u: vec![90, 128],
+            v: vec![240, 128],
+        };
+        assert_eq!(picture.rgb(3, 3), bt601(81, 90, 240));
+        assert_eq!(picture.rgb(4, 0), bt601(81, 128, 128));
+    }
 
     #[test]
     fn fields_are_read_least_significant_bit_first() {

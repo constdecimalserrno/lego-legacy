@@ -4,8 +4,9 @@
 //! Rock Raiders initialises it and plays its movies through DirectShow's
 //! multimedia streams instead ([`super::amstream`], #9). LEGO Chess plays
 //! all of its movies through its C API (#151): it opens a file, walks its
-//! streams and reads their headers and formats. The file is read by
-//! [`crate::avi`]. Its handles are the COM objects Windows hands out, with
+//! streams and reads their headers and formats, and takes each frame as a
+//! DIB. The file is read by [`crate::avi`], its pictures by [`crate::iv50`].
+//! Its handles are the COM objects Windows hands out, with
 //! every method of their own tables a wall, so a title that calls through
 //! one stops at a name; the C API is what is written. Every other entry
 //! point is an import nobody has written, and calling one is a wall that
@@ -24,6 +25,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("AVIFIL32", "AVIStreamInfoA", 3, stream_info),
     stdcall("AVIFIL32", "AVIStreamAddRef", 1, add_ref),
     stdcall("AVIFIL32", "AVIStreamReadFormat", 4, read_format),
+    stdcall("AVIFIL32", "AVIStreamGetFrameOpen", 2, get_frame_open),
+    stdcall("AVIFIL32", "AVIStreamGetFrame", 2, get_frame),
 ];
 
 /// vfw.h's answers: `MAKE_AVIERR(n)`, `0x80044000 + n`.
@@ -44,9 +47,15 @@ const CAPS: u32 = 0x3;
 const FILE_INFO_BYTES: u32 = 108;
 const STREAM_INFO_BYTES: u32 = 140;
 
-/// A movie a title opened, held while it is open: its structure, and the
-/// streams handed out of it.
+/// A movie a title opened, held while it is open: its bytes, its structure,
+/// and the streams handed out of it.
+// ponytail: the whole file is held, and LEGO Chess never lets go of one
+// (its close releases the streams and not the file), so every movie it
+// plays stays in host memory for the run, 12 MB for its intro. Read through
+// `Tree::lies` when a session's movies add up to too much.
 pub struct File {
+    name: String,
+    bytes: Vec<u8>,
     avi: crate::avi::Avi,
     /// Each stream's object, once `AVIFileGetStream` has handed it out: the
     /// same one every time, as AVIFile hands out the one stream.
@@ -89,7 +98,35 @@ pub static AVI_STREAM: Interface = Interface {
     ],
 };
 
-pub static INTERFACES: &[&Interface] = &[&AVI_FILE, &AVI_STREAM];
+pub static GET_FRAME: Interface = Interface {
+    name: "IGetFrame",
+    methods: &[
+        wall("QueryInterface", 2),
+        wall("AddRef", 0),
+        wall("Release", 0),
+        wall("GetFrame", 1),
+        wall("Begin", 3),
+        wall("End", 0),
+        wall("SetFormat", 6),
+    ],
+};
+
+pub static INTERFACES: &[&Interface] = &[&AVI_FILE, &AVI_STREAM, &GET_FRAME];
+
+/// What `AVIStreamGetFrameOpen` made: the stream it decodes, its picture so
+/// far, and the DIB in guest memory each frame is handed back in.
+pub struct Getter {
+    file: u32,
+    stream: usize,
+    /// Where the DIB is: its header, then its bits.
+    dib: u32,
+    /// Sixteen bits a pixel, which is 555, or 24.
+    bits: u16,
+    decoder: crate::iv50::Decoder,
+    picture: crate::iv50::Picture,
+    /// The last frame decoded into the picture, which the DIB holds.
+    decoded: Option<usize>,
+}
 
 fn init(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0)
@@ -181,7 +218,15 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         avi.streams.len()
     ));
     let streams = vec![None; avi.streams.len()];
-    ctx.state.avi_files.insert(object, File { avi, streams });
+    ctx.state.avi_files.insert(
+        object,
+        File {
+            name,
+            bytes,
+            avi,
+            streams,
+        },
+    );
     Ok(AVIERR_OK)
 }
 
@@ -478,4 +523,234 @@ fn read_format(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     } else {
         AVIERR_OK
     })
+}
+
+/// `BI_RGB`: a DIB of plain pixels, through no codec.
+const BI_RGB: u32 = 0;
+/// How long a `BITMAPINFOHEADER` is.
+const DIB_HEADER_BYTES: u32 = 40;
+
+fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamGetFrameOpen(stream, wanted): a getter of the stream's frames
+    // as DIBs in the wanted format, or none for a stream that is not video,
+    // as Wine's `getframe.c`, read as documentation, refuses one. The DIB is
+    // the wanted header, its image size filled in when it is zero, and the
+    // bits after it, in memory the getter keeps (`getframe.c` again).
+    let (at, wanted) = (args[0], args[1]);
+    let (owner, index) = stream_of(ctx, "AVIStreamGetFrameOpen", at)?;
+    let file = &ctx.state.avi_files[&owner];
+    let s = &file.avi.streams[index];
+    if !s.is_video() {
+        return Ok(0);
+    }
+    let name = file.name.clone();
+    let codec = s.compression();
+    let (width, height) = s.picture_size();
+    if !codec.eq_ignore_ascii_case(b"IV50") {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} is {}, which nothing here decodes",
+                String::from_utf8_lossy(&codec)
+            ),
+            caller: 0,
+        });
+    }
+    // The decompressor's own format, asked for by none or by
+    // AVIGETFRAMEF_BESTDISPLAYFMT, is not one this machine chooses.
+    if wanted <= 1 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} in the decompressor's own format"
+            ),
+            caller: 0,
+        });
+    }
+    let mut header = ctx
+        .mem
+        .slice(wanted, DIB_HEADER_BYTES as usize)
+        .map_err(Stop::Fault)?
+        .to_vec();
+    let word = |at: usize| {
+        u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    let bits = u16::from_le_bytes([header[14], header[15]]);
+    // A plain DIB the movie's own size, of one plane, bottom-up, at 16 or 24
+    // bits and with no colour table, is what is written: what LEGO Chess's
+    // movies ask for.
+    let plain = word(0) == DIB_HEADER_BYTES
+        && word(12) & 0xffff == 1
+        && word(16) == BI_RGB
+        && matches!(bits, 16 | 24)
+        && (word(4), word(8)) == (width, height)
+        && word(32) == 0;
+    if !plain {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} as a {bits}-bit DIB of \
+                 compression {:#x} in {} planes, {}x{} with {} colours, from a \
+                 {width}x{height} movie",
+                word(16),
+                word(12) & 0xffff,
+                word(4) as i32,
+                word(8) as i32,
+                word(32)
+            ),
+            caller: 0,
+        });
+    }
+    let image = (width * u32::from(bits) / 8).next_multiple_of(4) * height;
+    if word(20) == 0 {
+        header[20..24].copy_from_slice(&image.to_le_bytes());
+    }
+    let dib = ctx.state.heap.alloc(DIB_HEADER_BYTES + image);
+    ctx.mem.write(dib, &header).map_err(Stop::Fault)?;
+    let object = State::make_com(ctx, &GET_FRAME, ComState::None).map_err(Stop::Fault)?;
+    ctx.state.frame_getters.insert(
+        object,
+        Getter {
+            file: owner,
+            stream: index,
+            dib,
+            bits,
+            decoder: crate::iv50::Decoder::new(),
+            picture: crate::iv50::Picture::default(),
+            decoded: None,
+        },
+    );
+    ctx.log.line(&format!(
+        "movie {name} frames as {bits}-bit DIBs at {dib:#010x}"
+    ));
+    Ok(object)
+}
+
+fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIStreamGetFrame(getter, position): the DIB, with that frame in it.
+    // The pictures are decoded in order, a null one keeping the last; the
+    // same position again is the DIB as it is; one before the stream's start
+    // or past its frames is none, as Wine's `getframe.c` answers, a position
+    // being the chunk of that number.
+    let (at, position) = (args[0], args[1] as i32);
+    if at == 0 {
+        return Ok(0);
+    }
+    let state = &mut *ctx.state;
+    let Some(getter) = state.frame_getters.get_mut(&at) else {
+        return Err(stranger("AVIStreamGetFrame", "a frame getter", at));
+    };
+    let file = &state.avi_files[&getter.file];
+    let s = &file.avi.streams[getter.stream];
+    let chunks = &s.chunks;
+    let Ok(position) = usize::try_from(position) else {
+        return Ok(0);
+    };
+    if position < s.start as usize || position >= chunks.len() {
+        return Ok(0);
+    }
+    if getter.decoded == Some(position) {
+        return Ok(getter.dib);
+    }
+    // ponytail: a frame before the last one decoded starts again from the
+    // first. #152's Advisors loop back; decoding on from the nearest key
+    // frame `idx1` marks is the way past.
+    if getter.decoded.is_some_and(|last| position < last) {
+        getter.decoder = crate::iv50::Decoder::new();
+        getter.picture = crate::iv50::Picture::default();
+        getter.decoded = None;
+    }
+    let from = getter.decoded.map_or(0, |last| last + 1);
+    for (n, &(start, len)) in chunks.iter().enumerate().take(position + 1).skip(from) {
+        // An empty chunk is a dropped frame, which repeats the last.
+        if len > 0 {
+            getter
+                .decoder
+                .decode(&file.bytes[start..start + len], &mut getter.picture)
+                .map_err(|e| Stop::NotWritten {
+                    what: format!(
+                        "AVIFIL32.dll!AVIStreamGetFrame: frame {n} of {}: {e}",
+                        file.name
+                    ),
+                    caller: 0,
+                })?;
+        }
+        getter.decoded = Some(n);
+    }
+    let (width, height) = s.picture_size();
+    let picture = &getter.picture;
+    if (picture.width, picture.height) != (width as usize, height as usize) {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamGetFrame: frame {position} of {} is {}x{} in a {width}x{height} movie",
+                file.name, picture.width, picture.height
+            ),
+            caller: 0,
+        });
+    }
+    let bits = dib_bits(picture, getter.bits);
+    let dib = getter.dib;
+    ctx.mem
+        .write(dib + DIB_HEADER_BYTES, &bits)
+        .map_err(Stop::Fault)?;
+    Ok(dib)
+}
+
+/// A picture as the bits of a bottom-up DIB of plain pixels, its rows each
+/// padded to a whole number of words: 555 at 16 bits, which is a 16-bit
+/// `BI_RGB` pixel by Microsoft's `BITMAPINFOHEADER` page, each channel
+/// narrowed by dropping its low bits; or blue, green and red at 24.
+fn dib_bits(picture: &crate::iv50::Picture, bits: u16) -> Vec<u8> {
+    const RGB555: crate::raster::PixelFormat = crate::raster::PixelFormat {
+        bits: 16,
+        masks: [0x7c00, 0x03e0, 0x001f, 0],
+    };
+    let bytes = usize::from(bits / 8);
+    let stride = (picture.width * bytes).next_multiple_of(4);
+    let mut out = vec![0u8; stride * picture.height];
+    for y in 0..picture.height {
+        let row = (picture.height - 1 - y) * stride;
+        let row = &mut out[row..row + picture.width * bytes];
+        for (x, pixel) in row.chunks_exact_mut(bytes).enumerate() {
+            let (r, g, b) = picture.rgb(x, y);
+            if bytes == 2 {
+                let value = RGB555.encode([r, g, b, 0]) as u16;
+                pixel.copy_from_slice(&value.to_le_bytes());
+            } else {
+                pixel.copy_from_slice(&[b, g, r]);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dib_bits;
+    use crate::iv50::Picture;
+
+    /// Studio red at full and at no light, a 2x2 picture with one chroma
+    /// sample: the bottom row comes first, a 555 pixel keeps red at its top,
+    /// a 24-bit one is blue, green, red, and its rows of six bytes are padded
+    /// to eight.
+    #[test]
+    fn a_picture_is_a_bottom_up_dib_at_16_or_24_bits() {
+        let picture = Picture {
+            width: 2,
+            height: 2,
+            y: vec![81, 16, 16, 81],
+            u: vec![90],
+            v: vec![240],
+        };
+        // Full red is 255, 0, 0; with no light, 179, 0, 0.
+        assert_eq!(
+            (picture.rgb(0, 0), picture.rgb(1, 0)),
+            ((255, 0, 0), (179, 0, 0))
+        );
+        assert_eq!(
+            dib_bits(&picture, 16),
+            [0x00, 0x58, 0x00, 0x7c, 0x00, 0x7c, 0x00, 0x58]
+        );
+        assert_eq!(
+            dib_bits(&picture, 24),
+            [0, 0, 179, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 179, 0, 0]
+        );
+    }
 }

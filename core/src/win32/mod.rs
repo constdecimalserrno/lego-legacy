@@ -317,6 +317,9 @@ pub struct State {
     /// The movies a title has opened through AVIFile, by the file object it
     /// holds (#151).
     pub avi_files: BTreeMap<u32, avifile::File>,
+    /// The frame getters a title has opened on their streams, by the getter
+    /// it holds.
+    pub frame_getters: BTreeMap<u32, avifile::Getter>,
     /// The CD audio device.
     pub cd: winmm::CdAudio,
     /// Which keys are down, as the guest's own device numbers them.
@@ -446,6 +449,7 @@ impl State {
             yielded: false,
             players: BTreeMap::new(),
             avi_files: BTreeMap::new(),
+            frame_getters: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),

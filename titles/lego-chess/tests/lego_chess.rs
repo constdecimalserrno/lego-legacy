@@ -325,7 +325,9 @@ fn the_window_is_told_its_size_painted_and_focused() {
 
 /// Its first movie, the logo, opens through AVIFile (#151): its file and
 /// its two streams, their headers, and its sound's format, which the game
-/// makes its DirectSound buffer in.
+/// makes its DirectSound buffer in. Then it takes the first frame, as a
+/// 16-bit DIB, and hands it to its DirectX plugin to draw on its back
+/// buffer's DC.
 #[test]
 fn its_first_movie_opens_and_its_streams_are_read() {
     let Some(ran) = boot() else { return };
@@ -333,11 +335,15 @@ fn its_first_movie_opens_and_its_streams_are_read() {
     ran.assert_logged("movie D:\\intro\\lmi.avi opened through AVIFile: 2 streams")
         .assert_logged("call AVIFIL32.dll!AVIFileInfoA(")
         .assert_logged("call AVIFIL32.dll!AVIFileGetStream(")
-        .assert_logged("call AVIFIL32.dll!AVIStreamReadFormat(");
+        .assert_logged("call AVIFIL32.dll!AVIStreamReadFormat(")
+        .assert_logged("movie D:\\intro\\lmi.avi frames as 16-bit DIBs at ");
     for (call, from) in [
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b094"),
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b0db"),
         ("call IDirectSound::CreateSoundBuffer(", "0x00450a4a"),
+        ("call AVIFIL32.dll!AVIStreamGetFrameOpen(", "0x0044b325"),
+        ("call AVIFIL32.dll!AVIStreamGetFrame(", "0x0044b345"),
+        ("call IDirectDrawSurface::GetDC(", "0x40004081"),
     ] {
         assert!(
             ran.log
@@ -355,10 +361,11 @@ fn its_first_movie_opens_and_its_streams_are_read() {
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #151's next: the logo's frames, after its first two flips.
+    // #151's next: DrawDib, which the DirectX plugin draws the logo's first
+    // frame with, after the first two flips.
     ran.assert_flips(2).assert_logged(
-        "end wall: AVIFIL32.dll!AVIStreamGetFrameOpen is imported and not written yet, called \
-         from 0x0044b325",
+        "end wall: MSVFW32.dll!DrawDibOpen is imported and not written yet, called from \
+         0x4000408d",
     );
 }
 

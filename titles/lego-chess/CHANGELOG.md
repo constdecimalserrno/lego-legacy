@@ -91,6 +91,11 @@ stopped at #151's first wall, `AVIFIL32.dll!AVIFileOpenA`, at cursor 767,882 aft
 
 Its first movie, the logo, opens through AVIFile (#151, core 1.2.0). The game reads its two streams'
 headers, a video of 280 frames at 320x240 and 15 a second and its sound, PCM at 22,050 Hz in 8-bit
-mono, reads the sound's format and makes its DirectSound buffer for it, and the run stops at #151's
+mono, reads the sound's format and makes its DirectSound buffer for it, and the run stopped at #151's
 next wall, `AVIFIL32.dll!AVIStreamGetFrameOpen`, called from 0x0044B325 at cursor 768,839 after two
 flips.
+
+It takes the logo's frames as it asks for them (#151, core 1.2.0), each a 16-bit DIB of 320x240,
+and hands the first to its DirectX plugin, which takes its back buffer's DC to draw it on. The run
+stops at #151's next wall, `MSVFW32.dll!DrawDibOpen`, called from 0x4000408D at cursor 768,882
+after two flips.

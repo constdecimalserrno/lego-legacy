@@ -535,13 +535,10 @@ fn put_picture(
     }
     let w = (width as usize).min(picture.width);
     let h = (height as usize).min(picture.height);
-    let (cw, _) = picture.chroma_size();
     let mut row = vec![0u8; w * 2];
     for y in 0..h {
         for x in 0..w {
-            let luma = i32::from(picture.y[y * picture.width + x]);
-            let at = (y / 4) * cw + x / 4;
-            let (r, g, b) = rgb(luma, i32::from(picture.u[at]), i32::from(picture.v[at]));
+            let (r, g, b) = picture.rgb(x, y);
             let pixel = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
             row[x * 2..x * 2 + 2].copy_from_slice(&pixel.to_le_bytes());
         }
@@ -550,20 +547,6 @@ fn put_picture(
             .map_err(Stop::Fault)?;
     }
     Ok(())
-}
-
-/// ITU-R BT.601 at studio range, in fixed point: what a codec of this era
-/// turned its pictures into for an RGB screen. Chroma is taken from the
-/// sample its pixel sits in, without interpolation.
-fn rgb(y: i32, u: i32, v: i32) -> (u8, u8, u8) {
-    let c = (y - 16) * 298;
-    let (d, e) = (u - 128, v - 128);
-    let clip = |x: i32| ((x + 128) >> 8).clamp(0, 255) as u8;
-    (
-        clip(c + 409 * e),
-        clip(c - 100 * d - 208 * e),
-        clip(c + 516 * d),
-    )
 }
 
 fn get_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -630,26 +613,4 @@ fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         .map_or(0, |since| now.saturating_sub(since));
     write_stream_time(ctx, args[0], millis)?;
     Ok(S_OK)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rgb;
-
-    #[test]
-    fn studio_black_and_white_are_the_ends_of_the_range_and_grey_has_no_colour() {
-        assert_eq!(rgb(16, 128, 128), (0, 0, 0));
-        assert_eq!(rgb(235, 128, 128), (255, 255, 255));
-        let (r, g, b) = rgb(126, 128, 128);
-        assert!(r == g && g == b, "grey came out as {r},{g},{b}");
-    }
-
-    #[test]
-    fn full_red_and_blue_chroma_lean_the_way_bt601_says() {
-        // Studio red is Y 81, U 90, V 240; studio blue is Y 41, U 240, V 110.
-        let (r, g, b) = rgb(81, 90, 240);
-        assert!(r > 250 && g < 5 && b < 5, "red came out as {r},{g},{b}");
-        let (r, g, b) = rgb(41, 240, 110);
-        assert!(r < 5 && g < 5 && b > 250, "blue came out as {r},{g},{b}");
-    }
 }
