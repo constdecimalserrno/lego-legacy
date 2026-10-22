@@ -42,8 +42,9 @@ pub struct Stream {
     pub length: u32,
     pub suggested_buffer: u32,
     pub quality: u32,
-    /// How many bytes one of its units is, for a stream of fixed units such as
-    /// sound; zero for one of whole chunks.
+    /// How many bytes one of its units is, as its header writes it, for a
+    /// stream of fixed units such as sound; zero for one of whole chunks.
+    /// What a sound's units are is [`Stream::sample_bytes`].
     pub sample_size: u32,
     /// Where on the movie's picture it is drawn: left, top, right and bottom,
     /// 16 bits each as vfw.h has them.
@@ -84,18 +85,28 @@ impl Stream {
     pub fn compression(&self) -> [u8; 4] {
         self.format_u32(16).to_le_bytes()
     }
+
+    /// How many bytes one of its samples is: for a sound, its format's
+    /// `nBlockAlign`, whatever its header says, as Windows answers it (Wine's
+    /// conformance tests `test_ash1_corruption` and `test_ash1_corruption2`,
+    /// which pass on Windows); for anything else, its header's.
+    #[must_use]
+    pub fn sample_bytes(&self) -> u32 {
+        if self.is_audio() {
+            u16_at(&self.format, 12).map_or(0, u32::from)
+        } else {
+            self.sample_size
+        }
+    }
 }
 
 /// What a movie's main header, its `avih`, says about the whole of it: the
-/// fields of vfw.h's `MainAVIHeader` AVIFile answers with (#151).
+/// fields of vfw.h's `MainAVIHeader` AVIFile answers with as they are; the
+/// rest it works out from the streams (#151).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Header {
-    pub max_bytes_per_sec: u32,
     pub flags: u32,
     pub streams: u32,
-    pub suggested_buffer: u32,
-    pub width: u32,
-    pub height: u32,
 }
 
 /// A parsed movie.
@@ -146,38 +157,34 @@ fn walk(bytes: &[u8], mut at: usize, end: usize, avi: &mut Avi) -> Result<(), Er
                 if h.len() < 36 {
                     return Err(Error("a short stream header".to_owned()));
                 }
-                let at = |offset| u32_at(h, offset).unwrap_or(0);
+                let word = |offset| u32_at(h, offset).unwrap_or(0);
                 let half = |offset| u16_at(h, offset).unwrap_or(0);
                 stream.kind.copy_from_slice(&h[0..4]);
                 stream.handler.copy_from_slice(&h[4..8]);
-                stream.flags = at(8);
+                stream.flags = word(8);
                 (stream.priority, stream.language) = (half(12), half(14));
-                stream.initial_frames = at(16);
-                stream.scale = at(20);
-                stream.rate = at(24);
-                stream.start = at(28);
-                stream.length = at(32);
-                stream.suggested_buffer = at(36);
-                stream.quality = at(40);
-                stream.sample_size = at(44);
+                stream.initial_frames = word(16);
+                stream.scale = word(20);
+                stream.rate = word(24);
+                stream.start = word(28);
+                stream.length = word(32);
+                stream.suggested_buffer = word(36);
+                stream.quality = word(40);
+                stream.sample_size = word(44);
                 stream.frame = std::array::from_fn(|i| half(48 + 2 * i) as i16);
             }
             b"strn" => {
                 if let Some(stream) = avi.streams.last_mut() {
                     let name = &bytes[body..body_end];
-                    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-                    stream.name = name[..end].to_vec();
+                    let len = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+                    stream.name = name[..len].to_vec();
                 }
             }
             b"avih" => {
-                let at = |offset| u32_at(&bytes[body..body_end], offset).unwrap_or(0);
+                let word = |offset| u32_at(&bytes[body..body_end], offset).unwrap_or(0);
                 avi.header = Header {
-                    max_bytes_per_sec: at(4),
-                    flags: at(12),
-                    streams: at(24),
-                    suggested_buffer: at(28),
-                    width: at(32),
-                    height: at(36),
+                    flags: word(12),
+                    streams: word(24),
                 };
             }
             b"strf" => {
@@ -311,7 +318,17 @@ mod tests {
                         chunk(b"strn", b"LMI.avi Video #1\0"),
                     ],
                 ),
-                list(b"strl", &[chunk(b"strh", &sound), chunk(b"strf", &[0; 16])]),
+                list(
+                    b"strl",
+                    &[
+                        chunk(b"strh", &sound),
+                        // PCM, mono, 22,050 a second, two-byte blocks.
+                        chunk(
+                            b"strf",
+                            &[1, 0, 1, 0, 0x22, 0x56, 0, 0, 0x22, 0x56, 0, 0, 2, 0, 8, 0],
+                        ),
+                    ],
+                ),
             ],
         );
         let mut riff = b"AVI ".to_vec();
@@ -320,11 +337,7 @@ mod tests {
         let avi = parse(&chunk(b"RIFF", &riff)).expect("a well-formed file");
 
         let h = &avi.header;
-        assert_eq!(
-            (h.max_bytes_per_sec, h.flags, h.streams),
-            (774_506, 0x910, 2)
-        );
-        assert_eq!((h.suggested_buffer, h.width, h.height), (55_300, 320, 240));
+        assert_eq!((h.flags, h.streams), (0x910, 2));
         let video = &avi.streams[0];
         assert_eq!(&video.handler, b"IV50");
         assert_eq!((video.flags, video.priority, video.language), (1, 1, 2));
@@ -350,6 +363,10 @@ mod tests {
         );
         assert_eq!(sound.frame, [0; 4]);
         assert!(sound.name.is_empty());
+        // A sound's samples are its format's blocks, whatever its header
+        // says; a video's sample size is its header's.
+        assert_eq!((sound.sample_size, sound.sample_bytes()), (1, 2));
+        assert_eq!(video.sample_bytes(), 0);
     }
 
     #[test]

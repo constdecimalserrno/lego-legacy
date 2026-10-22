@@ -13,7 +13,7 @@ use lego_legacy_core::raster::PixelFormat;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::title::Declared;
 use lego_legacy_core::win32::{self, user32::WINDOW, Ctx};
-use lego_legacy_core::{disc, Title};
+use lego_legacy_core::{disc, roster, testkit, Title};
 
 /// Where the tests put what they pass and what is written back.
 const DATA: u32 = 0x0050_0000;
@@ -2393,14 +2393,18 @@ fn a_movie_opened_through_avifile_answers_its_headers_and_its_formats() {
     let file = read(&m, OUT);
     assert_ne!(file, 0);
 
-    // AVIFILEINFOA: the main header's, at the first stream's time scale, and
-    // the first stream's length in it, whatever the main header counts.
+    // AVIFILEINFOA, worked out from the streams as Wine works it out: the
+    // most bytes a second, the video's biggest chunk at 15 a second and the
+    // sound's 22,050 one-byte samples; the main header's flags; the caps; the
+    // main header's two streams; the biggest chunk; the video's frame; the
+    // first stream's time scale; and the longest stream's length in it,
+    // whatever the main header counts.
     assert_eq!(
         call(&mut m, "AVIFIL32", "AVIFileInfoA", &[file, INFO, 108]),
         Ok(0)
     );
     let fields: Vec<u32> = (0..10).map(|i| read(&m, INFO + 4 * i)).collect();
-    assert_eq!(fields, [22_400, 0x110, 3, 2, 4_096, 4, 2, 1, 15, 3]);
+    assert_eq!(fields, [2 * 15 + 22_050, 0x110, 3, 2, 2, 4, 2, 1, 15, 3]);
     assert_eq!(
         call(&mut m, "AVIFIL32", "AVIFileInfoA", &[file, INFO, 107]),
         Ok(0x8004_406b),
@@ -2437,14 +2441,17 @@ fn a_movie_opened_through_avifile_answers_its_headers_and_its_formats() {
     };
     let (fields, name) = info(&mut m, video);
     assert_eq!(fields[..2], [VIDS, u32::from_le_bytes(*b"IV50")]);
-    // Its scale, rate, start, length; and its frame, filled from the picture.
+    // Its scale, rate, start, length; its buffer, its biggest chunk, not its
+    // header's 2,048; and its frame, filled from the picture.
     assert_eq!(fields[5..9], [1, 15, 0, 3]);
+    assert_eq!(fields[10], 2);
     assert_eq!(fields[13..17], [0, 0, 4, 2]);
     assert_eq!(name, "movie.avi Video #1");
     let (fields, name) = info(&mut m, sound);
     assert_eq!(fields[0], AUDS);
-    // Its initial frames, its sample size, and a frame nobody fills.
-    assert_eq!((fields[9], fields[12]), (11, 1));
+    // Its initial frames, a buffer of nothing for a stream with no chunks,
+    // its sample size, and a frame nobody fills.
+    assert_eq!((fields[9], fields[10], fields[12]), (11, 0, 1));
     assert_eq!(fields[13..17], [0; 4]);
     assert_eq!(name, "MOVIE.AVI Audio #1");
     assert_eq!(
@@ -2478,10 +2485,115 @@ fn a_movie_opened_through_avifile_answers_its_headers_and_its_formats() {
     );
 }
 
+/// A sound's sample size is its format's block, whatever its header says, as
+/// Wine's conformance tests `test_ash1_corruption` and
+/// `test_ash1_corruption2`, which pass on Windows, find it (#151).
+#[test]
+fn a_sound_s_sample_size_is_its_format_s_block() {
+    let size = |bytes: Vec<u8>| {
+        let mut m = machine();
+        m.tree.declare(MOVIE, bytes);
+        m.arena
+            .write(DATA, format!("{MOVIE}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 1]),
+            Ok(0)
+        );
+        let sound = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIStreamInfoA", &[sound, OUT + 4, 140]),
+            Ok(0)
+        );
+        m.arena.read_u32(OUT + 4 + 48).expect("in the arena")
+    };
+    // The sound's header and its format, found by what they say.
+    let at = |bytes: &[u8], needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("in the movie")
+    };
+    let mut corrupt = movie(2);
+    let header = at(&corrupt, b"auds");
+    corrupt[header + 44..header + 48].copy_from_slice(&0xdead_beef_u32.to_le_bytes());
+    assert_eq!(size(corrupt), 1);
+    let mut corrupt = movie(2);
+    let format = at(&corrupt, &[1, 0, 1, 0, 0x22, 0x56, 0, 0]);
+    corrupt[format + 12..format + 14].copy_from_slice(&0xdead_u16.to_le_bytes());
+    assert_eq!(size(corrupt), 0xdead);
+}
+
+/// The intro's three movies, off LEGO Chess's disc, as AVIStreamInfoA answers
+/// them (#151): Indeo 5 at 15 a second; their frames, the logo's its own and
+/// Krisalis' and the intro's written as 32-bit edges and so empty, filled
+/// from their pictures; and their sounds' sample sizes, 8-bit mono's and
+/// 16-bit stereo's blocks.
+#[test]
+fn the_intro_s_movies_answer_their_streams_off_the_disc() {
+    let image = &roster::LEGO_CHESS.image;
+    if !testkit::rips(image) {
+        return;
+    }
+    let mut m = machine();
+    m.tree
+        .set_disc(disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens"));
+    for (name, frames, frame, sample) in [
+        ("LMI", 280, [0, 0, 320, 240], Some(1)),
+        ("KRISALIS", 38, [0, 0, 320, 240], None),
+        ("INTRO", 499, [0, 0, 320, 200], Some(4)),
+    ] {
+        m.arena
+            .write(DATA, format!("D:\\INTRO\\{name}.AVI\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        let info = |m: &mut Machine, n: u32| {
+            let found = call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, n]);
+            if found != Ok(0) {
+                return None;
+            }
+            let stream = m.arena.read_u32(OUT).expect("in the arena");
+            assert_eq!(
+                call(m, "AVIFIL32", "AVIStreamInfoA", &[stream, OUT + 4, 140]),
+                Ok(0)
+            );
+            Some(
+                (0..17)
+                    .map(|i| m.arena.read_u32(OUT + 4 + 4 * i).expect("in the arena"))
+                    .collect::<Vec<u32>>(),
+            )
+        };
+        let video = info(&mut m, 0).expect("a video stream");
+        assert_eq!(
+            video[..2],
+            [u32::from_le_bytes(*b"vids"), u32::from_le_bytes(*b"IV50")],
+            "{name}"
+        );
+        assert_eq!((video[5], video[6], video[8]), (1, 15, frames), "{name}");
+        assert_eq!(video[13..17], frame.map(|e: i32| e as u32), "{name}");
+        let sound = info(&mut m, 1).map(|s| {
+            assert_eq!(s[0], u32::from_le_bytes(*b"auds"), "{name}");
+            s[12]
+        });
+        assert_eq!(sound, sample, "{name}");
+    }
+}
+
 /// A movie that is not there is one the handler cannot open, which LEGO
-/// Chess skips (#151). One whose header says another number of streams than
-/// it holds is a damaged rip, and a mode other than reading is not one this
-/// machine opens a movie in: each is a wall.
+/// Chess skips (#151). One whose header says it holds more streams than it
+/// does is a damaged rip, which Wine fails to load, and a mode other than
+/// reading is not one this machine opens a movie in: each is a wall. One that
+/// holds more than its header says is read as Wine reads it, as the streams
+/// its header counts.
 #[test]
 fn a_movie_not_there_cannot_be_opened_and_a_damaged_one_is_a_wall() {
     let mut m = machine();
@@ -2508,5 +2620,16 @@ fn a_movie_not_there_cannot_be_opened_and_a_damaged_one_is_a_wall() {
     assert!(
         matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("mode 0x1")),
         "{wall:?}"
+    );
+    // A header that counts one stream of two: one stream.
+    m.tree.declare(MOVIE, movie(1));
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 1]),
+        Ok(0x8004_4073)
     );
 }

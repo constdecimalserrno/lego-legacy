@@ -10,7 +10,7 @@ use lego_chess::LEGO_CHESS as CHESS;
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::{avi, disc, hash, sound, testkit, Title};
+use lego_legacy_core::{disc, hash, testkit, Title};
 
 const ROOT: &str = CHESS.install_dir;
 
@@ -346,48 +346,6 @@ fn its_first_movie_opens_and_its_streams_are_read() {
             "{call} from {from}\nlog:\n{}",
             ran.log
         );
-    }
-}
-
-/// The three movies the intro plays, as AVIFile reads their headers (#151):
-/// the logo, Krisalis' and the intro. The last two write their frames as
-/// 32-bit edges, which read as vfw.h's 16-bit ones are empty, so AVIFile
-/// gives them their pictures' sizes; the logo's is its own.
-#[test]
-fn the_intro_s_movies_are_indeo_5_at_15_frames_a_second() {
-    if !scratch() {
-        return;
-    }
-    let mut tree = testkit::tree(&CHESS);
-    for (name, size, frames, frame, sound) in [
-        ("lmi", (320, 240), 280, [0, 0, 320, 240], Some((1, 8, 1))),
-        ("krisalis", (320, 240), 38, [0; 4], None),
-        ("intro", (320, 200), 499, [0; 4], Some((2, 16, 4))),
-    ] {
-        let bytes = tree
-            .read(&format!("D:\\intro\\{name}.avi"))
-            .expect("the movie is on the disc");
-        let movie = avi::parse(&bytes).expect("an AVI file");
-        let video = &movie.streams[0];
-        assert_eq!(
-            (&video.kind, &video.handler, video.compression()),
-            (b"vids", b"IV50", *b"IV50"),
-            "{name}"
-        );
-        assert_eq!(
-            (video.picture_size(), video.length, video.rate / video.scale),
-            (size, frames, 15),
-            "{name}"
-        );
-        assert_eq!(video.frame, frame, "{name}");
-        // Its sound, PCM at 22,050 Hz, as channels, bits and the bytes a
-        // sample is, which is what the game reads it in.
-        let heard = movie.streams.get(1).map(|s| {
-            let format = sound::Format::parse(&s.format).expect("a wave format");
-            assert_eq!((s.kind, format.tag, format.rate), (*b"auds", 1, 22_050));
-            (format.channels, format.bits, s.sample_size)
-        });
-        assert_eq!(heard, sound, "{name}");
     }
 }
 
