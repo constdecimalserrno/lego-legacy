@@ -384,14 +384,17 @@ const WA_ACTIVE: u32 = 1;
 /// in Microsoft's order: `WM_ACTIVATEAPP` as the application is about to be
 /// activated, `WM_ACTIVATE` with `WA_ACTIVE` and no window deactivated, and
 /// `WM_SETFOCUS` once the window has the focus, which Windows gives an
-/// activated window that is not minimized. A title that is never told
+/// activated window that is not minimized: Microsoft's `WM_ACTIVATE` page says
+/// `DefWindowProc` sets the keyboard focus to it, and Wine's
+/// `set_active_window` (`win32u/input.c`), read as documentation, sets the
+/// focus after it sends `WM_ACTIVATE`. A title that is never told
 /// believes it is in the background: Hot Wheels draws a whole race into its
 /// own frame buffer and puts none of it on the screen until it has heard the
 /// first (#38), and LEGO Chess's framework spins in its message pump until it
 /// has heard the last (0x0045C626, #196).
-// ponytail: posted, where Windows sends them from `ShowWindow` or a visible
-// `CreateWindowEx`, and without `WM_NCACTIVATE`, which no title reads; both
-// wait for a title that looks.
+// ponytail: posted at `CreateWindowExA`, where Windows sends them from
+// `ShowWindow` or a visible `CreateWindowExA`, and without the `WM_NCACTIVATE`
+// it sends between the first two, which no title reads; #203 sends them.
 fn activate(state: &mut super::State, time: u32) {
     for (message, wparam) in [
         (WM_ACTIVATEAPP, 1),

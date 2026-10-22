@@ -84,7 +84,9 @@ window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Window
 runs that exit move, their flips, declared milliseconds and exit code unchanged: `first-race.route`
 ends at 13,462,673,233 where it ended at 13,462,673,372, and the escape route at 583,424,170 where it
 ended at 583,424,086. Its two runs held to a budget end in another state; core's changelog lists
-the digests. A move the maintainer blessed on 2026-10-22.
+the digests. Its procedure hands both to `DefWindowProcA`, and its first pump runs between flips 99
+and 100, so the flips before it are unchanged. A move the maintainer blessed on 2026-10-22. A person
+should drive the first race again on the MacBook before its next release.
 
 ## 1.0.0 — 2026-10-18
 

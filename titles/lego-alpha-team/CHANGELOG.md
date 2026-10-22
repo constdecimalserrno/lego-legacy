@@ -75,13 +75,19 @@ will not unpack, or unpacks to another size than its header gives (#169, core 1.
 file was missing and ran on. A good rip unpacks every file, so no route moves.
 
 Took core 1.2.0's activation (#196): its window procedure is told, after `WM_ACTIVATEAPP`, that its
-window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. Its
-threads then meet their clock at other instructions, so its runs held to a budget end elsewhere:
+window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. On
+`WM_ACTIVATE` its own procedure sets its active flag, clips the pointer to its window (which the
+machine keeps for `GetClipCursor`, and the host does not enforce), stamps its frame clock again and
+resumes the sounds it paused, of which there are none at boot; `WM_SETFOCUS` goes to
+`DefWindowProcA`. Every flip of its intro comes 606 instructions later, and from the menu's load at
+flip 1634 its runs diverge, so its runs held to a budget end elsewhere:
 `first-mission.route` with 8,053 flips and 331,938 declared milliseconds where it had 8,054 and
 331,967, `select-adventure.route` with 4,455 and 214,138 where it had 4,454 and 214,104, and
 `menu.route` at 139,469 declared milliseconds where it had 139,471, its flips unchanged. Every other
-run with a window ends in another state at the same flip; core's changelog lists the digests. A
-move the maintainer blessed on 2026-10-22.
+run with a window ends in another state at the same flip; core's changelog lists the digests. Its
+two moved routes still reach the states they are named for, the first mission played and Select
+Adventure open, which is why ADR-0007 makes this a patch. A move the maintainer blessed on
+2026-10-22. A person should play it on the MacBook before its next release.
 
 ## 1.0.0 — 2026-10-18
 

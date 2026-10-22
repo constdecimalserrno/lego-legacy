@@ -8,7 +8,9 @@ One heading per version, newest first. What each part of core's version means is
 A title's window is told it is the active window and has the keyboard as Windows tells it (#196):
 after `WM_ACTIVATEAPP` come `WM_ACTIVATE` with `WA_ACTIVE` and no window deactivated, and then
 `WM_SETFOCUS` with no window that lost it, in Microsoft's order, posted with it as the window is made.
-LEGO Chess's message pump waits for `WM_SETFOCUS` (0x0045C626) and spun for ever without it. Every
+Windows sends them from `ShowWindow`, or a visible `CreateWindowExA`, with `WM_NCACTIVATE` between the
+first two; core posts them at `CreateWindowExA`, and #203 is to send them. LEGO Chess's message pump
+waits for `WM_SETFOCUS` (0x0045C626), and on a probe it spun for ever without it. Every
 released title's window procedure now hears two more messages, so every run of a released title that
 makes its window moves, a move the maintainer blessed on 2026-10-22; each title's changelog says how,
 and the runs are listed here:
@@ -46,7 +48,8 @@ and the runs are listed here:
 - lego-rock-raiders, `level-select.route` (held to 8,035,000,000): digest `49e57d12` → `df1a6347`;
 - lego-rock-raiders, a run with no route (held to 400,000,000): digest `6714ce40` → `e76c516d`;
 - lego-rock-raiders, a run with no route (held to 61,000,000): digest `3e8b8a38` → `f53901b5`;
-- lego-rock-raiders, `skip-the-intro.route` (held to 150,000,000): digest `315d3880` → `b0ab6356`;
+- lego-rock-raiders, `skip-the-intro.route` (held to 150,000,000): digest `315d3880` → `b0ab6356`
+  (Rock Raiders' run held to 100,000 makes no window and is unchanged);
 - lego-island, `maintainer-first-play.route`: replayed to 3,341,815,910 where it was held to 3,341,815,783, the same moment 127 instructions later, ending at flip 10,667 and 274,650 ms as before; digest `db7bd6b2` → `6b5eca98`.
 
 LEGO Chess's run ends at the same wall, cursor and flips, its digest `52a34d88` → `7fcea288`: its

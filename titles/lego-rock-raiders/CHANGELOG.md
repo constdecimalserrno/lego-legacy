@@ -87,10 +87,14 @@ Core's declared tree stops the run at a wall naming the file when a rip's cabine
 will not unpack, or unpacks to another size than its header gives (#169, core 1.2.0). The title was told the
 file was missing and ran on. A good rip unpacks every file, so no route moves.
 
-Took core 1.2.0's activation (#196): its window procedure is told, after `WM_ACTIVATEAPP`, that its
-window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. Every
+Took core 1.2.0's activation (#196): its window is told, after `WM_ACTIVATEAPP`, that it is active
+(`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it. Its message loop drops
+`WM_ACTIVATEAPP` before its procedure sees it (the filter at 0x004782D0), so these two are the
+first messages its procedure is handed on a committed route: it answers `WM_ACTIVATE` itself, with
+0, and hands `WM_SETFOCUS` to `DefWindowProcA`. Every flip comes 131 instructions later, so every
 run that makes its window ends in another state at the same instruction, flip and declared
-millisecond; core's changelog lists the digests. A move the maintainer blessed on 2026-10-22.
+millisecond; core's changelog lists the digests. A move the maintainer blessed on 2026-10-22. A
+person should play it on the MacBook before its next release.
 
 ## 1.0.0 — 2026-10-18
 

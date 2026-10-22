@@ -1000,7 +1000,7 @@ const SLOT_SAVED: u64 = 4140;
 
 /// Enough instructions for the committed route to start an adventure, skip
 /// its training mission, go back to HQ and open Select Adventure again: at the
-/// title's thirty, 14 billion reaches flip 4454. Mission One starts once its
+/// title's thirty, 14 billion reaches flip 4455. Mission One starts once its
 /// loading voice is heard whole (#92), well before the route's click at 3562.
 const SELECT_ADVENTURE_BUDGET: u64 = 14_000_000_000;
 

@@ -29,8 +29,8 @@ test runs it to 6,067,000,000: the island stands still for sixty flips, a declar
 `WM_TIMER` comes after flip 12462, the drag killing its timer; and from there the island goes by.
 The ride's hand is now that hand out of the door and the ride on from it, the same events, so
 `first-ride.route` does not move. No committed route moves, since none holds the button still for
-a second: `maintainer-first-play.route` still ends on its budget with the digest the maintainer's
-run ended with, `db7bd6b2…`. The restless hand's digest moves, `c029337f…` to `99ce5f30…`: two of
+a second: `maintainer-first-play.route` still ended on its budget with the digest the maintainer's
+run ended with, `db7bd6b2…`, until #196 (below). The restless hand's digest moves, `c029337f…` to `99ce5f30…`: two of
 its releases kill a timer that is not there, which is refused with `ERROR_INVALID_PARAMETER`, and
 the C runtime keeps that error.
 
@@ -87,14 +87,16 @@ release is 2.0.0, #163), which is the machine it has always had: C: and D: only.
 moves.
 
 Took core 1.2.0's activation (#196): its window procedure is told, after `WM_ACTIVATEAPP`, that its
-window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it, which
-takes it 127 instructions, so everything after its window is made happens 127 instructions later,
-its frames unchanged. Its runs that close themselves end 127 later: `first-save.route` at
-13,071,129,733, `pizza-delivery.route` at 10,657,537,702, and the hand that closes its window in the
-Information Center, recorded and replayed, at 4,998,298,839. The tests pin first light's flip 460 at
-97,000,829 and the information centre's flip 5099 at 3,952,209,794, and the maintainer's play is
-replayed to 3,341,815,910, the moment they closed the window, which still ends at flip 10,667 and
-274,650 declared milliseconds. A move the maintainer blessed on 2026-10-22.
+window is active (`WM_ACTIVATE`) and has the keyboard (`WM_SETFOCUS`), as Windows tells it, and
+hands both to `DefWindowProcA`, which takes it 127 instructions, so everything after its window is
+made happens 127 instructions later, its flips unchanged. Its runs that close themselves end 127
+later: `first-save.route` at 13,071,129,733, `pizza-delivery.route` at 10,657,537,702, and the hand
+that closes its window in the Information Center, recorded and replayed, at 4,998,298,839. The tests
+pin first light's flip 460 at 97,000,829 and the Information Center's flip 5099 at 3,952,209,794.
+The maintainer's play is replayed to 3,341,815,910, the moment they closed the window, at the same
+flip 10,667 and 274,650 declared milliseconds, but it no longer ends in their own run's state: it
+ends at `6b5eca98…`, since their play predates the two messages. A move the maintainer blessed on
+2026-10-22. A person should replay its first save on the MacBook before its next release.
 
 ## 1.0.0 — 2026-10-21
 

@@ -282,7 +282,7 @@ fn retained_mode_keeps_the_meshes_the_world_is_built_of() {
 const FIRST_LIGHT: u64 = 460;
 
 /// Enough instructions for the game to build its world and present first
-/// light, at 97,000,702, and a frame more.
+/// light, at 97,000,829, and a frame more.
 const FIRST_LIGHT_BUDGET: u64 = 98_000_000;
 
 /// The committed route to first light, replayed, keeping first light and the
@@ -1687,8 +1687,9 @@ static PLAYED: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
 
 /// The ticket's bar (#126): a person's play is the committed route, as Hot
 /// Wheels' first race is. Replayed, it ends where the maintainer's run ended on
-/// their MacBook, at the same instruction, flip and declared time, the budget
-/// exhausted where theirs was stopped by the person. Their play began from an
+/// their MacBook, at the same moment, 127 instructions later (#196), the same
+/// flip and declared time, the budget exhausted where theirs was stopped by the
+/// person. Their play began from an
 /// empty profile, so a replay over an empty data root starts from what theirs
 /// did: it changes nothing. Their window closing did not tell the game, then,
 /// so the players are all it saved, as theirs were.
