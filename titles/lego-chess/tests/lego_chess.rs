@@ -336,10 +336,17 @@ fn its_first_movie_opens_and_its_streams_are_read() {
         .assert_logged("call AVIFIL32.dll!AVIFileInfoA(")
         .assert_logged("call AVIFIL32.dll!AVIFileGetStream(")
         .assert_logged("call AVIFIL32.dll!AVIStreamReadFormat(")
-        .assert_logged("movie D:\\intro\\lmi.avi frames as 16-bit DIBs at ")
-        // The whole screen, from the whole 320x240 frame.
-        .assert_logged(", 0x0, 0x0, 0x280, 0x1e0, ")
-        .assert_logged(", 0x0, 0x0, 0x0, 0x140, 0xf0, 0x0) from 0x400040ca ");
+        .assert_logged("movie D:\\intro\\lmi.avi frames as 16-bit DIBs at ");
+    // The whole screen, from the whole 320x240 frame.
+    assert!(
+        ran.log
+            .lines()
+            .any(|l| l.starts_with("call MSVFW32.dll!DrawDibDraw(")
+                && l.contains(", 0x0, 0x0, 0x280, 0x1e0, ")
+                && l.contains(", 0x0, 0x0, 0x0, 0x140, 0xf0, 0x0) from 0x400040ca ")),
+        "DrawDibDraw draws the whole frame doubled onto the whole screen\nlog:\n{}",
+        ran.log
+    );
     for (call, from) in [
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b094"),
         ("call AVIFIL32.dll!AVIStreamAddRef(", "0x0044b0db"),

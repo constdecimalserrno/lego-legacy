@@ -2882,6 +2882,26 @@ fn a_surface_hands_out_one_dc_at_a_time() {
         "DDERR_DCALREADYCREATED"
     );
     assert_eq!(read(&m), 7);
+    // Its DC out, the surface is locked: Lock answers DDERR_SURFACEBUSY, as
+    // Wine's `test_getdc` finds Windows answering, and a blit or a flip, which
+    // nothing has observed, is a wall.
+    assert_eq!(
+        com(
+            &mut m,
+            "IDirectDrawSurface",
+            25,
+            one,
+            &[0, OUT + 0x40, 0, 0]
+        ),
+        Ok(0x8876_01ae)
+    );
+    for (slot, args) in [(5, &[0, 0, 0, 0x400, 0][..]), (11, &[0, 0][..])] {
+        let wall = com(&mut m, "IDirectDrawSurface", slot, one, args);
+        assert!(
+            matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("while its DC is out")),
+            "{wall:?}"
+        );
+    }
     // Its DirectX 6 face is the same surface, with the same DC out.
     let face = with_ctx(&mut m, |ctx| {
         win32::State::face(ctx, one, &win32::ddraw::DIRECT_DRAW_SURFACE4)
@@ -2916,6 +2936,55 @@ fn a_surface_hands_out_one_dc_at_a_time() {
         com(&mut m, "IDirectDrawSurface", GET_DC, two, &[0]),
         Ok(0x8007_0057)
     );
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", RELEASE_DC, one, &[dc]),
+        Ok(0)
+    );
+    assert_eq!(
+        com(
+            &mut m,
+            "IDirectDrawSurface",
+            25,
+            one,
+            &[0, OUT + 0x40, 0, 0]
+        ),
+        Ok(0),
+        "let go of, it locks"
+    );
+
+    // A screen with no surface behind it has its frame when its DC is let go
+    // of, as letting go of a lock of the whole of it does.
+    let screen = with_ctx(&mut m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            &win32::ddraw::DIRECT_DRAW_SURFACE,
+            win32::ComState::Surface {
+                pixels: PIXELS,
+                width: 4,
+                height: 4,
+                pitch: 8,
+                format: PixelFormat::RGB565,
+                primary: true,
+                back: 0,
+                palette: 0,
+            },
+        )
+    })
+    .expect("a screen");
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", GET_DC, screen, &[OUT]),
+        Ok(0)
+    );
+    m.state.present = None;
+    let dc = read(&m);
+    assert_eq!(
+        com(&mut m, "IDirectDrawSurface", RELEASE_DC, screen, &[dc]),
+        Ok(0)
+    );
+    assert_eq!(
+        m.state.present.map(|p| (p.pixels, p.width)),
+        Some((PIXELS, 4))
+    );
 }
 
 /// The 4x4 sixteen-bit surface at `PIXELS`, as its 565 pixels, row by row.
@@ -2933,8 +3002,11 @@ fn four_by_four(m: &Machine) -> Vec<u16> {
 /// pixel repeated as many times over as the destination is the DIB's size,
 /// from the bottom row up, and what falls off the surface left out. A 555
 /// pixel's channels are widened by their own top bits on the way to a 565
-/// surface, so green's sixth bit is its top one. A top-down DIB or a scale
-/// that is not whole is a wall, and a handle closed is one no more.
+/// surface, so green's sixth bit is its top one. A top-down or empty DIB is
+/// refused, as Microsoft's DrawDibDraw page and Wine's `test_DrawDib_sizeimage`
+/// refuse one; a scale that is not whole, or a 24-bit DIB, is a wall; a
+/// destination wholly off the surface draws nothing; and handles count up, so
+/// a handle closed is one no more.
 #[test]
 fn drawdib_draws_a_dib_whole_onto_a_surface_s_dc() {
     const DIB: u32 = DATA + 0x400;
@@ -2979,39 +3051,46 @@ fn drawdib_draws_a_dib_whole_onto_a_surface_s_dc() {
         [0, 0, 0, 0, 0, a, a, b, 0, a, a, b, 0, c, c, d]
     );
 
-    m.arena
-        .write_u32(DIB + 8, (-2i32) as u32)
-        .expect("in the arena");
-    let wall = draw(&mut m, DIB, (0, 0, 4, 4));
-    assert!(
-        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("2x-2")),
-        "{wall:?}"
+    // Off the surface: drawn, and nothing changes.
+    assert_eq!(draw(&mut m, DIB, (100, 0, 4, 4)), Ok(1));
+    assert_eq!(
+        four_by_four(&m),
+        [0, 0, 0, 0, 0, a, a, b, 0, a, a, b, 0, c, c, d]
     );
-    m.arena.write_u32(DIB + 8, 2).expect("in the arena");
+    // Top-down, and of no width: refused, and nothing drawn.
+    for (at, value) in [(8, (-2i32) as u32), (4, 0)] {
+        m.arena.write_u32(DIB + at, value).expect("in the arena");
+        assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(0));
+        m.arena.write_u32(DIB + at, 2).expect("in the arena");
+    }
+    assert_eq!(four_by_four(&m)[5], a);
     let wall = draw(&mut m, DIB, (0, 0, 3, 3));
     assert!(
         matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("onto 3x3")),
         "{wall:?}"
     );
-    // A 24-bit DIB's pixel is blue, green and red, its row padded to a word.
+    // A 24-bit DIB, which nothing on the roster draws.
     m.arena
         .write(
             DIB + 0x100,
             &[dib_header(1, 1, 24, 4), vec![0x10, 0x20, 0x30, 0]].concat(),
         )
         .expect("in the arena");
-    assert_eq!(
-        call(
-            &mut m,
-            "MSVFW32",
-            "DrawDibDraw",
-            &[dd, dc, 3, 0, 1, 1, DIB + 0x100, 0, 0, 0, 1, 1, 0]
-        ),
-        Ok(1)
+    let wall = call(
+        &mut m,
+        "MSVFW32",
+        "DrawDibDraw",
+        &[dd, dc, 3, 0, 1, 1, DIB + 0x100, 0, 0, 0, 1, 1, 0],
     );
-    assert_eq!(four_by_four(&m)[3], 0x3102);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("24-bit")),
+        "{wall:?}"
+    );
 
     assert_eq!(call(&mut m, "MSVFW32", "DrawDibClose", &[dd]), Ok(1));
     assert_eq!(call(&mut m, "MSVFW32", "DrawDibClose", &[dd]), Ok(0));
     assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(0));
+    // The next handle is the next one up, not the one let go of.
+    assert_eq!(call(&mut m, "MSVFW32", "DrawDibOpen", &[]), Ok(2));
+    assert_eq!(draw(&mut m, DIB, (0, 0, 4, 4)), Ok(0), "1 is let go of");
 }

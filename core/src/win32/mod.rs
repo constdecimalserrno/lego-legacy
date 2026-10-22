@@ -307,8 +307,10 @@ pub struct State {
     /// The device contexts surfaces have handed out and not yet had back, by
     /// the DC, each with the surface it draws on (#151).
     pub surface_dcs: BTreeMap<u32, u32>,
-    /// The DrawDibs a title has open, by their handles (#151).
+    /// The DrawDibs a title has open, by their handles, and the handle the
+    /// next one will be given (#151).
     pub drawdibs: std::collections::BTreeSet<u32>,
+    pub next_drawdib: u32,
     /// The palette the screen is showing through, if any.
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
@@ -483,6 +485,7 @@ impl State {
             clip_lists: BTreeMap::new(),
             surface_dcs: BTreeMap::new(),
             drawdibs: std::collections::BTreeSet::new(),
+            next_drawdib: 1,
             palette: 0,
             present: None,
             keys_down: Vec::new(),

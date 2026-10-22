@@ -686,10 +686,35 @@ fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool
 /// `0x0002_xxxx`.
 const SURFACE_DC: u32 = 0x0004_0000;
 
-/// `DDERR_INVALIDPARAMS`, `DDERR_DCALREADYCREATED` and `DDERR_NODC`.
+/// `DDERR_INVALIDPARAMS`, `DDERR_DCALREADYCREATED`, `DDERR_NODC` and
+/// `DDERR_SURFACEBUSY`.
 const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
 const DDERR_DCALREADYCREATED: u32 = 0x8876_026c;
 const DDERR_NODC: u32 = 0x8876_00cb;
+const DDERR_SURFACEBUSY: u32 = 0x8876_01ae;
+
+/// Whether a surface has its device context out, which locks it until the DC
+/// is let go of, as Microsoft's GetDC page says: what a DC draws, DrawDib
+/// (#151), draws on the surface's own pixels.
+fn dc_out(ctx: &Ctx<'_>, surface: u32) -> bool {
+    let surface = ctx.state.identity(surface);
+    ctx.state.surface_dcs.values().any(|s| *s == surface)
+}
+
+/// A blit or a flip touching a surface whose DC is out: what DirectDraw
+/// answers for one is not documented, so it is a wall.
+fn busy(ctx: &Ctx<'_>, this: u32, call: &str, surfaces: &[u32]) -> Result<(), Stop> {
+    match surfaces.iter().find(|s| **s != 0 && dc_out(ctx, **s)) {
+        None => Ok(()),
+        Some(s) => Err(Stop::NotWritten {
+            what: format!(
+                "{}::{call}: {s:#x} while its DC is out",
+                ctx.state.interface_of(this).unwrap_or("IDirectDrawSurface")
+            ),
+            caller: 0,
+        }),
+    }
+}
 
 fn get_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetDC(dc out): a device context drawing onto the surface's own pixels,
@@ -701,7 +726,7 @@ fn get_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(DDERR_INVALIDPARAMS);
     }
     let surface = ctx.state.identity(this);
-    if ctx.state.surface_dcs.values().any(|s| *s == surface) {
+    if dc_out(ctx, this) {
         return Ok(DDERR_DCALREADYCREATED);
     }
     let mut dc = SURFACE_DC;
@@ -717,6 +742,9 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // ReleaseDC(dc): the surface's device context let go of. A surface with
     // none out answers DDERR_NODC, as Wine's does; one handed another DC than
     // its own is a wall, since what Windows answers for it is not documented.
+    // A screen with nothing behind it has its frame then, as letting go of a
+    // lock of the whole of it does (`unlock`): Wine's ReleaseDC brings the
+    // front buffer up to date.
     let surface = ctx.state.identity(this);
     let Some(&dc) = ctx
         .state
@@ -737,6 +765,15 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     ctx.state.surface_dcs.remove(&dc);
+    if let Some((pixels, width, height, pitch, depth, true, 0)) = surface_of(ctx, this) {
+        ctx.state.present = Some(super::Present {
+            pixels,
+            width,
+            height,
+            pitch,
+            depth,
+        });
+    }
     Ok(S_OK)
 }
 
@@ -776,10 +813,15 @@ fn pixel_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 
 fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Lock(rect, descriptor, flags, event). The guest is given the address of
-    // its own pixels: the surface is guest memory and always was.
+    // its own pixels: the surface is guest memory and always was. One whose DC
+    // is out is already locked, which Wine's ddraw conformance test
+    // `test_getdc`, which passes on Windows, finds answered DDERR_SURFACEBUSY.
     let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
+    if dc_out(ctx, this) {
+        return Ok(DDERR_SURFACEBUSY);
+    }
     let format = format_of(ctx, this);
     write_surface_desc(ctx, args[1], width, height, format, pixels)?;
     Ok(S_OK)
@@ -831,6 +873,7 @@ fn flip(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     let Some((pixels, width, height, pitch, depth, _, back)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
+    busy(ctx, this, "Flip", &[this, back])?;
     let source = surface_of(ctx, back).map_or(pixels, |s| s.0);
     if source != pixels {
         let bytes = ctx
@@ -852,6 +895,7 @@ fn flip(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 
 fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Blt(destination rect, source, source rect, flags, effects).
+    busy(ctx, this, "Blt", &[this, args[1]])?;
     const DDBLT_ASYNC: u32 = 0x0000_0200;
     const DDBLT_COLORFILL: u32 = 0x0000_0400;
     const DDBLT_KEYSRC: u32 = 0x0000_8000;
@@ -1058,6 +1102,7 @@ fn set_hwnd(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // BltFast(x, y, source, source rect, flags).
+    busy(ctx, this, "BltFast", &[this, args[2]])?;
     const DDBLTFAST_SRCCOLORKEY: u32 = 0x1;
     const DDBLTFAST_WAIT: u32 = 0x10;
     let flags = args[4];

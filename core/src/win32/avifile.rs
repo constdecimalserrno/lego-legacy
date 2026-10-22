@@ -757,14 +757,16 @@ fn dib_bits(picture: &crate::iv50::Picture, bits: u16) -> Vec<u8> {
 }
 
 fn draw_dib_open(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // DrawDibOpen(): a handle to draw with, the lowest not in use, counted
-    // from one as Wine's `drawdib.c`, read as documentation, counts them. Its
-    // handles are its own: LEGO Chess opens one for each frame it draws, and
-    // taken from the machine's own handles they would climb into its window's.
-    let mut handle = 1;
-    while ctx.state.drawdibs.contains(&handle) {
-        handle += 1;
+    // DrawDibOpen(): a handle to draw with, counted up from one past any still
+    // open, as Wine's `drawdib.c`, read as documentation, counts them, so a
+    // handle let go of is not handed out again and drawing with it is
+    // refused. They are DrawDib's own, not the machine's handles: LEGO Chess
+    // opens one for each frame it draws.
+    while ctx.state.drawdibs.contains(&ctx.state.next_drawdib) {
+        ctx.state.next_drawdib = ctx.state.next_drawdib.wrapping_add(1);
     }
+    let handle = ctx.state.next_drawdib;
+    ctx.state.next_drawdib = handle.wrapping_add(1);
     ctx.state.drawdibs.insert(handle);
     Ok(handle)
 }
@@ -776,17 +778,22 @@ fn draw_dib_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn draw_dib_draw(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DrawDibDraw(handle, dc, x, y, width, height, header, bits, source x,
-    // source y, source width, source height, flags): a plain bottom-up DIB
-    // drawn whole onto a surface's DC, each pixel repeated as many times over
-    // as the destination is the DIB's size, and what falls off the surface
-    // left out; FALSE for a handle it never gave. Bits of none are the ones
-    // after the header, as Wine's `drawdib.c` reads them. Each channel is widened by repeating its top
+    // source y, source width, source height, flags): a plain bottom-up DIB of
+    // 16 bits a pixel drawn whole onto a surface's DC, each pixel repeated as
+    // many times over as the destination is the DIB's size, and what falls off
+    // the surface left out. FALSE for a handle it never gave or has let go of
+    // (Wine's `drawdib.c`, read as documentation), and for a DIB that is
+    // top-down or empty: Microsoft's DrawDibDraw page says its height must be
+    // positive, as DrawDibDraw "will not draw inverted DIBs", and Wine's
+    // conformance test `test_DrawDib_sizeimage`, which passes on Windows,
+    // finds an empty one refused too. Bits of none are the ones after the
+    // header, as Wine reads them. Each channel is widened by repeating its top
     // bits and then narrowed to the surface's, as Wine's DIB engine does,
     // which gives a 555 DIB's green its sixth bit on a 565 surface from its
-    // own top one. Anything else is a wall: a flag, a part of a DIB or a
-    // scale that is not whole, and a top-down DIB, which Wine's DrawDibBegin
-    // refuses as one it does not draw and what Windows does with is not
-    // documented.
+    // own top one. A flag, a part of a DIB, a scale that is not whole, a
+    // codec, a colour table, another depth or an indexed surface is a wall:
+    // LEGO Chess draws its movies' 16-bit frames whole and doubled, and its
+    // Advisors read their 24-bit ones without DrawDib.
     let [hdd, dc, x, y, width, height, header, bits, sx, sy, sw, sh, flags] = args else {
         unreachable!("DrawDibDraw takes thirteen arguments");
     };
@@ -806,15 +813,12 @@ fn draw_dib_draw(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let read = |at: u32| ctx.mem.read_u32(header + at).map_err(Stop::Fault);
     let (size, dib_width, dib_height) = (read(0)?, read(4)? as i32, read(8)? as i32);
     let (depth, compression, colours) = (read(12)? >> 16, read(16)?, read(32)?);
-    if compression != BI_RGB
-        || !matches!(depth, 16 | 24)
-        || colours != 0
-        || dib_width <= 0
-        || dib_height <= 0
-    {
+    if dib_width <= 0 || dib_height <= 0 {
+        return Ok(0);
+    }
+    if compression != BI_RGB || depth != 16 || colours != 0 {
         return Err(wall(format!(
-            "a {depth}-bit DIB of compression {compression:#x}, {dib_width}x{dib_height}, with \
-             {colours} colours"
+            "a {depth}-bit DIB of compression {compression:#x} with {colours} colours"
         )));
     }
     let signed = |v: u32| i64::from(v as i32);
@@ -849,33 +853,32 @@ fn draw_dib_draw(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if format.bits < 16 {
         return Err(wall(format!("onto a {}-bit surface", format.bits)));
     }
-    let bytes = (depth / 8) as usize;
-    let stride = (dib_width as usize * bytes).next_multiple_of(4);
+    let (x0, x1) = (x.max(0), (x + width).min(i64::from(surface_width)));
+    let (y0, y1) = (y.max(0), (y + height).min(i64::from(surface_height)));
+    // Wholly off the surface: nothing to draw, and drawn.
+    if x0 >= x1 || y0 >= y1 {
+        return Ok(1);
+    }
+    let stride = (dib_width as usize * 2).next_multiple_of(4);
     let at = if *bits == 0 { header + size } else { *bits };
     let image = ctx
         .mem
         .slice(at, stride * dib_height as usize)
         .map_err(Stop::Fault)?
         .to_vec();
-    let colour = |p: &[u8]| -> [u8; 4] {
-        if bytes == 2 {
-            let v = u16::from_le_bytes([p[0], p[1]]);
-            let widen = |c: u16| ((c << 3) | (c >> 2)) as u8;
-            [
-                widen((v >> 10) & 31),
-                widen((v >> 5) & 31),
-                widen(v & 31),
-                0,
-            ]
-        } else {
-            [p[2], p[1], p[0], 0]
-        }
+    let colour = |p: &[u8; 2]| -> [u8; 4] {
+        let v = u16::from_le_bytes(*p);
+        let widen = |c: u16| ((c << 3) | (c >> 2)) as u8;
+        [
+            widen((v >> 10) & 31),
+            widen((v >> 5) & 31),
+            widen(v & 31),
+            0,
+        ]
     };
     let (scale_x, scale_y) = (width / sw, height / sh);
     let out = format.bits.div_ceil(8) as usize;
-    let (x0, x1) = (x.max(0), (x + width).min(i64::from(surface_width)));
-    let (y0, y1) = (y.max(0), (y + height).min(i64::from(surface_height)));
-    let mut row = vec![0u8; (x1 - x0).max(0) as usize * out];
+    let mut row = vec![0u8; (x1 - x0) as usize * out];
     let mut drawn = None;
     for dy in y0..y1 {
         // A positive height is bottom-up: the DIB's first row is the bottom.
@@ -883,8 +886,10 @@ fn draw_dib_draw(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         // many times over it is drawn.
         let line = (dib.1 - 1 - (dy - y) / scale_y) as usize * stride;
         if drawn != Some(line) {
-            let pixels: Vec<u32> = image[line..line + dib_width as usize * bytes]
-                .chunks_exact(bytes)
+            let pixels: Vec<u32> = image[line..line + dib_width as usize * 2]
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| format.encode(colour(p)))
                 .collect();
             for (dx, pixel) in (x0..x1).zip(row.chunks_exact_mut(out)) {
