@@ -21,8 +21,10 @@ throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
   has stood a declared threshold since the flip or since the host was last asked (core's
   `ASK_BETWEEN_FLIPS_MILLIS`). The polls are counted on the declared machine, so a recording
   replays exactly, and the threshold decides only where a person's input lands live, never what a
-  route replays. The maintainer chose this on 2026-10-22, so that a title waiting on a key without
-  flipping sees it let go: LEGO Chess waits so after a movie Space skipped.
+  route replays. They are every input reader core has written; a reader joins them as it is
+  written, which renumbers no committed route, since until then a call to it was a wall. The
+  maintainer chose this on 2026-10-22, so that a title waiting on a key without flipping sees it
+  let go: LEGO Chess waits so after a movie Space skipped.
 - The retired-instruction count is observable behaviour: an engine change that alters it changes
   the guest, and must be treated as such.
 - An engine too slow for a title shows as slow motion with stretched audio, which is the honest
@@ -30,13 +32,12 @@ throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
 
 ## Considered options
 
+- **Per-title host timebase**, as an earlier, unpublished emulator had for three of the roster's
+  four titles: every frame became a reading of the wall clock, the clock had to be recorded to
+  replay, and the same throughput produced a different experience per title; rejected.
 - **Input only at a flip**, as until #215: a title waiting on a key without flipping never sees it
   let go, and LEGO Chess hung after Space skipped a movie; rejected on 2026-10-22. So were the
   other ways of keying an event between flips: to declared ticks, which would tie what a route
   means to the threshold and the clock; to the cursor, which nobody can write by hand and any
   change to what retires before it re-keys; and to a frame the machine presents again when one
   stands too long, which moves every flip after a long frame that polls.
-
-- **Per-title host timebase**, as an earlier, unpublished emulator had for three of the roster's
-  four titles: every frame became a reading of the wall clock, the clock had to be recorded to
-  replay, and the same throughput produced a different experience per title; rejected.

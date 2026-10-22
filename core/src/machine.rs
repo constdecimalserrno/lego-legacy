@@ -362,16 +362,6 @@ impl Machine {
         self.polls += 1;
         let at = (flip, self.polls);
         let ask = self.clock.cycles() >= self.ask_at;
-        // Most polls have nothing due and nothing to ask: Hot Wheels makes
-        // eighty thousand a frame.
-        if !ask
-            && self
-                .route
-                .as_ref()
-                .is_none_or(|route| route.due(self.delivered, at).is_empty())
-        {
-            return;
-        }
         if ask {
             self.ask_again();
         }
@@ -818,8 +808,10 @@ enum Bound {
 /// The calls that read what a person did: the keyboard, the mouse or the
 /// message queue. They are a title's input polls, where what a person did
 /// between flips reaches it (#215), and they are every input reader core has
-/// written, on every thread and whatever they filter. A reader written later
-/// joins them; until then a call to one is a wall.
+/// written, on every thread and whatever they filter, by name, so another
+/// DirectInput device's `GetDeviceState` is one too. A reader written later
+/// joins them as it is written, and that renumbers no committed route's
+/// polls: until then a call to it was a wall, so no route got past one.
 const POLLS: &[&str] = &[
     "PeekMessageA",
     "GetMessageA",
@@ -1377,14 +1369,18 @@ impl Machine {
     }
 
     /// Put the machine back where a snapshot left it: its processor, declared
-    /// clock, flips and guest memory. The Win32 state, the x87's status word
-    /// and stack top, and how far the route has been delivered (#215) stay as
-    /// this machine already has them, so only the stub, which keeps no Win32
-    /// state and reads no input, resumes whole (`snap`).
+    /// clock, flips and guest memory. The Win32 state and the x87's status
+    /// word and stack top stay as this machine already has them, so only the
+    /// stub, which keeps no Win32 state, resumes whole (`snap`).
     ///
     /// # Errors
     /// When the snapshot came from another build, title or route, or when it
     /// is not a snapshot at all.
+    // ponytail: and so does where the route is (#215): how many of its events
+    // were delivered, and the polls since the flip, so a run replaying a route
+    // resumed past its start would be handed them again. Only the stub
+    // resumes, and it reads no input. Upgrade path: carry both in the
+    // snapshot when a title resumes.
     pub fn resume(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         use crate::snap::{Reader, Snap, SnapError, Visitor, MAGIC};
 

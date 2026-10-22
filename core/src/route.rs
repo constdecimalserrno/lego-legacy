@@ -197,10 +197,11 @@ impl Route {
         Self::default()
     }
 
-    /// Add one event, keeping the route in (flip, poll) order.
+    /// Add one event, keeping the route in (flip, poll) order: after every
+    /// event already at its point, as the recorder hands them over.
     pub fn push(&mut self, at: (u64, u64), event: Input) {
-        self.events.push((at, event));
-        self.events.sort_by_key(|(at, _)| *at);
+        let after = self.events.partition_point(|(e, _)| *e <= at);
+        self.events.insert(after, (at, event));
     }
 
     #[must_use]
@@ -227,8 +228,8 @@ impl Route {
     /// The events from the `from`th on that are due by a point: each one keyed
     /// at or before it, in order. So an event keyed to a poll the guest never
     /// made is delivered at the first point after it, the next flip at the
-    /// latest (#215). Only as far as the first event not yet due is looked at:
-    /// a title can poll eighty thousand times a frame.
+    /// latest (#215). It looks no further than the first event not yet due:
+    /// a title can poll every seventy-odd instructions.
     #[must_use]
     pub fn due(&self, from: usize, at: (u64, u64)) -> &[((u64, u64), Input)] {
         let rest = self.events.get(from..).unwrap_or_default();
