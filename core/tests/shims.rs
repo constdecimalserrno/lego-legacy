@@ -2412,7 +2412,7 @@ fn a_movie_opened_through_avifile_answers_its_headers_and_its_formats() {
         Ok(0)
     );
     let fields: Vec<u32> = (0..10).map(|i| read(&m, INFO + 4 * i)).collect();
-    assert_eq!(fields, [2 * 15 + 22_050, 0x110, 3, 2, 2, 4, 2, 1, 15, 3]);
+    assert_eq!(fields, [2 * 15 + 22_050, 0x110, 3, 2, 4, 4, 2, 1, 15, 3]);
     assert_eq!(
         call(&mut m, "AVIFIL32", "AVIFileInfoA", &[file, INFO, 107]),
         Ok(0x8004_406b),
@@ -2457,9 +2457,9 @@ fn a_movie_opened_through_avifile_answers_its_headers_and_its_formats() {
     assert_eq!(name, "movie.avi Video #1");
     let (fields, name) = info(&mut m, sound);
     assert_eq!(fields[0], AUDS);
-    // Its initial frames, a buffer of nothing for a stream with no chunks,
-    // its sample size, and a frame nobody fills.
-    assert_eq!((fields[9], fields[10], fields[12]), (11, 0, 1));
+    // Its initial frames, its biggest chunk, its sample size, and a frame
+    // nobody fills.
+    assert_eq!((fields[9], fields[10], fields[12]), (11, 4, 1));
     assert_eq!(fields[13..17], [0; 4]);
     assert_eq!(name, "MOVIE.AVI Audio #1");
     assert_eq!(
@@ -3166,9 +3166,12 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
     let video = stream(&mut m, MOVIE, 0);
     let short = stream(&mut m, "C:\\STUB\\SHORT.AVI", 0);
     // What a read answers, the bytes and samples it says it read, and the
-    // bytes in the buffer.
+    // bytes in the buffer. Both counts start as nonsense, so a read that
+    // clears them shows it; and nothing past the room is written, which the
+    // marker past what was read shows.
     let read = |m: &mut Machine, s: u32, start: i32, samples: i32, room: u32| {
         m.arena.write(BUFFER, &[0xcc; 16]).expect("in the arena");
+        m.arena.write(OUT, &[0xdd; 8]).expect("in the arena");
         let answer = call(
             m,
             "AVIFIL32",
@@ -3182,6 +3185,8 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
             .slice(BUFFER, bytes as usize)
             .expect("in the arena")
             .to_vec();
+        let past = m.arena.slice(BUFFER + bytes, 1).expect("in the arena")[0];
+        assert_eq!(past, 0xcc, "nothing written past what was read");
         (answer, bytes, samples, buffer)
     };
 
@@ -3191,9 +3196,9 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
     assert_eq!(read(&mut m, mono, 5, 10, 16), (Ok(0), 2, 2, vec![6, 7]));
     assert_eq!(read(&mut m, mono, 7, 1, 16), (Ok(0), 0, 0, vec![]));
     assert_eq!(
-        read(&mut m, mono, 8, 1, 16).0,
-        Ok(0x8004_4073),
-        "AVIERR_NODATA"
+        read(&mut m, mono, 8, 1, 16),
+        (Ok(0x8004_4073), 0, 0, vec![]),
+        "AVIERR_NODATA, its counts cleared"
     );
     assert_eq!(
         read(&mut m, mono, 0, 4, 2),
@@ -3202,6 +3207,11 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
     assert_eq!(
         read(&mut m, mono, 0, -1, 5),
         (Ok(0), 5, 5, vec![1, 2, 3, 4, 5])
+    );
+    // As many as fit in no room: too small, as Wine answers it.
+    assert_eq!(
+        read(&mut m, mono, 0, -1, (-4i32) as u32),
+        (Ok(0x8004_4074), 0, 0, vec![])
     );
     // No buffer: the counts alone.
     assert_eq!(
@@ -3238,7 +3248,10 @@ fn a_sound_is_read_by_the_sample_across_its_chunks() {
         read(&mut m, stereo, 3, 5, 16),
         (Ok(0), 8, 2, (4..12).collect::<Vec<u8>>())
     );
-    assert_eq!(read(&mut m, stereo, 1, 1, 16).0, Ok(0x8004_4073));
+    assert_eq!(
+        read(&mut m, stereo, 1, 1, 16),
+        (Ok(0x8004_4073), 0, 0, vec![])
+    );
 
     for (s, start, samples, says) in [
         (video, 0, 1, "of whole chunks"),

@@ -7,9 +7,10 @@ One heading per version, newest first. What each part of core's version means is
 
 `AVIStreamStart` and `AVIStreamLength` answer a stream's start and length, and `AVIStreamRead` reads
 a stream of fixed-size samples, a sound's, across its chunks, as Wine's `avifile.c`, read as
-documentation, reads one; all three were walls (#150). Both counts it writes are cleared first; a
-start before the stream or past its end is `AVIERR_NODATA`; what is asked for stops at the stream's
-end; -1 samples is as many as fit; no buffer is the counts alone; and what does not fit is
+documentation, reads one, its samples its format's blocks as `AVIStreamInfoA` says; all three were
+walls (#150). Both counts it writes are cleared first; a start before the stream or past its end is
+`AVIERR_NODATA`; what is asked for stops at the stream's end; -1 samples is as many as fit, and with
+no room is `AVIERR_BUFFERTOOSMALL`; no buffer is the counts alone; and what does not fit is
 `AVIERR_BUFFERTOOSMALL`. A stream of whole chunks, a video's, is a wall, since no title reads one,
 and so are a count below -1 and a stream whose chunks hold less than its header says, a damaged rip.
 LEGO Chess fills its movies' DirectSound buffers through it, and with it reaches first light. No

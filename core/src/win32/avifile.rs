@@ -567,7 +567,8 @@ fn stream_length(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn stream_read(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // AVIStreamRead(stream, start, samples, buffer, room, bytes read, samples
     // read): a stream of fixed-size samples, a sound's, read across its
-    // chunks as Wine's `avifile.c`, read as documentation, reads one. What
+    // chunks as Wine's `avifile.c`, read as documentation, reads one, its
+    // samples its format's blocks (`Stream::sample_bytes`). What
     // was read is said only after both counts are cleared; a start before
     // the stream or past its end is AVIERR_NODATA; -1 samples is as many as
     // fit; what is asked for stops at the stream's end; no buffer is the
@@ -589,7 +590,7 @@ fn stream_read(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     let file = &ctx.state.avi_files[&owner];
     let s = &file.avi.streams[index];
-    if s.sample_size == 0 {
+    if s.sample_bytes() == 0 {
         return Err(Stop::NotWritten {
             what: format!(
                 "AVIFIL32.dll!AVIStreamRead: stream {index} of {}, of whole chunks",
@@ -601,7 +602,7 @@ fn stream_read(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let (first, length, size) = (
         i64::from(s.start),
         i64::from(s.length),
-        i64::from(s.sample_size),
+        i64::from(s.sample_bytes()),
     );
     let (start, room) = (i64::from(*start as i32), i64::from(*room as i32));
     if start < first || start > first + length {
@@ -620,6 +621,11 @@ fn stream_read(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if samples == -1 {
         if *bytes_out == 0 && *samples_out == 0 {
             return Ok(AVIERR_BADPARAM);
+        }
+        // As many as fit in no room is none, which Wine, counting the room
+        // as unsigned, answers as too small.
+        if room <= 0 {
+            return Ok(AVIERR_BUFFERTOOSMALL);
         }
         samples = room / size;
     }

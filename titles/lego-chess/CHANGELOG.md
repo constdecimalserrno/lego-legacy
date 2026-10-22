@@ -117,6 +117,6 @@ first notices comes at flip 10. The old tree's first light, a chessboard splash,
 the movie; here the movies play, and the splash is the bumper after the intro.
 `routes/first-light.route` is committed with its determinism gate, two replays side by side to flip
 10 and a frame more, 84 million instructions. The boot test now ends by its budget inside the logo's
-first frame. Played on with no route, the logo plays its 280 frames to the end, and the run stops at
-#151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
+first frame. A run with no route goes on: the logo plays its 280 frames to the end, and the run
+stops at #151's next wall, `AVIFIL32.dll!AVIStreamGetFrameClose`, called from 0x0044B605 at cursor
 2,582,262,607 after 282 flips.

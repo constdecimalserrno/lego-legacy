@@ -474,11 +474,22 @@ static LIT: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new
 /// First light, as the conversions #151 wrote make it: the logo's frame 5
 /// decoded, taken as a 555 DIB, drawn doubled onto the 565 back buffer with
 /// green's sixth bit its top one, and presented. Its 52 lit pixels are the
-/// brick's first sliver, greys of no more than #212121, black to the eye; the
-/// presented frame is the bytes predicted from FFmpeg 9.0.1's planes of the
-/// same picture (`work/150-chess-first-light/research.md` §3), and its 565
-/// screen is the old tree's default-boot first light, `28b52ec6`, byte for
-/// byte.
+/// brick's first sliver, greys of no more than #212121, black to the eye.
+///
+/// The pinned screen is a reference decoder's picture taken the same way:
+/// FFmpeg 9.0.1, run once by hand on a copy of the disc's `INTRO\LMI.AVI`,
+///
+///   ffmpeg -i LMI.AVI -map 0:v:0 -f rawvideo -pix_fmt yuv410p
+///     -fps_mode passthrough -
+///
+/// writes the pictures it shows (frames 1 and 3 are null), so frame 5 is the
+/// fourth it writes. Each pixel goes through BT.601 at studio range in
+/// Microsoft's integer form, its chroma from its 4x4 block; is narrowed to
+/// 555 by dropping each channel's low bits; is widened to 565 with green's
+/// sixth bit its top one; and is doubled to 640x480. That 565 screen is the
+/// sha256 below, `28b52ec6`, which is also the old tree's default-boot first
+/// light; widened to the BGRA the host is handed, each channel's top bits
+/// repeated, it is `6f73eca7`.
 #[test]
 fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
     let Some(ran) = first_light(&LIT) else { return };
@@ -502,11 +513,12 @@ fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
         lit.flip
     );
     assert_eq!((lit.width, lit.height), (640, 480));
-    let before = ran
-        .host
-        .frame(FIRST_LIGHT - 1)
-        .expect("the frame before it is kept");
-    assert_eq!(before.pixels[..3], [0, 0, 0], "and before it, black");
+    // Before it, the player's two clears, the plugin's two flips it fills
+    // black, and the logo's own black frames: every one of them black.
+    for frame in &ran.host.frames[..FIRST_LIGHT as usize] {
+        assert!(frame.is_uniform(), "flip {} is one colour", frame.flip);
+        assert_eq!(frame.pixels[..3], [0, 0, 0], "flip {} is black", frame.flip);
+    }
     let shown: Vec<(usize, usize)> = lit
         .pixels
         .as_chunks::<4>()
@@ -532,6 +544,20 @@ fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
     assert_eq!(
         hash::sha256_hex(&lit.pixels),
         "6f73eca7d5b907a0900f3c6f45765ecb7fc6c9edd29723dfa6a2fccada780b52"
+    );
+    // The 565 screen it was widened from: each channel's top bits.
+    let screen: Vec<u8> = lit
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|[b, g, r, _]| {
+            (u16::from(r >> 3) << 11 | u16::from(g >> 2) << 5 | u16::from(b >> 3)).to_le_bytes()
+        })
+        .collect();
+    assert_eq!(
+        hash::sha256_hex(&screen),
+        "28b52ec6d2bc2914b91305f2d379dfbf38762dd8aeb2618f24241a8553dc5069"
     );
     // The brick a person first notices, and the pictures of both for a
     // person to look at.
