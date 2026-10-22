@@ -5,6 +5,13 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+DirectDraw's `IDirectDraw2` face, the one a DirectX 5 program holds and here the object's
+`IDirectDraw4` face, hands out `IDirect3D2`, as any face of a COM object answers for any other and as
+Wine's ddraw hands Direct3D 2 out from every DirectDraw face, where it refused it (#148). LEGO Chess's
+DirectX plugin asks it for Direct3D 2 and calls `EnumDevices` through what it is given without
+looking, so a refusal was an access violation in the plugin. LEGO Island asks the `IDirectDraw` face,
+which already answered; no released title asks this one, so no released run moves.
+
 The 3D listener's `SetAllParameters` sets every value at once from a `DS3DLISTENER`, as dsound.h
 lays it out, dropping the velocity as `SetVelocity` does, where it was a wall (#149). Another size,
 an apply that is neither immediate nor deferred, a distance factor not above zero, or a rolloff or
@@ -521,7 +528,8 @@ Nothing of that game is loose on its disc, so core reads the archives its setup 
 LEGO Chess's machine reads its disc through its Joliet tree from its install on (#144), and is the
 first to declare absent libraries (#146), Glide's runtime and its OpenGL plugin; its own changelog
 says why. Its bumper and its plugin table were not reached then: the run stopped at
-`GetClipCursor`, which #147 answers above; #149's run reaches the plugin table.
+`GetClipCursor`, which #147 answers above; #149's run reaches the plugin table and #148's walks it
+through.
 `install::Tree::install` is now the one way a title's tree is built, by the machine and by
 `testkit::tree` alike, where each had its own copy of the step and Chess's test a third.
 

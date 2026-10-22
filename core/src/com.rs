@@ -156,6 +156,17 @@ const FACES: &[(&str, &str, &str)] = &[
         "6aae1ec1-662a-11d0-889d-00aa00bbb76a",
         "IDirect3D2",
     ),
+    // And off the `IDirectDraw2` face a DirectX 5 program holds, which is
+    // this object's `IDirectDraw4` face: any interface must be able to query
+    // for any other interface on an object (COM's rules for QueryInterface),
+    // and Wine's ddraw, read as documentation, hands Direct3D 2 out from
+    // every DirectDraw face. LEGO Chess's DirectX plugin asks this one for
+    // it, and calls through what it is given without looking (#148).
+    (
+        "IDirectDraw4",
+        "6aae1ec1-662a-11d0-889d-00aa00bbb76a",
+        "IDirect3D2",
+    ),
     // DirectX 3's DirectDraw, which a title's movie player asks for: the same
     // slots as the newer one as far as it goes (#9).
     (
@@ -453,9 +464,9 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         }
     }
 
-    // DirectX 5's own faces, which only LEGO Island holds: a face it asks one
-    // of them for that is not here yet stops the run by name, rather than
-    // sending the title down a path it would not take on Windows (#117).
+    // DirectX 5's own faces: a face a title asks one of them for that is not
+    // here yet stops the run by name, rather than sending the title down a
+    // path it would not take on Windows (#117).
     if matches!(
         have,
         "IDirect3D2"

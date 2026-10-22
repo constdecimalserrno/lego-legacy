@@ -229,19 +229,31 @@ fn its_input_and_sound_come_up() {
         .assert_logged("mci command 0x080d to device 1, flags 0x402, answered 0");
 }
 
+/// Its plugin walk goes through all four (#148): the DirectX plugin gets
+/// Direct3D 2 off DirectDraw's `IDirectDraw2` face, as DirectX 5 hands it
+/// out, and lists its devices from it; the Glide plugin finds no
+/// `glide2x.dll`; the Software plugin lists its own driver; and the OpenGL
+/// plugin is not there.
+#[test]
+fn the_plugin_walk_gets_direct3d_2() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged("com IDirectDraw4 handed back IDirect3D2")
+        .assert_logged("call IDirect3D2::EnumDevices(")
+        .assert_logged("library missing glide2x.dll")
+        .assert_logged("proc address KLIB_Software_HookDll")
+        .assert_logged("library missing KLIB_OpenGL_PlugIn.dll");
+}
+
 /// Where the boot stops: the wall the machine names next, which each ticket
 /// that answers one moves on.
 #[test]
 fn the_boot_stops_at_the_wall_it_meets_next() {
     let Some(ran) = boot() else { return };
 
-    // #148's: its plugin walk loads the DirectX plugin, which asks DirectDraw
-    // for Direct3D 2 and, refused, calls through the pointer it was not
-    // given, an access violation nothing takes.
-    ran.assert_logged("load library KLIB_DirectX_PlugIn.dll")
-        .assert_logged("was asked for 6aae1ec1-662a-11d0-889d-00aa00bbb76a and refused")
-        .assert_logged("an access violation reading 0x00000000 at 0x400014e1")
-        .assert_logged("end wall: KERNEL32.dll!UnhandledExceptionFilter");
+    // #147's: the game's main asks the system's language.
+    ran.assert_logged("end wall: KERNEL32.dll!GetSystemDefaultLangID")
+        .assert_logged("called from 0x004086e6");
 }
 
 #[test]
