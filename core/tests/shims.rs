@@ -26,8 +26,19 @@ fn machine() -> Machine {
 
 /// Call `dll!name` with `args`, as the boundary would.
 fn call(machine: &mut Machine, dll: &str, name: &str, args: &[u32]) -> Result<u32, Stop> {
+    call_as(machine, &Title::STUB, dll, name, args)
+}
+
+/// As [`call`], on `title`'s declared machine.
+fn call_as(
+    machine: &mut Machine,
+    title: &'static Title,
+    dll: &str,
+    name: &str,
+    args: &[u32],
+) -> Result<u32, Stop> {
     let shim = win32::find(dll, name).unwrap_or_else(|| panic!("{dll}!{name} is written"));
-    with_ctx(machine, |ctx| (shim.run)(ctx, args))
+    as_title(machine, title, |ctx| (shim.run)(ctx, args))
 }
 
 /// Call the method in `slot` of `interface` on `this`, as a guest calling
@@ -1494,9 +1505,7 @@ static FLOPPY: Title = Title {
 
 /// Call `KERNEL32!name` on `title`'s machine.
 fn kernel32(m: &mut Machine, title: &'static Title, name: &str, args: &[u32]) -> Result<u32, Stop> {
-    let shim =
-        win32::find("KERNEL32", name).unwrap_or_else(|| panic!("KERNEL32!{name} is written"));
-    as_title(m, title, |ctx| (shim.run)(ctx, args))
+    call_as(m, title, "KERNEL32", name, args)
 }
 
 /// LEGO Chess's CD check, `0x405420`, as it makes its calls: it tests bit 0
@@ -1547,16 +1556,9 @@ fn the_chess_cd_check_finds_its_disc_past_a_floppy_drive() {
 }
 
 #[test]
-fn a_floppy_drive_is_removable_and_empty() {
-    const ERROR_NOT_READY: u32 = 21;
-    const SEM_FAILCRITICALERRORS: u32 = 1;
+fn a_floppy_drive_is_removable_and_named_with_the_others() {
     let mut m = machine();
     m.arena.write(DATA, b"A:\\\0").expect("in the arena");
-    m.arena
-        .write(DATA + 16, b"A:\\SAVE.DAT\0")
-        .expect("in the arena");
-    let volume = [DATA, OUT, 0x100, 0, 0, 0, OUT + 0x100, 0x100];
-    let open = [DATA + 16, 0x8000_0000, 1, 0, 3, 0x80, 0];
 
     // Bit 0 is A:, and it is named first among the roots.
     assert_eq!(
@@ -1573,40 +1575,6 @@ fn a_floppy_drive_is_removable_and_empty() {
     );
     // DRIVE_REMOVABLE.
     assert_eq!(kernel32(&mut m, &FLOPPY, "GetDriveTypeA", &[DATA]), Ok(2));
-
-    // A title that has not said it takes critical errors itself would be
-    // shown Windows' box asking for a disk, which this machine does not have.
-    assert!(matches!(
-        kernel32(&mut m, &FLOPPY, "GetVolumeInformationA", &volume),
-        Err(Stop::NotWritten { .. })
-    ));
-    assert!(matches!(
-        kernel32(&mut m, &FLOPPY, "CreateFileA", &open),
-        Err(Stop::NotWritten { .. })
-    ));
-    // One that has is told the drive is not ready.
-    kernel32(&mut m, &FLOPPY, "SetErrorMode", &[SEM_FAILCRITICALERRORS]).expect("answered");
-    assert_eq!(
-        kernel32(&mut m, &FLOPPY, "GetVolumeInformationA", &volume),
-        Ok(0)
-    );
-    assert_eq!(m.state.last_error, ERROR_NOT_READY);
-    // And so is everything else that looks on the drive.
-    m.arena
-        .write(DATA + 32, b"C:\\SAVE.DAT\0")
-        .expect("in the arena");
-    for (name, args, failed) in [
-        ("CreateFileA", &open[..], 0xffff_ffff),
-        ("GetFileAttributesA", &[DATA + 16], 0xffff_ffff),
-        ("FindFirstFileA", &[DATA + 16, OUT], 0xffff_ffff),
-        ("DeleteFileA", &[DATA + 16], 0),
-        ("CreateDirectoryA", &[DATA + 16, 0], 0),
-        ("MoveFileA", &[DATA + 32, DATA + 16], 0),
-    ] {
-        m.state.last_error = 0;
-        assert_eq!(kernel32(&mut m, &FLOPPY, name, args), Ok(failed), "{name}");
-        assert_eq!(m.state.last_error, ERROR_NOT_READY, "{name}");
-    }
 
     // A machine with no floppy drive answers as it always has.
     assert_eq!(
@@ -1626,4 +1594,116 @@ fn a_floppy_drive_is_removable_and_empty() {
         ),
         Ok(8)
     );
+    assert_eq!(
+        m.arena.slice(OUT, 9).expect("in the arena"),
+        b"C:\\\0D:\\\0\0"
+    );
+}
+
+/// Each call that names a place on A:, as dll, name, arguments and what it
+/// answers when it fails.
+fn on_a(m: &mut Machine) -> Vec<(&'static str, &'static str, Vec<u32>, u32)> {
+    let (root, file, here, wide) = (DATA, DATA + 16, DATA + 48, DATA + 64);
+    m.arena.write(root, b"A:\\\0").expect("in the arena");
+    m.arena
+        .write(file, b"A:\\SAVE.DAT\0")
+        .expect("in the arena");
+    m.arena
+        .write(here, b"C:\\SAVE.DAT\0")
+        .expect("in the arena");
+    let name: Vec<u8> = "A:\\INTRO.AVI\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    m.arena.write(wide, &name).expect("in the arena");
+    let failed = 0xffff_ffff;
+    vec![
+        (
+            "KERNEL32",
+            "GetVolumeInformationA",
+            vec![root, OUT, 0x100, 0, 0, 0, OUT + 0x100, 0x100],
+            0,
+        ),
+        (
+            "KERNEL32",
+            "CreateFileA",
+            vec![file, 0x8000_0000, 1, 0, 3, 0x80, 0],
+            failed,
+        ),
+        ("KERNEL32", "GetFileAttributesA", vec![file], failed),
+        ("KERNEL32", "FindFirstFileA", vec![file, OUT], failed),
+        ("KERNEL32", "DeleteFileA", vec![file], 0),
+        ("KERNEL32", "CreateDirectoryA", vec![file, 0], 0),
+        ("KERNEL32", "MoveFileA", vec![here, file], 0),
+        ("KERNEL32", "SetCurrentDirectoryA", vec![root], 0),
+        ("KERNEL32", "SetFileAttributesA", vec![file, 0x80], 0),
+        ("KERNEL32", "LoadLibraryA", vec![file], 0),
+        ("WINMM", "mmioOpenA", vec![file, 0, 0], 0),
+        // IAMMultiMediaStream::OpenFile: HRESULT_FROM_WIN32(ERROR_NOT_READY).
+        (
+            "IAMMultiMediaStream",
+            "OpenFile",
+            vec![wide, 0],
+            0x8007_0015,
+        ),
+    ]
+}
+
+/// Make one of [`on_a`]'s calls on `title`'s machine.
+fn make(
+    m: &mut Machine,
+    title: &'static Title,
+    dll: &str,
+    name: &str,
+    args: &[u32],
+) -> Result<u32, Stop> {
+    if dll == "IAMMultiMediaStream" {
+        // Its sixteenth slot, on a stream no title made: the drive is
+        // refused before the stream is looked at.
+        let method = win32::com_method(dll, 16).expect("a slot 16");
+        assert_eq!(method.name, name);
+        return as_title(m, title, |ctx| (method.run)(ctx, 0, args));
+    }
+    call_as(m, title, dll, name, args)
+}
+
+#[test]
+fn whatever_looks_on_the_empty_floppy_drive_is_refused() {
+    const ERROR_NOT_READY: u32 = 21;
+    const SEM_FAILCRITICALERRORS: u32 = 1;
+    let mut m = machine();
+    let calls = on_a(&mut m);
+
+    // A title that has not said it takes critical errors itself would be
+    // shown Windows' box asking for a disk, which this machine does not
+    // have. Every call that did not stop there is named.
+    let unrefused: Vec<_> = calls
+        .iter()
+        .filter(|(dll, name, args, _)| {
+            !matches!(
+                make(&mut m, &FLOPPY, dll, name, args),
+                Err(Stop::NotWritten { .. })
+            )
+        })
+        .map(|(_, name, ..)| *name)
+        .collect();
+    assert_eq!(
+        unrefused,
+        Vec::<&str>::new(),
+        "these did not stop at the box"
+    );
+
+    // One that has is told the drive is not ready.
+    kernel32(&mut m, &FLOPPY, "SetErrorMode", &[SEM_FAILCRITICALERRORS]).expect("answered");
+    for (dll, name, args, failed) in &calls {
+        m.state.last_error = 0;
+        assert_eq!(
+            make(&mut m, &FLOPPY, dll, name, args),
+            Ok(*failed),
+            "{name}"
+        );
+        assert_eq!(m.state.last_error, ERROR_NOT_READY, "{name}");
+    }
+    // Nothing was made the current directory.
+    assert_ne!(m.state.current_directory, "A:\\");
 }

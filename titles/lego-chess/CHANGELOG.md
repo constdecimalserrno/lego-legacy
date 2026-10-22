@@ -24,5 +24,7 @@ The declared machine has a floppy drive, A:, with no disk in it (#145), as a 199
 CD check (0x405420) tests bit 0 of `GetLogicalDrives` once and never shifts, so with no A: it looked
 at no drive and would ask for its disc for ever; with one it asks every letter its type, A: only
 that, and finds `CDFS` and `LEGOCHESS` on D:. The run still stops at `GetClipCursor` at cursor
-15,940, before the check. Until #147's run reaches it, core's shim tests stand in: they make the
-check's calls as its code at 0x405420 makes them and find `D:\`.
+15,940, before the check, and #147's boot reaches its first DirectDraw call before the game calls
+the check at 0x4087AF, so #148's run is the first to reach it. Until then core's shim tests stand
+in: they make the check's calls as its code at 0x405420 makes them and find `D:\`. The rip's label
+is tested to be `LEGOCHESS`, the label the check compares.

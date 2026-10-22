@@ -256,6 +256,11 @@ fn add_media_stream(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 
 fn open_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let name = ctx.wide_string(args[0]).map_err(Stop::Fault)?;
+    if ctx.refuse_on_empty_floppy(&name)? {
+        // HRESULT_FROM_WIN32(ERROR_NOT_READY), the drive's own error as COM
+        // carries a Win32 one.
+        return Ok(0x8007_0015);
+    }
     let Some(bytes) = ctx.open_guest_file(&name) else {
         ctx.log.line(&format!("movie {name} missing"));
         // VFW_E_NOT_FOUND.

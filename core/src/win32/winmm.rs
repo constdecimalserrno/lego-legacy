@@ -243,6 +243,9 @@ fn mmio_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     let path = ctx.string(name).map_err(Stop::Fault)?;
+    if ctx.refuse_on_empty_floppy(&path)? {
+        return Ok(0);
+    }
     let Some(bytes) = ctx.open_guest_file(&path) else {
         ctx.log.line(&format!("file missing {path}"));
         return Ok(0);

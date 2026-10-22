@@ -52,8 +52,9 @@ Minimizing its window on macOS, or hiding the application, no longer closes it (
 it is told nothing new beyond the keys and buttons it held let go, runs on unseen but heard, and is
 shown again on restore. No route moved.
 
-Declares no floppy drive (#145), core 1.2.0's new `Declared::floppy`, which is the machine it has
-always had: C: and D: only. Nothing it sees moves.
+Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
+release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees
+moves.
 
 ## 1.0.0 — 2026-10-18
 

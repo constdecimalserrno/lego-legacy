@@ -257,9 +257,11 @@ pub struct State {
     /// everything else the machine hands out, because Alpha Team maps four
     /// hundred megabytes of archives and never lets go (#57).
     pub next_mapping: u32,
-    /// Which failures the guest asked to be shown rather than handed back.
-    /// Kept so that `SetErrorMode` can answer with what it was, and read by
-    /// nothing: this machine puts no dialog up.
+    /// Which failures the guest asked to have handed back rather than shown:
+    /// what `SetErrorMode` was last told. Read when something looks on the
+    /// empty floppy drive: with `SEM_FAILCRITICALERRORS` the call fails as
+    /// the drive not being ready, and without it the run stops at Windows'
+    /// box asking for a disk (#145).
     pub error_mode: u32,
     /// Where the guest believes it is.
     pub current_directory: String,
@@ -950,6 +952,15 @@ pub fn call_each(
     Ok(())
 }
 
+/// `GetDriveTypeA`'s answer for a drive with removable media, such as a
+/// floppy drive.
+const DRIVE_REMOVABLE: u32 = 2;
+/// The error mode in which a title takes critical errors itself.
+const SEM_FAILCRITICALERRORS: u32 = 1;
+/// A drive with no disk in it: MS-DOS's critical error 2, "drive not ready",
+/// counted from `ERROR_WRITE_PROTECT`, 19, as Windows counts them (#145).
+const ERROR_NOT_READY: u32 = 21;
+
 impl Ctx<'_> {
     /// Read a NUL-terminated UTF-16 string the guest passed.
     ///
@@ -1026,6 +1037,55 @@ impl Ctx<'_> {
     #[must_use]
     pub fn guest_file_is_there(&self, path: &str) -> bool {
         self.tree.holds(&self.absolute(path))
+    }
+
+    /// The declared machine's drives, each letter with what `GetDriveTypeA`
+    /// answers for it: a floppy drive when the title declares one, the fixed
+    /// disk the title is installed on, and the CD-ROM its pressing is in. The
+    /// one place they are listed (#145).
+    #[must_use]
+    pub fn drives(&self) -> &'static [(u8, u32)] {
+        if self.title.declared.floppy {
+            &[(b'A', DRIVE_REMOVABLE), (b'C', 3), (b'D', 5)]
+        } else {
+            &[(b'C', 3), (b'D', 5)]
+        }
+    }
+
+    /// What `GetDriveTypeA` answers for a drive letter: `DRIVE_NO_ROOT_DIR`,
+    /// 1, for one the machine does not have.
+    #[must_use]
+    pub fn drive_type(&self, letter: u8) -> u32 {
+        self.drives()
+            .iter()
+            .find(|(drive, _)| drive.eq_ignore_ascii_case(&letter))
+            .map_or(1, |&(_, kind)| kind)
+    }
+
+    /// Refuse a call that looks on the machine's floppy drive, which has no
+    /// disk in it, as Windows does; whether it did.
+    ///
+    /// Windows shows a box asking for a disk unless the title has said it
+    /// takes critical errors itself, and then the call fails as the drive
+    /// not being ready (`GetVolumeInformationA`'s remarks). This machine has
+    /// no such box, so a title that has not said so stops at a wall.
+    ///
+    /// # Errors
+    /// That wall.
+    pub fn refuse_on_empty_floppy(&mut self, path: &str) -> Result<bool, Stop> {
+        let path = self.absolute(path);
+        let drive = path.as_bytes();
+        if drive.get(1) != Some(&b':') || self.drive_type(drive[0]) != DRIVE_REMOVABLE {
+            return Ok(false);
+        }
+        if self.state.error_mode & SEM_FAILCRITICALERRORS == 0 {
+            return Err(Stop::NotWritten {
+                what: format!("Windows' box asking for a disk in A:, for {path}"),
+                caller: 0,
+            });
+        }
+        self.state.last_error = ERROR_NOT_READY;
+        Ok(true)
     }
 
     /// A path the guest gave us, resolved the way the guest means it, which

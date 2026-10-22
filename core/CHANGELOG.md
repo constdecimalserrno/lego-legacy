@@ -375,15 +375,24 @@ No other title's route moves.
 
 A title can declare a floppy drive, A:, with no disk in it (#145). `Declared` gains the required
 field `floppy`, which every title crate had to add to build, so by ADR-0007 this makes core's next
-release a major. `GetLogicalDrives` sets bit 0 for the drive, which Microsoft documents as A:,
-`GetLogicalDriveStringsA` names `A:\` first, and `GetDriveTypeA("A:\")` answers `DRIVE_REMOVABLE`
-(2). Whatever looks on the drive fails as on an empty drive: `GetVolumeInformationA`, a
-`CreateFileA` or `OpenFile` open, `GetFileAttributesA`, `FindFirstFileA`, `DeleteFileA`,
-`CreateDirectoryA`, and `MoveFileA` from or to A:. For a title that has set `SEM_FAILCRITICALERRORS`
-each fails with `ERROR_NOT_READY` (21). For one that has not, Windows would show its box asking for
-a disk (`GetVolumeInformationA`'s remarks), and this machine has no such box, so the run stops at a
-wall that names it. Only LEGO Chess declares the drive. Every released title and the stub declare
-none and answer as before, so no route moves.
+release a major: this heading releases as 2.0.0 (#163). The drives are listed in one place,
+`Ctx::drives`. `GetLogicalDrives` sets bit 0 for the floppy, which Microsoft documents as A:;
+`GetLogicalDriveStringsA` names `A:\` first; and `GetDriveTypeA("A:\")` answers `DRIVE_REMOVABLE`
+(2). `GetDriveTypeA` with no root still answers C:'s type whatever the current directory, since
+Alpha Team saves its game only on that answer. Every call that names a place on A: is refused as on
+an empty drive, through `Ctx::refuse_on_empty_floppy`:
+
+- KERNEL32's `GetVolumeInformationA`, `CreateFileA`, `OpenFile`, `GetFileAttributesA`,
+  `FindFirstFileA`, `DeleteFileA`, `CreateDirectoryA`, `MoveFileA` from or to A:,
+  `SetCurrentDirectoryA`, `SetFileAttributesA` and `LoadLibraryA`;
+- WINMM's `mmioOpenA`, and the movie stream's `IAMMultiMediaStream::OpenFile`.
+
+For a title that has set `SEM_FAILCRITICALERRORS` each fails with `ERROR_NOT_READY` (21); the movie
+stream hands it back as `HRESULT_FROM_WIN32(ERROR_NOT_READY)`. For one that has not, Windows would show its box asking
+for a disk (`GetVolumeInformationA`'s remarks), and this machine has no such box, so the run stops
+at a wall that names it. Other drives the machine lacks are not refused yet (#171). Only LEGO Chess
+declares the drive. Every released title and the stub declare none and answer as before, so no
+route moves.
 
 ## 1.1.0 — 2026-10-21
 

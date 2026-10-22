@@ -10,7 +10,7 @@ use lego_chess::LEGO_CHESS as CHESS;
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::{hash, testkit, Title};
+use lego_legacy_core::{disc, hash, testkit, Title};
 
 const ROOT: &str = CHESS.install_dir;
 
@@ -89,6 +89,11 @@ fn its_machine_reads_long_names_and_lacks_glide_and_the_opengl_plugin() {
         .collect();
     absent.sort_unstable();
     assert_eq!(absent, ["KLIB_OpenGL_PlugIn.dll", "glide2x.dll"]);
+    // The label the game's CD check compares, byte for byte, at 0x4054E2
+    // (#145).
+    let iso = disc::open_pressing(CHESS.image.disc_dir, CHESS.image.pressing)
+        .expect("the pressing opens");
+    assert_eq!(iso.label, "LEGOCHESS");
 }
 
 #[test]

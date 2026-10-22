@@ -1002,8 +1002,9 @@ fn disable_thread_library_calls(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32
     Ok(1)
 }
 
-/// Which failures the machine shows a person rather than handing back. Nothing
-/// on this machine puts a dialog up, so the mode is kept and never read.
+/// Which failures the machine hands back rather than showing a person. It is
+/// read when something looks on the empty floppy drive (#145), where Windows
+/// would otherwise put up its box asking for a disk.
 fn set_error_mode(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(std::mem::replace(&mut ctx.state.error_mode, args[0]))
 }
@@ -1751,6 +1752,10 @@ fn get_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn set_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
+    // Any other place is taken as it is named, there or not (#171).
+    if ctx.refuse_on_empty_floppy(&path)? {
+        return Ok(0);
+    }
     ctx.state.current_directory = path;
     Ok(1)
 }
@@ -1785,11 +1790,6 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 /// A file another handle has open and does not share as this one asks.
 const ERROR_SHARING_VIOLATION: u32 = 32;
-/// A drive with no disk in it: MS-DOS's critical error 2, "drive not ready",
-/// counted from `ERROR_WRITE_PROTECT` as Windows counts them (#145).
-const ERROR_NOT_READY: u32 = 21;
-/// The error mode in which a title takes critical errors itself.
-const SEM_FAILCRITICALERRORS: u32 = 1;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
 fn create_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1833,7 +1833,7 @@ fn open(
 ) -> Result<u32, Stop> {
     let writing = access & GENERIC_WRITE != 0;
 
-    if empty_drive(ctx, &path)? {
+    if ctx.refuse_on_empty_floppy(&path)? {
         return Ok(INVALID_HANDLE);
     }
 
@@ -2232,7 +2232,7 @@ fn get_file_attributes(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // unpacked to say so.
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
     let path = ctx.absolute(&path);
-    if empty_drive(ctx, &path)? {
+    if ctx.refuse_on_empty_floppy(&path)? {
         return Ok(INVALID_HANDLE);
     }
     if ctx.tree.readable(&path) {
@@ -2247,45 +2247,19 @@ fn get_drive_type(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The declared machine's drives: a fixed disk the title is installed on,
     // a CD-ROM its pressing is in, and a floppy drive when it declares one.
     // Anything else does not exist.
+    // No root at all is the current directory's, which is taken to be on C:
+    // whatever it is: Alpha Team saves only when it hears C: or a floppy
+    // drive here (#145's blast review), so it is left as it was.
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let letter = path.chars().next().unwrap_or('C').to_ascii_uppercase();
-    Ok(match letter {
-        'A' if ctx.title.declared.floppy => 2, // DRIVE_REMOVABLE
-        'C' => 3,                              // DRIVE_FIXED
-        'D' => 5,                              // DRIVE_CDROM
-        _ => 1,                                // DRIVE_NO_ROOT_DIR
-    })
+    Ok(ctx.drive_type(path.bytes().next().unwrap_or(b'C')))
 }
 
 fn get_logical_drives(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // Bits for C and D, and for A when the machine has a floppy drive: bit 0
-    // is A, as Microsoft documents.
-    Ok(u32::from(ctx.title.declared.floppy) | (1 << 2) | (1 << 3))
-}
-
-/// Whether `path` is on the machine's floppy drive, which has no disk in it,
-/// so that whatever reads or writes there fails as it does on Windows.
-///
-/// Windows asks a person to put one in, with a box of its own, unless the
-/// title has said it takes critical errors itself; then the call fails as
-/// the drive not being ready (`GetVolumeInformationA`'s remarks). This
-/// machine has no such box, so a title that has not said so stops at a wall.
-fn empty_drive(ctx: &mut Ctx<'_>, path: &str) -> Result<bool, Stop> {
-    let on_a = path.len() > 1 && path.as_bytes()[..2].eq_ignore_ascii_case(b"A:");
-    if !(on_a && ctx.title.declared.floppy) {
-        return Ok(false);
-    }
-    if ctx.state.error_mode & SEM_FAILCRITICALERRORS == 0 {
-        return Err(Stop::NotWritten {
-            what: format!("Windows' box asking for a disk in A:, for {path}"),
-            caller: ctx
-                .mem
-                .read_u32(ctx.cpu.r[crate::cpu::ESP])
-                .unwrap_or_default(),
-        });
-    }
-    ctx.state.last_error = ERROR_NOT_READY;
-    Ok(true)
+    // A bit for each: bit 0 is A, as Microsoft documents.
+    Ok(ctx
+        .drives()
+        .iter()
+        .fold(0, |mask, &(letter, _)| mask | 1 << (letter - b'A')))
 }
 
 /// A file the guest would rather read as memory than through a handle.
@@ -2748,19 +2722,19 @@ fn get_time_zone_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Sto
 /// The declared machine's drives, written out as the roots they are.
 fn get_logical_drive_strings(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetLogicalDriveStringsA(size, buffer). The same drives
-    // `GetLogicalDrives` names in bits: the disk the title is installed on,
-    // the drive its pressing is in, and a floppy drive when it declares one.
-    let drives: &[u8] = if ctx.title.declared.floppy {
-        b"A:\\\0C:\\\0D:\\\0\0"
-    } else {
-        b"C:\\\0D:\\\0\0"
-    };
+    // `GetLogicalDrives` names in bits.
+    let drives: Vec<u8> = ctx
+        .drives()
+        .iter()
+        .flat_map(|&(letter, _)| [letter, b':', b'\\', 0])
+        .chain([0])
+        .collect();
     let needed = u32::try_from(drives.len()).unwrap_or(0);
     if args[0] < needed {
         // What it would take, which is what a caller asking with nothing gets.
         return Ok(needed);
     }
-    ctx.mem.write(args[1], drives).map_err(Stop::Fault)?;
+    ctx.mem.write(args[1], &drives).map_err(Stop::Fault)?;
     // Everything but the last terminator, which is how this one counts.
     Ok(needed - 1)
 }
@@ -2769,8 +2743,7 @@ fn get_volume_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
     // A title looks at the disc's own label to decide whether the right disc
     // is in the drive. The label is the pressing's, read off the image itself.
     let root = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let on = ctx.absolute(&root);
-    if empty_drive(ctx, &on)? {
+    if ctx.refuse_on_empty_floppy(&root)? {
         return Ok(0);
     }
     let is_cd = root.to_ascii_uppercase().starts_with('D');
@@ -2943,6 +2916,10 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Windows' error (#146). Anything else is a wall.
     let name = ctx.string(args[0]).map_err(Stop::Fault)?;
     ctx.log.line(&format!("load library {name}"));
+    // Except on the empty floppy drive, which has nothing to load.
+    if ctx.refuse_on_empty_floppy(&name)? {
+        return Ok(0);
+    }
     // A path is one the installer would have written; only the file at the end
     // of it is the title's own. A name with no extension is looked for with
     // ".DLL" added, as Microsoft documents.
@@ -3062,7 +3039,7 @@ fn find_first_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // is walking, so what it finds is what it can then open (#57).
     let pattern = ctx.string(args[0]).map_err(Stop::Fault)?;
     let full = ctx.absolute(&pattern);
-    if empty_drive(ctx, &full)? {
+    if ctx.refuse_on_empty_floppy(&full)? {
         return Ok(INVALID_HANDLE);
     }
     let (dir, glob) = match full.rsplit_once('\\') {
@@ -3130,7 +3107,7 @@ fn delete_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // believing a file it can still open has gone.
     let named = ctx.string(args[0]).map_err(Stop::Fault)?;
     let path = ctx.absolute(&named);
-    if empty_drive(ctx, &path)? {
+    if ctx.refuse_on_empty_floppy(&path)? {
         return Ok(0);
     }
     let gone = ctx.tree.remove(&path);
@@ -3155,7 +3132,7 @@ fn move_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let from = ctx.string(args[0]).map_err(Stop::Fault)?;
     let to = ctx.string(args[1]).map_err(Stop::Fault)?;
     let (from, to) = (ctx.absolute(&from), ctx.absolute(&to));
-    if empty_drive(ctx, &from)? || empty_drive(ctx, &to)? {
+    if ctx.refuse_on_empty_floppy(&from)? || ctx.refuse_on_empty_floppy(&to)? {
         return Ok(0);
     }
     if !ctx.tree.readable(&from) {
@@ -3205,15 +3182,20 @@ fn move_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn create_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let full = ctx.absolute(&path);
-    if empty_drive(ctx, &full)? {
+    if ctx.refuse_on_empty_floppy(&path)? {
         return Ok(0);
     }
     ctx.log.line(&format!("create directory {path}"));
     Ok(1)
 }
 
-fn set_file_attributes(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
+fn set_file_attributes(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Told it was done, for any file anywhere but the empty floppy drive
+    // (#171).
+    let path = ctx.string(args[0]).map_err(Stop::Fault)?;
+    if ctx.refuse_on_empty_floppy(&path)? {
+        return Ok(0);
+    }
     Ok(1)
 }
 
