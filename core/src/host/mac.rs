@@ -124,6 +124,25 @@ impl Runtime {
         unsafe { std::mem::transmute_copy(&self.msg) }
     }
 
+    /// An autorelease pool, open until [`Runtime::drain`] (#180). AppKit
+    /// opens one for each turn of its own event loop, and this backend runs
+    /// its own, so it opens its own: every object AppKit hands back
+    /// autoreleased is let go when the pool drains, and without one never is
+    /// (Apple, `NSAutoreleasePool`).
+    fn pool(&self) -> Id {
+        // Safety: NSAutoreleasePool's own `alloc` and `init`.
+        unsafe {
+            let pool: Id = self.send::<MsgId>()(self.class("NSAutoreleasePool"), self.sel("alloc"));
+            self.send::<MsgId>()(pool, self.sel("init"))
+        }
+    }
+
+    /// Drain a pool [`Runtime::pool`] opened, in the same function.
+    fn drain(&self, pool: Id) {
+        // Safety: `drain` on the pool, once.
+        unsafe { self.send::<MsgVoid>()(pool, self.sel("drain")) }
+    }
+
     fn nil(&self) -> Id {
         std::ptr::null_mut()
     }
@@ -789,8 +808,11 @@ impl MacWindow {
             return;
         };
         let caption = CString::new(caption).unwrap_or_default();
+        // A caption can change outside a pump, when the title shows its
+        // pointer or the run ends, so it has a pool of its own (#180).
+        let pool = self.rt.pool();
         // Safety: an NSString made from a NUL-terminated string, and
-        // `setTitle:` on our own window.
+        // `setTitle:` on our own window, which copies it.
         unsafe {
             let caption: Id = self.rt.send::<MsgIdCharPtr>()(
                 self.rt.class("NSString"),
@@ -799,6 +821,7 @@ impl MacWindow {
             );
             self.rt.send::<MsgVoidId>()(self.window, self.rt.sel("setTitle:"), caption);
         }
+        self.rt.drain(pool);
     }
 
     /// The title's pointer is the person's own and it is here on the guest's
@@ -909,6 +932,11 @@ impl MacWindow {
     /// Take everything the window system has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
+        // What AppKit hands back autoreleased here, each event, the run loop
+        // mode, the date, is let go as the pump ends (#180). Nothing kept
+        // across pumps is only autoreleased: the window, its view and layer
+        // and the application are owned (#175).
+        let pool = self.rt.pool();
         let front;
         // Safety: the standard event loop, called with AppKit's own types.
         unsafe {
@@ -1132,6 +1160,7 @@ impl MacWindow {
             self.keep_on_the_picture(tell);
         }
         self.draw_pointer_where_it_belongs();
+        self.rt.drain(pool);
     }
 }
 
@@ -1281,7 +1310,7 @@ impl Host for MacWindow {
 mod tests {
     use super::{
         direct_input_key, direct_input_modifier, guest_point, ns_cursor, quit_delegate, Id, MsgId,
-        MsgPoint, MsgVoid, Point, Rect, Runtime, Sel, PRESENT_BITMAP_INFO, QUITS,
+        MsgPoint, MsgU64, MsgVoid, Point, Rect, Runtime, Sel, PRESENT_BITMAP_INFO, QUITS,
     };
     use crate::host::{sys, Input};
     use std::sync::atomic::Ordering;
@@ -1487,6 +1516,27 @@ mod tests {
         assert_eq!(reply, 0, "NSTerminateCancel");
         assert_eq!(QUITS.load(Ordering::Relaxed), before + 1, "one close");
         assert!(!quit_delegate(&rt).expect("and again").is_null());
+    }
+
+    /// What is autoreleased while a pool is open is let go when it is
+    /// drained (#180): an object held twice and autoreleased once is held
+    /// once after. No window: an `NSObject` of our own.
+    #[test]
+    fn an_autoreleased_object_is_let_go_when_the_pool_drains() {
+        let rt = Runtime::open().expect("AppKit is on every Mac");
+        // Safety: NSObject's own methods; the object is let go of as many
+        // times as it is held.
+        unsafe {
+            let object: Id = rt.send::<MsgId>()(rt.class("NSObject"), rt.sel("alloc"));
+            let object: Id = rt.send::<MsgId>()(object, rt.sel("init"));
+            rt.send::<MsgId>()(object, rt.sel("retain"));
+            let pool = rt.pool();
+            rt.send::<MsgId>()(object, rt.sel("autorelease"));
+            rt.drain(pool);
+            let held: u64 = rt.send::<MsgU64>()(object, rt.sel("retainCount"));
+            assert_eq!(held, 1, "the autorelease was let go");
+            rt.send::<MsgVoid>()(object, rt.sel("release"));
+        }
     }
 
     #[test]

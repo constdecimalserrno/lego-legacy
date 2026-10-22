@@ -59,6 +59,9 @@ Switching to another Space on macOS frees a captured mouse, as losing the front 
 Quitting from the Dock on macOS, or logging out or restarting, closes it as its window's close
 button does (#178, core 1.2.0), where the process ended at once. No route moved.
 
+A long play on macOS no longer grows the process's memory (#180, core 1.2.0): what macOS hands
+back for a while is let go every frame. No route moved.
+
 Declares no floppy drive (#145), core's new required `Declared::floppy` (unreleased; core's next
 release is 2.0.0, #163), which is the machine it has always had: C: and D: only. Nothing it sees
 moves.

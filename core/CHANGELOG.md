@@ -115,6 +115,18 @@ cancelled, and the person starts it again once the title has left. It also answe
 an application delegate without it. A quit in the "close the window to end" wait ends it. No route
 moves; a headless run has no window.
 
+The macOS backend drains an autorelease pool every pump, so a long play no longer grows the
+process's memory (#180). AppKit opens a pool for each turn of its own event loop, and this backend
+runs its own loop, so nothing AppKit handed back autoreleased was ever let go: each event, the run
+loop mode and the date asked for every pump, and each new caption (Apple, `NSAutoreleasePool`:
+"If a pool is not available, autoreleased objects do not get released and you leak memory"). A
+probe making the same calls with no window, a million times, grew by 109 MB with no pool and stayed
+flat at 6 MB with one drained each time; with a window each event adds to that. The pool is an
+`NSAutoreleasePool`, opened as `pump` starts and drained as it ends, and one around a caption,
+which can change outside a pump. What the backend keeps across pumps is owned, never only
+autoreleased: the window (#175), its view and layer, the application, the delegate (#178) and the
+title's pointer shape. No route moves; a headless run has no window.
+
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
 the maintainer blessed on 2026-10-21; a person drives Hot Wheels' first race again before its next
