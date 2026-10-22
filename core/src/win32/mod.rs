@@ -342,6 +342,9 @@ pub struct State {
     pub last_right_click: (u32, (i32, i32)),
     /// Whether the class the title registered asked for double clicks.
     pub double_clicks: bool,
+    /// The rectangle the title confined the pointer to with `ClipCursor`,
+    /// cut to the screen, or none (#147).
+    pub clip: Option<[i32; 4]>,
     /// Where the title last asked that the pointer be put, until the machine
     /// has told the host about it (#59).
     pub pointer_put: Option<(i32, i32)>,
@@ -468,6 +471,7 @@ impl State {
             last_right_click: (0, (0, 0)),
             pointer_put: None,
             double_clicks: false,
+            clip: None,
             cursor_shown: 0,
             cursor: None,
             cursors: Vec::new(),

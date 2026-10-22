@@ -51,8 +51,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "GetCursorPos", 1, cursor_pos),
     stdcall("USER32", "GetAsyncKeyState", 1, async_key_state),
     stdcall("USER32", "SetCursorPos", 2, set_cursor_pos),
-    stdcall("USER32", "ClipCursor", 1, succeed),
-    stdcall("USER32", "GetClipCursor", 1, clip_cursor),
+    stdcall("USER32", "ClipCursor", 1, clip_cursor),
+    stdcall("USER32", "GetClipCursor", 1, get_clip_cursor),
     stdcall("USER32", "DialogBoxParamA", 5, dialog_box),
     stdcall("USER32", "EndDialog", 2, end_dialog),
     stdcall("USER32", "GetDlgItem", 2, dialog_item),
@@ -1369,21 +1369,65 @@ pub fn shape(state: &super::State, cursor: u32) -> Option<crate::host::Cursor> {
 
 fn client_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // The one window covers the whole screen, as `GetRegionData` says.
-    let (width, height, _) = ctx.state.display_mode;
-    let at = args[1];
-    for (offset, value) in [(0, 0), (4, 0), (8, width), (12, height)] {
-        ctx.mem.write_u32(at + offset, value).map_err(Stop::Fault)?;
-    }
+    write_rect(ctx, args[1], screen(ctx))?;
     Ok(1)
 }
 
-/// GetClipCursor(rect): where the pointer is confined. Nowhere, on this
-/// machine: `ClipCursor` keeps nothing, so the answer is the screen, which is
-/// what Microsoft documents for a pointer that is not confined. LEGO Chess's
-/// framework reads it as it starts (0x0045AC36) and hands it back to
-/// `ClipCursor` as it leaves (#147).
+/// The declared screen in the mode it is in, as a rectangle.
+fn screen(ctx: &Ctx<'_>) -> [i32; 4] {
+    let (width, height, _) = ctx.state.display_mode;
+    [0, 0, width as i32, height as i32]
+}
+
+fn write_rect(ctx: &mut Ctx<'_>, at: u32, rect: [i32; 4]) -> Result<(), Stop> {
+    for (i, value) in rect.into_iter().enumerate() {
+        ctx.mem
+            .write_u32(at + 4 * i as u32, value as u32)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
+/// ClipCursor(rect): the pointer is confined to the rectangle, cut to the
+/// screen, or freed with none, as Microsoft documents. The machine keeps it
+/// for `GetClipCursor` to answer (#147).
+// ponytail: kept, not enforced: the host's pointer is the person's, and no
+// title has been seen to move it out of a rectangle it confined it to; make
+// the host honour it when one does.
 fn clip_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    client_rect(ctx, &[WINDOW, args[0]])
+    if args[0] == 0 {
+        ctx.state.clip = None;
+        return Ok(1);
+    }
+    let mut rect = [0; 4];
+    for (i, word) in rect.iter_mut().enumerate() {
+        *word = ctx
+            .mem
+            .read_u32(args[0] + 4 * i as u32)
+            .map_err(Stop::Fault)? as i32;
+    }
+    let [_, _, width, height] = screen(ctx);
+    ctx.state.clip = Some([
+        rect[0].clamp(0, width),
+        rect[1].clamp(0, height),
+        rect[2].clamp(0, width),
+        rect[3].clamp(0, height),
+    ]);
+    Ok(1)
+}
+
+/// GetClipCursor(rect): where the pointer is confined, which is the
+/// rectangle `ClipCursor` was last given, or the screen when it is confined
+/// nowhere, as Microsoft documents; with nowhere to write it, a failure.
+/// LEGO Chess's framework reads it as it starts (the call that returns to
+/// 0x0045AC3C) and hands it back to `ClipCursor` as it leaves (#147).
+fn get_clip_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    let rect = ctx.state.clip.unwrap_or_else(|| screen(ctx));
+    write_rect(ctx, args[0], rect)?;
+    Ok(1)
 }
 
 fn cursor_pos(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

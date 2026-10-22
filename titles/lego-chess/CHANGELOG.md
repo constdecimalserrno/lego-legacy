@@ -17,8 +17,9 @@ only there. It has no `glide2x.dll`, for the machine has no 3dfx card, and no
 tells it (#146).
 
 Started, its C runtime runs, its framework registers its class and makes its window, and the run
-stops at its first wall, `USER32.dll!GetClipCursor`, called from 0x0045AC3C at cursor 15,940 with
-nothing presented (#147). Untagged until its release (#162).
+stopped at its first wall, `USER32.dll!GetClipCursor`, called from 0x0045AC3C at cursor 15,940 with
+nothing presented, until #147 answered it; where it stops now is in the newest paragraphs below.
+Untagged until its release (#162).
 
 The declared machine has a floppy drive, A:, with no disk in it (#145), as a 1998 PC had. The game's
 CD check (0x405420) tests bit 0 of `GetLogicalDrives` once and never shifts, so with no A: it looked
@@ -35,8 +36,8 @@ damaged KLIB plugin stopped at #146's wall, which said it was not the title's ow
 of a good rip expand, so the run is unchanged.
 
 Its framework asks where the pointer is confined as it starts (#147), and is told the whole screen,
-0,0 to 640,480, as Windows tells a program whose pointer is confined nowhere; it keeps the rectangle
-to hand back to `ClipCursor` as it leaves. It goes on to its DirectInput devices and its sound, and
+as Windows tells a program whose pointer is confined nowhere; it keeps the rectangle to hand back to
+`ClipCursor` as it leaves. What `ClipCursor` is given is now kept and read back, as Windows does. It goes on to its DirectInput devices and its sound, and
 the run stops at #149's first wall, the 3D listener's `SetAllParameters`, called from 0x0044FE17 at
 cursor 214,521, still with nothing presented. Its boot test now runs to that wall, on a budget of a
 million instructions where it was a hundred thousand.

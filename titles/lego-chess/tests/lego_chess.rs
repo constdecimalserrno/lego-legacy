@@ -185,11 +185,10 @@ fn the_game_loads_out_of_main_z_and_makes_its_window() {
 }
 
 /// Its framework reads where the pointer is confined as it starts, to put it
-/// back as it leaves, and is told the whole screen (#147). It goes on to its
-/// input and its sound, and stops at #149's first wall: the 3D listener's
-/// `SetAllParameters`.
+/// back as it leaves (#147); core's shim tests hold what it is told, the
+/// whole screen.
 #[test]
-fn the_framework_reads_the_pointer_s_clip_and_stops_at_the_3d_listener() {
+fn the_framework_reads_where_the_pointer_is_confined() {
     let Some(ran) = boot() else { return };
 
     assert!(
@@ -200,7 +199,18 @@ fn the_framework_reads_the_pointer_s_clip_and_stops_at_the_3d_listener() {
         "its framework asks where the pointer is confined\nlog:\n{}",
         ran.log
     );
-    ran.assert_logged("end wall: IDirectSound3DListener::SetAllParameters");
+}
+
+/// Where the boot stops: the wall the machine names next, which each ticket
+/// that answers one moves on.
+#[test]
+fn the_boot_stops_at_the_wall_it_meets_next() {
+    let Some(ran) = boot() else { return };
+
+    // #149's: its sound's 3D listener, set all at once.
+    ran.assert_logged(
+        "end wall: IDirectSound3DListener::SetAllParameters (called from 0x0044fe17)",
+    );
 }
 
 #[test]

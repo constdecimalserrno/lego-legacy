@@ -5,10 +5,12 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
-`GetClipCursor` answers the declared screen, in the mode it is in, and success (#147): the
-pointer is confined nowhere on this machine, since `ClipCursor` keeps nothing, and Microsoft
-documents the screen as the answer for a pointer that is not confined. LEGO Chess's framework asks
-as it starts; no released title imports it, so no released run moves.
+`GetClipCursor` answers where the pointer is confined, as Microsoft documents (#147): the
+rectangle `ClipCursor` was last given, which it now keeps, cut to the screen, until it is given none,
+or the declared screen, in the mode it is in, while it is confined nowhere; with nowhere to write it,
+it fails. The host's pointer is not held to the rectangle; no title has been seen to need it. LEGO
+Chess's framework asks as it starts. Only LEGO Chess imports `GetClipCursor`, and nothing reads what
+`ClipCursor` keeps but it, so no released run moves.
 
 `DestroyWindow` tells the window it destroys, as Microsoft documents, where it answered success and
 told it nothing (#140). Its procedure is sent `WM_DESTROY` and then `WM_NCDESTROY`, whatever it
@@ -493,7 +495,8 @@ Nothing of that game is loose on its disc, so core reads the archives its setup 
 
 LEGO Chess's machine reads its disc through its Joliet tree from its install on (#144), and is the
 first to declare absent libraries (#146), Glide's runtime and its OpenGL plugin; its own changelog
-says why. Its bumper and its plugin table are not reached yet: the run stops at `GetClipCursor`.
+says why. Its bumper and its plugin table were not reached then: the run stopped at
+`GetClipCursor`, which #147 answers above.
 `install::Tree::install` is now the one way a title's tree is built, by the machine and by
 `testkit::tree` alike, where each had its own copy of the step and Chess's test a third.
 

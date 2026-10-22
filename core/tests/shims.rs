@@ -193,11 +193,12 @@ fn a_window_style_and_instance_are_the_ones_it_was_made_with() {
     assert!(call(&mut m, "USER32", "GetWindowLongA", &[WINDOW, GWL_USERDATA]).is_err());
 }
 
-/// The pointer is confined nowhere on this machine, so where it is confined
-/// is the whole declared screen, in the mode the screen is in, as Microsoft
-/// documents for a pointer that is not confined (#147).
+/// A pointer confined nowhere is confined to the whole declared screen, in
+/// the mode the screen is in; one confined is confined to its rectangle, cut
+/// to the screen, until it is freed; and with nowhere to say, the call fails,
+/// as Microsoft documents `GetClipCursor` and `ClipCursor` (#147).
 #[test]
-fn a_pointer_never_confined_is_confined_to_the_screen() {
+fn the_pointer_s_clip_is_the_screen_until_it_is_confined() {
     let mut m = machine();
     let rect = |m: &Machine| -> Vec<u32> {
         (0..4)
@@ -206,10 +207,30 @@ fn a_pointer_never_confined_is_confined_to_the_screen() {
     };
     assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
     assert_eq!(rect(&m), [0, 0, 640, 480]);
-
     m.state.display_mode = (800, 600, 16);
     assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
     assert_eq!(rect(&m), [0, 0, 800, 600]);
+
+    // LEGO Chess confines it to its screen less a pixel at 0x0044C43C.
+    for (i, word) in [0u32, 0, 639, 479].into_iter().enumerate() {
+        m.arena
+            .write_u32(DATA + 4 * i as u32, word)
+            .expect("in the arena");
+    }
+    assert_eq!(call(&mut m, "USER32", "ClipCursor", &[DATA]), Ok(1));
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
+    assert_eq!(rect(&m), [0, 0, 639, 479]);
+    // A rectangle past the screen is cut to it.
+    m.arena.write_u32(DATA + 8, 5000).expect("in the arena");
+    assert_eq!(call(&mut m, "USER32", "ClipCursor", &[DATA]), Ok(1));
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
+    assert_eq!(rect(&m), [0, 0, 800, 479]);
+    // Freed, it is the screen again.
+    assert_eq!(call(&mut m, "USER32", "ClipCursor", &[0]), Ok(1));
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[OUT]), Ok(1));
+    assert_eq!(rect(&m), [0, 0, 800, 600]);
+
+    assert_eq!(call(&mut m, "USER32", "GetClipCursor", &[0]), Ok(0));
 }
 
 /// Make the title's window, with its procedure at `procedure`.
