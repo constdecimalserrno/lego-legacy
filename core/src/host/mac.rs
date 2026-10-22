@@ -535,6 +535,12 @@ impl MacWindow {
                 2,
                 false,
             );
+            // Its close button only takes it off the screen. A window made in
+            // code is released when it closes, by default (Apple,
+            // `isReleasedWhenClosed`), and this one is still asked about and
+            // drawn into while the title leaves (#140, #175): it is kept, by
+            // the retain `alloc` gave, until the process ends.
+            rt.send::<MsgVoidBool>()(window, rt.sel("setReleasedWhenClosed:"), false);
 
             let title = CString::new(name).unwrap_or_default();
             let string_class = rt.class("NSString");
@@ -1059,7 +1065,8 @@ impl Drop for MacWindow {
         // without a pointer, or with the title's shape.
         self.free_mouse();
         self.pointer_shape(None);
-        // Safety: closing a window we opened.
+        // Safety: closing a window we opened, which is alive even when its
+        // button already closed it (#175).
         unsafe {
             self.rt.send::<MsgVoid>()(self.window, self.rt.sel("close"));
         }

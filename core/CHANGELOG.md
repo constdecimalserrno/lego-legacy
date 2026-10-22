@@ -84,6 +84,13 @@ and the Windows and X backends never took one for a close. The decision is `host
 told are held let go, as for any window not in front (#141), and it runs on, unseen but heard.
 Telling it as Windows does is #177. No route moves; a headless run has no window.
 
+The macOS window outlives its close button (#175). A window made in code is released when it
+closes, by default (Apple's `isReleasedWhenClosed` and `close()`), and the backend went on asking
+it about itself, setting its caption and drawing into its layer while the title left (#140), and
+closed it again as the run ended: messages to an object it may have freed, read from the
+documentation and never seen to crash. The window is now only taken off the screen, and kept until
+the process ends. No route moves; a headless run has no window.
+
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
 the maintainer blessed on 2026-10-21; a person drives Hot Wheels' first race again before its next
