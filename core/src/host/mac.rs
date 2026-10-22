@@ -1037,14 +1037,15 @@ impl MacWindow {
         // settled every time the window system is asked what happened, the
         // front first, so that a pointer kept on the picture is put back only
         // while this application is still in front, with its window on the
-        // screen: one closed by its button is not in front.
-        // Safety: `isActive` on NSApplication. A BOOL is one byte, and the
-        // rest of the register is not ours to read.
-        let active = unsafe {
-            let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
-            v & 0xff != 0
+        // screen: one closed by its button, or minimized, is not in front.
+        // Safety: `isActive` on NSApplication and `isVisible` on our window.
+        // A BOOL is one byte, and the rest of the register is not ours to
+        // read.
+        let front = unsafe {
+            let active: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
+            let visible: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isVisible"));
+            active & 0xff != 0 && visible & 0xff != 0
         };
-        let front = active && !self.hidden;
         self.pending
             .extend(self.capture.front(front, Instant::now()));
         let tell = self.capture.newly_kept();

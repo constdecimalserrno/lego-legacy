@@ -993,7 +993,7 @@ impl WinWindow {
                 (self.user.screen_to_client)(self.window, &mut at);
             }
             let (w, h) = self.client_size();
-            self.placed(at.x.clamp(0, w - 1), at.y.clamp(0, h - 1));
+            self.placed(at.x.min(w - 1).max(0), at.y.min(h - 1).max(0));
         }
         self.draw_pointer_where_it_belongs();
     }

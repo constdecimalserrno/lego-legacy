@@ -758,16 +758,14 @@ impl LinuxWindow {
         // Whether the window has the keyboard changes without the title being
         // told, so whose the mouse is is settled every time the server is
         // asked what happened. A title the mouse is newly kept for is told
-        // where the pointer was last seen, held to the window as the grab
-        // holds the pointer; a pointer the grab moved there comes as a move.
+        // where the pointer was last seen; one the grab moved into the window
+        // comes as a move.
         self.pending
             .extend(self.capture.front(self.focused, Instant::now()));
         self.take_pointer_where_it_belongs();
         if self.capture.newly_kept() {
-            let (w, h) = self.window_size;
-            let (w, h) = (i32::try_from(w).unwrap_or(1), i32::try_from(h).unwrap_or(1));
             let (x, y) = self.seen_at;
-            self.moved(x.clamp(0, w - 1), y.clamp(0, h - 1));
+            self.moved(x, y);
         }
         // A taken pointer that has strayed from the middle is moved back
         // there, once every event already sent has been measured.

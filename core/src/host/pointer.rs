@@ -210,13 +210,16 @@ pub fn moved(taken: bool, ours: bool) -> Moved {
 const ESCAPE: u32 = 0x01;
 
 /// How long a click on a window not in front waits for it to come to the
-/// front, and so capture the mouse: at least this many pumps after the one it
-/// came in, and at least this long, so that neither a fast host nor a stall
-/// cuts it short.
+/// front, and so capture the mouse: at least [`WAIT_PUMPS`] pumps after the
+/// one it came in, and at least [`WAIT_FOR`], so that neither a fast host nor
+/// a stall cuts it short. A window that comes to the front within that, by
+/// that click or by any other way, captures; one that comes later does not.
 /// ponytail: they cover AppKit activating the application as it hands on the
 /// click and an X window manager's `FocusIn` coming after it; a window slower
 /// than that to come to the front takes a second click.
-const WAIT: (u8, Duration) = (2, Duration::from_millis(500));
+const WAIT_PUMPS: u8 = 2;
+/// See [`WAIT_PUMPS`].
+const WAIT_FOR: Duration = Duration::from_millis(500);
 
 /// What the host does with the mouse now (#141), by whether it is captured
 /// and how the title reads it.
@@ -242,7 +245,7 @@ pub enum Mouse {
 /// That click captures the mouse, and it is the host's, not the title's: it
 /// would otherwise press whatever the title's own pointer happens to be over.
 /// A click on a window behind others captures too, once it has come to the
-/// front ([`WAIT`]). From then on every move and button is the title's, until
+/// front ([`WAIT_PUMPS`]). From then on every move and button is the title's, until
 /// Escape frees it, which is the host's too (Hot Wheels quits on Escape), or
 /// the window stops being the one in front. It is never captured again
 /// without a click, and once the run is over not at all (#111). A press on
@@ -257,7 +260,7 @@ pub struct Capture {
     /// Whether the window was the one in front at the end of the last pump.
     front: bool,
     /// A click made while the window was not in front, which captures the
-    /// mouse if it comes to the front ([`WAIT`]): how many pumps have ended
+    /// mouse if it comes to the front ([`WAIT_PUMPS`]): how many pumps have ended
     /// since, and when it came.
     waiting: Option<(u8, Instant)>,
     /// Whether the title has been told where the pointer is since the mouse
@@ -302,11 +305,12 @@ impl Capture {
     /// (`ShowCursor`), which changes what a captured mouse is ([`Mouse`]).
     pub fn pointer_shown(&mut self, shown: bool) {
         self.draws_own = !shown;
+        self.kept_told &= shown;
     }
 
     /// A button pressed on the picture, `now`: what the title is told of it,
     /// if anything. A press while the mouse is the person's captures it, at
-    /// once with the window in front or once it comes there ([`WAIT`]), and
+    /// once with the window in front or once it comes there ([`WAIT_PUMPS`]), and
     /// is the host's.
     pub fn press(&mut self, button: Button, now: Instant) -> Option<Input> {
         if !self.captured {
@@ -368,8 +372,8 @@ impl Capture {
             return Vec::new();
         }
         if let Some((pumps, since)) = &mut self.waiting {
-            *pumps += 1;
-            if *pumps > WAIT.0 && now.duration_since(*since) > WAIT.1 {
+            *pumps = pumps.saturating_add(1);
+            if *pumps > WAIT_PUMPS && now.duration_since(*since) > WAIT_FOR {
                 self.waiting = None;
             }
         }
@@ -381,7 +385,8 @@ impl Capture {
     /// Whether the mouse has been kept on the picture since this was last
     /// asked, by a click or by the title showing the host's pointer, so that
     /// the title is to be told where the pointer is, which no move has told
-    /// it since. Asked once at the end of every pump.
+    /// it since; freed and kept again within one pump counts too. Asked once
+    /// at the end of every pump.
     pub fn newly_kept(&mut self) -> bool {
         let kept = self.mouse() == Mouse::Kept;
         let newly = kept && !self.kept_told;
@@ -393,6 +398,7 @@ impl Capture {
     /// button it was told is down, whose release it may never be sent.
     fn free(&mut self) -> Vec<Input> {
         self.captured = false;
+        self.kept_told = false;
         self.held.drain(..).map(Input::Up).collect()
     }
 
@@ -445,7 +451,7 @@ pub fn back_on_the_picture(
 #[cfg(test)]
 mod tests {
     use super::{
-        back_on_the_picture, moved, Button, Capture, Input, Mouse, Moved, Steer, ESCAPE, WAIT,
+        back_on_the_picture, moved, Button, Capture, Input, Mouse, Moved, Steer, ESCAPE, WAIT_PUMPS,
     };
     use std::time::{Duration, Instant};
 
@@ -501,8 +507,8 @@ mod tests {
     /// A click on a window behind others brings it to the front and captures
     /// the mouse once it is there, without a second click, if it comes within
     /// two pumps after the one the click came in or half a second, whichever
-    /// is longer; never later, so the window coming to the front some other
-    /// way never captures by surprise (#141).
+    /// is longer; never later, so the window coming to the front long after
+    /// never captures by surprise (#141).
     #[test]
     fn a_click_on_a_window_behind_captures_once_it_is_in_front() {
         let t = now();
@@ -529,8 +535,8 @@ mod tests {
         // once in more than that: neither cuts the wait short.
         let mut mouse = Capture::default();
         mouse.press(Button::Left, t);
-        for ms in 0..10 {
-            assert_eq!(mouse.front(false, after(ms)), []);
+        for _ in 0..300 {
+            assert_eq!(mouse.front(false, after(1)), []);
         }
         assert_eq!(mouse.front(true, after(10)), [], "many pumps, little time");
         assert!(mouse.captured());
@@ -542,7 +548,7 @@ mod tests {
 
         let mut mouse = Capture::default();
         mouse.press(Button::Left, t);
-        for pump in 0..=WAIT.0 {
+        for pump in 0..=WAIT_PUMPS {
             assert_eq!(mouse.front(false, after(600 + u64::from(pump))), []);
         }
         assert_eq!(mouse.front(true, after(700)), [], "in front too late");
@@ -570,9 +576,17 @@ mod tests {
         mouse.pointer_shown(true);
         assert!(mouse.newly_kept(), "kept again by the title's ShowCursor");
         assert!(mouse.key(ESCAPE, true).is_some());
+        assert!(mouse.key(ESCAPE, false).is_some());
         assert!(!mouse.newly_kept());
         mouse.press(Button::Left, now());
         assert!(mouse.newly_kept(), "and by the next click");
+        assert!(mouse.key(ESCAPE, true).is_some());
+        assert!(mouse.key(ESCAPE, false).is_some());
+        mouse.press(Button::Left, now());
+        assert!(mouse.newly_kept(), "freed and kept again in one pump");
+        mouse.pointer_shown(false);
+        mouse.pointer_shown(true);
+        assert!(mouse.newly_kept(), "steered and kept again in one pump");
     }
 
     /// What a captured mouse is follows how the title reads it, as its
