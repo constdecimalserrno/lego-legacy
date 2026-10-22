@@ -832,6 +832,7 @@ impl MacWindow {
     /// Take everything the window system has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
+        let visible;
         // Safety: the standard event loop, called with AppKit's own types.
         unsafe {
             loop {
@@ -1023,7 +1024,7 @@ impl MacWindow {
 
             // A BOOL is one byte, and the rest of the register is not ours
             // to read.
-            let visible = {
+            visible = {
                 let v: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isVisible"));
                 v & 0xff != 0
             };
@@ -1038,14 +1039,16 @@ impl MacWindow {
         // front first, so that a pointer kept on the picture is put back only
         // while this application is still in front, with its window on the
         // screen: one closed by its button, or minimized, is not in front.
-        // Safety: `isActive` on NSApplication and `isVisible` on our window.
-        // A BOOL is one byte, and the rest of the register is not ours to
-        // read.
-        let front = unsafe {
-            let active: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
-            let visible: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isVisible"));
-            active & 0xff != 0 && visible & 0xff != 0
-        };
+        // Safety: `isActive` on NSApplication and `isMiniaturized` on our
+        // window. A BOOL is one byte, and the rest of the register is not ours
+        // to read.
+        let front = visible
+            && unsafe {
+                let active: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
+                let down: u64 =
+                    self.rt.send::<MsgU64>()(self.window, self.rt.sel("isMiniaturized"));
+                active & 0xff != 0 && down & 0xff == 0
+            };
         self.pending
             .extend(self.capture.front(front, Instant::now()));
         let tell = self.capture.newly_kept();

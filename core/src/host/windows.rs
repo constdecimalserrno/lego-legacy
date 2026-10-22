@@ -982,18 +982,19 @@ impl WinWindow {
         // change without the title being told, so this is settled every time
         // Windows is asked what happened. A title the mouse is newly kept for
         // is told where the pointer is, held to the client area as the clip
-        // is about to hold the pointer itself.
+        // is about to hold the pointer itself, once there is a client area to
+        // hold it to.
         self.pending
             .extend(self.capture.front(active, Instant::now()));
-        if self.capture.newly_kept() {
+        let (w, h) = self.client_size();
+        if w > 0 && h > 0 && self.capture.newly_kept() {
             let mut at = Point::default();
             // Safety: user32's own, with a point to write into.
             unsafe {
                 (self.user.cursor_pos)(&mut at);
                 (self.user.screen_to_client)(self.window, &mut at);
             }
-            let (w, h) = self.client_size();
-            self.placed(at.x.min(w - 1).max(0), at.y.min(h - 1).max(0));
+            self.placed(at.x.clamp(0, w - 1), at.y.clamp(0, h - 1));
         }
         self.draw_pointer_where_it_belongs();
     }
