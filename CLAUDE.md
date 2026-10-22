@@ -37,3 +37,20 @@ Every crate and title is versioned and tagged on its own, meticulously, so each 
 - **Releasing**: tag each crate whose version moved as `<crate>-v<version>`, and the workspace as `v<version>`. A patch to one title releases on its own.
 
 `core/tests/versions.rs` fails the suite on a missed bump or a missing heading.
+
+## Ticket runbook
+
+Every ticket runs the `ticket-runbook` skill (the maintainer's rule, 2026-10-21): a `task/<NN-slug>` branch named for its GitHub issue, and a pull request. The maintainer signs each pull request off and merges it, unless they have pre-approved an effort's pull requests, as they did LEGO Chess's on 2026-10-21. Then the lead merges each one by fast-forward once its gate and three reviews pass. These are its settings:
+
+- **Service:** the play kit. `lego-ship` builds every binary in the workspace and publishes them in `play-kit/` (git-ignored). The maintainer's MacBook pulls that before every `lego` run; game data and saves stay there.
+- **Deploy (step 11):** `lego-ship`, alone, after the merge, at any time. A ship never touches a game already running, since the MacBook pulls only when a title starts.
+- **Monitor (step 12):** a headless run, from the MacBook's kit, of a committed route of each title the change touches. It must end on the same line as the gate's run of that route.
+- **Freeze:** none.
+- **Shared code that needs extra care:** `core/`, which every title runs on, above all `core/src/host/` (the host behaves the same for every title) and anything that can move a released title's runs. A move in Rock Raiders', Hot Wheels', Alpha Team's or LEGO Island's runs needs the maintainer's blessing before its merge.
+- **Outages confirmed as expected, and who confirmed them:** none yet.
+
+## Living doc
+
+Our living doc: https://claude.ai/artifact/8VZiKCrrknBDVunxKQk7iB. It mirrors the GitHub issues, which stay the record. Its ticket files live in `.scratch/lego-legacy/` and render to the local mirror `.scratch/lego-legacy/living-doc.html`. Both stay in the maintainer's checkout, excluded from git because they name local paths.
+
+After every ticket change, and for every new ticket (filed on GitHub first, then mirrored, or from the page's form), use the `living-doc` skill. It syncs the local mirror and the artifact, and respins the artifact when this link is unreachable after a Claude seat switch.
