@@ -152,6 +152,26 @@ fn an_image_the_cabinet_does_not_hold_is_named() {
     }
 }
 
+/// LEGO Chess pointed at an image its `MAIN.Z` does not hold says what it
+/// looked for, as the cabinet's refusal does (#143).
+#[test]
+fn an_image_the_archive_does_not_hold_is_named() {
+    if !testkit::rips(&roster::LEGO_CHESS.image) {
+        return;
+    }
+    let absent = Entry {
+        image: EntryImage {
+            path: "NoSuchThing.exe",
+            ..roster::LEGO_CHESS.image
+        },
+        ..roster::LEGO_CHESS
+    };
+    match roster::look_for(&absent) {
+        Found::Unreadable { why } => assert!(why.contains("NoSuchThing.exe"), "{why}"),
+        other => panic!("found {other} instead of naming what it looked for"),
+    }
+}
+
 /// A damaged rip whose volume descriptor is sound, with a root directory of
 /// `len` bytes at sector 17 that starts with `record`.
 fn damaged_rip(name: &str, len: u32, record: &[u8]) -> std::path::PathBuf {

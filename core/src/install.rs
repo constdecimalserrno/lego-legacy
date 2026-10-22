@@ -47,6 +47,9 @@ pub enum Source {
     Disc(String),
     /// A file packed into the pressing's cabinet, by its index there.
     Packed(usize),
+    /// A file imploded into the pressing's InstallShield 3 archive, by its
+    /// index there (#143).
+    Imploded(usize),
     /// Bytes the machine makes up, because the installer would have written
     /// them rather than copied them.
     Declared(Vec<u8>),
@@ -54,9 +57,12 @@ pub enum Source {
 
 /// The declared machine's disc.
 pub struct Tree {
-    /// The pressing's own archive, and the stem its data files are named
-    /// with: a cabinet's volume N lives in `<stem>N.CAB` beside the header.
+    /// The pressing's cabinet, and the stem its data files are named with: a
+    /// cabinet's volume N lives in `<stem>N.CAB` beside the header.
     cabinet: Option<(crate::cabinet::Cabinet, String)>,
+    /// The pressing's InstallShield 3 archive, the one `Source::Imploded`
+    /// indexes, and its path on the disc (#143).
+    archive: Option<(crate::is3::Archive, String)>,
     /// Guest paths, upper-cased and with their separators normalised, to what
     /// stands behind them.
     files: BTreeMap<String, Source>,
@@ -77,6 +83,7 @@ impl Tree {
     pub fn new() -> Self {
         Self {
             cabinet: None,
+            archive: None,
             files: BTreeMap::new(),
             iso: None,
             profile: None,
@@ -255,6 +262,75 @@ impl Tree {
         Ok(declared)
     }
 
+    /// Declare everything an InstallShield 3 archive of the pressing holds,
+    /// under a root, where its setup expands it (#143). A member is expanded
+    /// when it is read, as a cabinet's entry is unpacked.
+    ///
+    /// `beside` names members of the setup's other archives, by archive and
+    /// path, that its script copies to the root on their own. They are small,
+    /// and are expanded now.
+    ///
+    /// # Errors
+    /// When an archive is not on the disc or is not an InstallShield 3
+    /// archive, or a member named beside it is not in its archive.
+    pub fn set_expanded(
+        &mut self,
+        iso: &mut Iso,
+        archive: &str,
+        beside: &[(&str, &str)],
+        root: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let expanded = crate::is3::Archive::open(&iso.read(archive)?)?;
+        for (index, member) in expanded.members().iter().enumerate() {
+            let guest = format!("{root}\\{}", member.path());
+            self.files
+                .insert(Self::key(&guest), Source::Imploded(index));
+        }
+        let mut declared = expanded.members().len();
+        self.archive = Some((expanded, archive.to_owned()));
+        for (library, path) in beside {
+            let bytes = iso.read(library)?;
+            let member = crate::is3::Archive::open(&bytes)?.read(&bytes, path)?;
+            self.declare(&format!("{root}\\{path}"), member);
+            declared += 1;
+        }
+        Ok(declared)
+    }
+
+    /// Install a title on the declared machine's disc as its setup would have,
+    /// from the pressing itself rather than by running the setup (#16), and
+    /// put the pressing in the drive. The pressing was opened by its primary
+    /// tree's names, as the launcher reads it; from here it is read as the
+    /// title declares (#144). How many files it declared.
+    ///
+    /// The machine and the tests build a title's tree this one way.
+    ///
+    /// # Errors
+    /// When the pressing will not read as the title says it is installed.
+    pub fn install(
+        &mut self,
+        mut iso: Iso,
+        title: &crate::Title,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        if title.declared.joliet {
+            iso.read_joliet()?;
+        }
+        let installed = match title.installed {
+            crate::title::Installed::Cabinet => {
+                let header = iso.read("DATA1.HDR")?;
+                self.set_cabinet(&header, "DATA", title.install_dir)?
+            }
+            crate::title::Installed::Copied(from) => {
+                self.set_copied(&mut iso, from, title.install_dir)?
+            }
+            crate::title::Installed::Expanded { archive, beside } => {
+                self.set_expanded(&mut iso, archive, beside, title.install_dir)?
+            }
+        };
+        self.set_disc(iso);
+        Ok(installed)
+    }
+
     /// Declare a file the installer would have written rather than copied.
     pub fn declare(&mut self, guest_path: &str, bytes: Vec<u8>) {
         self.files
@@ -277,7 +353,7 @@ impl Tree {
         self.profile_path(&key).is_some_and(|p| p.is_file())
             || matches!(
                 self.files.get(&key),
-                Some(Source::Declared(_) | Source::Packed(_))
+                Some(Source::Declared(_) | Source::Packed(_) | Source::Imploded(_))
             )
             || self.lies(&key).is_some()
     }
@@ -334,6 +410,16 @@ impl Tree {
                 let (cabinet, _) = self.cabinet.as_ref()?;
                 cabinet.unpack(&entry, &span).ok()
             }
+            Some(Source::Imploded(index)) => {
+                let (archive, path) = self.archive.as_ref()?;
+                let member = archive.members().get(index)?;
+                let span = self
+                    .iso
+                    .as_mut()?
+                    .read_range(path, member.offset, member.compressed as usize)
+                    .ok()?;
+                member.expand(&span).ok()
+            }
             Some(Source::Disc(path)) => self.iso.as_mut()?.read(&path).ok(),
             None => {
                 // The declared machine has the pressing in its CD drive, so a
@@ -357,7 +443,8 @@ impl Tree {
     ///
     /// What `FindFirstFileA` enumerates. The sizes are what the tree already
     /// knows, without unpacking anything: a packed file's from the cabinet's
-    /// header and a declared file's from its bytes, and a file on the disc
+    /// header, an imploded file's from its archive's table, a declared file's
+    /// from its bytes, and a file on the disc
     /// itself is answered as zero bytes long. A title looking for its archives
     /// should not cost four hundred megabytes of inflating to answer.
     #[must_use]
@@ -383,6 +470,11 @@ impl Tree {
                     .as_ref()
                     .and_then(|(c, _)| c.entries().get(*index))
                     .map_or(0, |e| e.expanded),
+                Source::Imploded(index) => self
+                    .archive
+                    .as_ref()
+                    .and_then(|(a, _)| a.members().get(*index))
+                    .map_or(0, |m| m.expanded),
                 Source::Disc(_) => 0,
             };
             out.push((name.to_owned(), size));

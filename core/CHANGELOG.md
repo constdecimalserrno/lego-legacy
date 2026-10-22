@@ -325,6 +325,41 @@ So, by #142's rule, `joliet` is declared per title: the four released titles dec
 their runs unchanged, until the maintainer decides, and LEGO Chess declares `true` with its crate
 (#143).
 
+LEGO Chess joined the roster as its fifth entry, `roster::LEGO_CHESS`, with its own crate and in
+progress (#143): `Lego Chess.exe` out of the Masterpiece pressing's `MAIN.Z`, no Red Book audio.
+Nothing of that game is loose on its disc, so core reads the archives its setup expands:
+
+- `is3`, InstallShield 3's `.Z` archive: its header, its table of directories and then files, and
+  each file in the directory its own record names by index, not where the table lists it. A table
+  whose record is too short for its own name is refused as damaged (`Is3Error::Damaged`). The
+  original pressing's `MAIN.Z` lists its executable, a root file, last, and a reader that deals the
+  records out to directories in turn misplaces 48 of its files; a unit test holds the rule over an
+  archive listed that way.
+- `explode`, PKWARE's Data Compression Library implode undone, written from Ben Rudiak-Gould's
+  description of the format (comp.compression, 2001, placed by him in the public domain), its
+  three tables his, code word by code word: plain or coded literals, and a dictionary of one, two
+  or four kilobytes. `explode(bytes, expanded)` takes the size its table gives it and stops a
+  stream as soon as it would pass it (`ExplodeError::TooLong`). His
+  example, with the one offset Mark Adler's `blast` notes as wrong put right, explodes to
+  `AIAIAIAIAIAIA`; all 881 members of `MAIN.Z` and the 7 of `_SETUP.LIB` expand to the sizes their
+  tables give, and were checked once, off the suite, against the research's own expansion of
+  them.
+- `title::Installed::Expanded`: every member of an archive on the disc under the install directory,
+  expanded when it is read, as a cabinet's entry is unpacked (`install::Tree::set_expanded`), and
+  at the root members of the setup's other archives it copies there on their own: Chess's
+  `Text.txt` out of `_SETUP.LIB`.
+- `EntryImage::in_cabinet` is `EntryImage::kept`, a `title::Kept`: loose on the disc, in the
+  pressing's cabinet, or imploded in an archive it names. `roster::look_for` and the machine read it
+  alike.
+
+LEGO Chess's machine reads its disc through its Joliet tree from its install on (#144), and is the
+first to declare absent libraries (#146), Glide's runtime and its OpenGL plugin; its own changelog
+says why. Its bumper and its plugin table are not reached yet: the run stops at `GetClipCursor`.
+`install::Tree::install` is now the one way a title's tree is built, by the machine and by
+`testkit::tree` alike, where each had its own copy of the step and Chess's test a third.
+
+No other title's route moves.
+
 ## 1.1.0 — 2026-10-21
 
 What LEGO Island 1.0.0 runs on, from its roster entry to its saves: counted semaphores, the old

@@ -7,6 +7,7 @@ members = [
     "titles/hotwheels-stunt-track-driver",
     "titles/lego-alpha-team",
     "titles/lego-island",
+    "titles/lego-chess",
 ]
 
 # ADR-0001: zero external crates, forever. Nothing may appear here or in any

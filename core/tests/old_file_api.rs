@@ -15,7 +15,7 @@ use lego_legacy_core::disc;
 use lego_legacy_core::guest::GuestMem;
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::{Machine, Outcome, STACK_TOP};
-use lego_legacy_core::roster::LEGO_ISLAND;
+use lego_legacy_core::roster::{LEGO_CHESS, LEGO_ISLAND};
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::win32::{Contents, Object};
@@ -600,16 +600,8 @@ fn a_search_of_the_cd_is_a_wall() {
 /// stops the run at a wall naming it.
 #[test]
 fn lego_chess_s_bumper_opens_by_its_long_name_on_its_own_disc() {
-    // The pressing #142 takes, before a crate of its own puts it on the
-    // roster.
-    const CHESS: EntryImage = EntryImage {
-        disc_dir: "chess",
-        pressing: "masterpiece-chess",
-        path: "MAIN.Z",
-        in_cabinet: false,
-        sha256: "",
-        why: "LEGO Chess's Masterpiece pressing, read here for its Joliet tree alone",
-    };
+    // The pressing #142 takes, read here for its Joliet tree alone.
+    const CHESS: EntryImage = LEGO_CHESS.image;
     if !testkit::rips(&CHESS) {
         return;
     }

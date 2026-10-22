@@ -332,22 +332,16 @@ pub fn differing(
         .count()
 }
 
-/// The declared tree over a title's cabinet, as the machine builds it.
+/// The declared tree over a title's pressing, built as the machine builds it
+/// ([`Tree::install`]).
 ///
 /// # Panics
-/// When the pressing or its cabinet will not read.
+/// When the pressing will not open or install.
 #[must_use]
 pub fn tree(title: &Title) -> Tree {
-    let mut iso = disc::open_pressing(title.image.disc_dir, title.image.pressing)
+    let iso = disc::open_pressing(title.image.disc_dir, title.image.pressing)
         .expect("the pressing opens");
-    // The disc read as the title's machine reads it (#144).
-    if title.declared.joliet {
-        iso.read_joliet().expect("the descriptors read");
-    }
-    let header = iso.read("DATA1.HDR").expect("the cabinet's header reads");
     let mut tree = Tree::new();
-    tree.set_cabinet(&header, "DATA", title.install_dir)
-        .expect("the cabinet reads");
-    tree.set_disc(iso);
+    tree.install(iso, title).expect("the pressing installs");
     tree
 }

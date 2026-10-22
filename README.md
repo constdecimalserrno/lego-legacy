@@ -12,6 +12,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | Hot Wheels Stunt Track Driver | **Playable**: a person has driven the first race to the finish |
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
 | LEGO Island | **Playable**: Nick Brick's pizza delivery plays from the intro to a save and its own exit, and a person has signed it off |
+| LEGO Chess | In progress ([#142](https://github.com/constdecimalserrno/lego-legacy/issues/142)): it starts, makes its window, and stops at its first wall |
 | LEGO Racers | On the roster, not started |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
@@ -79,6 +80,7 @@ on an unmounted disc).
 | Hot Wheels Stunt Track Driver | `game-data/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver/hotwheels-stunt-track-driver.iso` | |
 | Alpha Team | `game-data/alpha-team/alpha-team/alpha-team.iso` | The original pressing. |
 | LEGO Island | `game-data/lego-island/lego-island/lego-island.iso` | The original 1997 pressing. |
+| LEGO Chess | `game-data/chess/masterpiece-chess/masterpiece-chess.iso` | The **Masterpiece** re-release, whose game is V2.06. The original pressing's V2.05 is a different executable and is not accepted. |
 
 Running the launcher with no arguments lists each title and says whether its image was found
 and is the right one. Saves land beside the rip, in `game-data/<disc>/profile/`.

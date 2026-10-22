@@ -812,24 +812,8 @@ impl Machine {
         self.state.volume_label = iso.label.clone();
 
         // What this title's installer would have put on the machine's disc,
-        // declared from the pressing itself rather than by running the
-        // installer (#16).
-        // The image was read by the primary tree's names, as the launcher
-        // reads it; the rest of the run reads the disc as the title declares.
-        let mut iso = iso;
-        if title.declared.joliet {
-            iso.read_joliet()?;
-        }
-        self.state.installed_files = match title.installed {
-            crate::title::Installed::Cabinet => {
-                let header = iso.read("DATA1.HDR")?;
-                self.tree.set_cabinet(&header, "DATA", title.install_dir)?
-            }
-            crate::title::Installed::Copied(from) => {
-                self.tree.set_copied(&mut iso, from, title.install_dir)?
-            }
-        };
-        self.tree.set_disc(iso);
+        // and the pressing in its drive.
+        self.state.installed_files = self.tree.install(iso, title)?;
 
         // What this title's installer would have left in the registry, which
         // is where a title looks to find itself and its disc.

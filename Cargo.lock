@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lego-chess"
+version = "0.1.0"
+dependencies = [
+ "lego-legacy-core",
+]
+
+[[package]]
 name = "lego-island"
 version = "1.0.1"
 dependencies = [
@@ -29,7 +36,7 @@ version = "1.2.0"
 
 [[package]]
 name = "lego-legacy-launcher"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "lego-legacy-core",
 ]

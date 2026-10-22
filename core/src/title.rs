@@ -16,12 +16,11 @@ pub struct EntryImage {
     /// The pressing directory under that.
     pub pressing: &'static str,
     /// Where the executable sits inside that pressing's image: a path on the
-    /// disc, or — when `in_cabinet` — the name the pressing's cabinet gives it.
+    /// disc, or the name the archive it is kept in gives it.
     pub path: &'static str,
-    /// Whether the image is inside the pressing's cabinet rather than on the
-    /// disc as a file of its own. Alpha Team ships nothing of itself loose
-    /// (#53).
-    pub in_cabinet: bool,
+    /// Whether it is on the disc as a file of its own or kept in one of the
+    /// pressing's archives.
+    pub kept: Kept,
     /// The bytes that make this title this title.
     pub sha256: &'static str,
     /// Why this pressing and not the other.
@@ -32,24 +31,44 @@ impl EntryImage {
     /// Read this image out of a pressing, wherever it is kept.
     ///
     /// # Errors
-    /// When the pressing does not hold it, or its cabinet will not give it up.
+    /// When the pressing does not hold it, or the archive it is kept in will
+    /// not give it up.
     pub fn read(&self, iso: &mut crate::disc::Iso) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        if !self.in_cabinet {
-            return Ok(iso.read(self.path)?);
+        match self.kept {
+            Kept::Loose => Ok(iso.read(self.path)?),
+            Kept::Imploded(archive) => {
+                let bytes = iso.read(archive)?;
+                Ok(crate::is3::Archive::open(&bytes)?.read(&bytes, self.path)?)
+            }
+            Kept::Cabinet => {
+                let header = iso.read("DATA1.HDR")?;
+                let cabinet = crate::cabinet::Cabinet::open(&header)?;
+                let entry = cabinet
+                    .find(self.path)
+                    .ok_or_else(|| format!("the cabinet does not hold {}", self.path))?
+                    .clone();
+                let span = iso.read_range(
+                    &format!("DATA{}.CAB", entry.volume),
+                    entry.offset,
+                    entry.compressed as usize,
+                )?;
+                Ok(cabinet.unpack(&entry, &span)?)
+            }
         }
-        let header = iso.read("DATA1.HDR")?;
-        let cabinet = crate::cabinet::Cabinet::open(&header)?;
-        let entry = cabinet
-            .find(self.path)
-            .ok_or_else(|| format!("the cabinet does not hold {}", self.path))?
-            .clone();
-        let span = iso.read_range(
-            &format!("DATA{}.CAB", entry.volume),
-            entry.offset,
-            entry.compressed as usize,
-        )?;
-        Ok(cabinet.unpack(&entry, &span)?)
     }
+}
+
+/// Where a pressing keeps its entry image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kept {
+    /// On the disc as a file of its own.
+    Loose,
+    /// In the pressing's cabinet, by the name its header gives it. Alpha Team
+    /// ships nothing of itself loose (#53).
+    Cabinet,
+    /// Imploded in the InstallShield 3 archive on the disc named here, by its
+    /// path in it. LEGO Chess ships nothing of itself loose either (#143).
+    Imploded(&'static str),
 }
 
 /// The machine a title is told it is running on.
@@ -142,6 +161,14 @@ pub enum Installed {
     /// Copied whole out of a directory of the disc, which is what an
     /// installer does for a title that ships its files loose.
     Copied(&'static str),
+    /// Expanded out of an InstallShield 3 archive on the disc, every member
+    /// where the archive puts it, under the install directory (#143); and at
+    /// that directory's root, beside them, each member of the setup's other
+    /// archives that its script copies there on its own, as archive and path.
+    Expanded {
+        archive: &'static str,
+        beside: &'static [(&'static str, &'static str)],
+    },
 }
 
 /// One supported game, identified by the bytes of its entry image.
@@ -225,7 +252,7 @@ impl Title {
             disc_dir: "",
             pressing: "",
             path: "",
-            in_cabinet: false,
+            kept: Kept::Loose,
             sha256: "",
             why: "the stub guest is assembled by hand in this crate and comes off no disc",
         },

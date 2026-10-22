@@ -3,10 +3,14 @@
 One heading per version, newest first. What each part of the launcher's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
-## 1.1.1 — 2026-10-21
+## 1.2.0 — 2026-10-21
 
-Took core 1.2.0 (#140). The launcher uses core only to find and check the rips and starts each
-title as a program of its own, so nothing it does changed.
+Took core 1.2.0: its window changes (#140) change nothing the launcher does, since it uses core
+only to find and check the rips and starts each title as a program of its own, and its roster
+lists LEGO Chess (#143).
+
+Lists LEGO Chess as the fifth title and starts it, as `lego-legacy lego-chess`, when its rip is
+there (#143). It is in progress: it stops at a wall long before it is playable.
 
 ## 1.1.0 — 2026-10-21
 
