@@ -10,9 +10,10 @@
 //! What a backend works out without asking its operating system is kept
 //! apart from it, with no `cfg`, so that every host's tests hold it: the
 //! pointer a title is handed and whose the mouse is ([`pointer`]), the keys
-//! it is told of ([`key_change`]), the pace ([`pace`]), the feed to an audio
-//! device ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys
-//! and scaling ([`windows_input`]), and X's ([`x11`]).
+//! it is told of ([`key_change`]), whether a window off the screen is closed
+//! ([`closed`]), the pace ([`pace`]), the feed to an audio device
+//! ([`feed`]) and the stretch of the mix ([`stretch`]), Windows' keys and
+//! scaling ([`windows_input`]), and X's ([`x11`]).
 
 pub mod feed;
 pub mod headless;
@@ -51,6 +52,17 @@ pub(crate) static CLOSE_ASKED: AtomicU32 = AtomicU32::new(0);
 /// Ask the run to end once more, and say how many times it has been asked.
 pub(crate) fn ask_to_close() -> u32 {
     CLOSE_ASKED.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Whether a window gone from the screen is the person closing it (#140), for
+/// a host that can only tell a close by the window leaving the screen, as
+/// macOS's can. A window minimized is off the screen too, and so is every
+/// window of an application hidden, and neither is a close: Windows answers a
+/// minimize with `SC_MINIMIZE` and an iconic window, never with `SC_CLOSE`
+/// (#173).
+#[must_use]
+pub fn closed(visible: bool, minimized: bool, app_hidden: bool) -> bool {
+    !visible && !minimized && !app_hidden
 }
 
 /// Hear the operating system ask a run to end, from now on. A title's `main`
@@ -280,6 +292,8 @@ pub trait Host {
     /// by closing the window or by what [`listen`] hears. A host with no
     /// window has only the second. The first close is delivered to the title
     /// at the next flip, as [`Input::Close`]; a second stops the run (#140).
+    /// A window minimized, or one of an application hidden, is not closed
+    /// ([`closed`], #173).
     fn closes(&self) -> u32 {
         CLOSE_ASKED.load(Ordering::Relaxed)
     }
@@ -309,7 +323,15 @@ pub trait Host {
 
 #[cfg(test)]
 mod tests {
-    use super::{key_change, Input};
+    use super::{closed, key_change, Input};
+
+    #[test]
+    fn a_window_off_the_screen_is_closed_only_when_neither_minimized_nor_hidden() {
+        assert!(closed(false, false, false), "closed by its button");
+        assert!(!closed(true, false, false), "on the screen");
+        assert!(!closed(false, true, false), "minimized");
+        assert!(!closed(false, false, true), "its application hidden");
+    }
 
     fn down(code: u32) -> Option<Input> {
         Some(Input::Key { code, down: true })

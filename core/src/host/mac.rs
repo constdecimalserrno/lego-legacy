@@ -435,7 +435,7 @@ pub struct MacWindow {
     closes: u32,
     /// Whether the window is gone from the screen, closed by its button,
     /// which is one close however long it stays gone.
-    hidden: bool,
+    gone: bool,
     /// Whether the person's own pointer is over this window's picture, where
     /// it takes the title's shape (#139). Starts true, because a window that
     /// has just opened under the pointer has not been told otherwise.
@@ -493,15 +493,6 @@ fn button(kind: u64) -> Button {
     } else {
         Button::Left
     }
-}
-
-/// Whether the window being gone from the screen is the person closing it
-/// (#140). A window minimized into the Dock is off the screen too, and so is
-/// every window of an application hidden, and neither is a close: Windows
-/// answers a minimize with `SC_MINIMIZE` and an iconic window, never with
-/// `SC_CLOSE` (#173).
-fn closed(visible: bool, miniaturized: bool, app_hidden: bool) -> bool {
-    !visible && !miniaturized && !app_hidden
 }
 
 impl MacWindow {
@@ -608,7 +599,7 @@ impl MacWindow {
                 held: Vec::new(),
                 audio: None,
                 closes: 0,
-                hidden: false,
+                gone: false,
                 pointer_over_us: true,
                 pointer_taken: false,
                 capture: Capture::default(),
@@ -1018,39 +1009,40 @@ impl MacWindow {
                 }
             }
 
+            // What AppKit says of the window and the application, asked only
+            // of a getter that takes nothing and answers a BOOL, which is the
+            // signature `MsgU64` is sent with: a BOOL is one byte, and the
+            // rest of the register is not ours to read.
+            let ask = |receiver: Id, question: &str| {
+                let v: u64 = self.rt.send::<MsgU64>()(receiver, self.rt.sel(question));
+                v & 0xff != 0
+            };
+
             // A key let go while another application has the keyboard is
             // never sent here, so what was held is let go when the window
             // loses it.
-            let key_window = {
-                let v: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isKeyWindow"));
-                v & 0xff != 0
-            };
-            if !key_window {
+            if !ask(self.window, "isKeyWindow") {
                 for code in self.held.drain(..) {
                     self.pending.push(Input::Key { code, down: false });
                 }
             }
 
-            // A BOOL is one byte, and the rest of the register is not ours
-            // to read.
-            let ask = |receiver: Id, question: &str| {
-                let v: u64 = self.rt.send::<MsgU64>()(receiver, self.rt.sel(question));
-                v & 0xff != 0
-            };
             let visible = ask(self.window, "isVisible");
             let miniaturized = ask(self.window, "isMiniaturized");
-            if closed(visible, miniaturized, ask(self.app, "isHidden")) && !self.hidden {
-                self.hidden = true;
+            if super::closed(visible, miniaturized, ask(self.app, "isHidden")) && !self.gone {
+                self.gone = true;
                 self.closes += 1;
             }
+            // Where the person's pointer is and which application is in front
+            // are both things that change without the title being told, so
+            // this is settled every time the window system is asked what
+            // happened, the front first, so that a pointer kept on the picture
+            // is put back only while this application is still in front, with
+            // its window on the screen: one closed by its button, minimized,
+            // or of an application hidden, which is then not the active one,
+            // is not in front.
             front = visible && !miniaturized && ask(self.app, "isActive");
         }
-        // Where the person's pointer is and which application is in front are
-        // both things that change without the title being told, so this is
-        // settled every time the window system is asked what happened, the
-        // front first, so that a pointer kept on the picture is put back only
-        // while this application is still in front, with its window on the
-        // screen: one closed by its button, or minimized, is not in front.
         self.pending
             .extend(self.capture.front(front, Instant::now()));
         let tell = self.capture.newly_kept();
@@ -1205,8 +1197,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        closed, direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId,
-        MsgPoint, MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
+        direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId, MsgPoint,
+        MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
 
@@ -1295,14 +1287,6 @@ mod tests {
             }
             assert_eq!(out, [0xf0, 0x80, 0x10, 0xff], "orange, and opaque");
         }
-    }
-
-    #[test]
-    fn a_window_off_the_screen_is_closed_only_when_neither_minimized_nor_hidden() {
-        assert!(closed(false, false, false), "closed by its button");
-        assert!(!closed(true, false, false), "on the screen");
-        assert!(!closed(false, true, false), "minimized into the Dock");
-        assert!(!closed(false, false, true), "its application hidden");
     }
 
     #[test]

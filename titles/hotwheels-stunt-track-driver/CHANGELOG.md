@@ -46,7 +46,8 @@ moved with it forced on, measured at `7509b49`. Core's `FindFirstFileA` on the C
 wall; this title never searches.
 
 Minimizing its window on macOS, or hiding the application, no longer closes it (#173, core 1.2.0):
-it runs on unseen and is shown again on restore. No route moved.
+it is told nothing new beyond the keys and buttons it held let go, runs on unseen but heard, and is
+shown again on restore. No route moved.
 
 ## 1.0.0 — 2026-10-18
 

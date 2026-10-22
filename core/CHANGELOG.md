@@ -74,13 +74,15 @@ clippy-clean, not run.
 Minimizing the window on macOS, or hiding the application, is not a close (#173). The macOS
 backend took its window leaving the screen for its close button, and a window minimized into the
 Dock, or one of an application hidden, is off the screen too (Apple's `isVisible`,
-`isMiniaturized` and `hide(_:)`), so since 1.0.0 minimizing a run stopped it, and with the close
-above it would have told the title to close. Windows answers a minimize with `SC_MINIMIZE` and an
-iconic window, never `SC_CLOSE`, and the Windows and X backends never took one for a close. The
-title is told nothing when its window is minimized or restored, as before: the declared machine's
-window is always the active one, and no title asks `IsIconic` or needs `WM_SIZE`; the host frees
-the mouse and lets go of what was held, as for any window not in front (#141). No route moves; a
-headless run has no window.
+`isMiniaturized` and `hide(_:)`). So, read from the code (#6, `a8fc43a`) and Apple's documentation
+rather than seen at a window, minimizing the window stopped the run in 1.0.0 and 1.1.0, ended the
+"close the window to end" wait after a run, and with the close above would have told the title
+`SC_CLOSE`. Windows answers a minimize with `SC_MINIMIZE` and an iconic window, never `SC_CLOSE`,
+and the Windows and X backends never took one for a close. The decision is `host::closed`, with no
+`cfg`, so every host's tests hold it. On a minimize or a hide the title is told nothing new: no
+`SC_MINIMIZE`, `WM_SIZE`, `WM_ACTIVATE` or `WM_ACTIVATEAPP` FALSE, only the keys and buttons it was
+told are held let go, as for any window not in front (#141), and it runs on, unseen but heard.
+Telling it as Windows does is #177. No route moves; a headless run has no window.
 
 `WM_TIMER` is sent as Windows sends it (#138), where `SetTimer` and `KillTimer` answered success
 and no timer ever came due. It moves Hot Wheels' runs, which are released and signed off, a move
