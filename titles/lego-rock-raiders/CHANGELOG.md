@@ -38,6 +38,9 @@ route moved.
 
 Its declared machine lacks no library (`absent_libraries`, #146): no gate run asks `LoadLibraryA` for one, so no route moves.
 
+Took core 1.2.0's mouse (#141): a player clicks on the picture to give the title the mouse, and
+Escape frees it, neither reaching the game. No route records either, so no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

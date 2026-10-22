@@ -23,6 +23,9 @@ route closes, and the title never destroys its window in one, so no route moved.
 
 Its declared machine lacks no library (`absent_libraries`, #146): in every gate run it asks `LoadLibraryA` only for libraries it ships and the two of Microsoft's core writes, so no route moves.
 
+Took core 1.2.0's mouse (#141): a player clicks on the picture to give the title the mouse, and
+Escape frees it, neither reaching the game. No route records either, so no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

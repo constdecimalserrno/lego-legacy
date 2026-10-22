@@ -34,6 +34,10 @@ exit code unchanged; core's changelog lists them. The race still finishes, with 
 
 Its declared machine lacks no library (`absent_libraries`, #146): no gate run asks `LoadLibraryA` for one, so no route moves.
 
+Took core 1.2.0's mouse (#141): a player clicks on the picture to give the title the mouse, and
+Escape frees it, neither reaching the game, so the Escape that frees the mouse never quits; the
+next one does. No route records either, so no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.
