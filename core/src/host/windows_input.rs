@@ -81,6 +81,20 @@ pub fn closes(message: u32, wparam: usize, lparam: u32) -> bool {
         && lparam & (1 << 30) == 0
 }
 
+/// A session end Windows forces, by its `lParam` (winuser.h).
+const ENDSESSION_CRITICAL: usize = 0x4000_0000;
+
+/// Whether a `WM_QUERYENDSESSION` may be held while the title leaves (#184):
+/// any but one with [`ENDSESSION_CRITICAL`] in its `lParam`,
+/// which Windows forces and lets nothing hold (Microsoft, `WM_QUERYENDSESSION`
+/// and "Application Shutdown Changes in Windows Vista"). A logoff
+/// (`ENDSESSION_LOGOFF`), a shutdown or restart (0) and the Restart Manager's
+/// close (`ENDSESSION_CLOSEAPP`) are each held.
+#[must_use]
+pub fn holds_session(lparam: isize) -> bool {
+    lparam as usize & ENDSESSION_CRITICAL == 0
+}
+
 /// Where the picture goes in a window's client area, as `(x, y, width,
 /// height)` in the client's own pixels: as large as fits, its aspect kept,
 /// and centred, as the macOS layer's `resizeAspect` puts it. What is left
@@ -174,8 +188,8 @@ pub fn cursor_bitmaps(shape: &super::Cursor) -> Option<(Vec<u8>, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        closes, cursor_bitmaps, direct_input_key, guest_point, key, picture, raw_moved, WM_KEYDOWN,
-        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        closes, cursor_bitmaps, direct_input_key, guest_point, holds_session, key, picture,
+        raw_moved, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
     /// A pointer shape reaches Windows as its colours, blue first, and a mask
@@ -361,5 +375,20 @@ mod tests {
         // A mouse again forgets where the pointer was.
         let _ = raw_moved(0, 1, 1, &mut last, screen, desktop);
         assert_eq!(last, None);
+    }
+
+    /// A session's end is held while the title leaves, a logoff, a shutdown
+    /// or restart and the Restart Manager's close alike, but not one Windows
+    /// forces, which it lets nothing hold (#184).
+    #[test]
+    fn a_session_end_is_held_unless_it_is_forced() {
+        // `ENDSESSION_LOGOFF`, a shutdown or restart, `ENDSESSION_CLOSEAPP`.
+        for lparam in [0x8000_0000_u32 as isize, 0, 1] {
+            assert!(holds_session(lparam), "{lparam:#x}");
+        }
+        // `ENDSESSION_CRITICAL`, alone and with `ENDSESSION_LOGOFF`.
+        for lparam in [0x4000_0000, 0xc000_0000_u32 as isize] {
+            assert!(!holds_session(lparam), "{lparam:#x}");
+        }
     }
 }

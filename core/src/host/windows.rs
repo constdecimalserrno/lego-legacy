@@ -28,9 +28,11 @@ use std::time::Instant;
 type Handle = *mut c_void;
 type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
 type ClipCursor = unsafe extern "system" fn(*const Rect) -> i32;
+type BlockReason = unsafe extern "system" fn(Handle, *const u16) -> i32;
 
 const WM_PAINT: u32 = 0x000f;
 const WM_CLOSE: u32 = 0x0010;
+const WM_QUERYENDSESSION: u32 = 0x0011;
 const WM_INPUT: u32 = 0x00ff;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -229,6 +231,8 @@ struct User32 {
     ) -> Handle,
     destroy_window: unsafe extern "system" fn(Handle) -> i32,
     def_window_proc: WndProc,
+    block_reason: BlockReason,
+    unblock_reason: unsafe extern "system" fn(Handle) -> i32,
     peek_message: unsafe extern "system" fn(*mut Msg, Handle, u32, u32, u32) -> i32,
     dispatch_message: unsafe extern "system" fn(*const Msg) -> isize,
     adjust_window_rect: unsafe extern "system" fn(*mut Rect, u32, i32, u32) -> i32,
@@ -266,6 +270,8 @@ impl User32 {
                 create_window: lib.function("CreateWindowExW")?,
                 destroy_window: lib.function("DestroyWindow")?,
                 def_window_proc: lib.function("DefWindowProcW")?,
+                block_reason: lib.function("ShutdownBlockReasonCreate")?,
+                unblock_reason: lib.function("ShutdownBlockReasonDestroy")?,
                 peek_message: lib.function("PeekMessageW")?,
                 dispatch_message: lib.function("DispatchMessageW")?,
                 adjust_window_rect: lib.function("AdjustWindowRectEx")?,
@@ -343,9 +349,14 @@ impl Gdi32 {
 /// made.
 static DEF_WINDOW_PROC: AtomicUsize = AtomicUsize::new(0);
 
+/// `ShutdownBlockReasonCreate`, for the window procedure, as
+/// [`DEF_WINDOW_PROC`] is.
+static BLOCK_REASON: AtomicUsize = AtomicUsize::new(0);
+
 /// What Windows calls with a message sent to the window rather than posted
 /// to it. Everything a person does is posted, and taken from the queue in
-/// [`WinWindow::pump`]; all that is answered here is a close.
+/// [`WinWindow::pump`]; all that is answered here is a close, and a session
+/// ending.
 unsafe extern "system" fn window_proc(
     hwnd: Handle,
     message: u32,
@@ -357,6 +368,31 @@ unsafe extern "system" fn window_proc(
     // #140).
     if message == WM_CLOSE {
         super::ask_to_close();
+        return 0;
+    }
+    // A logoff, shutdown or restart is a close too, as on macOS (#178, #184),
+    // and is held while the title leaves. Windows wants the answer at once,
+    // and the title runs on this thread, so the hold is Microsoft's own for
+    // one that knows only now that it must block: a reason, then FALSE
+    // ("Application Shutdown Changes in Windows Vista", usage model 2). The
+    // person sees the reason on Windows' screen while the title leaves. A
+    // session end asked again meanwhile is held again, never a second close
+    // that would stop the title before it is done. One Windows forces ("Log
+    // out anyway", `ENDSESSION_CRITICAL`) cannot be held: it is answered TRUE,
+    // and Windows ends the process once `DefWindowProcW` has answered its
+    // `WM_ENDSESSION` zero, the title untold, as any forced logoff ends it.
+    if message == WM_QUERYENDSESSION {
+        if !input::holds_session(lparam) {
+            return 1;
+        }
+        CLOSE_ASKED.fetch_max(1, Ordering::Relaxed);
+        // Safety: user32's `ShutdownBlockReasonCreate`, stored before the
+        // window was made, called on the thread that made it, with a
+        // NUL-terminated string live for the call.
+        unsafe {
+            let block: BlockReason = std::mem::transmute(BLOCK_REASON.load(Ordering::Relaxed));
+            block(hwnd, wide("The game is closing.").as_ptr());
+        }
         return 0;
     }
     // Safety: written with `DefWindowProcW`'s own address before the window
@@ -455,6 +491,7 @@ impl WinWindow {
         let user = User32::open()?;
         let gdi = Gdi32::open()?;
         DEF_WINDOW_PROC.store(user.def_window_proc as usize, Ordering::Relaxed);
+        BLOCK_REASON.store(user.block_reason as usize, Ordering::Relaxed);
         let class_name = wide("lego-legacy");
         let title = wide(name);
         let (w, h) = (
@@ -1014,8 +1051,12 @@ impl Drop for WinWindow {
         // without a pointer, or clipped, or with the title's shape.
         self.free_mouse();
         self.pointer_shape(None);
-        // Safety: destroying a window we made.
-        unsafe { (self.user.destroy_window)(self.window) };
+        // Safety: a window we made, on the thread that made it. A session
+        // end held while the title left is held no longer (#184).
+        unsafe {
+            (self.user.unblock_reason)(self.window);
+            (self.user.destroy_window)(self.window);
+        }
     }
 }
 
