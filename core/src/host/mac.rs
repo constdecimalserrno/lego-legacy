@@ -465,10 +465,8 @@ pub struct MacWindow {
     pointer_taken: bool,
     /// Whose the mouse is ([`Capture`], #141).
     capture: Capture,
-    /// The name the window is titled with, and what its title last said
-    /// after it of whose the mouse is.
+    /// The name the window is titled with.
     name: String,
-    hint: &'static str,
     /// The shape the title set its pointer to, as an `NSCursor` this window
     /// owns, or nil for the person's own arrow (#139).
     shape: Id,
@@ -625,7 +623,6 @@ impl MacWindow {
                 pointer_taken: false,
                 capture: Capture::default(),
                 name: name.to_owned(),
-                hint: "",
                 shape: std::ptr::null_mut(),
                 shaped: false,
                 steer: Steer::new(
@@ -683,13 +680,17 @@ impl MacWindow {
             let v: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
             v & 0xff != 0
         };
-        self.capture.front(active);
+        self.pending.extend(self.capture.front(active));
         self.title_says();
         let take = self.capture.captured() && self.pointer_hidden;
-        // The title's shape, over the picture while it is in front, and the
-        // arrow everywhere else (#139). AppKit puts its own arrow back as the
+        // The title's shape, over the picture while it is in front with the
+        // mouse captured, and the arrow everywhere else (#139, #141). AppKit puts its own arrow back as the
         // pointer crosses its windows, so the shape is set on every pump.
-        let shaped = !take && self.pointer_over_us && active && !self.shape.is_null();
+        let shaped = !take
+            && self.capture.captured()
+            && self.pointer_over_us
+            && active
+            && !self.shape.is_null();
         if shaped || self.shaped {
             // Safety: NSCursor's own class method, and `set` on a cursor.
             unsafe {
@@ -735,12 +736,10 @@ impl MacWindow {
     /// Say in the window's title whose the mouse is, once that has changed
     /// (#141).
     fn title_says(&mut self) {
-        let hint = self.capture.hint();
-        if hint == self.hint {
+        let Some(title) = self.capture.title(&self.name) else {
             return;
-        }
-        self.hint = hint;
-        let title = CString::new(format!("{}{hint}", self.name)).unwrap_or_default();
+        };
+        let title = CString::new(title).unwrap_or_default();
         // Safety: an NSString made from a NUL-terminated string, and
         // `setTitle:` on our own window.
         unsafe {
@@ -936,10 +935,7 @@ impl MacWindow {
                             }
                         }
                     }
-                    2 | 4 => {
-                        let up = self.capture.release(button(kind));
-                        self.pending.extend(up);
-                    }
+                    2 | 4 => self.pending.extend(self.capture.release(button(kind))),
                     // Moved and dragged, which is one of three things
                     // ([`moved`]).
                     5..=7 => {

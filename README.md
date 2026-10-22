@@ -105,10 +105,10 @@ with a snapshot taken at the wall. Useful flags, all listed by `--help`:
 | `--headless` | no window, uncapped |
 | `--data-root <dir>` | keep saves in `<dir>/profile` instead of beside the rip |
 
-In every title, click on the picture to play. Until you do, the mouse is yours and the game sees
-none of it, and the click that captures it does not reach the game either. Escape frees the mouse
-again, and while the mouse is captured Escape does not reach the game: the next one, with the mouse
-free, does. Cmd-Tab, or anything else that takes the window out of the front, frees it too, and the
+In every title, click on the picture to play (a window behind others takes one click to come to
+the front first). Until you do, the mouse is yours and the game sees none of it, and the click
+that captures it does not reach the game either. Escape frees the mouse again, and while the mouse
+is captured Escape does not reach the game: the next one, with the mouse free, does. Cmd-Tab, or anything else that takes the window out of the front, frees it too, and the
 window's title says which it is. Cmd-Q, Cmd-W or the window's close button asks the game to close,
 as Windows does, and the run ends when it leaves; a second close stops the run at once. The Linux
 backend is written to do the same, freeing the mouse when another window takes the keyboard and

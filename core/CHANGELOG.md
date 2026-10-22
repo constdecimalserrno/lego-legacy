@@ -174,18 +174,21 @@ LEGO Island never took it, and was handed every move over its picture.
 
 - Until a click on the picture the title sees none of the mouse, no move and no button. That
   click captures it and is the host's, and so is its release: it would otherwise press whatever
-  the title's own pointer was over. A press on the window's frame never captures (#49).
+  the title's own pointer was over. A press on the window's frame never captures (#49), nor does
+  one on a window not yet in front, which only brings it there, as a first click does on macOS.
 - Captured, every move and button is the title's. A title that draws its own pointer (Rock
   Raiders, Hot Wheels, Alpha Team) has the person's hidden and frozen and its own steered by how
   far the mouse goes, as when it was taken. One that shows the host's (LEGO Island, #139) keeps
-  it, in the title's shape, on the picture: by `ClipCursor` to the client area on Windows, by a
+  it, in the title's shape, on the picture, where until then it was the host's arrow: by `ClipCursor` to the client area on Windows, by a
   grab confined to the window on X, and on macOS, which has neither, by putting it back at the
   edge it left by, with the mouse joined to the pointer again straight after so that the warp holds
   no event back. That title is told where the pointer is at the click that captures, which no move
   has told it since.
 - Escape frees it and is the host's, repeating and let go, so the Escape that frees the mouse
-  never quits Hot Wheels; the next one, with the mouse free, reaches the title as any key does.
-  The window leaving the front frees it too, and only a click captures it again. The end of the run
+  never quits Hot Wheels; the next one, with the mouse free, reaches the title as any key does,
+  and stays the title's, repeating and let go, if a click captures the mouse while it is held.
+  The window leaving the front frees it too, and lets go in the title of a button it held, whose
+  release goes to another window; only a click captures it again. The end of the run
   frees it for good, through `Host::free_mouse`, which the run calls where it called
   `show_pointer(true)`, so no click captures it while the window waits to be closed (#111).
 - A button let go reaches the title only if its press did, as a key does: a press the title saw

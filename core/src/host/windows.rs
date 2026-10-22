@@ -417,10 +417,8 @@ pub struct WinWindow {
     clipped: bool,
     /// Whose the mouse is ([`Capture`], #141).
     capture: Capture,
-    /// The name the window is titled with, and what its title last said
-    /// after it of whose the mouse is.
+    /// The name the window is titled with.
     name: String,
-    hint: &'static str,
     /// Windows' arrow, the class's cursor everywhere but where the title's
     /// shape is drawn; the title's shape, as a cursor this window made, or
     /// null for none; and which of the two the class has now (#139).
@@ -533,7 +531,6 @@ impl WinWindow {
             clipped: false,
             capture: Capture::default(),
             name: name.to_owned(),
-            hint: "",
             steer: Steer::new(
                 (
                     i32::try_from(width / 2).unwrap_or(320),
@@ -639,15 +636,16 @@ impl WinWindow {
     fn draw_pointer_where_it_belongs(&mut self) {
         // Safety: user32's own, which takes nothing.
         let active = unsafe { (self.user.foreground_window)() } == self.window;
-        self.capture.front(active);
+        self.pending.extend(self.capture.front(active));
         self.title_says();
         if !self.pointer_taken {
             self.pointer_over_us = self.over_the_picture();
         }
-        // The title's shape while the window is in front, and the arrow
-        // while it is not (#139). The class's cursor is what Windows draws
+        // The title's shape while the mouse is captured, which is only while
+        // the window is in front, and the arrow while it is not (#139, #141).
+        // The class's cursor is what Windows draws
         // over the client area as the pointer moves, and only there.
-        let want = if active && !self.shape.is_null() {
+        let want = if self.capture.captured() && !self.shape.is_null() {
             self.shape
         } else {
             self.arrow
@@ -723,12 +721,10 @@ impl WinWindow {
     /// Say in the window's title whose the mouse is, once that has changed
     /// (#141).
     fn title_says(&mut self) {
-        let hint = self.capture.hint();
-        if hint == self.hint {
+        let Some(title) = self.capture.title(&self.name) else {
             return;
-        }
-        self.hint = hint;
-        let title = wide(&format!("{}{hint}", self.name));
+        };
+        let title = wide(&title);
         // Safety: our own window, and a string that outlives the call.
         unsafe { (self.user.set_window_text)(self.window, title.as_ptr()) };
     }
@@ -932,8 +928,8 @@ impl WinWindow {
                 false
             }
             WM_LBUTTONUP | WM_RBUTTONUP => {
-                let up = self.capture.release(button(msg.message));
-                self.pending.extend(up);
+                self.pending
+                    .extend(self.capture.release(button(msg.message)));
                 if msg.wparam & MK_BUTTONS == 0 {
                     // Safety: user32's own, which takes nothing.
                     unsafe { (self.user.release_capture)() };

@@ -491,10 +491,8 @@ pub struct LinuxWindow {
     /// none while it is the person's own, or kept in the window for a title
     /// that shows it.
     taken: Option<Held>,
-    /// The name the window is titled with, and what its title last said
-    /// after it of whose the mouse is.
+    /// The name the window is titled with.
     name: String,
-    hint: &'static str,
     /// Where the person's own pointer was last seen in the window, which is
     /// where it is put back when it is given back.
     seen_at: (i32, i32),
@@ -628,7 +626,6 @@ impl LinuxWindow {
                 grabbed: false,
                 taken: None,
                 name: name.to_owned(),
-                hint: "",
                 seen_at: (0, 0),
                 steer: Steer::new(
                     (
@@ -827,8 +824,7 @@ impl LinuxWindow {
                         _ => return,
                     };
                     if event.kind == BUTTON_RELEASE {
-                        let up = self.capture.release(button);
-                        self.pending.extend(up);
+                        self.pending.extend(self.capture.release(button));
                     } else if let Some(down) = self.capture.press(button) {
                         self.pending.push(down);
                     } else {
@@ -967,12 +963,17 @@ impl LinuxWindow {
     /// with its connection: there is nothing to restore from a signal, as
     /// there is on the Mac (#45).
     fn take_pointer_where_it_belongs(&mut self) {
-        self.capture.front(self.focused);
+        self.pending.extend(self.capture.front(self.focused));
         self.title_says();
-        // The title's shape while this window has the keyboard, and the
-        // desktop's pointer while it does not (#139). X draws a window's
+        // The title's shape while the mouse is captured, which is only while
+        // this window has the keyboard, and the desktop's pointer while it is
+        // not (#139, #141). X draws a window's
         // cursor only over that window.
-        let shape = if self.focused { self.shape } else { 0 };
+        let shape = if self.capture.captured() {
+            self.shape
+        } else {
+            0
+        };
         if shape != self.defined {
             self.defined = shape;
             // Safety: the window is ours, the cursor ours or none.
@@ -1022,13 +1023,10 @@ impl LinuxWindow {
     /// Say in the window's title whose the mouse is, once that has changed
     /// (#141). `XStoreName` takes Latin-1, which has no dash this long.
     fn title_says(&mut self) {
-        let hint = self.capture.hint();
-        if hint == self.hint {
+        let Some(title) = self.capture.title(&self.name) else {
             return;
-        }
-        self.hint = hint;
-        let title = format!("{}{hint}", self.name).replace('—', "-");
-        let title = CString::new(title).unwrap_or_default();
+        };
+        let title = CString::new(title.replace('—', "-")).unwrap_or_default();
         // Safety: our own window, and a NUL-terminated name that outlives
         // the call.
         unsafe {
