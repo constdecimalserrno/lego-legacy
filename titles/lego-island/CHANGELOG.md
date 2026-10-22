@@ -48,6 +48,9 @@ Joliet tree: read through it, the disc answers the same names but for case, and 
 moved with it forced on, measured at `7509b49`. Core's `FindFirstFileA` on the CD is now a
 wall; this title never searches.
 
+Minimizing its window on macOS, or hiding the application, no longer closes it (#173, core 1.2.0):
+it runs on unseen and is shown again on restore. No route moved.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from

@@ -495,6 +495,15 @@ fn button(kind: u64) -> Button {
     }
 }
 
+/// Whether the window being gone from the screen is the person closing it
+/// (#140). A window minimized into the Dock is off the screen too, and so is
+/// every window of an application hidden, and neither is a close: Windows
+/// answers a minimize with `SC_MINIMIZE` and an iconic window, never with
+/// `SC_CLOSE` (#173).
+fn closed(visible: bool, miniaturized: bool, app_hidden: bool) -> bool {
+    !visible && !miniaturized && !app_hidden
+}
+
 impl MacWindow {
     /// Open a window of this size, titled after the title being run, with the
     /// declared machine's own pointer speed ([`Steer`]).
@@ -832,7 +841,7 @@ impl MacWindow {
     /// Take everything the window system has for us, turning what a person did
     /// into guest input and noticing a close.
     pub fn pump(&mut self) {
-        let visible;
+        let front;
         // Safety: the standard event loop, called with AppKit's own types.
         unsafe {
             loop {
@@ -1024,14 +1033,17 @@ impl MacWindow {
 
             // A BOOL is one byte, and the rest of the register is not ours
             // to read.
-            visible = {
-                let v: u64 = self.rt.send::<MsgU64>()(self.window, self.rt.sel("isVisible"));
+            let ask = |receiver: Id, question: &str| {
+                let v: u64 = self.rt.send::<MsgU64>()(receiver, self.rt.sel(question));
                 v & 0xff != 0
             };
-            if !visible && !self.hidden {
+            let visible = ask(self.window, "isVisible");
+            let miniaturized = ask(self.window, "isMiniaturized");
+            if closed(visible, miniaturized, ask(self.app, "isHidden")) && !self.hidden {
                 self.hidden = true;
                 self.closes += 1;
             }
+            front = visible && !miniaturized && ask(self.app, "isActive");
         }
         // Where the person's pointer is and which application is in front are
         // both things that change without the title being told, so this is
@@ -1039,16 +1051,6 @@ impl MacWindow {
         // front first, so that a pointer kept on the picture is put back only
         // while this application is still in front, with its window on the
         // screen: one closed by its button, or minimized, is not in front.
-        // Safety: `isActive` on NSApplication and `isMiniaturized` on our
-        // window. A BOOL is one byte, and the rest of the register is not ours
-        // to read.
-        let front = visible
-            && unsafe {
-                let active: u64 = self.rt.send::<MsgU64>()(self.app, self.rt.sel("isActive"));
-                let down: u64 =
-                    self.rt.send::<MsgU64>()(self.window, self.rt.sel("isMiniaturized"));
-                active & 0xff != 0 && down & 0xff == 0
-            };
         self.pending
             .extend(self.capture.front(front, Instant::now()));
         let tell = self.capture.newly_kept();
@@ -1203,8 +1205,8 @@ impl Host for MacWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId, MsgPoint,
-        MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
+        closed, direct_input_key, direct_input_modifier, guest_point, ns_cursor, Id, MsgId,
+        MsgPoint, MsgVoid, Point, Rect, Runtime, PRESENT_BITMAP_INFO,
     };
     use crate::host::{sys, Input};
 
@@ -1293,6 +1295,14 @@ mod tests {
             }
             assert_eq!(out, [0xf0, 0x80, 0x10, 0xff], "orange, and opaque");
         }
+    }
+
+    #[test]
+    fn a_window_off_the_screen_is_closed_only_when_neither_minimized_nor_hidden() {
+        assert!(closed(false, false, false), "closed by its button");
+        assert!(!closed(true, false, false), "on the screen");
+        assert!(!closed(false, true, false), "minimized into the Dock");
+        assert!(!closed(false, false, true), "its application hidden");
     }
 
     #[test]

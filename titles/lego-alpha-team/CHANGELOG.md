@@ -36,6 +36,9 @@ milliseconds where it ends at 8,054 and 331,967. Core's changelog lists each run
 `FindFirstFileA` on the CD is now a wall; this title searches only relative to its install
 directory on C:, and no route moves.
 
+Minimizing its window on macOS, or hiding the application, no longer closes it (#173, core 1.2.0):
+it runs on unseen and is shown again on restore. No route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main
