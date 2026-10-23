@@ -28,7 +28,8 @@ pub struct Immediate {
     devices: BTreeMap<u32, Device>,
     /// Materials' own bytes, a `D3DMATERIAL` each.
     materials: BTreeMap<u32, Vec<u8>>,
-    /// Which material a handle names.
+    /// Which material or texture a handle names: one table, as Wine's ddraw
+    /// keeps one, read as documentation.
     handles: BTreeMap<u32, u32>,
     next_handle: u32,
     /// Viewports' own descriptions, as the guest last set them.
@@ -91,7 +92,7 @@ pub static DEVICE2: Interface = Interface {
         method("GetTransform", 2, get_transform),
         wall("MultiplyTransform", 2),
         wall("DrawPrimitive", 5),
-        wall("DrawIndexedPrimitive", 7),
+        method("DrawIndexedPrimitive", 7, draw_indexed_primitive2),
         wall("SetClipStatus", 1),
         wall("GetClipStatus", 1),
     ],
@@ -176,7 +177,10 @@ pub static D3D2: Interface = Interface {
         RELEASE,
         method("EnumDevices", 2, enum_devices2),
         wall("CreateLight", 2),
-        wall("CreateMaterial", 2),
+        // DirectX 5's material, `IDirect3DMaterial2`, is DirectX 6's slot for
+        // slot, as d3d.h declares the two, so one table answers both. LEGO
+        // Chess's DirectX plugin makes one for each texture (#210).
+        method("CreateMaterial", 2, create_material),
         // DirectX 5's viewport, `IDirect3DViewport2`, is DirectX 6's slot for
         // slot as far as it goes, as d3d.h declares the two, so the one table
         // answers both. LEGO Chess's DirectX plugin makes one for its device
@@ -224,7 +228,7 @@ pub static MATERIAL3: Interface = Interface {
         RELEASE,
         method("SetMaterial", 1, set_material),
         method("GetMaterial", 1, get_material),
-        method("GetHandle", 2, material_handle),
+        method("GetHandle", 2, get_handle),
     ],
 };
 
@@ -248,9 +252,9 @@ pub static TEXTURE2: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        wall("GetHandle", 2),
+        method("GetHandle", 2, get_handle),
         wall("PaletteChanged", 2),
-        wall("Load", 1),
+        method("Load", 1, load_texture),
     ],
 };
 
@@ -805,6 +809,10 @@ fn create_device2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     let surface = args[1];
     let object =
         State::make_com(ctx, &DEVICE2, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    // A DirectX 5 device starts with specular highlights on, as Wine's
+    // conformance test `test_lighting_interface_versions` finds Windows
+    // starting one (#210).
+    device(ctx, object).render.insert(rs::SPECULARENABLE, 1);
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3d2 device at {object:#010x} drawing into surface {surface:#010x}"
@@ -950,8 +958,10 @@ fn render_state_at_start(state: u32) -> Option<u32> {
         // D3DRENDERSTATE_SRCBLEND and DESTBLEND: one and zero.
         19 => 2,
         20 => 1,
-        // D3DRENDERSTATE_TEXTUREMAPBLEND: modulate.
-        21 => 4,
+        // D3DRENDERSTATE_TEXTUREMAPBLEND: D3DTBLEND_MODULATE, as Wine's
+        // `d3d_device_init`, read as documentation, starts every device before
+        // DirectX 7's (#210).
+        21 => 2,
         // D3DRENDERSTATE_CULLMODE: counter-clockwise.
         22 => 3,
         // D3DRENDERSTATE_ZFUNC: less or equal.
@@ -1250,9 +1260,12 @@ fn get_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     Ok(S_OK)
 }
 
-fn material_handle(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // GetHandle(device, out): the name a device's states use for a material.
-    // One per material, from one, in the order they are asked for.
+/// GetHandle(device, out), a material's or a texture's: the name a device's
+/// states use for it. One each whichever device asks, from one, in the order
+/// they are asked for, from the one table, as Wine's
+/// `d3d_texture2_GetHandle`, read as documentation, gives a texture its own
+/// (#210).
+fn get_handle(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let immediate = &mut ctx.state.immediate;
     let handle = match immediate.handles.iter().find(|(_, m)| **m == identity) {
@@ -1264,6 +1277,71 @@ fn material_handle(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         }
     };
     ctx.mem.write_u32(args[1], handle).map_err(Stop::Fault)?;
+    Ok(S_OK)
+}
+
+/// `D3DERR_TEXTURE_LOAD_FAILED`.
+const D3DERR_TEXTURE_LOAD_FAILED: u32 = 0x8876_02d5;
+
+/// Load(source): fill a texture from another the same size, which is what a
+/// `DDSCAPS_ALLOCONLOAD` texture in video memory is made for. As Wine's
+/// `d3d_texture2_Load` and its conformance test `test_texture_load_ckey` find
+/// Windows doing it: the pixels are copied, the source's colour key replaces
+/// the destination's and none leaves it be, `ALLOCONLOAD` is no longer
+/// claimed, and another size is `D3DERR_TEXTURE_LOAD_FAILED`. Another pixel
+/// format, which a driver would convert, a palette to copy, and mipmaps,
+/// whose levels Wine loads one by one, are walls. LEGO Chess's DirectX
+/// plugin loads every texture it draws this way (#210).
+fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    use super::ddraw::caps::{ALLOCONLOAD, MIPMAP};
+    let surface = |ctx: &Ctx<'_>, at: u32| match ctx.state.com(at).map(|o| &o.state) {
+        Some(ComState::Surface {
+            pixels,
+            width,
+            height,
+            pitch,
+            format,
+            palette,
+            caps,
+            ..
+        }) => Some((*pixels, *width, *height, *pitch, *format, *palette, *caps)),
+        _ => None,
+    };
+    if ctx.state.identity(args[0]) == ctx.state.identity(this) {
+        return Ok(S_OK);
+    }
+    let (Some(to), Some(from)) = (surface(ctx, this), surface(ctx, args[0])) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let (
+        (into, width, height, into_pitch, format, _, into_caps),
+        (out_of, w, h, pitch, f, palette, caps),
+    ) = (to, from);
+    if (w, h) != (width, height) {
+        return Ok(D3DERR_TEXTURE_LOAD_FAILED);
+    }
+    if f != format || palette != 0 || (caps | into_caps) & MIPMAP != 0 {
+        return Err(unwritten(format!(
+            "IDirect3DTexture2::Load: a {f:?} texture, caps {caps:#x}, palette {palette:#x}, \
+             into a {format:?} one, caps {into_caps:#x}"
+        )));
+    }
+    let row = (width * format.bits.div_ceil(8)) as usize;
+    let span = |pitch: u32| pitch as usize * (height.max(1) - 1) as usize + row;
+    let (texels, target) = ctx
+        .mem
+        .read_and_write((out_of, span(pitch)), (into, span(into_pitch)))
+        .map_err(Stop::Fault)?;
+    for y in 0..height as usize {
+        let (from, to) = (y * pitch as usize, y * into_pitch as usize);
+        target[to..to + row].copy_from_slice(&texels[from..from + row]);
+    }
+    if let Some(key) = ctx.state.color_keys.get(&out_of).copied() {
+        ctx.state.color_keys.insert(into, key);
+    }
+    if let Some(ComState::Surface { caps, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+        *caps &= !ALLOCONLOAD;
+    }
     Ok(S_OK)
 }
 
@@ -1556,8 +1634,40 @@ fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Sto
 }
 
 fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // DrawIndexedPrimitive(type, format, vertices, count, indices, index
-    // count, flags): sixteen-bit indices into the vertices.
+    draw_indexed(
+        ctx,
+        "IDirect3DDevice3::DrawIndexedPrimitive",
+        this,
+        args[1],
+        args,
+    )
+}
+
+/// DirectX 5's, which names its vertices by a `D3DVERTEXTYPE` where DirectX 6
+/// has a flexible format. `D3DVT_TLVERTEX` is laid out as
+/// `D3DFVF_TLVERTEX` is (d3dtypes.h): on the screen already, with both
+/// colours and one pair of texture coordinates. LEGO Chess's DirectX plugin
+/// draws all it draws in them (#210); the other two types are walls.
+fn draw_indexed_primitive2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    const D3DVT_TLVERTEX: u32 = 3;
+    const D3DFVF_TLVERTEX: u32 = 0x1c4;
+    let method = "IDirect3DDevice2::DrawIndexedPrimitive";
+    if args[1] != D3DVT_TLVERTEX {
+        return Err(unwritten(format!("{method}: vertex type {}", args[1])));
+    }
+    draw_indexed(ctx, method, this, D3DFVF_TLVERTEX, args)
+}
+
+/// DrawIndexedPrimitive(type, vertices' type or format, vertices, count,
+/// indices, index count, flags), the vertices in `format`: sixteen-bit
+/// indices into the vertices.
+fn draw_indexed(
+    ctx: &mut Ctx<'_>,
+    method: &str,
+    this: u32,
+    format: u32,
+    args: &[u32],
+) -> Result<u32, Stop> {
     let bytes = ctx
         .mem
         .slice(args[4], args[5] as usize * 2)
@@ -1569,15 +1679,7 @@ fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<
         .map(|w| u32::from(u16::from_le_bytes(*w)))
         .collect();
     draw(
-        ctx,
-        "IDirect3DDevice3::DrawIndexedPrimitive",
-        this,
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        &indices,
-        args[6],
+        ctx, method, this, args[0], format, args[2], args[3], &indices, args[6],
     )
 }
 
@@ -1713,6 +1815,27 @@ fn combine(op: u32, arg1: u32, arg2: u32) -> Option<crate::raster::Combine> {
     }
 }
 
+/// How DirectX 5's `D3DTEXTUREBLEND` makes a pixel's colour and alpha, as
+/// Wine's `d3d_device3_SetRenderState` maps each onto the first texture stage:
+/// `D3DTBLEND_DECAL` and `D3DTBLEND_COPY` take the texel's, and
+/// `D3DTBLEND_MODULATE` multiplies the colours and takes the texel's alpha if
+/// the texture has alpha and the vertex's if not. The others are walls.
+fn texture_map_blend(
+    blend: u32,
+    texture_alpha: bool,
+) -> (
+    Option<crate::raster::Combine>,
+    Option<crate::raster::Combine>,
+) {
+    use crate::raster::Combine;
+    match blend {
+        1 | 7 => (Some(Combine::Texture), Some(Combine::Texture)),
+        2 if texture_alpha => (Some(Combine::Modulate), Some(Combine::Texture)),
+        2 => (Some(Combine::Modulate), Some(Combine::Diffuse)),
+        _ => (None, None),
+    }
+}
+
 /// How a texture is addressed past its edge: `D3DTADDRESS_WRAP` or `_CLAMP`.
 fn clamps(address: u32) -> Option<bool> {
     match address {
@@ -1770,20 +1893,43 @@ fn draw(
         .map(|v| pipeline::read_vertex(format, v))
         .collect();
 
+    // A DirectX 5 device has no texture stages: what it draws with is the
+    // texture its handle names, and how a texel and the colour make a pixel
+    // is one state, `D3DRENDERSTATE_TEXTUREMAPBLEND` (#210). On a later
+    // device either is a wall, as it was.
+    let dx5 = ctx.state.interface_of(this) == Some(DEVICE2.name);
+    let by_handle = render_state(device_of(ctx.state, this), method, rs::TEXTUREHANDLE)?;
+    let named = match ctx.state.immediate.handles.get(&by_handle) {
+        _ if !dx5 || by_handle == 0 => 0,
+        Some(&t)
+            if matches!(
+                ctx.state.com(t).map(|o| &o.state),
+                Some(ComState::Surface { .. })
+            ) =>
+        {
+            t
+        }
+        _ => {
+            return Err(unwritten(format!(
+                "{method}: texture handle {by_handle}, never handed out"
+            )))
+        }
+    };
+
     // What the device draws them with. A state this pipeline does not honour
     // is a wall once a title turns it on, not a frame drawn as if it had not.
     let device = device_of(ctx.state, this);
     let state = |s: u32| render_state(device, method, s);
     let stage = |s: u32| stage_state(device, method, s);
     for (what, on) in [
-        ("a texture by handle", state(rs::TEXTUREHANDLE)? != 0),
+        ("a texture by handle", !dx5 && by_handle != 0),
         (
             "wrapping across texture edges",
             state(rs::WRAPU)? != 0 || state(rs::WRAPV)? != 0 || state(rs::WRAP0)? != 0,
         ),
         (
             "a texture map blend",
-            device.render.contains_key(&rs::TEXTUREMAPBLEND),
+            !dx5 && device.render.contains_key(&rs::TEXTUREMAPBLEND),
         ),
         ("a fill that is not solid", state(rs::FILLMODE)? != 3),
     ] {
@@ -1799,7 +1945,11 @@ fn draw(
     // DirectX 7 keeps the viewport on the device itself, so there is no object
     // to ask (#57).
     let viewport7 = device.viewport7;
-    let texture = device.textures.get(&0).copied().unwrap_or(0);
+    let texture = if dx5 {
+        named
+    } else {
+        device.textures.get(&0).copied().unwrap_or(0)
+    };
     let material_handle = device.light.get(&LIGHT_MATERIAL).copied().unwrap_or(0);
     let ambient = pipeline::colour(device.light.get(&LIGHT_AMBIENT).copied().unwrap_or(0));
     let compare = |value: u32| {
@@ -1894,11 +2044,22 @@ fn draw(
         stage(tss::ALPHAARG1)?,
         stage(tss::ALPHAARG2)?,
     );
-    let (Some(colour_combine), Some(alpha_combine)) = (combine(op, a1, a2), combine(aop, aa1, aa2))
-    else {
-        return Err(unwritten(format!(
-            "{method}: texture stage colour {op} ({a1:#x}, {a2:#x}), alpha {aop} ({aa1:#x}, {aa2:#x})"
-        )));
+    let legacy = dx5.then(|| state(rs::TEXTUREMAPBLEND)).transpose()?;
+    let texture_alpha = match ctx.state.com(texture).map(|o| &o.state) {
+        Some(ComState::Surface { format, .. }) => format.masks[3] != 0,
+        _ => true,
+    };
+    let combines = match legacy {
+        Some(blend) => texture_map_blend(blend, texture_alpha),
+        None => (combine(op, a1, a2), combine(aop, aa1, aa2)),
+    };
+    let (Some(colour_combine), Some(alpha_combine)) = combines else {
+        return Err(unwritten(match legacy {
+            Some(blend) => format!("{method}: texture map blend {blend}"),
+            None => format!(
+                "{method}: texture stage colour {op} ({a1:#x}, {a2:#x}), alpha {aop} ({aa1:#x}, {aa2:#x})"
+            ),
+        }));
     };
     states.colour = colour_combine;
     states.alpha = alpha_combine;
@@ -1921,6 +2082,18 @@ fn draw(
                 .contains_key(&ctx.state.identity(viewport)) =>
             {
                 pipeline::Viewport::whole(x, y, w, h)
+            }
+            // For vertices already on the screen a viewport is only where they
+            // are cut off: its rectangle, which `D3DVIEWPORT` and
+            // `D3DVIEWPORT2` both start with. LEGO Chess's DirectX plugin
+            // describes its own with `SetViewport2` (#210); projecting through
+            // one a title described is not written.
+            Some(ComState::Viewport { .. }) if format & fvf::POSITION_MASK == fvf::XYZRHW => {
+                let bytes = &ctx.state.immediate.viewports[&ctx.state.identity(viewport)];
+                let field = |o: usize| {
+                    u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+                };
+                pipeline::Viewport::whole(field(4), field(8), field(12), field(16))
             }
             _ => {
                 return Err(unwritten(format!(

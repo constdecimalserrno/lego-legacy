@@ -386,11 +386,11 @@ fn get_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let depth = ctx.state.display_mode.2;
     for at in [args[0], args[2]] {
         if at != 0 {
+            let pitch = super::ddraw::pitch_for(width, depth);
             super::ddraw::write_surface_desc(
                 ctx,
                 at,
-                width,
-                height,
+                (width, height, pitch),
                 super::ddraw::screen_format(depth),
                 0,
             )?;
@@ -438,7 +438,7 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
         };
         let (width, height) = movie.avi.streams[movie.video].picture_size();
         let depth = ctx.state.display_mode.2;
-        super::ddraw::make_surface(ctx, width, height, depth, false)?.0
+        super::ddraw::make_surface(ctx, width, height, depth)?.0
     } else {
         args[0]
     };

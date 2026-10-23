@@ -849,6 +849,9 @@ pub enum ComState {
         /// How a pixel is laid out: what the title asked for, or the screen's.
         format: crate::raster::PixelFormat,
         primary: bool,
+        /// What `GetSurfaceDesc` says it is, its `DDSCAPS_*`: what the title
+        /// asked for, and where DirectDraw put it (#210).
+        caps: u32,
         /// The surface behind this one, when it flips.
         back: u32,
         /// The palette an indexed surface's pixels are looked up in.

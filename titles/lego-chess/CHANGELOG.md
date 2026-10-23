@@ -172,3 +172,14 @@ same millisecond at once.
   run at about 0.65 of real time on the Mac mini. No sound plays through them. At a window core now
   takes the pace as real time at the movie's first hold that has to wait, where it stretched up to
   half a second of the movie's sound by the holds' pace.
+
+Its bumper presents (#210, core 1.2.0). Past the intro the game loads `intro\Chess Bumper01.bmp`
+and `02.bmp` off the disc into two 256x256 textures, which its DirectX plugin makes in system memory
+over the game's own pixels and loads into copies in video memory, and draws both, the LEGO logo and
+the word chess on its chequerboard, on white, through Direct3D 2: flips 829 and 830 on
+a run with no route. The run then stops at `KERNEL32.dll!UnhandledExceptionFilter`, called from
+0x0047562D at cursor 8,645,403,111 after 831 flips: the game reads through a null pointer at
+0x0045672F, having found none of the room's files. It looks for them by relative names in
+directories it sets by relative names too, which the machine does not yet resolve against its
+current directory, and at boot it sets an empty one (`SetCurrentDirectoryA` from 0x0045691B at
+cursor 260,327), which Windows refuses and the machine takes.

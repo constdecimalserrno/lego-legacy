@@ -110,7 +110,7 @@ pub static DIRECT_DRAW_SURFACE: Interface = Interface {
         method("GetBltStatus", 1, ok),
         method("GetCaps", 1, surface_caps),
         method("GetClipper", 1, ok),
-        method("GetColorKey", 2, ok),
+        method("GetColorKey", 2, get_color_key),
         method("GetDC", 1, get_dc),
         method("GetFlipStatus", 1, ok),
         method("GetOverlayPosition", 2, ok),
@@ -220,7 +220,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         method("GetBltStatus", 1, ok),
         method("GetCaps", 1, surface_caps),
         method("GetClipper", 1, ok),
-        method("GetColorKey", 2, ok),
+        method("GetColorKey", 2, get_color_key),
         method("GetDC", 1, get_dc),
         method("GetFlipStatus", 1, ok),
         method("GetOverlayPosition", 2, ok),
@@ -243,7 +243,7 @@ pub static DIRECT_DRAW_SURFACE4: Interface = Interface {
         method("GetDDInterface", 1, ok),
         method("PageLock", 1, ok),
         method("PageUnlock", 1, ok),
-        method("SetSurfaceDesc", 2, ok),
+        method("SetSurfaceDesc", 2, set_surface_desc),
         method("SetPrivateData", 4, ok),
         method("GetPrivateData", 3, ok),
         method("FreePrivateData", 1, ok),
@@ -337,7 +337,8 @@ fn display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop
     let (width, height, depth) = ctx.state.display_mode;
     let at = args[0];
     if at != 0 {
-        write_surface_desc(ctx, at, width, height, screen_format(depth), 0)?;
+        let pitch = pitch_for(width, depth);
+        write_surface_desc(ctx, at, (width, height, pitch), screen_format(depth), 0)?;
     }
     Ok(S_OK)
 }
@@ -474,12 +475,10 @@ pub(crate) fn write_pixel_format(
 pub(crate) fn write_surface_desc(
     ctx: &mut Ctx<'_>,
     at: u32,
-    width: u32,
-    height: u32,
+    (width, height, pitch): (u32, u32, u32),
     format: PixelFormat,
     pixels: u32,
 ) -> Result<(), Stop> {
-    let pitch = pitch_for(width, format.bits);
     // dwSize, dwFlags, dwHeight, dwWidth, lPitch, ... lpSurface at 0x24.
     for (offset, value) in [
         (0, 108),
@@ -557,15 +556,32 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     };
     let depth = format.bits;
 
-    let (object, pixels) = make_surface_as(ctx, width, height, format, primary)?;
-    let pitch = pitch_for(width, depth);
-
     // A surface asked for with a back buffer gets one, attached to it.
     let back_count = if flags & 0x20 != 0 {
         ctx.mem.read_u32(at + 0x14).map_err(Stop::Fault)?
     } else {
         0
     };
+    // What it says it is: what it was asked to be, in video memory unless
+    // asked for system memory, and on the screen if it is the screen, its
+    // front buffer if it flips; as Wine's conformance tests `test_rt_caps`,
+    // `test_primary_caps` and `test_flip` find Windows answering.
+    let mut caps = caps;
+    if caps & caps::SYSTEMMEMORY == 0 {
+        caps |= caps::VIDEOMEMORY;
+        if caps & caps::NONLOCALVIDMEM == 0 {
+            caps |= caps::LOCALVIDMEM;
+        }
+    }
+    if primary {
+        caps |= caps::VISIBLE;
+    }
+    if back_count > 0 {
+        caps |= caps::FRONTBUFFER;
+    }
+
+    let (object, pixels) = make_surface_as(ctx, width, height, format, caps)?;
+    let pitch = pitch_for(width, depth);
     if back_count > 0 {
         let back_pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
         let back = State::make_com(
@@ -578,6 +594,9 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
                 pitch,
                 format,
                 primary: false,
+                // The buffer behind the screen, as `test_flip` finds it.
+                caps: caps & !(caps::VISIBLE | caps::PRIMARYSURFACE | caps::FRONTBUFFER)
+                    | caps::BACKBUFFER,
                 back: 0,
                 palette: 0,
             },
@@ -612,8 +631,9 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     Ok(S_OK)
 }
 
-/// A surface of guest memory, as `CreateSurface` makes one and anything
-/// else that hands a guest a surface of its own.
+/// A surface of guest memory, as anything that hands a guest a surface of
+/// its own makes one: a plain one in system memory, as a movie stream makes
+/// the surface of a sample a title gave none (Wine's `ddrawstream.c`).
 ///
 /// Answers the object and where its pixels are.
 ///
@@ -624,18 +644,18 @@ pub(crate) fn make_surface(
     width: u32,
     height: u32,
     depth: u32,
-    primary: bool,
 ) -> Result<(u32, u32), Stop> {
-    make_surface_as(ctx, width, height, screen_format(depth), primary)
+    let caps = caps::SYSTEMMEMORY | caps::OFFSCREENPLAIN;
+    make_surface_as(ctx, width, height, screen_format(depth), caps)
 }
 
-/// A surface in a pixel format of its own.
+/// A surface in a pixel format of its own, which is what `caps` says.
 fn make_surface_as(
     ctx: &mut Ctx<'_>,
     width: u32,
     height: u32,
     format: PixelFormat,
-    primary: bool,
+    caps: u32,
 ) -> Result<(u32, u32), Stop> {
     let pitch = pitch_for(width, format.bits);
     let pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
@@ -648,13 +668,29 @@ fn make_surface_as(
             height,
             pitch,
             format,
-            primary,
+            primary: caps & caps::PRIMARYSURFACE != 0,
+            caps,
             back: 0,
             palette: 0,
         },
     )
     .map_err(Stop::Fault)?;
     Ok((object, pixels))
+}
+
+/// `DDSCAPS_*`, as ddraw.h numbers them.
+pub(crate) mod caps {
+    pub const BACKBUFFER: u32 = 0x0000_0004;
+    pub const FRONTBUFFER: u32 = 0x0000_0020;
+    pub const OFFSCREENPLAIN: u32 = 0x0000_0040;
+    pub const PRIMARYSURFACE: u32 = 0x0000_0200;
+    pub const SYSTEMMEMORY: u32 = 0x0000_0800;
+    pub const VIDEOMEMORY: u32 = 0x0000_4000;
+    pub const VISIBLE: u32 = 0x0000_8000;
+    pub const MIPMAP: u32 = 0x0040_0000;
+    pub const ALLOCONLOAD: u32 = 0x0400_0000;
+    pub const LOCALVIDMEM: u32 = 0x1000_0000;
+    pub const NONLOCALVIDMEM: u32 = 0x2000_0000;
 }
 
 fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool, u32)> {
@@ -785,12 +821,25 @@ fn format_of(ctx: &Ctx<'_>, this: u32) -> PixelFormat {
     }
 }
 
+/// A surface's `DDSCAPS_*`.
+fn caps_of(ctx: &Ctx<'_>, this: u32) -> u32 {
+    match ctx.state.com(this).map(|o| &o.state) {
+        Some(ComState::Surface { caps, .. }) => *caps,
+        _ => 0,
+    }
+}
+
 fn surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
+    let Some((pixels, width, height, pitch, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     let format = format_of(ctx, this);
-    write_surface_desc(ctx, args[0], width, height, format, pixels)?;
+    write_surface_desc(ctx, args[0], (width, height, pitch), format, pixels)?;
+    // The caps `dwFlags` says are there, at 0x68 (#210).
+    let caps = caps_of(ctx, this);
+    ctx.mem
+        .write_u32(args[0] + 0x68, caps)
+        .map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
@@ -816,14 +865,14 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // its own pixels: the surface is guest memory and always was. One whose DC
     // is out is already locked, which Wine's ddraw conformance test
     // `test_getdc`, which passes on Windows, finds answered DDERR_SURFACEBUSY.
-    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
+    let Some((pixels, width, height, pitch, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     if dc_out(ctx, this) {
         return Ok(DDERR_SURFACEBUSY);
     }
     let format = format_of(ctx, this);
-    write_surface_desc(ctx, args[1], width, height, format, pixels)?;
+    write_surface_desc(ctx, args[1], (width, height, pitch), format, pixels)?;
     Ok(S_OK)
 }
 
@@ -1159,7 +1208,6 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 fn set_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetColorKey(flags, key). The source key is what a keyed blit leaves
     // out; it belongs to the pixels, which every face of a surface shares.
-    const DDCKEY_SRCBLT: u32 = 0x8;
     let Some((pixels, ..)) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
@@ -1181,6 +1229,109 @@ fn set_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
             });
         }
         ctx.state.color_keys.insert(pixels, low);
+    }
+    Ok(S_OK)
+}
+
+/// `DDCKEY_SRCBLT`: the key a blit or a texture leaves out, which is the only
+/// one this machine keeps.
+const DDCKEY_SRCBLT: u32 = 0x8;
+
+fn get_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // GetColorKey(flags, key): the source key, low and high alike, or that
+    // there is none with the key left as it was, as Wine's conformance test
+    // `test_texture_load_ckey` finds Windows answering. LEGO Chess's DirectX
+    // plugin hands what it reads on to each texture it loads (#210).
+    const DDERR_NOCOLORKEY: u32 = 0x8876_00d7;
+    let Some((pixels, ..)) = surface_of(ctx, this) else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    if args[1] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    if args[0] != DDCKEY_SRCBLT {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface::GetColorKey: flags {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    let Some(key) = ctx.state.color_keys.get(&pixels).copied() else {
+        return Ok(DDERR_NOCOLORKEY);
+    };
+    for at in [args[1], args[1] + 4] {
+        ctx.mem.write_u32(at, key).map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
+fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // SetSurfaceDesc(description, flags): a surface in system memory takes the
+    // memory a title hands it, and with it a width and pitch together; it
+    // keeps its key; and the rest is refused, in the order Wine's
+    // `ddraw_surface7_SetSurfaceDesc` refuses it and as its conformance test
+    // `test_set_surface_desc`, through `IDirectDrawSurface3`, finds Windows
+    // answering. A new height or format is a wall. LEGO Chess's DirectX plugin
+    // hands each texture's surface the pixels the game decodes into (#210).
+    const DDSD_CAPS: u32 = 0x1;
+    const DDSD_HEIGHT: u32 = 0x2;
+    const DDSD_WIDTH: u32 = 0x4;
+    const DDSD_PITCH: u32 = 0x8;
+    const DDSD_LPSURFACE: u32 = 0x800;
+    const DDSD_PIXELFORMAT: u32 = 0x1000;
+    const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+    const DDERR_INVALIDSURFACETYPE: u32 = 0x8876_0250;
+    let at = args[0];
+    if at == 0 || args[1] != 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    let caps = caps_of(ctx, this);
+    if caps & caps::SYSTEMMEMORY == 0 || caps & caps::PRIMARYSURFACE != 0 {
+        return Ok(DDERR_INVALIDSURFACETYPE);
+    }
+    let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
+    let (flags, width, pitch, memory) = (read(4)?, read(12)?, read(16)?, read(0x24)?);
+    let allowed =
+        DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_LPSURFACE | DDSD_PIXELFORMAT;
+    if flags & !allowed != 0 || flags & DDSD_LPSURFACE == 0 || memory == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    if flags & DDSD_CAPS != 0 && read(0x68)? != 0 {
+        return Ok(DDERR_INVALIDCAPS);
+    }
+    let sized = flags & (DDSD_WIDTH | DDSD_PITCH);
+    let pitch_ok = i32::try_from(pitch).is_ok_and(|p| p > 0) && pitch % 4 == 0;
+    if sized != 0 && (sized != DDSD_WIDTH | DDSD_PITCH || width == 0 || !pitch_ok) {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    if flags & (DDSD_HEIGHT | DDSD_PIXELFORMAT) != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawSurface3::SetSurfaceDesc: flags {flags:#x}"),
+            caller: 0,
+        });
+    }
+    let Some(ComState::Surface {
+        pixels,
+        width: w,
+        pitch: p,
+        ..
+    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    else {
+        return Ok(DDERR_INVALIDPARAMS);
+    };
+    let before = std::mem::replace(pixels, memory);
+    if sized != 0 {
+        (*w, *p) = (width, pitch);
+    }
+    // Its key and its clipper are its own, kept by where its pixels are, and
+    // go with them; a key kept where they now are was a surface's there
+    // before, released (#210).
+    let key = ctx.state.color_keys.remove(&before);
+    ctx.state.color_keys.remove(&memory);
+    if let Some(key) = key {
+        ctx.state.color_keys.insert(memory, key);
+    }
+    if ctx.state.clipped.remove(&before) {
+        ctx.state.clipped.insert(memory);
     }
     Ok(S_OK)
 }
@@ -1304,7 +1455,14 @@ fn enumerate_modes(ctx: &mut Ctx<'_>, args: &[u32], size: u32) -> Result<u32, St
     ctx.mem
         .write(desc, &vec![0; size as usize])
         .map_err(Stop::Fault)?;
-    write_surface_desc(ctx, desc, *width, *height, screen_format(*depth), 0)?;
+    let pitch = pitch_for(*width, *depth);
+    write_surface_desc(
+        ctx,
+        desc,
+        (*width, *height, pitch),
+        screen_format(*depth),
+        0,
+    )?;
     ctx.mem.write_u32(desc, size).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "ddraw modes: {width}x{height}x{depth}, the only one declared"

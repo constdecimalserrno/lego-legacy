@@ -84,6 +84,63 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
+LEGO Chess's bumper draws through its DirectX plugin's Direct3D 2 device (#210). Four walls are
+written. `IDirect3D2::CreateMaterial` makes a material, DirectX 5's `IDirect3DMaterial2` being
+DirectX 6's slot for slot. `IDirect3DTexture2::GetHandle` gives a texture one handle whichever device
+asks, from the table materials' handles come from, counted from one, as Wine's
+`d3d_texture2_GetHandle`, read as documentation, gives it. `IDirect3DTexture2::Load` fills a texture
+from one the same size, as Wine's `d3d_texture2_Load` and its conformance test
+`test_texture_load_ckey` find Windows doing: the pixels, and the source's colour key where it has
+one, and the texture no longer claims `DDSCAPS_ALLOCONLOAD`; another size is
+`D3DERR_TEXTURE_LOAD_FAILED`, and another format, a palette to copy or mipmaps are walls.
+`IDirect3DDevice2::DrawIndexedPrimitive` draws `D3DVT_TLVERTEX` vertices, laid out as
+`D3DFVF_TLVERTEX`, through DirectX 6's draw. A DirectX 5 device has no texture stages, so there the
+draw takes the texture `D3DRENDERSTATE_TEXTUREHANDLE` names, and `D3DRENDERSTATE_TEXTUREMAPBLEND`'s
+decal, copy and modulate, the last taking a texture's alpha when it has one and the vertex's when
+not, as Wine's `d3d_device3_SetRenderState` maps them onto the first stage; on DirectX 6's and 7's
+faces both stay walls. For vertices already on the screen the draw takes the rectangle of a
+viewport the title described, which was a wall. The other vertex types and blends, and a handle
+never handed out, are walls. A DirectX 5 device starts with specular highlights on, as Wine's
+conformance test `test_lighting_interface_versions` finds Windows starting one, and every device's
+`D3DRENDERSTATE_TEXTUREMAPBLEND` starts at `D3DTBLEND_MODULATE` (2), as Wine's `d3d_device_init`
+starts it, where it answered `D3DTBLEND_MODULATEALPHA` (4) under a comment saying modulate. Three
+answers that faked success now answer as DirectX does:
+- `IDirectDrawSurface3::SetSurfaceDesc`, which changed nothing, points a surface in system memory at
+  the memory the title hands it, with a width and pitch given together, its colour key and clipper
+  going with it; it refuses what Wine's conformance test `test_set_surface_desc` finds Windows
+  refusing, in the order Wine's `ddraw_surface7_SetSurfaceDesc` refuses it, and a height or a format
+  is a wall;
+- `GetColorKey`, which wrote nothing, answers the source key, or `DDERR_NOCOLORKEY` with the key it
+  was handed left as it was;
+- `GetSurfaceDesc`, which wrote no `ddsCaps` while saying it had, answers the caps a surface was made
+  with and where DirectDraw put it: in video memory unless asked for system memory, the screen
+  visible and its front buffer when it flips, the buffer behind it the back buffer, as Wine's
+  `test_rt_caps`, `test_primary_caps` and `test_flip` find Windows answering. It and `Lock` answer a
+  surface's own pitch.
+
+LEGO Chess's plugin makes each texture in system memory over the game's own pixels, loads it into a
+copy in video memory that it drops unless the copy says it is there, keys the copy with what
+`GetColorKey` answers, and draws it by its handle: its bumper presents. LEGO Island's runs move, in
+memory alone: it keeps the descriptions `GetSurfaceDesc` fills, which now carry their caps, so each
+of its runs ends at the same cursor, flips and declared time as before with another digest, a move
+the maintainer blessed on 2026-10-22. Rock Raiders', Hot Wheels' and Alpha Team's runs do not move.
+LEGO Island's changelog says how; the runs are listed here:
+
+- lego-island, `first-light.route` (held to 98,000,000): digest `1295656d` → `48366519`;
+- lego-island, `first-ride.route` (held to 6,350,000,000): digest `d4014002` → `adbcf549`;
+- lego-island, `first-save.route` (held to 6,030,000,000): digest `b299dcd3` → `99bf7904`;
+- lego-island, `information-center.route` (held to 3,965,000,000): digest `d74f0616` → `91b5d02b`;
+- lego-island, `maintainer-first-play.route` (held to 3,341,815,910): digest `6b5eca98` → `800b55b0`;
+- lego-island, a run with no route (held to 5,571,000): digest `a39bb4f2` → `f25712dd`;
+- lego-island, a run with no route (held to 320,000,000): digest `8d7906a2` → `bda2ef63`;
+- lego-island, a run with no route (held to 4,490,000,000): digest `9b73e5c5` → `ff6fa6e1`;
+- lego-island, a run with no route (held to 6,030,000,000): digest `b299dcd3` → `99bf7904`;
+- lego-island, a run with no route (held to 6,067,000,000): digest `4fc2975c` → `c7157b94`;
+- lego-island, a run with no route (held to 6,350,000,000): digest `d4014002` → `adbcf549`.
+
+Its runs that close themselves, `first-save.route` and `pizza-delivery.route` past their ends and
+the closing hand's, end on the same lines as before.
+
 `AVIStreamGetFrameClose` lets a frame getter go, its DIB and its hold on its stream with it,
 answering the references it has left, as Wine's `api.c` releases it, a getter holding its stream
 from its open as Wine's `getframe.c` holds it; `AVIStreamRelease` counts a stream's reference out,
