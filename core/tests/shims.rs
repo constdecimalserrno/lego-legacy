@@ -447,6 +447,19 @@ fn a_system_keystroke_is_a_wall_and_a_key_with_no_window_types_nothing() {
     assert!(m.state.messages.is_empty(), "and nothing posted");
 }
 
+/// The keys the title has read as held are in the digest, since the next key
+/// it translates types with them, and a machine that has read none hashes as
+/// it did before there were any (#157).
+#[test]
+fn the_keys_read_as_held_are_in_the_digest() {
+    let mut m = machine();
+    let none = m.state_digest();
+    m.state.keys_read.push(0x2a);
+    assert_ne!(m.state_digest(), none, "a Shift read as held is hashed");
+    m.state.keys_read.clear();
+    assert_eq!(m.state_digest(), none, "and none read hashes as before");
+}
+
 /// Each key types what it types on a US keyboard, with the modifiers held
 /// (#157): what the US layout Microsoft publishes with its driver samples
 /// (`input/layout/kbdus/kbdus.c`) gives it alone, with Shift, with Ctrl and
