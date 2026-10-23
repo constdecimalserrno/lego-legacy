@@ -874,7 +874,9 @@ fn the_skip_route_replays_to_the_same_machine_every_time() {
 /// New Player form's buttons and boxes on black, its first whole frame, its
 /// first with the name box's caret on, and the name typed; "Who's playing?"
 /// with the new player in it; the throne room's first, as the camera starts to
-/// fly in, and one with the King there; and the Quick Game screen's first.
+/// fly in, one with the King there, and the one before the click on the chess
+/// board, which the game names under the pointer ("Quick game"); and the Quick
+/// Game screen's first.
 const BUMPER: u64 = 303;
 const FORM_ON_BLACK: u64 = 306;
 const NEW_PLAYER: u64 = 307;
@@ -883,8 +885,9 @@ const NAMED: u64 = 335;
 const WHO_IS_PLAYING: u64 = 360;
 const THRONE_ROOM: u64 = 392;
 const THE_KING: u64 = 400;
+const BOARD_NAMED: u64 = 429;
 const QUICK_GAME: u64 = 432;
-const THRONE_ROOM_KEPT: [u64; 9] = [
+const THRONE_ROOM_KEPT: [u64; 10] = [
     BUMPER,
     FORM_ON_BLACK,
     NEW_PLAYER,
@@ -893,6 +896,7 @@ const THRONE_ROOM_KEPT: [u64; 9] = [
     WHO_IS_PLAYING,
     THRONE_ROOM,
     THE_KING,
+    BOARD_NAMED,
     QUICK_GAME,
 ];
 
@@ -935,15 +939,17 @@ fn throne_room(
 
 static THRONE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
-/// What a run saved, read from where its log says it went.
-fn saved(ran: &testkit::Ran, name: &str) -> Vec<u8> {
-    let line = ran
+/// Where a run saved a file, as its log says it went: once, so what is there
+/// at the end of the run is what it wrote then.
+fn saved(ran: &testkit::Ran, name: &str) -> std::path::PathBuf {
+    let mut written = ran
         .log
         .lines()
-        .find(|l| l.starts_with("file written") && l.contains(name))
-        .unwrap_or_else(|| panic!("{name} is saved"));
+        .filter(|l| l.starts_with("file written") && l.contains(name));
+    let line = written.next().unwrap_or_else(|| panic!("{name} is saved"));
+    assert!(written.next().is_none(), "{name} is saved once");
     let (_, at) = line.rsplit_once(" to ").expect("where it went");
-    std::fs::read(at).expect("it is there")
+    at.into()
 }
 
 /// Past the intro, the bumper, the New Player form and the throne room draw
@@ -992,13 +998,20 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\1save.lcs, 190920 bytes",
         );
-    // The profile starts with the name typed, ended by a zero.
-    assert_eq!(saved(ran, "prof1.lcp")[..4], *b"Ada\0");
+    // The profile the tick saved starts with the name typed, ended by a zero.
+    let profile = std::fs::read(saved(ran, "prof1.lcp")).expect("it is there");
+    assert!(
+        profile.starts_with(b"Ada\0"),
+        "the profile is Ada's: {:x?}",
+        &profile[..profile.len().min(16)]
+    );
     // The rooms' sounds, all of them MS ADPCM: fifteen while the bumper
-    // stands, and twelve more as the tick takes the player in.
+    // stands, and twelve more as the tick takes the player in. The board's
+    // click and the Quick Game screen decode none and open no stream.
     assert_eq!(ran.log.matches("acm stream ").count(), 27);
     assert_eq!(ran.flip_before("acm stream 15:"), 304);
     assert_eq!(ran.flip_before("acm stream 16:"), 391);
+    assert_eq!(ran.flip_before("acm stream 27:"), 391);
     let at = |flip: u64| {
         let frame = ran.host.frame(flip).expect("presented");
         assert!(!frame.pixels.is_empty(), "flip {flip} is kept");
@@ -1038,6 +1051,10 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
             "1b7c3ce91f27a20b6a7564093c3be1e49af50760dea99d980252fa19f1ec41e7",
         ),
         (
+            BOARD_NAMED,
+            "fd644e4234353d410de9b3725a0e7f98e9f76caa77035de40cd9450971c2ae17",
+        ),
+        (
             QUICK_GAME,
             "590d5c72c8adfe0d247d2bc3902d126579ece1343bb0b46a7f437365b5510efc",
         ),
@@ -1046,10 +1063,16 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
     }
     assert!(!at(THRONE_ROOM).is_uniform(), "the throne room presents");
     // Nothing is heard from the bumper on until the King speaks, from flip
-    // 394; and the mix from the throne room on, his line, is pinned block by
-    // block.
+    // 394, and nothing after his line, which has died away by the Quick Game
+    // screen's third flip; the mix from the throne room on, his line, is
+    // pinned block by block.
     let silence = ran.loudness(BUMPER + 1, THRONE_ROOM);
     assert!(!silence.is_empty() && silence.iter().all(|r| *r == 0.0));
+    let after = ran.loudness(QUICK_GAME + 2, 471);
+    assert!(
+        !after.is_empty() && after.iter().all(|r| *r == 0.0),
+        "the Quick Game screen is silent"
+    );
     let throne_mix: Vec<(&Vec<i16>, u64)> = ran
         .host
         .audio_blocks
@@ -1101,10 +1124,12 @@ fn the_throne_room_route_replays_to_the_same_machine_every_time() {
         first.host.audio_blocks == second.host.audio_blocks,
         "and what it mixed"
     );
-    // And what it saved, read from where its log says each went.
+    // And what it saved, each replay into a data root of its own.
     for name in ["prof1.lcp", "1save.lcs"] {
+        let (one, two) = (saved(first, name), saved(second, name));
+        assert_ne!(one, two, "two replays, two files");
         assert!(
-            saved(first, name) == saved(second, name),
+            std::fs::read(one).ok() == std::fs::read(two).ok(),
             "and saved {name} the same"
         );
     }

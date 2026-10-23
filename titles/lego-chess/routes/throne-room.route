@@ -20,10 +20,12 @@
 # quill, its name box's caret first on at flip 319.
 #
 # The name is typed a key at a time, each let go before the next goes down. The name box
-# (0x00448320) takes a character once a frame, from the WM_CHAR its key types (#157), when it is
-# not the one it took last and at least 50 ms after it, so a key down and up inside one frame, or
-# two keys, would lose one. Left Shift goes down at flip 320 and A at 321, and the box shows A from
-# flip 322; Shift is let go at 325, so D at 328 shows Ad from 329, and A at 334 Ada from 335.
+# (0x00448320) reads the character the newest key typed once a frame, from its WM_CHAR (#157), and
+# takes it when it is not what it read the frame before and at least 50 ms have passed since the
+# last it took. A key let go clears it, so the same key twice is two characters if it is let go in
+# between; a key down and up inside one frame, or two keys inside one, lose one. Left Shift goes
+# down at flip 320 and A at 321, and the box shows A from flip 322; Shift is let go at 325, so D at
+# 328 shows Ad from 329, and A at 334 Ada from 335.
 #
 # The pointer goes to the tick at flip 345, and the left button goes down at flip 350: the game
 # waits for it to come up, presenting nothing, which it does at the 300th poll after the flip. The

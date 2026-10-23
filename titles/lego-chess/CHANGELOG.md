@@ -267,18 +267,21 @@ flip 291 is at 2,706,399,631 and its flip 305 at 2,971,352,027, 44 instructions 
 
 A name is typed at its New Player form, and its throne room's chess board opens the Quick Game
 screen (#157). `routes/throne-room.route` now types Ada into the name box a key at a time, Shift for
-her capital, where it typed nothing and the game named its player LEGO® Chess 1. The box takes one
-character a frame from the `WM_CHAR` its key types (0x00448320), when it is not the one it took
-last and at least 50 ms after it, so the route lets each key go before the next goes down: A from
-flip 322, Ad from 329 and Ada from 335. The tick saves her, `profiles\prof1.lcp` beginning with her
+her capital, where it typed nothing and the game named its player LEGO® Chess 1. The box reads the
+character the newest key typed once a frame, from its `WM_CHAR` (0x00448320), and takes it when it
+is not what it read the frame before and at least 50 ms have passed since the last it took; a key
+let go clears it, so the route lets each key go before the next goes down: A from flip 322, Ad from
+329 and Ada from 335. The tick saves her, `profiles\prof1.lcp` beginning with her
 name, lists her under "Who's playing?" from flip 352, and takes her into the throne room from flip
 392, where the King starts speaking at 394. The room's camera turns after the pointer, so what is
 under a pointer held still changes as it turns; at (385,285) the board stays under it, named
 "Quick game". The route points there at flip 405 and clicks at 430, and the Quick Game screen
 presents whole from flip 432, white played by a person and black by the computer, where #158
 starts a game. The window is closed at flip 470, and the game exits 0 at 3,246,017,664 after 471
-flips. The test reads the name out of the saved profile and pins the named form, "Who's playing?",
-the King and the Quick Game screen, the mix from the throne room on, and its determinism gate.
+flips. The King's line has died away by the Quick Game screen's third flip, and nothing more is
+heard. The test reads the name out of the saved profile and pins the named form, "Who's playing?",
+the King, the board named "Quick game" under the pointer the flip before the click, and the Quick
+Game screen, the mix from the throne room on, and its determinism gate.
 
 Its pointer, which it draws itself with the Windows one hidden, follows the mouse one for one, as
 before. Its one `SetCursorPos` (0x00457810, from 0x004113C0) is not its camera presets but Tab in a
