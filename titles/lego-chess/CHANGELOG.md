@@ -182,4 +182,4 @@ a run with no route. The run then stops at `KERNEL32.dll!UnhandledExceptionFilte
 0x0045672F, having found none of the room's files. It looks for them by relative names in
 directories it sets by relative names too, which the machine does not yet resolve against its
 current directory, and at boot it sets an empty one (`SetCurrentDirectoryA` from 0x0045691B at
-cursor 260,327), which Windows refuses and the machine takes.
+cursor 260,327), which Windows refuses and the machine takes (#171).

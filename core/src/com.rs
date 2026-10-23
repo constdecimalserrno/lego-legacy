@@ -288,6 +288,9 @@ const OWN: &[(&str, &str)] = &[
     ("IDirect3DDevice3", "b0ab3b60-33d7-11d1-a981-00c04fd7b174"),
     ("IDirect3DLight", "4417c142-33ad-11cf-816f-0000c020156e"),
     ("IDirect3DMaterial3", "ca9c46f4-d3c5-11d1-b75a-00600852b312"),
+    // DirectX 5's material, which the same table answers, `IDirect3DMaterial2`
+    // being `IDirect3DMaterial3` slot for slot in d3d.h (#210).
+    ("IDirect3DMaterial3", "93281503-8cf8-11d0-89ab-00a0c9054129"),
     ("IDirect3DRM", "2bc49361-8327-11cf-ac4a-0000c03825a1"),
     ("IDirect3DRM2", "4516ecc8-8f20-11d0-9b6d-0000c0781bc3"),
     ("IDirect3DRM3", "4516ec83-8f20-11d0-9b6d-0000c0781bc3"),

@@ -3457,11 +3457,19 @@ const DESC: u32 = DATA + 0x800;
 /// with `caps`, asked for as LEGO Chess's DirectX plugin asks for its
 /// textures (#210).
 fn created(m: &mut Machine, size: u32, caps: u32) -> u32 {
+    created_as(m, size, caps, [0xf800, 0x07e0, 0x001f, 0])
+}
+
+/// The same, sixteen bits a pixel in these red, green, blue and alpha masks.
+fn created_as(m: &mut Machine, size: u32, caps: u32, masks: [u32; 4]) -> u32 {
     let mut desc = [0u32; 27];
     // DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT, and a
-    // DDPIXELFORMAT at 0x48: its size, DDPF_RGB, sixteen bits and 565.
+    // DDPIXELFORMAT at 0x48: its size, DDPF_RGB and DDPF_ALPHAPIXELS when it
+    // has alpha, sixteen bits and the masks.
+    let flags = if masks[3] == 0 { 0x40 } else { 0x41 };
     desc[..4].copy_from_slice(&[108, 0x1007, size, size]);
-    desc[18..25].copy_from_slice(&[32, 0x40, 0, 16, 0xf800, 0x07e0, 0x001f]);
+    desc[18..22].copy_from_slice(&[32, flags, 0, 16]);
+    desc[22..26].copy_from_slice(&masks);
     desc[26] = caps;
     m.arena.write(DESC, &words(&desc)).expect("in the arena");
     let made = method(m, "IDirectDraw4", "CreateSurface", 0, &[DESC, OUT, 0]);
@@ -3704,6 +3712,34 @@ fn a_texture_is_loaded_from_one_in_system_memory_and_has_one_handle() {
     // DDSCAPS_MIPMAP: its levels are not written.
     let levels = created(&mut m, 4, TEXTURE | SYSTEMMEMORY | 0x0040_0000);
     assert!(matches!(load(&mut m, levels), Err(Stop::NotWritten { .. })));
+    // Two textures over one buffer, as `SetSurfaceDesc` can point them: the
+    // pixels go through a copy, as `memmove` copies, and stay as they were.
+    let (first, second) = (
+        created(&mut m, 4, TEXTURE | SYSTEMMEMORY),
+        created(&mut m, 4, TEXTURE | SYSTEMMEMORY),
+    );
+    let mut desc = [0u32; 27];
+    // DDSD_LPSURFACE, and the memory at 0x24.
+    desc[..2].copy_from_slice(&[108, 0x800]);
+    desc[9] = TEXELS;
+    m.arena.write(DESC, &words(&desc)).expect("in the arena");
+    for over in [first, second] {
+        let set = method(
+            &mut m,
+            "IDirectDrawSurface4",
+            "SetSurfaceDesc",
+            over,
+            &[DESC, 0],
+        );
+        assert_eq!(set, Ok(0));
+    }
+    m.arena.write(TEXELS, &texels).expect("in the arena");
+    let over_one = method(&mut m, "IDirect3DTexture2", "Load", second, &[first]);
+    assert_eq!(over_one, Ok(0));
+    assert_eq!(
+        m.arena.slice(TEXELS, 32).expect("in the arena"),
+        &texels[..]
+    );
 
     let handle = |m: &mut Machine, of: u32| {
         assert_eq!(
@@ -3737,13 +3773,28 @@ fn a_texture_is_loaded_from_one_in_system_memory_and_has_one_handle() {
     );
     assert_eq!(material_handle, Ok(0));
     assert_eq!(m.arena.read_u32(OUT), Ok(3), "from the one table");
+    // IID_IDirect3DMaterial2 (d3d.h): DirectX 5's face of the same table.
+    let material2 = [
+        0x03, 0x15, 0x28, 0x93, 0xf8, 0x8c, 0xd0, 0x11, 0x89, 0xab, 0x00, 0xa0, 0xc9, 0x05, 0x41,
+        0x29,
+    ];
+    m.arena.write(DATA, &material2).expect("in the arena");
+    let asked = made(
+        &mut m,
+        "IDirect3DMaterial3",
+        "QueryInterface",
+        material,
+        &[DATA],
+    );
+    assert_eq!(asked, material, "the same face");
 }
 
 /// DirectX 5's device draws vertices already on the screen, triangle lists
 /// of `D3DTLVERTEX`, with the texture its handle names, as a decal or
-/// modulated by the vertices' colour, inside the viewport the title described:
+/// modulated by the vertices' colour, taking the texture's alpha when it has
+/// one and the vertices' when not, cut to the viewport the title described:
 /// as LEGO Chess's DirectX plugin draws all it draws (#210). Another vertex
-/// type, a blend not written and a handle never handed out are walls.
+/// type, a blend not written and a handle that names no texture are walls.
 #[test]
 fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     const VERTICES: u32 = DATA + 0x400;
@@ -3897,12 +3948,112 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     assert_eq!(draw(&mut m, 3), Ok(0));
     assert_eq!(quadrants(&m), [red, green, blue, white, 0], "a decal");
 
-    // D3DVT_LVERTEX, D3DTBLEND_MODULATEALPHA, and a handle never given.
+    // Drawn with clipping on, a square twice as wide is cut to the
+    // viewport's rectangle.
+    let square_of = |m: &mut Machine, wide: f32, diffuse: u32| {
+        let corner = |x: f32, y: f32| {
+            let [x, y, z, rhw, u, v] = floats([x, y, 0.5, 1.0, x / 4.0, y / 4.0]);
+            [x, y, z, rhw, diffuse, 0, u, v]
+        };
+        let square: Vec<u32> = [
+            corner(0.0, 0.0),
+            corner(wide, 0.0),
+            corner(0.0, 4.0),
+            corner(wide, 4.0),
+        ]
+        .concat();
+        m.arena
+            .write(VERTICES, &words(&square))
+            .expect("in the arena");
+    };
+    square_of(&mut m, 8.0, 0xff80_8080);
+    let clipped = method(
+        &mut m,
+        "IDirect3DDevice2",
+        "DrawIndexedPrimitive",
+        device,
+        &[4, 3, VERTICES, 4, INDICES, 6, 0],
+    );
+    assert_eq!(clipped, Ok(0));
+    assert_eq!(
+        (pixel(&m, 3, 1), pixel(&m, 5, 1)),
+        (green, 0),
+        "cut off at x 4"
+    );
+
+    // Modulated with blending on, SRCALPHA and INVSRCALPHA: a texture with
+    // alpha gives its texels', 4444 and 1555 alike, and one without takes the
+    // vertices'.
+    set(&mut m, 21, 2);
+    for (state, value) in [(27, 1), (19, 5), (20, 6)] {
+        set(&mut m, state, value);
+    }
+    let fill = |m: &mut Machine, colour: u32| {
+        for y in 0..4 {
+            let row: Vec<u8> = (0..4).flat_map(|_| (colour as u16).to_le_bytes()).collect();
+            m.arena.write(PIXELS + y * 128, &row).expect("in the arena");
+        }
+    };
+    square_of(&mut m, 4.0, 0xffff_ffff);
+    for masks in [
+        [0x0f00, 0x00f0, 0x000f, 0xf000],
+        [0x7c00, 0x03e0, 0x001f, 0x8000],
+    ] {
+        let alpha = created_as(&mut m, 2, TEXTURE | SYSTEMMEMORY, masks);
+        let (at, pitch) = locked(&mut m, alpha);
+        let format = PixelFormat { bits: 16, masks };
+        // Opaque red and clear green above, clear blue and opaque white below.
+        for (row, pair) in [
+            [[255, 0, 0, 255], [0, 255, 0, 0]],
+            [[0, 0, 255, 0], [255, 255, 255, 255]],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let bytes: Vec<u8> = pair
+                .iter()
+                .flat_map(|&texel| (format.encode(texel) as u16).to_le_bytes())
+                .collect();
+            m.arena
+                .write(at + row as u32 * pitch, &bytes)
+                .expect("in the arena");
+        }
+        assert_eq!(
+            method(
+                &mut m,
+                "IDirect3DTexture2",
+                "GetHandle",
+                alpha,
+                &[device, OUT]
+            ),
+            Ok(0)
+        );
+        let named = m.arena.read_u32(OUT).expect("in the arena");
+        set(&mut m, 1, named);
+        fill(&mut m, 0);
+        assert_eq!(draw(&mut m, 3), Ok(0));
+        assert_eq!(quadrants(&m), [red, 0, 0, white, 0], "{masks:x?}");
+    }
+    set(&mut m, 1, handle);
+    let behind = rgb(0, 0, 255);
+    square_of(&mut m, 4.0, 0x00ff_ffff);
+    fill(&mut m, behind);
+    assert_eq!(draw(&mut m, 3), Ok(0));
+    assert_eq!(quadrants(&m), [behind, behind, behind, behind, 0], "clear");
+    square_of(&mut m, 4.0, 0xffff_ffff);
+    assert_eq!(draw(&mut m, 3), Ok(0));
+    assert_eq!(quadrants(&m), [red, green, blue, white, 0], "opaque");
+    for (state, value) in [(27, 0), (21, 1)] {
+        set(&mut m, state, value);
+    }
+
+    // D3DVT_LVERTEX, D3DTBLEND_MODULATEALPHA, and a handle that names no
+    // texture.
     assert!(matches!(draw(&mut m, 2), Err(Stop::NotWritten { .. })));
     set(&mut m, 21, 4);
     assert!(matches!(draw(&mut m, 3), Err(Stop::NotWritten { .. })));
     set(&mut m, 21, 1);
-    set(&mut m, 1, handle + 1);
+    set(&mut m, 1, 99);
     assert!(matches!(draw(&mut m, 3), Err(Stop::NotWritten { .. })));
 
     // DirectX 6's face of a device draws by its texture stages, and a texture
@@ -3923,6 +4074,32 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
         &[1, handle],
     );
     assert_eq!(set6, Ok(0));
+    // It starts modulating, as a device before DirectX 7's does; DirectX 7
+    // has no such state to start.
+    let blend6 = method(
+        &mut m,
+        "IDirect3DDevice3",
+        "GetRenderState",
+        dx6,
+        &[21, OUT],
+    );
+    assert_eq!((blend6, m.arena.read_u32(OUT)), (Ok(0), Ok(2)));
+    let dx7 = with_ctx(&mut m, |ctx| {
+        win32::State::make_com(
+            ctx,
+            win32::interface_named("IDirect3DDevice7").expect("written"),
+            win32::ComState::Device3D { surface: target },
+        )
+    })
+    .expect("made");
+    let blend7 = method(
+        &mut m,
+        "IDirect3DDevice7",
+        "GetRenderState",
+        dx7,
+        &[21, OUT],
+    );
+    assert!(matches!(blend7, Err(Stop::NotWritten { .. })));
     let drawn6 = method(
         &mut m,
         "IDirect3DDevice3",

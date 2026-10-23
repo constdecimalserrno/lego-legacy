@@ -103,8 +103,9 @@ that closes its window in the Information Center, recorded and replayed, at 4,99
 pin first light's flip 460 at 97,000,829 and the Information Center's flip 5099 at 3,952,209,794.
 The maintainer's play is replayed to 3,341,815,910, the moment they closed the window, at the same
 flip 10,667 and 274,650 declared milliseconds, but it no longer ends in their own run's state: it
-ends at `6b5eca98…`, since their play predates the two messages. A move the maintainer blessed on
-2026-10-22. A person should replay its first save on the MacBook before its next release.
+ends at `6b5eca98…`, until #210 (above), since their play predates the two messages. A move the
+maintainer blessed on 2026-10-22. A person should replay its first save on the MacBook before its
+next release.
 
 Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands
 core's `ASK_BETWEEN_FLIPS_MILLIS` or more of declared time reaches it at the frame's next input poll

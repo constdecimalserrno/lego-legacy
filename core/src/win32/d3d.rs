@@ -960,7 +960,8 @@ fn render_state_at_start(state: u32) -> Option<u32> {
         20 => 1,
         // D3DRENDERSTATE_TEXTUREMAPBLEND: D3DTBLEND_MODULATE, as Wine's
         // `d3d_device_init`, read as documentation, starts every device before
-        // DirectX 7's (#210).
+        // DirectX 7's (#210). DirectX 7's face has no such state, and
+        // `get_render_state` declares none for it.
         21 => 2,
         // D3DRENDERSTATE_CULLMODE: counter-clockwise.
         22 => 3,
@@ -1004,11 +1005,14 @@ fn render_state_at_start(state: u32) -> Option<u32> {
 
 fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let state = args[0];
-    let value = device(ctx, this)
-        .render
-        .get(&state)
-        .copied()
-        .or_else(|| render_state_at_start(state));
+    // DirectX 7 has no `TEXTUREMAPBLEND`: Wine's `d3d_device7_GetRenderState`
+    // refuses it as invalid there. So a DirectX 7 device declares no start
+    // for it.
+    let dx7 = ctx.state.interface_of(this) == Some(DEVICE7.name);
+    let value =
+        device(ctx, this).render.get(&state).copied().or_else(|| {
+            render_state_at_start(state).filter(|_| !dx7 || state != rs::TEXTUREMAPBLEND)
+        });
     let Some(value) = value else {
         ctx.log.line(&format!(
             "d3d render state {state} read before it was set, and what it starts as is not declared"
@@ -1288,12 +1292,14 @@ const D3DERR_TEXTURE_LOAD_FAILED: u32 = 0x8876_02d5;
 /// `d3d_texture2_Load` and its conformance test `test_texture_load_ckey` find
 /// Windows doing it: the pixels are copied, the source's colour key replaces
 /// the destination's and none leaves it be, `ALLOCONLOAD` is no longer
-/// claimed, and another size is `D3DERR_TEXTURE_LOAD_FAILED`. Another pixel
-/// format, which a driver would convert, a palette to copy, and mipmaps,
-/// whose levels Wine loads one by one, are walls. LEGO Chess's DirectX
-/// plugin loads every texture it draws this way (#210).
+/// claimed, and another size is `D3DERR_TEXTURE_LOAD_FAILED`. The pixels go
+/// through a copy, as `memmove` copies, so two textures over the same memory
+/// load as Wine's `memcpy` over one buffer leaves it. Another pixel format, a
+/// palette to copy, and mipmaps, whose levels Wine loads one by one, are
+/// walls. LEGO Chess's DirectX plugin loads every texture it draws this way
+/// (#210).
 fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    use super::ddraw::caps::{ALLOCONLOAD, MIPMAP};
+    use super::ddraw::ddscaps::{ALLOCONLOAD, MIPMAP};
     let surface = |ctx: &Ctx<'_>, at: u32| match ctx.state.com(at).map(|o| &o.state) {
         Some(ComState::Surface {
             pixels,
@@ -1328,9 +1334,14 @@ fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     }
     let row = (width * format.bits.div_ceil(8)) as usize;
     let span = |pitch: u32| pitch as usize * (height.max(1) - 1) as usize + row;
-    let (texels, target) = ctx
+    let texels = ctx
         .mem
-        .read_and_write((out_of, span(pitch)), (into, span(into_pitch)))
+        .slice(out_of, span(pitch))
+        .map_err(Stop::Fault)?
+        .to_vec();
+    let target = ctx
+        .mem
+        .slice_mut(into, span(into_pitch))
         .map_err(Stop::Fault)?;
     for y in 0..height as usize {
         let (from, to) = (y * pitch as usize, y * into_pitch as usize);
@@ -1911,7 +1922,7 @@ fn draw(
         }
         _ => {
             return Err(unwritten(format!(
-                "{method}: texture handle {by_handle}, never handed out"
+                "{method}: texture handle {by_handle}, which names no texture"
             )))
         }
     };
@@ -2083,12 +2094,15 @@ fn draw(
             {
                 pipeline::Viewport::whole(x, y, w, h)
             }
-            // For vertices already on the screen a viewport is only where they
-            // are cut off: its rectangle, which `D3DVIEWPORT` and
-            // `D3DVIEWPORT2` both start with. LEGO Chess's DirectX plugin
-            // describes its own with `SetViewport2` (#210); projecting through
-            // one a title described is not written.
-            Some(ComState::Viewport { .. }) if format & fvf::POSITION_MASK == fvf::XYZRHW => {
+            // What LEGO Chess's DirectX plugin needs of a viewport it describes
+            // with `SetViewport2` and draws vertices already on the screen
+            // through, on its DirectX 5 device (#210): the rectangle they are
+            // cut to, which `D3DVIEWPORT` and `D3DVIEWPORT2` both start with.
+            // Projecting through one a title described is not written, nor
+            // is this on a later device.
+            Some(ComState::Viewport { .. })
+                if dx5 && format & fvf::POSITION_MASK == fvf::XYZRHW =>
+            {
                 let bytes = &ctx.state.immediate.viewports[&ctx.state.identity(viewport)];
                 let field = |o: usize| {
                     u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])

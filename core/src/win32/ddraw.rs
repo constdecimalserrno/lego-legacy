@@ -471,7 +471,9 @@ pub(crate) fn write_pixel_format(
     Ok(())
 }
 
-/// Write a DDSURFACEDESC the way a guest reads one back.
+/// Write a DDSURFACEDESC the way a guest reads one back. Its `dwFlags` claim
+/// `DDSD_CAPS`, and only `GetSurfaceDesc` writes the caps after it; that every
+/// other caller writes them, or does not claim them, is #227's.
 pub(crate) fn write_surface_desc(
     ctx: &mut Ctx<'_>,
     at: u32,
@@ -566,21 +568,21 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     // asked for system memory, and on the screen if it is the screen, its
     // front buffer if it flips; as Wine's conformance tests `test_rt_caps`,
     // `test_primary_caps` and `test_flip` find Windows answering.
-    let mut caps = caps;
-    if caps & caps::SYSTEMMEMORY == 0 {
-        caps |= caps::VIDEOMEMORY;
-        if caps & caps::NONLOCALVIDMEM == 0 {
-            caps |= caps::LOCALVIDMEM;
+    let mut given = caps;
+    if given & ddscaps::SYSTEMMEMORY == 0 {
+        given |= ddscaps::VIDEOMEMORY;
+        if given & ddscaps::NONLOCALVIDMEM == 0 {
+            given |= ddscaps::LOCALVIDMEM;
         }
     }
     if primary {
-        caps |= caps::VISIBLE;
+        given |= ddscaps::VISIBLE;
     }
     if back_count > 0 {
-        caps |= caps::FRONTBUFFER;
+        given |= ddscaps::FRONTBUFFER;
     }
 
-    let (object, pixels) = make_surface_as(ctx, width, height, format, caps)?;
+    let (object, pixels) = make_surface_as(ctx, width, height, format, given)?;
     let pitch = pitch_for(width, depth);
     if back_count > 0 {
         let back_pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
@@ -595,8 +597,8 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
                 format,
                 primary: false,
                 // The buffer behind the screen, as `test_flip` finds it.
-                caps: caps & !(caps::VISIBLE | caps::PRIMARYSURFACE | caps::FRONTBUFFER)
-                    | caps::BACKBUFFER,
+                caps: given & !(ddscaps::VISIBLE | ddscaps::PRIMARYSURFACE | ddscaps::FRONTBUFFER)
+                    | ddscaps::BACKBUFFER,
                 back: 0,
                 palette: 0,
             },
@@ -645,7 +647,7 @@ pub(crate) fn make_surface(
     height: u32,
     depth: u32,
 ) -> Result<(u32, u32), Stop> {
-    let caps = caps::SYSTEMMEMORY | caps::OFFSCREENPLAIN;
+    let caps = ddscaps::SYSTEMMEMORY | ddscaps::OFFSCREENPLAIN;
     make_surface_as(ctx, width, height, screen_format(depth), caps)
 }
 
@@ -668,7 +670,7 @@ fn make_surface_as(
             height,
             pitch,
             format,
-            primary: caps & caps::PRIMARYSURFACE != 0,
+            primary: caps & ddscaps::PRIMARYSURFACE != 0,
             caps,
             back: 0,
             palette: 0,
@@ -679,7 +681,7 @@ fn make_surface_as(
 }
 
 /// `DDSCAPS_*`, as ddraw.h numbers them.
-pub(crate) mod caps {
+pub(crate) mod ddscaps {
     pub const BACKBUFFER: u32 = 0x0000_0004;
     pub const FRONTBUFFER: u32 = 0x0000_0020;
     pub const OFFSCREENPLAIN: u32 = 0x0000_0040;
@@ -846,7 +848,8 @@ fn surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 fn surface_caps(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let primary = surface_of(ctx, this).is_some_and(|s| s.5);
     if args[0] != 0 {
-        // DDSCAPS_PRIMARYSURFACE or DDSCAPS_OFFSCREENPLAIN.
+        // DDSCAPS_PRIMARYSURFACE or DDSCAPS_OFFSCREENPLAIN, where
+        // `GetSurfaceDesc` answers the surface's own caps: #227's.
         ctx.mem
             .write_u32(args[0], if primary { 0x200 } else { 0x40 })
             .map_err(Stop::Fault)?;
@@ -1285,7 +1288,7 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         return Ok(DDERR_INVALIDPARAMS);
     }
     let caps = caps_of(ctx, this);
-    if caps & caps::SYSTEMMEMORY == 0 || caps & caps::PRIMARYSURFACE != 0 {
+    if caps & ddscaps::SYSTEMMEMORY == 0 || caps & ddscaps::PRIMARYSURFACE != 0 {
         return Ok(DDERR_INVALIDSURFACETYPE);
     }
     let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
@@ -1323,14 +1326,19 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         (*w, *p) = (width, pitch);
     }
     // Its key and its clipper are its own, kept by where its pixels are, and
-    // go with them; a key kept where they now are was a surface's there
-    // before, released (#210).
+    // go with them; a key or a clipper kept where they now are was a
+    // surface's there before, released (#210).
+    // ponytail: kept by address, two live surfaces over one buffer share a key
+    // and a clipper; keep them on `ComState::Surface` if a title points two at
+    // one.
     let key = ctx.state.color_keys.remove(&before);
     ctx.state.color_keys.remove(&memory);
     if let Some(key) = key {
         ctx.state.color_keys.insert(memory, key);
     }
-    if ctx.state.clipped.remove(&before) {
+    let clipped = ctx.state.clipped.remove(&before);
+    ctx.state.clipped.remove(&memory);
+    if clipped {
         ctx.state.clipped.insert(memory);
     }
     Ok(S_OK)

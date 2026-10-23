@@ -86,25 +86,29 @@ gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.
 
 LEGO Chess's bumper draws through its DirectX plugin's Direct3D 2 device (#210). Four walls are
 written. `IDirect3D2::CreateMaterial` makes a material, DirectX 5's `IDirect3DMaterial2` being
-DirectX 6's slot for slot. `IDirect3DTexture2::GetHandle` gives a texture one handle whichever device
+DirectX 6's slot for slot (d3d.h), and the material answers `IID_IDirect3DMaterial2` as the viewport
+answers DirectX 5's. `IDirect3DTexture2::GetHandle` gives a texture one handle whichever device
 asks, from the table materials' handles come from, counted from one, as Wine's
-`d3d_texture2_GetHandle`, read as documentation, gives it. `IDirect3DTexture2::Load` fills a texture
-from one the same size, as Wine's `d3d_texture2_Load` and its conformance test
-`test_texture_load_ckey` find Windows doing: the pixels, and the source's colour key where it has
-one, and the texture no longer claims `DDSCAPS_ALLOCONLOAD`; another size is
-`D3DERR_TEXTURE_LOAD_FAILED`, and another format, a palette to copy or mipmaps are walls.
-`IDirect3DDevice2::DrawIndexedPrimitive` draws `D3DVT_TLVERTEX` vertices, laid out as
+`d3d_texture2_GetHandle`, read as documentation, gives it. `IDirect3DTexture2::Load` fills a texture from one the same size,
+as Wine's `d3d_texture2_Load` and its conformance test `test_texture_load_ckey` find Windows doing:
+the pixels, copied as `memmove` copies so that two textures over the same memory load, and the
+source's colour key where it has one, and the texture no longer claims `DDSCAPS_ALLOCONLOAD`;
+another size is `D3DERR_TEXTURE_LOAD_FAILED`, and another format, a palette to copy or mipmaps are
+walls. `IDirect3DDevice2::DrawIndexedPrimitive` draws `D3DVT_TLVERTEX` vertices, laid out as
 `D3DFVF_TLVERTEX`, through DirectX 6's draw. A DirectX 5 device has no texture stages, so there the
 draw takes the texture `D3DRENDERSTATE_TEXTUREHANDLE` names, and `D3DRENDERSTATE_TEXTUREMAPBLEND`'s
 decal, copy and modulate, the last taking a texture's alpha when it has one and the vertex's when
 not, as Wine's `d3d_device3_SetRenderState` maps them onto the first stage; on DirectX 6's and 7's
-faces both stay walls. For vertices already on the screen the draw takes the rectangle of a
-viewport the title described, which was a wall. The other vertex types and blends, and a handle
-never handed out, are walls. A DirectX 5 device starts with specular highlights on, as Wine's
-conformance test `test_lighting_interface_versions` finds Windows starting one, and every device's
-`D3DRENDERSTATE_TEXTUREMAPBLEND` starts at `D3DTBLEND_MODULATE` (2), as Wine's `d3d_device_init`
-starts it, where it answered `D3DTBLEND_MODULATEALPHA` (4) under a comment saying modulate. Three
-answers that faked success now answer as DirectX does:
+faces both stay walls. For vertices already on the screen, a DirectX 5 device's draw takes the
+rectangle of a viewport the title described as where they are cut off, which LEGO Chess's plugin
+needs and which was a wall; on a later device it still is. The other vertex types and blends, and a
+handle that names no texture, are walls. A DirectX 5 device starts with specular highlights on, as
+Wine's conformance test `test_lighting_interface_versions` finds Windows starting one. A device
+before DirectX 7's starts `D3DRENDERSTATE_TEXTUREMAPBLEND` at `D3DTBLEND_MODULATE` (2), as Wine's
+`d3d_device_init` starts it, where every device answered `D3DTBLEND_MODULATEALPHA` (4) under a
+comment saying modulate; DirectX 7 has no such state, Wine's `d3d_device7_GetRenderState` refusing
+it, so reading it unset there is a wall. Two answers that faked success now answer as DirectX does,
+and a third does in one call of a family:
 - `IDirectDrawSurface3::SetSurfaceDesc`, which changed nothing, points a surface in system memory at
   the memory the title hands it, with a width and pitch given together, its colour key and clipper
   going with it; it refuses what Wine's conformance test `test_set_surface_desc` finds Windows
@@ -116,7 +120,9 @@ answers that faked success now answer as DirectX does:
   with and where DirectDraw put it: in video memory unless asked for system memory, the screen
   visible and its front buffer when it flips, the buffer behind it the back buffer, as Wine's
   `test_rt_caps`, `test_primary_caps` and `test_flip` find Windows answering. It and `Lock` answer a
-  surface's own pitch.
+  surface's own pitch. The rest of the family is #227's: every other description core writes, for
+  `Lock`, `GetDisplayMode`, `EnumDisplayModes` and the movie stream's `GetFormat`, still claims
+  `DDSD_CAPS` and writes none, and `GetCaps` still answers from whether a surface is the screen.
 
 LEGO Chess's plugin makes each texture in system memory over the game's own pixels, loads it into a
 copy in video memory that it drops unless the copy says it is there, keys the copy with what
@@ -124,7 +130,11 @@ copy in video memory that it drops unless the copy says it is there, keys the co
 memory alone: it keeps the descriptions `GetSurfaceDesc` fills, which now carry their caps, so each
 of its runs ends at the same cursor, flips and declared time as before with another digest, a move
 the maintainer blessed on 2026-10-22. Rock Raiders', Hot Wheels' and Alpha Team's runs do not move.
-LEGO Island's changelog says how; the runs are listed here:
+Alpha Team's `NiDirect3d.dll` branches on the caps at four sites (0x6F4569, 0x6F4714, 0x6F4A5F and
+0x6F51AA, at its preferred base), and none of them turns another way on its path: the one its calls
+reach tests `DDSCAPS_NONLOCALVIDMEM`, which no surface core makes claims, and the other three come
+only from a renderer made over another, which it never makes. LEGO Island's changelog says how its
+runs move; they are listed here:
 
 - lego-island, `first-light.route` (held to 98,000,000): digest `1295656d` → `48366519`;
 - lego-island, `first-ride.route` (held to 6,350,000,000): digest `d4014002` → `adbcf549`;
