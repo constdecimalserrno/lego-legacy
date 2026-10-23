@@ -84,6 +84,20 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
+A triangle at one depth, its three depths equal bit for bit, has that depth at every pixel it covers
+(#210): the steps of its depth are differences of equal floats, which are exactly zero, so a depth
+interpolated linearly across it is that depth throughout. The edge planes it was interpolated
+through left an ulp or so of noise across it, and two such triangles at one depth under
+`D3DCMP_LESSEQUAL` were drawn as if one were a hair behind the other wherever the noise fell that
+way: in a sweep of overlapping quads at a third, 215 of 270 placements lost pixels. LEGO Chess draws
+its New Player form's letters as overlapping quads at a third, and a third of them did not draw.
+Depths equal only to within rounding, and sloped triangles that share a plane, keep their noise, a
+ceiling `raster::triangle` names; a triangle at an infinite depth, which no title draws, is
+interpolated as before.
+Rock Raiders, Alpha Team and LEGO Island draw through this rasteriser, and none of their runs moves:
+their disc tests end on the lines they ended on before. Hot Wheels draws no triangle, locking its
+surfaces and drawing into them itself, and its lines are unchanged too.
+
 The Audio Compression Manager's streams decode Microsoft's ADPCM (#153): MSACM32's `acmStreamOpen`,
 `acmStreamSize`, `acmStreamPrepareHeader`, `acmStreamUnprepareHeader` and `acmStreamConvert`, which
 were walls, answer as Microsoft's pages and Wine's conformance test `test_prepareheader`, which

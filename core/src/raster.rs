@@ -515,10 +515,20 @@ pub fn triangle(
         out
     };
     let over_w = |f: fn(&Vertex) -> f32| plane([f(&a) * a.rhw, f(&b) * b.rhw, f(&c) * c.rhw]);
+    // A level triangle, its three depths one, has that depth at every pixel,
+    // as a rasteriser that takes its gradients from the vertices' differences
+    // gives it. These planes would carry an ulp of noise across it, enough for
+    // a quad to fail `LESSEQUAL` against one under it at the same depth: LEGO
+    // Chess draws its glyphs so (#210).
+    let depth = if a.z == b.z && b.z == c.z {
+        (0.0, 0.0, a.z)
+    } else {
+        plane([a.z, b.z, c.z])
+    };
     // Depth, the reciprocal of distance, texture coordinates, diffuse and
     // specular colour.
     let planes = [
-        plane([a.z, b.z, c.z]),
+        depth,
         plane([a.rhw, b.rhw, c.rhw]),
         over_w(|v| v.uv[0]),
         over_w(|v| v.uv[1]),
@@ -827,6 +837,70 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Level quads, each at one depth, overlapping under `LESSEQUAL`: the later
+    /// one covers the earlier wherever on the screen it lies, as on a card
+    /// (#210). LEGO Chess's glyphs are such quads, at a third. With an ulp of
+    /// interpolated depth across each, 215 of these 270 placements lost
+    /// pixels.
+    #[test]
+    fn a_level_quad_covers_another_at_its_depth_wherever_it_lies() {
+        let (w, h) = (640, 480);
+        let mut pixels = vec![0u8; w * h * 2];
+        let mut depth = vec![1.0f32; w * h];
+        let quad = |x: f32, y: f32, blue: bool| {
+            let colour = if blue {
+                [0.0, 0.0, 1.0, 1.0]
+            } else {
+                [1.0, 0.0, 0.0, 1.0]
+            };
+            let v = |x, y| Vertex {
+                z: 1.0 / 3.0,
+                diffuse: colour,
+                ..at(x, y)
+            };
+            [
+                [v(x, y), v(x + 16.0, y), v(x, y + 16.0)],
+                [v(x, y + 16.0), v(x + 16.0, y), v(x + 16.0, y + 16.0)],
+            ]
+        };
+        let mut lost = Vec::new();
+        for y in [100, 112, 192, 292, 322] {
+            for x in (240..400).step_by(3) {
+                pixels.fill(0);
+                depth.fill(1.0);
+                let mut target = Target {
+                    pixels: &mut pixels,
+                    width: w as u32,
+                    height: h as u32,
+                    pitch: (w * 2) as u32,
+                    format: PixelFormat::RGB565,
+                    depth: &mut depth,
+                    clip: [0, 0, w as i32, h as i32],
+                    first_row: 0,
+                };
+                for (at, blue) in [(x, false), (x + 8, true)] {
+                    for t in quad(at as f32, y as f32, blue) {
+                        triangle(&mut target, t, None, &States::default());
+                    }
+                }
+                let covered = (y..y + 16).all(|row| {
+                    (x + 8..x + 24).all(|column| {
+                        let p = (row * w + column) * 2;
+                        pixels[p..p + 2] == [0x1f, 0x00] && depth[row * w + column] == 1.0 / 3.0
+                    })
+                });
+                if !covered {
+                    lost.push((x, y));
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "{} placements lost pixels: {lost:?}",
+            lost.len()
+        );
     }
 
     #[test]

@@ -206,3 +206,9 @@ all in one channel, to sixteen bits, each to its end. The run no longer stops: p
 run with no route, it presents the New Player form's buttons and boxes on black at flip 832, at
 cursor 8,729,002,651, and from flip 833 its room with the form on the desk, a third of whose letters
 do not yet draw (#210), and waits there for a player, flipping.
+
+Every letter of its New Player form draws (#210, core 1.2.0): its glyphs are quads at one depth,
+each overlapping the one before, and a triangle at one depth now has that depth exactly, where an
+ulp of noise hid a third of them behind the ones they overlap. From flip 833 on a run with no route,
+the first that shows the form whole, its words are the old tree's New Player form's to the eye; its
+name and age boxes are not, the old tree having drawn them darker.
