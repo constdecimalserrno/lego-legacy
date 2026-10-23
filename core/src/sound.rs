@@ -112,7 +112,7 @@ impl Format {
 
     /// Microsoft's ADPCM: each block starts with its predictors and first two
     /// samples, and every sample after is a nibble.
-    fn ms_adpcm(&self, data: &[u8]) -> Result<Vec<i16>, Error> {
+    pub(crate) fn ms_adpcm(&self, data: &[u8]) -> Result<Vec<i16>, Error> {
         const ADAPTATION: [i32; 16] = [
             230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
         ];

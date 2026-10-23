@@ -15,6 +15,7 @@ pub mod dinput;
 pub mod dsound;
 pub mod gdi32;
 pub mod kernel32;
+pub mod msacm32;
 pub mod msvcrt;
 pub mod ole32;
 pub mod pipeline;
@@ -311,6 +312,10 @@ pub struct State {
     /// next one will be given (#151).
     pub drawdibs: std::collections::BTreeSet<u32>,
     pub next_drawdib: u32,
+    /// The ACM streams a title has open, by their handles, and the handle the
+    /// next one will be given, counted from one (#153).
+    pub acm_streams: BTreeMap<u32, msacm32::Stream>,
+    pub next_acm_stream: u32,
     /// The palette the screen is showing through, if any.
     pub palette: u32,
     /// The frame the guest last flipped, waiting to be presented.
@@ -486,6 +491,8 @@ impl State {
             surface_dcs: BTreeMap::new(),
             drawdibs: std::collections::BTreeSet::new(),
             next_drawdib: 1,
+            acm_streams: BTreeMap::new(),
+            next_acm_stream: 1,
             palette: 0,
             present: None,
             keys_down: Vec::new(),
@@ -1296,6 +1303,7 @@ fn written(dll: &str) -> impl Iterator<Item = &'static Shim> + '_ {
         gdi32::SHIMS,
         d3drm::SHIMS,
         avifile::SHIMS,
+        msacm32::SHIMS,
         ole32::SHIMS,
         version::SHIMS,
         winmm::SHIMS,

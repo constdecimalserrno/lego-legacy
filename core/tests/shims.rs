@@ -4196,3 +4196,285 @@ fn a_directory_is_set_by_its_full_path_and_an_empty_one_is_refused() {
         );
     }
 }
+
+/// An `ADPCMWAVEFORMAT` as LEGO Chess's sounds have one, `channels` at 22,050
+/// Hz in blocks of `align` bytes, with Microsoft's seven predictor pairs; and
+/// the PCM it decodes to, of the same rate and channels.
+fn adpcm_formats(channels: u16, align: u16, bits: u16) -> (Vec<u8>, Vec<u8>) {
+    let samples_per_block = align * 2 / channels - 12;
+    let mut adpcm = Vec::new();
+    for value in [2u16, channels] {
+        adpcm.extend(value.to_le_bytes());
+    }
+    adpcm.extend(22_050u32.to_le_bytes());
+    adpcm.extend(10_752u32.to_le_bytes());
+    for value in [align, 4, 32, samples_per_block, 7] {
+        adpcm.extend(value.to_le_bytes());
+    }
+    for (a, b) in [
+        (256i16, 0i16),
+        (512, -256),
+        (0, 0),
+        (192, 64),
+        (240, 0),
+        (460, -208),
+        (392, -232),
+    ] {
+        adpcm.extend(a.to_le_bytes());
+        adpcm.extend(b.to_le_bytes());
+    }
+    let frame = channels * bits / 8;
+    let mut pcm = Vec::new();
+    for value in [1u16, channels] {
+        pcm.extend(value.to_le_bytes());
+    }
+    pcm.extend(22_050u32.to_le_bytes());
+    pcm.extend((22_050 * u32::from(frame)).to_le_bytes());
+    for value in [frame, bits, 0] {
+        pcm.extend(value.to_le_bytes());
+    }
+    (adpcm, pcm)
+}
+
+/// Where the ACM tests put the source format, the destination's, a header,
+/// the ADPCM and the PCM.
+const FROM: u32 = DATA + 0x100;
+const TO: u32 = DATA + 0x200;
+const HEADER: u32 = DATA + 0x300;
+const ADPCM: u32 = 0x0060_0000;
+const DECODED: u32 = 0x0068_0000;
+
+/// Open an ACM stream from `adpcm` to `pcm`, as LEGO Chess's sample loader
+/// opens one (0x0044FA7E): no driver, no filter, not in real time.
+fn acm_open(m: &mut Machine, adpcm: &[u8], pcm: &[u8]) -> Result<u32, Stop> {
+    m.arena.write(FROM, adpcm).expect("in the arena");
+    m.arena.write(TO, pcm).expect("in the arena");
+    call(
+        m,
+        "MSACM32",
+        "acmStreamOpen",
+        &[OUT, 0, FROM, TO, 0, 0, 0, 0x4],
+    )
+}
+
+/// An `ACMSTREAMHEADER` over the ADPCM and the PCM, `from` and `to` bytes long.
+fn acm_header(m: &mut Machine, from: u32, to: u32) {
+    let mut header = [0u32; 21];
+    header[0] = 0x54;
+    (header[3], header[4], header[7], header[8]) = (ADPCM, from, DECODED, to);
+    m.arena
+        .write(HEADER, &words(&header))
+        .expect("in the arena");
+}
+
+/// Microsoft's ADPCM decodes through ACM as Windows 98's own codec decodes
+/// it (#153): a block's two header samples and then a sample a nibble, each
+/// predicted from the two before it, into sixteen-bit or eight-bit PCM, whole
+/// blocks only, a short last block counted whole by `acmStreamSize`, as Wine's
+/// `msadp32`, read as documentation, decodes and counts them; and its stream
+/// calls refuse what Wine's conformance test `test_prepareheader` finds
+/// Windows refusing. LEGO Chess's sample loader decodes its effects so.
+#[test]
+fn acm_decodes_ms_adpcm_a_block_at_a_time() {
+    let mut m = machine();
+    let (adpcm, pcm) = adpcm_formats(1, 32, 16);
+    assert_eq!(acm_open(&mut m, &adpcm, &pcm), Ok(0));
+    let stream = m.arena.read_u32(OUT).expect("in the arena");
+    // One block of 32 bytes: predictor 0, its delta 16, then samples 1,000 and
+    // 500, and nibbles of 1, 1 and then nothing but 0.
+    let mut block = vec![0u8; 32];
+    block[..7].copy_from_slice(&[0, 16, 0, 0xe8, 0x03, 0xf4, 0x01]);
+    block[7] = 0x11;
+    m.arena.write(ADPCM, &block).expect("in the arena");
+    // Its 52 samples: 500 and 1,000 from its header; 1,016 and 1,032, each
+    // the one before it and a step of 16; and 1,032 again for every 0.
+    let expected: Vec<i16> = [500, 1000, 1016]
+        .into_iter()
+        .chain(std::iter::repeat_n(1032, 49))
+        .collect();
+
+    // The size of a block and a short one: two blocks' worth.
+    let size = call(&mut m, "MSACM32", "acmStreamSize", &[stream, 33, OUT, 0]);
+    assert_eq!(size, Ok(0));
+    assert_eq!(m.arena.read_u32(OUT), Ok(2 * 52 * 2));
+    let less = call(&mut m, "MSACM32", "acmStreamSize", &[stream, 31, OUT, 0]);
+    assert_eq!(less, Ok(512), "ACMERR_NOTPOSSIBLE: less than a block");
+
+    let prepare = |m: &mut Machine, flags: u32| {
+        call(
+            m,
+            "MSACM32",
+            "acmStreamPrepareHeader",
+            &[stream, HEADER, flags],
+        )
+    };
+    let convert = |m: &mut Machine| call(m, "MSACM32", "acmStreamConvert", &[stream, HEADER, 0x10]);
+    acm_header(&mut m, 0, 256);
+    assert_eq!(prepare(&mut m, 0), Ok(11), "MMSYSERR_INVALPARAM: no ADPCM");
+    acm_header(&mut m, 31, 256);
+    assert_eq!(
+        prepare(&mut m, 0),
+        Ok(512),
+        "ACMERR_NOTPOSSIBLE: less than a block"
+    );
+    acm_header(&mut m, 33, 256);
+    assert_eq!(prepare(&mut m, 1), Ok(10), "MMSYSERR_INVALFLAG");
+    assert_eq!(convert(&mut m), Ok(514), "ACMERR_UNPREPARED");
+    assert_eq!(prepare(&mut m, 0), Ok(0));
+    assert_eq!(m.arena.read_u32(HEADER + 4), Ok(0x0002_0000), "prepared");
+    assert_eq!(convert(&mut m), Ok(0));
+    let read = |m: &Machine, o: u32| m.arena.read_u32(HEADER + o).expect("in the arena");
+    assert_eq!(read(&m, 4), 0x0003_0000, "prepared and done");
+    assert_eq!(
+        (read(&m, 0x14), read(&m, 0x24)),
+        (32, 104),
+        "the short block is left"
+    );
+    let decoded: Vec<i16> = m
+        .arena
+        .slice(DECODED, 104)
+        .expect("in the arena")
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
+        .collect();
+    assert_eq!(decoded, expected);
+    let unprepare = |m: &mut Machine| {
+        call(
+            m,
+            "MSACM32",
+            "acmStreamUnprepareHeader",
+            &[stream, HEADER, 0],
+        )
+    };
+    assert_eq!(unprepare(&mut m), Ok(0));
+    assert_eq!(read(&m, 4), 0x0001_0000, "done, no longer prepared");
+    assert_eq!(unprepare(&mut m), Ok(514));
+
+    // Eight bits a sample: each sample's top byte, unsigned.
+    let (adpcm, pcm) = adpcm_formats(1, 32, 8);
+    assert_eq!(acm_open(&mut m, &adpcm, &pcm), Ok(0));
+    let eight = m.arena.read_u32(OUT).expect("in the arena");
+    acm_header(&mut m, 32, 52);
+    let prepared = call(
+        &mut m,
+        "MSACM32",
+        "acmStreamPrepareHeader",
+        &[eight, HEADER, 0],
+    );
+    assert_eq!(prepared, Ok(0));
+    let converted = call(&mut m, "MSACM32", "acmStreamConvert", &[eight, HEADER, 0]);
+    assert_eq!(converted, Ok(0));
+    let bytes = m.arena.slice(DECODED, 52).expect("in the arena").to_vec();
+    let top: Vec<u8> = expected.iter().map(|s| s.to_le_bytes()[1] ^ 0x80).collect();
+    assert_eq!(bytes, top);
+
+    // A header whose buffers moved since it was prepared is refused, as Wine's
+    // `ACM_ValidatePointers` refuses it.
+    acm_header(&mut m, 32, 52);
+    let again = call(
+        &mut m,
+        "MSACM32",
+        "acmStreamPrepareHeader",
+        &[eight, HEADER, 0],
+    );
+    assert_eq!(again, Ok(0));
+    m.arena
+        .write(HEADER + 0x1c, &words(&[DECODED + 4]))
+        .expect("in the arena");
+    let moved = call(&mut m, "MSACM32", "acmStreamConvert", &[eight, HEADER, 0]);
+    assert_eq!(moved, Ok(11), "MMSYSERR_INVALPARAM");
+
+    // Another rate or channels, or a block too small for its own header, is
+    // no conversion the codec makes, and no handle; another format, other
+    // predictors, a stream the machine never made, or sizing from the
+    // destination, is not written.
+    let (adpcm, mut pcm) = adpcm_formats(1, 32, 16);
+    pcm[2] = 2;
+    m.arena.write(OUT, &words(&[0x1234])).expect("in the arena");
+    assert_eq!(acm_open(&mut m, &adpcm, &pcm), Ok(512));
+    assert_eq!(m.arena.read_u32(OUT), Ok(0), "no handle");
+    let (mut small, pcm) = adpcm_formats(1, 32, 16);
+    small[12] = 6;
+    assert_eq!(acm_open(&mut m, &small, &pcm), Ok(512));
+    let (mut odd, _) = adpcm_formats(1, 32, 16);
+    odd[22] = 1;
+    assert!(matches!(
+        acm_open(&mut m, &odd, &pcm),
+        Err(Stop::NotWritten { .. })
+    ));
+    assert!(matches!(
+        acm_open(&mut m, &pcm, &pcm),
+        Err(Stop::NotWritten { .. })
+    ));
+    let unknown = call(&mut m, "MSACM32", "acmStreamSize", &[99, 64, OUT, 0]);
+    assert_eq!(unknown, Ok(5), "MMSYSERR_INVALHANDLE");
+    assert!(matches!(
+        call(&mut m, "MSACM32", "acmStreamSize", &[stream, 64, OUT, 1]),
+        Err(Stop::NotWritten { .. })
+    ));
+}
+
+/// A sound off the disc decodes through ACM to what FFmpeg decodes it to
+/// (#153): `sounds\chimp.wav`, MS ADPCM at 22,050 Hz in one channel, thirty
+/// whole blocks of 512 bytes and a short one of 132, which ACM leaves. The
+/// pinned hash is FFmpeg 9.0.1's sixteen-bit PCM of the thirty whole blocks,
+/// 30,360 samples, from a command run once by hand on a copy of the file,
+///
+///   ffmpeg -i chimp.wav -f s16le -acodec pcm_s16le chimp.s16
+///
+/// and its first 60,720 bytes: FFmpeg goes on into the short block.
+#[test]
+fn a_sound_off_the_disc_decodes_through_acm_as_ffmpeg_decodes_it() {
+    let image = &roster::LEGO_CHESS.image;
+    if !testkit::rips(image) {
+        return;
+    }
+    let mut iso = disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens");
+    let bytes = iso.read("MAIN.Z").expect("the archive reads");
+    let archive = lego_legacy_core::is3::Archive::open(&bytes).expect("an InstallShield 3 archive");
+    let wav = archive
+        .read(&bytes, "sounds\\chimp.wav")
+        .expect("it expands");
+    // Its chunks: `fmt ` at 12, then `fact`, then `data`.
+    let chunk = |id: &[u8]| {
+        let at = wav
+            .windows(4)
+            .position(|w| w == id)
+            .expect("the chunk is there");
+        let len = u32::from_le_bytes(wav[at + 4..at + 8].try_into().expect("four bytes"));
+        &wav[at + 8..at + 8 + len as usize]
+    };
+    let (format, data) = (chunk(b"fmt "), chunk(b"data"));
+    assert_eq!(
+        (data.len(), u16::from_le_bytes([format[12], format[13]])),
+        (15_492, 512)
+    );
+    let mut m = machine();
+    let (_, pcm) = adpcm_formats(1, 512, 16);
+    assert_eq!(acm_open(&mut m, format, &pcm), Ok(0));
+    let stream = m.arena.read_u32(OUT).expect("in the arena");
+    m.arena.write(ADPCM, data).expect("in the arena");
+    let from = u32::try_from(data.len()).expect("small");
+    assert_eq!(
+        call(&mut m, "MSACM32", "acmStreamSize", &[stream, from, OUT, 0]),
+        Ok(0)
+    );
+    let room = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(room, 31 * 1012 * 2, "the short block counted whole");
+    acm_header(&mut m, from, room);
+    for (name, flags) in [("acmStreamPrepareHeader", 0), ("acmStreamConvert", 0x10)] {
+        assert_eq!(
+            call(&mut m, "MSACM32", name, &[stream, HEADER, flags]),
+            Ok(0)
+        );
+    }
+    let used = m.arena.read_u32(HEADER + 0x24).expect("in the arena");
+    assert_eq!(used, 30 * 1012 * 2);
+    let decoded = m.arena.slice(DECODED, used as usize).expect("in the arena");
+    assert_eq!(
+        hash::sha256_hex(decoded),
+        "48957f54289e3f0ebd8da109f41d228f9ed70bcebd5d03e2fee71460a422cf55"
+    );
+}

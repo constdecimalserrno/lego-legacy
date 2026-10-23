@@ -84,6 +84,21 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
+The Audio Compression Manager's streams decode Microsoft's ADPCM (#153): MSACM32's
+`acmStreamOpen`, `acmStreamSize`, `acmStreamPrepareHeader`, `acmStreamUnprepareHeader` and
+`acmStreamConvert`, which were walls, answer as Windows 98's own ADPCM codec does, as Wine's
+`msacm32` and `msadp32`, read as documentation, and its conformance test `test_prepareheader` have
+them. A stream turns MS ADPCM into PCM of the same rate and channels, sixteen or eight bits a
+sample, an eight-bit sample its sixteen-bit one's top byte unsigned; another rate or channels is
+`ACMERR_NOTPOSSIBLE`, no conversion the codec makes. Its size counts a short last block whole, and
+its conversion decodes whole blocks only, as `msadp32` does, saying how much of each side it used.
+A header with no ADPCM is `MMSYSERR_INVALPARAM`, less than a block `ACMERR_NOTPOSSIBLE`, a reserved
+flag `MMSYSERR_INVALFLAG`, an unprepared one `ACMERR_UNPREPARED`, and an unknown stream
+`MMSYSERR_INVALHANDLE`. Another format, a driver, a filter, a callback, sizing from the destination
+or another conversion flag is a wall. The decoding is `sound.rs`'s, Rock Raiders' movies' own, now
+open to the crate, and unchanged; LEGO Chess's `sounds\chimp.wav` decodes through it to FFmpeg's
+PCM byte for byte. Only LEGO Chess imports MSACM32, so no released run moves.
+
 `SetCurrentDirectoryA` sets a directory by its full path, as `GetFullPathNameA` names it (#171). A
 relative name is the current directory's child, where it was taken as the whole directory; one
 rooted by either separator is on the current drive; a trailing separator goes; and `.` names where

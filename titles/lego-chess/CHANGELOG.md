@@ -197,3 +197,11 @@ digest and flip lines, its mix unchanged. Past the bumper the game sets its own 
 holds, and loads what is in them. The run stops at #153's wall, `MSACM32.dll!acmStreamOpen`, called
 from 0x0044FA83 at cursor 8,616,780,716 after 831 flips, as the game decodes `sounds\chimp.wav`, an
 MS ADPCM sound.
+
+Its sounds decode (#153, core 1.2.0): its sample loader (0x0044F950) opens an ACM stream from each MS
+ADPCM sound to PCM, sizes it, and decodes it, sixteen bits a sample, or eight for a sound of more
+than half a megabyte, which `MSACM32.dll!acmStreamOpen` stopped at. On the way to its room it decodes
+fifteen, twelve at 11,025 Hz and three at 22,050, all in one channel, to sixteen bits. The run no
+longer stops: past the bumper it presents its room from flip 832, at cursor 8,729,002,651 on a run
+with no route, the desk with the New Player form, a third of whose letters do not yet draw (#210),
+and waits there for a player, flipping.
