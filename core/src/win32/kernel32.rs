@@ -3362,17 +3362,42 @@ fn get_profile_string(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // CreateThread(security, stack bytes, start, parameter, flags, out id).
     let (start, parameter, flags) = (args[2], args[3], args[4]);
-
-    // A stack of its own, and a thread block of its own for `fs` to be based
-    // at. Both come off the guest heap, which is where everything the machine
-    // hands a guest comes from.
-    let bytes = if args[1] == 0 { THREAD_STACK } else { args[1] };
-    let stack = ctx.state.heap.alloc(bytes);
-    let block = ctx.state.heap.alloc(0x1000);
-    if stack == 0 || block == 0 {
+    // CREATE_SUSPENDED: made, and not run until somebody says so.
+    let Some(handle) = spawn(ctx, args[1], start, parameter, flags & 4 != 0)? else {
         // ERROR_NOT_ENOUGH_MEMORY, which is what a caller checks for.
         ctx.state.last_error = 8;
         return Ok(0);
+    };
+    if args[5] != 0 {
+        let id = ctx.state.next_thread_id;
+        ctx.mem.write_u32(args[5], id).map_err(Stop::Fault)?;
+    }
+    Ok(handle)
+}
+
+/// Make a guest thread that starts at `start` with `parameter`, on a stack
+/// of `stack_bytes` (the default for none), and hand back its handle: none
+/// when the heap has no room for its stack. It is the last of the machine's
+/// threads, and the newest thread id is its own.
+pub(super) fn spawn(
+    ctx: &mut Ctx<'_>,
+    stack_bytes: u32,
+    start: u32,
+    parameter: u32,
+    suspended: bool,
+) -> Result<Option<u32>, Stop> {
+    // A stack of its own, and a thread block of its own for `fs` to be based
+    // at. Both come off the guest heap, which is where everything the machine
+    // hands a guest comes from.
+    let bytes = if stack_bytes == 0 {
+        THREAD_STACK
+    } else {
+        stack_bytes
+    };
+    let stack = ctx.state.heap.alloc(bytes);
+    let block = ctx.state.heap.alloc(0x1000);
+    if stack == 0 || block == 0 {
+        return Ok(None);
     }
     let top = stack + bytes;
     crate::machine::write_tib(ctx.mem, block, top, stack, ctx.state.next_thread_id)
@@ -3401,8 +3426,6 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         manual: true,
         held: None,
     });
-    // CREATE_SUSPENDED: made, and not run until somebody says so.
-    let suspended = flags & 4 != 0;
     ctx.state.threads.push(crate::win32::GuestThread {
         cpu,
         handle,
@@ -3414,15 +3437,13 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         wake_at: 0,
         gives_up_at: 0,
         waiting_on: Vec::new(),
+        time_critical: false,
     });
-    if args[5] != 0 {
-        ctx.mem.write_u32(args[5], id).map_err(Stop::Fault)?;
-    }
     ctx.log.line(&format!(
         "thread {id} at {start:#010x}, stack {stack:#010x}+{bytes}{}",
         if suspended { ", suspended" } else { "" }
     ));
-    Ok(handle)
+    Ok(Some(handle))
 }
 
 /// How much stack a thread gets when it does not ask for a size.

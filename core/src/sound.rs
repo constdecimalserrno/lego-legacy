@@ -418,6 +418,24 @@ impl Mixer {
         true
     }
 
+    /// Whether the machine has a MIDI out: a synth, which only the player's
+    /// bank gives it (ADR-0008).
+    #[must_use]
+    pub fn midi_out(&self) -> bool {
+        self.synth.is_some()
+    }
+
+    /// Set the synth's own volume at a declared time, an attenuation in
+    /// 1/65,536 centibels: what the mix has not reached by then is heard at
+    /// the new volume, and what it has, was heard at the old. Without a synth
+    /// there is nothing to set.
+    pub fn midi_volume(&mut self, nanos: u64, mem: &dyn GuestMem, attenuation: i64) {
+        self.catch_up(nanos, mem);
+        if let Some(synth) = &mut self.synth {
+            synth.volume(attenuation);
+        }
+    }
+
     /// Stop a sound at a declared time: what the mix has not reached by then
     /// is not heard, and what it has, was.
     pub fn stop(&mut self, id: u32, nanos: u64) {

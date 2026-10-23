@@ -5,6 +5,7 @@
 use super::{stdcall, Ctx, Object, Shim};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use std::collections::VecDeque;
 
 pub const SHIMS: &[Shim] = &[
     stdcall("WINMM", "timeGetTime", 0, time_get_time),
@@ -23,6 +24,17 @@ pub const SHIMS: &[Shim] = &[
     stdcall("WINMM", "mciGetErrorStringA", 3, mci_error_string),
     stdcall("WINMM", "mciSendCommandA", 4, mci_send_command),
     stdcall("WINMM", "midiStreamOpen", 6, midi_stream_open),
+    stdcall("WINMM", "midiStreamClose", 1, midi_stream_close),
+    stdcall("WINMM", "midiStreamProperty", 3, midi_stream_property),
+    stdcall("WINMM", "midiStreamOut", 3, midi_stream_out),
+    stdcall("WINMM", "midiStreamRestart", 1, midi_stream_restart),
+    stdcall("WINMM", "midiStreamPause", 1, midi_stream_pause),
+    stdcall("WINMM", "midiStreamStop", 1, midi_stream_stop),
+    stdcall("WINMM", "midiOutGetDevCapsA", 3, midi_out_caps),
+    stdcall("WINMM", "midiOutSetVolume", 2, midi_out_volume),
+    stdcall("WINMM", "midiOutPrepareHeader", 3, midi_out_prepare),
+    stdcall("WINMM", "midiOutUnprepareHeader", 3, midi_out_unprepare),
+    stdcall("WINMM", "midiOutReset", 1, midi_out_reset),
 ];
 
 /// The `cdaudio` device: whether it is open; the title's Red Book pressing,
@@ -274,27 +286,667 @@ fn mci_send_command(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(answer)
 }
 
-/// midiStreamOpen(stream, device, count, callback, instance, flags): the
-/// declared machine has no MIDI port, until #154 gives it one and whenever
-/// the player has no bank after that (ADR-0008), so no device is in range,
-/// the mapper included: `MMSYSERR_BADDEVICEID`, which `midiStreamOpen`'s own
-/// page lists, and which Wine's conformance tests (`dlls/winmm/tests/midi.c`,
-/// `test_midi_outfns`) record every Windows they ran on answering for the
-/// mapper with no port. A stream of other than one device, or with nowhere to
-/// say which, is refused as invalid, as the same page lists. None is handed
-/// back: LEGO Chess takes any refusal as no music (0x0041360C), and its tune
-/// player opens it again while it has none (0x00413B6D).
+// The machine's MIDI out, as a title reaches it through WINMM's MIDI stream
+// (#154, ADR-0008). What every call answers is Windows' own, read from
+// Microsoft's page for it and from Wine's `dlls/winmm/winmm.c` and its
+// conformance tests (`dlls/winmm/tests/midi.c`, which pass on Windows), read
+// as documentation; what no title has asked for is a wall that names it.
+
+const MMSYSERR_BADDEVICEID: u32 = 2;
+const MMSYSERR_NOMEM: u32 = 7;
+const MMSYSERR_INVALPARAM: u32 = 11;
+const MIDIERR_UNPREPARED: u32 = 64;
+const MIDIERR_STILLPLAYING: u32 = 65;
+
+/// The device id of the MIDI mapper, and `midiStreamOpen`'s one callback
+/// kind a title uses.
+const MIDI_MAPPER: u32 = 0xffff_ffff;
+const CALLBACK_FUNCTION: u32 = 0x0003_0000;
+
+/// What a stream's callback is told, as `mmsystem.h` numbers them.
+const MOM_OPEN: u32 = 0x3c7;
+const MOM_CLOSE: u32 = 0x3c8;
+const MOM_DONE: u32 = 0x3c9;
+const MOM_POSITIONCB: u32 = 0x3ca;
+
+/// A `MIDIHDR`'s flags, and how much of one a call must be given: up to its
+/// `dwOffset`, as Wine's `midiStreamOut` and the conformance tests' smallest
+/// header have it.
+const MHDR_DONE: u32 = 1;
+const MHDR_PREPARED: u32 = 2;
+const MHDR_INQUEUE: u32 = 4;
+const MHDR_ISSTRM: u32 = 8;
+const MIDIHDR_LEAST: u32 = 28;
+
+/// A `MIDIEVENT`'s flags, in the high byte of its event.
+const MEVT_F_CALLBACK: u32 = 0x4000_0000;
+
+/// The machine's MIDI out as WINMM serves it: the player thread it plays a
+/// stream on, the stream open on it, and the calls the player owes the
+/// title.
+pub struct Midi {
+    /// The player, by its place among the machine's threads.
+    player: usize,
+    stream: Option<Stream>,
+    /// Calls the player owes the title, oldest first: the `MOM_DONE` of each
+    /// buffer a stop, a reset or a close returned.
+    owed: VecDeque<(u32, [u32; 5])>,
+}
+
+/// A MIDI stream a title has open: whom it calls back, its time division and
+/// tempo, the buffers it has queued and where it has played to.
+struct Stream {
+    handle: u32,
+    callback: u32,
+    instance: u32,
+    /// Ticks to a quarter note, and microseconds to a quarter note.
+    division: u32,
+    tempo: u32,
+    /// The headers queued, the first playing, and the offset of its next
+    /// event.
+    queue: VecDeque<u32>,
+    at: u32,
+    /// The stream's own time of the last event played, in nanoseconds, and
+    /// what the time division left over of it: a tick is rarely a whole
+    /// number of nanoseconds, and nothing is lost between events.
+    played: u64,
+    left_over: u128,
+    /// The declared nanosecond it was last restarted or paused at and its
+    /// own time then, and whether it has played on since.
+    clock: (u64, u64),
+    playing: bool,
+    stopped: bool,
+    /// The notes it has turned on and not off, a bit a key, by channel, and
+    /// the status a message without one runs on with.
+    sounding: [u128; 16],
+    running: u8,
+}
+
+impl Stream {
+    /// Note what a short message does to the notes sounding.
+    fn track(&mut self, message: u32) {
+        let [mut status, mut key, mut velocity, _] = message.to_le_bytes();
+        match status {
+            0..0x80 => (status, key, velocity) = (self.running, status, key),
+            0x80..0xf0 => self.running = status,
+            0xf0..0xf8 => self.running = 0,
+            _ => {}
+        }
+        let (channel, bit) = (usize::from(status & 0x0f), 1u128 << (key & 0x7f));
+        match status & 0xf0 {
+            0x90 if velocity > 0 => self.sounding[channel] |= bit,
+            0x80 | 0x90 => self.sounding[channel] &= !bit,
+            _ => {}
+        }
+    }
+}
+
+/// What the declared clock reads, in nanoseconds, as a shim sees it.
+fn now(ctx: &Ctx<'_>) -> u64 {
+    ctx.clock_millis * 1_000_000
+}
+
+/// The stream a handle names, if it is the one open.
+fn stream<'a>(ctx: &'a mut Ctx<'_>, handle: u32) -> Option<&'a mut Stream> {
+    ctx.state
+        .midi
+        .as_mut()?
+        .stream
+        .as_mut()
+        .filter(|s| s.handle == handle)
+}
+
+/// Hand the player something to do. It runs before the caller goes on, as
+/// Windows gives a time-critical thread it has just made ready the processor,
+/// and as Wine's caller waits for its player (`midistream_post_message_and_wait`).
+fn wake_the_player(state: &mut super::State) {
+    if let Some(midi) = &state.midi {
+        state.threads[midi.player].wake_at = 0;
+    }
+    state.yielded = true;
+}
+
+/// Send the synth a short message at a declared time: a message no synth
+/// hears is never dropped as if it were heard (#155).
+fn send(ctx: &mut Ctx<'_>, nanos: u64, message: u32) -> Result<(), Stop> {
+    if ctx.state.mixer.midi(nanos, message) {
+        return Ok(());
+    }
+    Err(Stop::NotWritten {
+        what: format!("a MIDI message {message:#08x} with no synth to hear it"),
+        caller: 0,
+    })
+}
+
+/// Return every buffer the stream has queued, `MHDR_DONE` set and out of the
+/// queue, as `midiStreamStop`'s and `midiOutReset`'s pages say: the player
+/// owes the callback a `MOM_DONE` for each, and makes them before the caller
+/// goes on.
+fn give_back(ctx: &mut Ctx<'_>, handle: u32) -> Result<(), Stop> {
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(());
+    };
+    let headers: Vec<u32> = stream.queue.drain(..).collect();
+    stream.at = 0;
+    let (callback, instance) = (stream.callback, stream.instance);
+    for &header in &headers {
+        let flags = ctx.mem.read_u32(header + 16).map_err(Stop::Fault)?;
+        let done = (flags | MHDR_DONE | MHDR_ISSTRM) & !MHDR_INQUEUE;
+        ctx.mem.write_u32(header + 16, done).map_err(Stop::Fault)?;
+        if let Some(midi) = ctx.state.midi.as_mut() {
+            midi.owed
+                .push_back((callback, [handle, MOM_DONE, instance, header, 0]));
+        }
+    }
+    if !headers.is_empty() {
+        wake_the_player(ctx.state);
+    }
+    Ok(())
+}
+
+/// Turn off the notes the stream turned on, as `midiStreamStop` does.
+fn notes_off(ctx: &mut Ctx<'_>, handle: u32) -> Result<(), Stop> {
+    let at = now(ctx);
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(());
+    };
+    let sounding = std::mem::take(&mut stream.sounding);
+    for (channel, keys) in (0u32..).zip(sounding) {
+        for key in (0..128).filter(|k| keys & (1u128 << k) != 0) {
+            send(ctx, at, 0x80 | channel | key << 8)?;
+        }
+    }
+    Ok(())
+}
+
+/// A wall for what no title asks of a stream.
+fn not_written(what: String) -> Result<u32, Stop> {
+    Err(Stop::NotWritten { what, caller: 0 })
+}
+
+/// midiStreamOpen(stream, device, count, callback, instance, flags).
+///
+/// The declared machine's MIDI out is the Microsoft GS Wavetable SW Synth,
+/// and the mapper, device -1, sends to it; it has one only with the player's
+/// bank (ADR-0008). Without it no device is in range, the mapper included:
+/// `MMSYSERR_BADDEVICEID`, which the call's own page lists and Wine's
+/// conformance tests record every Windows answering for the mapper with no
+/// port (#149). A stream of other than one device, or with nowhere to say
+/// which, is refused as invalid, as the same page and Wine's code have it. A
+/// stream opens paused, at Windows' 24 ticks a quarter note and 500,000
+/// microseconds to it, the defaults the conformance tests read back; its
+/// callback is told `MOM_OPEN` on the caller's thread before the call
+/// returns, as Wine's `midiStreamOpen` tells it. Its player is a thread of
+/// its own, made with the first stream and kept for every stream after it:
+/// LEGO Chess closes its stream and opens another at each change of tune.
 fn midi_stream_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    const MMSYSERR_BADDEVICEID: u32 = 2;
-    const MMSYSERR_INVALPARAM: u32 = 11;
-    let (stream, device, count) = (args[0], args[1], args[2]);
-    let answer = if stream == 0 || device == 0 || count != 1 {
+    let (stream_at, device_at, count, callback, instance, flags) =
+        (args[0], args[1], args[2], args[3], args[4], args[5]);
+    let answer = if stream_at == 0 || device_at == 0 || count != 1 {
         MMSYSERR_INVALPARAM
-    } else {
+    } else if !ctx.state.mixer.midi_out()
+        || ![MIDI_MAPPER, 0].contains(&ctx.mem.read_u32(device_at).map_err(Stop::Fault)?)
+    {
         MMSYSERR_BADDEVICEID
+    } else {
+        open_stream(ctx, stream_at, callback, instance, flags)?
     };
     ctx.log.line(&format!("midi stream open answered {answer}"));
     Ok(answer)
+}
+
+fn open_stream(
+    ctx: &mut Ctx<'_>,
+    stream_at: u32,
+    callback: u32,
+    instance: u32,
+    flags: u32,
+) -> Result<u32, Stop> {
+    if flags != CALLBACK_FUNCTION || callback == 0 {
+        return not_written(format!(
+            "WINMM.dll!midiStreamOpen: a callback {callback:#x} of flags {flags:#x}"
+        ));
+    }
+    if ctx.state.midi.as_ref().is_some_and(|m| m.stream.is_some()) {
+        return not_written("WINMM.dll!midiStreamOpen: a second stream at once".to_owned());
+    }
+    if ctx.state.midi.is_none() {
+        let start = ctx.boundary.bind_midi_player();
+        if super::kernel32::spawn(ctx, 0, start, 0, false)?.is_none() {
+            return Ok(MMSYSERR_NOMEM);
+        }
+        let player = ctx.state.threads.len() - 1;
+        let thread = &mut ctx.state.threads[player];
+        // Time-critical, as Wine makes its player; with no stream to play
+        // yet, it waits.
+        thread.time_critical = true;
+        thread.wake_at = u64::MAX;
+        ctx.state.midi = Some(Midi {
+            player,
+            stream: None,
+            owed: VecDeque::new(),
+        });
+    }
+    let handle = ctx.state.give(Object::MidiStream);
+    ctx.mem.write_u32(stream_at, handle).map_err(Stop::Fault)?;
+    let clock = (now(ctx), 0);
+    if let Some(midi) = ctx.state.midi.as_mut() {
+        midi.stream = Some(Stream {
+            handle,
+            callback,
+            instance,
+            division: 24,
+            tempo: 500_000,
+            queue: VecDeque::new(),
+            at: 0,
+            played: 0,
+            left_over: 0,
+            clock,
+            playing: false,
+            stopped: false,
+            sounding: [0; 16],
+            running: 0,
+        });
+    }
+    ctx.call_guest = Some((callback, vec![handle, MOM_OPEN, instance, 0, 0]));
+    Ok(0)
+}
+
+/// midiStreamClose(stream): it stops the stream first, as Wine's does, its
+/// queued buffers coming back to the callback on the player; then the
+/// callback is told `MOM_CLOSE` on the caller's thread, and the handle names
+/// nothing.
+fn midi_stream_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let handle = args[0];
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    let (callback, instance) = (stream.callback, stream.instance);
+    if ctx.state.midi.as_ref().map(|m| m.player) == Some(ctx.state.thread) {
+        return not_written("WINMM.dll!midiStreamClose from its own callback".to_owned());
+    }
+    notes_off(ctx, handle)?;
+    give_back(ctx, handle)?;
+    if let Some(midi) = ctx.state.midi.as_mut() {
+        midi.stream = None;
+    }
+    ctx.state.close(handle);
+    ctx.call_guest = Some((callback, vec![handle, MOM_CLOSE, instance, 0, 0]));
+    Ok(0)
+}
+
+/// midiStreamProperty(stream, data, property): the time division, set while
+/// the stream does not play, as the call's page says and Wine refuses it
+/// with `MMSYSERR_INVALPARAM` while it plays. Getting a property, the tempo,
+/// and a division in SMPTE frames are walls: no title asks for them.
+fn midi_stream_property(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const MIDIPROP_SET_TIMEDIV: u32 = 0x8000_0001;
+    let (handle, data, property) = (args[0], args[1], args[2]);
+    if stream(ctx, handle).is_none() {
+        return Ok(MMSYSERR_INVALHANDLE);
+    }
+    if property != MIDIPROP_SET_TIMEDIV {
+        return not_written(format!(
+            "WINMM.dll!midiStreamProperty: property {property:#x}"
+        ));
+    }
+    let size = ctx.mem.read_u32(data).map_err(Stop::Fault)?;
+    let division = ctx.mem.read_u32(data + 4).map_err(Stop::Fault)?;
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    if size != 8 || stream.playing {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    if division == 0 || division & 0x8000 != 0 {
+        return not_written(format!(
+            "WINMM.dll!midiStreamProperty: a time division of {division:#x}"
+        ));
+    }
+    stream.division = division;
+    stream.left_over = 0;
+    Ok(0)
+}
+
+/// midiStreamOut(stream, header, size): queue a prepared buffer, as Wine's
+/// does: a header too small, with no data, more recorded than it holds, or
+/// recorded in other than whole words is invalid; one not prepared is
+/// `MIDIERR_UNPREPARED`, and one already queued `MIDIERR_STILLPLAYING`. It
+/// plays from where the queue reaches it.
+fn midi_stream_out(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, header, size) = (args[0], args[1], args[2]);
+    if size < MIDIHDR_LEAST || header == 0 {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    let read = |o: u32| ctx.mem.read_u32(header + o).map_err(Stop::Fault);
+    let (data, length, recorded, flags) = (read(0)?, read(4)?, read(8)?, read(16)?);
+    if data == 0 || recorded > length || recorded % 4 != 0 {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    if flags & MHDR_PREPARED == 0 {
+        return Ok(MIDIERR_UNPREPARED);
+    }
+    if flags & MHDR_INQUEUE != 0 {
+        return Ok(MIDIERR_STILLPLAYING);
+    }
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    if stream.stopped {
+        return not_written("WINMM.dll!midiStreamOut on a stream stopped".to_owned());
+    }
+    stream.queue.push_back(header);
+    let playing = stream.playing;
+    // Queued, and not done; Windows 9x sets `MHDR_ISSTRM` only once it is
+    // done, as the conformance tests record.
+    let queued = (flags | MHDR_INQUEUE) & !MHDR_DONE;
+    ctx.mem
+        .write_u32(header + 16, queued)
+        .map_err(Stop::Fault)?;
+    if playing {
+        wake_the_player(ctx.state);
+    }
+    Ok(0)
+}
+
+/// midiStreamRestart(stream): it plays on from where it was paused, the
+/// time it was paused not counted, as the conformance tests measure; one
+/// already playing is left as it is, as the call's page says.
+fn midi_stream_restart(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let at = now(ctx);
+    let Some(stream) = stream(ctx, args[0]) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    if stream.stopped {
+        return not_written("WINMM.dll!midiStreamRestart on a stream stopped".to_owned());
+    }
+    if !stream.playing {
+        stream.clock = (at, stream.clock.1);
+        stream.playing = true;
+        wake_the_player(ctx.state);
+    }
+    Ok(0)
+}
+
+/// midiStreamPause(stream): where it has got to is kept, as the call's page
+/// says; one already paused is left as it is. Notes sounding go on sounding:
+/// nothing documents a pause turning them off, and Wine's does not.
+fn midi_stream_pause(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let at = now(ctx);
+    let Some(stream) = stream(ctx, args[0]) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    if stream.stopped {
+        return not_written("WINMM.dll!midiStreamPause on a stream stopped".to_owned());
+    }
+    if stream.playing {
+        let (since, then) = stream.clock;
+        stream.clock = (at, then + at.saturating_sub(since));
+        stream.playing = false;
+    }
+    Ok(0)
+}
+
+/// midiStreamStop(stream): it turns off the notes the stream turned on and
+/// returns its queued buffers to the callback, as the call's page says, and
+/// goes back to its start, as Wine's does. A stopped stream is only reset
+/// or closed after: what else Windows answers on one is not documented.
+fn midi_stream_stop(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, at) = (args[0], now(ctx));
+    if stream(ctx, handle).is_none() {
+        return Ok(MMSYSERR_INVALHANDLE);
+    }
+    notes_off(ctx, handle)?;
+    give_back(ctx, handle)?;
+    if let Some(stream) = stream(ctx, handle) {
+        (stream.played, stream.left_over, stream.clock) = (0, 0, (at, 0));
+        (stream.playing, stream.stopped) = (false, true);
+    }
+    Ok(0)
+}
+
+/// midiOutReset(stream): it returns the stream's queued buffers to the
+/// callback, and sends a note-off for every note on every channel and turns
+/// each channel's sustain off, as the call's page says.
+fn midi_out_reset(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, at) = (args[0], now(ctx));
+    let Some(stream) = stream(ctx, handle) else {
+        return Ok(MMSYSERR_INVALHANDLE);
+    };
+    stream.sounding = [0; 16];
+    give_back(ctx, handle)?;
+    for channel in 0..16 {
+        for key in 0..128 {
+            send(ctx, at, 0x80 | channel | key << 8)?;
+        }
+        send(ctx, at, 0xb0 | channel | 64 << 8)?;
+    }
+    Ok(0)
+}
+
+/// midiOutPrepareHeader(stream, header, size): a header too small, or a
+/// stream buffer over 64K, is invalid, as the call's page says; one prepared
+/// already is left as it is. Windows 9x leaves the other flags as they were,
+/// as the conformance tests record.
+fn midi_out_prepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, header, size) = (args[0], args[1], args[2]);
+    if stream(ctx, handle).is_none() {
+        return Ok(MMSYSERR_INVALHANDLE);
+    }
+    if header == 0 || size < MIDIHDR_LEAST {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    if ctx.mem.read_u32(header + 4).map_err(Stop::Fault)? > 0x1_0000 {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    let flags = ctx.mem.read_u32(header + 16).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(header + 16, flags | MHDR_PREPARED)
+        .map_err(Stop::Fault)?;
+    Ok(0)
+}
+
+/// midiOutUnprepareHeader(stream, header, size): one not prepared is left as
+/// it is, and one still queued is `MIDIERR_STILLPLAYING`, as the call's page
+/// says and the conformance tests check in that order.
+fn midi_out_unprepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, header, size) = (args[0], args[1], args[2]);
+    if stream(ctx, handle).is_none() {
+        return Ok(MMSYSERR_INVALHANDLE);
+    }
+    if header == 0 || size < MIDIHDR_LEAST {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    let flags = ctx.mem.read_u32(header + 16).map_err(Stop::Fault)?;
+    if flags & MHDR_PREPARED == 0 {
+        return Ok(0);
+    }
+    if flags & MHDR_INQUEUE != 0 {
+        return Ok(MIDIERR_STILLPLAYING);
+    }
+    ctx.mem
+        .write_u32(header + 16, flags & !MHDR_PREPARED)
+        .map_err(Stop::Fault)?;
+    Ok(0)
+}
+
+/// What the MIDI mapper says it is, as `midiOutGetDevCapsA` writes its
+/// `MIDIOUTCAPSA`: what Windows answers for its mapper over the GS Wavetable
+/// synth, as Wine's conformance tests print it on Windows 11
+/// (test.winehq.org, `winmm:midi`): "Microsoft MIDI Mapper", manufacturer 1
+/// (`MM_MICROSOFT`), product 1 (`MM_MIDI_MAPPER`), `MOD_MAPPER`, no voices or
+/// notes of its own, and support 9, `MIDICAPS_VOLUME | MIDICAPS_STREAM`, its
+/// synth's volume and streams, as Wine's midimap notes the mapper answers.
+/// The channel mask is every channel, the GS synth's, which Matthew van
+/// Eerde's `midienum` prints for it (2012); the driver version is zero, no
+/// answer seen having printed one. LEGO Chess reads only the support.
+fn mapper_caps() -> Vec<u8> {
+    let mut caps = Vec::with_capacity(52);
+    caps.extend_from_slice(&1u16.to_le_bytes());
+    caps.extend_from_slice(&1u16.to_le_bytes());
+    caps.extend_from_slice(&0u32.to_le_bytes());
+    let mut name = [0u8; 32];
+    name[..21].copy_from_slice(b"Microsoft MIDI Mapper");
+    caps.extend_from_slice(&name);
+    for half in [5u16, 0, 0, 0xffff] {
+        caps.extend_from_slice(&half.to_le_bytes());
+    }
+    caps.extend_from_slice(&9u32.to_le_bytes());
+    caps
+}
+
+/// midiOutGetDevCapsA(device, caps, size): the mapper's, as much of them as
+/// the caller has room for. Without a MIDI out the mapper is out of range,
+/// as the conformance tests record Windows answering with no MIDI device. Any
+/// other device, or a handle, is a wall: LEGO Chess asks only the mapper.
+fn midi_out_caps(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (device, caps, size) = (args[0], args[1], args[2]);
+    if !ctx.state.mixer.midi_out() {
+        return Ok(MMSYSERR_BADDEVICEID);
+    }
+    if device != MIDI_MAPPER {
+        return not_written(format!("WINMM.dll!midiOutGetDevCapsA: device {device:#x}"));
+    }
+    if caps == 0 {
+        return Ok(MMSYSERR_INVALPARAM);
+    }
+    let bytes = mapper_caps();
+    let take = bytes.len().min(size as usize);
+    ctx.mem.write(caps, &bytes[..take]).map_err(Stop::Fault)?;
+    Ok(0)
+}
+
+/// midiOutSetVolume(stream, volume): the synth's volume, from the declared
+/// moment on. Microsoft's page has 0xFFFF full and 0x0000 silence,
+/// "interpreted logarithmically", so that each step up is heard as the same
+/// rise: so it is decibels, straight from 0 dB at 0xFFFF down to -96 dB, the
+/// bottom of sixteen-bit sound and the synth's own end of sound, at 0x0000.
+/// The mapper has no `MIDICAPS_LRVOLUME`, so the low word is the volume and
+/// the high one is not heard, as the page says of such a device. A device id,
+/// or any handle but the stream's, is a wall: LEGO Chess sets only its
+/// stream's.
+fn midi_out_volume(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (handle, volume) = (args[0], args[1]);
+    if stream(ctx, handle).is_none() {
+        return not_written(format!(
+            "WINMM.dll!midiOutSetVolume of {handle:#x}, which is no stream open"
+        ));
+    }
+    let quieter = i64::from(0xffff - (volume & 0xffff));
+    let attenuation = (960i64 << 16) * quieter / 0xffff;
+    let at = now(ctx);
+    ctx.state.mixer.midi_volume(at, &*ctx.mem, attenuation);
+    Ok(0)
+}
+
+/// The player's turn (#154), on its own thread: the next call it owes the
+/// title, or else every event of its stream now due played, until one asks
+/// for the callback or a buffer is done, and then that callback. With
+/// nothing due it waits for the millisecond the next event is due in, and
+/// with nothing to play, for a call to give it something.
+///
+/// An event's moment is its delta in ticks at the tempo then in force, from
+/// the one before it, as Wine's player waits it. A short message goes to the
+/// synth at that very nanosecond, which the mix hears from there unless it
+/// has passed it already. A tempo applies to the deltas after it; a no-op
+/// does nothing but call back; anything else is a wall. Each event played
+/// leaves its offset in the header's `dwOffset`, as Windows 9x does, and one
+/// marked `MEVT_F_CALLBACK` calls back with `MOM_POSITIONCB`. A buffer
+/// played to its end is done, out of the queue, and calls back with
+/// `MOM_DONE`, as Wine's player does.
+pub(crate) fn player_turn(ctx: &mut Ctx<'_>) -> Result<Option<(u32, Vec<u32>)>, Stop> {
+    let at = now(ctx);
+    let owed = ctx.state.midi.as_mut().and_then(|m| m.owed.pop_front());
+    if let Some((callback, args)) = owed {
+        return Ok(Some(call_back(ctx, callback, &args)));
+    }
+    loop {
+        let Some(stream) = ctx
+            .state
+            .midi
+            .as_mut()
+            .and_then(|m| m.stream.as_mut())
+            .filter(|s| s.playing)
+        else {
+            return Ok(wait(ctx, u64::MAX));
+        };
+        let Some(&header) = stream.queue.front() else {
+            return Ok(wait(ctx, u64::MAX));
+        };
+        let (handle, callback, instance) = (stream.handle, stream.callback, stream.instance);
+        let read = |at: u32| ctx.mem.read_u32(at).map_err(Stop::Fault);
+        let (data, recorded) = (read(header)?, read(header + 8)?);
+        if stream.at + 12 > recorded {
+            stream.queue.pop_front();
+            stream.at = 0;
+            let done = (read(header + 16)? | MHDR_DONE | MHDR_ISSTRM) & !MHDR_INQUEUE;
+            ctx.mem.write_u32(header + 16, done).map_err(Stop::Fault)?;
+            let args = [handle, MOM_DONE, instance, header, 0];
+            return Ok(Some(call_back(ctx, callback, &args)));
+        }
+        let offset = stream.at;
+        let (delta, event) = (read(data + offset)?, read(data + offset + 8)?);
+        let ticks = u128::from(delta) * u128::from(stream.tempo) * 1000 + stream.left_over;
+        let division = u128::from(stream.division);
+        let moment = stream.played + u64::try_from(ticks / division).unwrap_or(u64::MAX);
+        let due = (stream.clock.0 + moment).saturating_sub(stream.clock.1);
+        if due > at {
+            return Ok(wait(ctx, due.div_ceil(1_000_000)));
+        }
+        (stream.played, stream.left_over) = (moment, ticks % division);
+        stream.at += 12;
+        let parameter = event & 0x00ff_ffff;
+        let short = match (event & !MEVT_F_CALLBACK) >> 24 {
+            // MEVT_SHORTMSG, MEVT_TEMPO and MEVT_NOP.
+            0x00 => {
+                stream.track(parameter);
+                Some(parameter)
+            }
+            0x01 => {
+                stream.tempo = parameter;
+                None
+            }
+            0x02 => None,
+            kind => {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "a MIDI stream event of type {kind:#04x}, at {offset} in {header:#x}"
+                    ),
+                    caller: 0,
+                })
+            }
+        };
+        ctx.mem
+            .write_u32(header + 28, offset)
+            .map_err(Stop::Fault)?;
+        if let Some(message) = short {
+            send(ctx, due, message)?;
+        }
+        if event & MEVT_F_CALLBACK != 0 {
+            let args = [handle, MOM_POSITIONCB, instance, header, 0];
+            return Ok(Some(call_back(ctx, callback, &args)));
+        }
+    }
+}
+
+/// The player waits until a declared millisecond: none, for a call to give
+/// it something to do.
+fn wait(ctx: &mut Ctx<'_>, until: u64) -> Option<(u32, Vec<u32>)> {
+    let running = ctx.state.thread;
+    ctx.state.threads[running].wake_at = until;
+    None
+}
+
+/// The player calls the title back, and says so in a traced run.
+fn call_back(ctx: &mut Ctx<'_>, callback: u32, args: &[u32; 5]) -> (u32, Vec<u32>) {
+    let millis = ctx.clock_millis;
+    ctx.log.at(crate::cli::Trace::Shims, || {
+        format!(
+            "midi player calls back {:#x} with {:#x} at {millis} ms",
+            args[1], args[3]
+        )
+    });
+    (callback, args.to_vec())
 }
 
 fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {

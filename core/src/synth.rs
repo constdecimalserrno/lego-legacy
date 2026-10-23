@@ -48,8 +48,9 @@
 //!   block's own arithmetic, swings it both. The example is taken.
 //! - **Gain is added up in centibels and stops at 0 dB,** as the
 //!   specification's summing node does, and 0 dB there is full scale: nothing
-//!   further scales the synth in the mix. Pan is the specification's equal
-//!   power.
+//!   further scales the synth in the mix but the device's own volume, which a
+//!   title sets with `midiOutSetVolume` (#154). Pan is the specification's
+//!   equal power.
 //! - **A drum's key group cuts its others off in 15 ms,** the errata's
 //!   preference.
 //! - **A variation the bank lacks** plays its program's capital tone, in bank
@@ -505,6 +506,9 @@ pub struct Synth {
     /// on with.
     running: u8,
     started: u64,
+    /// The device's own volume, as `midiOutSetVolume` sets it, as an
+    /// amplitude in Q16 over everything it plays: 1.0 until it is set.
+    gain: i64,
 }
 
 impl Synth {
@@ -519,6 +523,7 @@ impl Synth {
             queue: VecDeque::new(),
             running: 0,
             started: 0,
+            gain: 1 << 16,
         };
         for channel in 0..16 {
             synth.program(channel, 0);
@@ -532,6 +537,14 @@ impl Synth {
     pub fn message(&mut self, frame: u64, message: u32) {
         let at = self.queue.partition_point(|(f, _)| *f <= frame);
         self.queue.insert(at, (frame, message));
+    }
+
+    /// Set the device's own volume, an attenuation in 1/65,536 centibels
+    /// over all it plays, from the next frame rendered: none at all leaves
+    /// every sample as it was, and -96 dB or more is silence, as it is for a
+    /// voice (#154).
+    pub fn volume(&mut self, attenuation: i64) {
+        self.gain = amplitude(attenuation) as i64;
     }
 
     /// One frame of the mix, both sides, after every message heard from it.
@@ -552,7 +565,7 @@ impl Synth {
             out[1] += right;
         }
         self.voices.retain(|v| !v.done());
-        out.map(|s| s.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+        out.map(|s| ((s * self.gain) >> 16).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
     }
 
     fn apply(&mut self, message: u32) {

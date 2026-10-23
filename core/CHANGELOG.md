@@ -5,6 +5,47 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+LEGO Chess's MIDI stream runs as Windows runs it, on the declared Microsoft GS Wavetable SW Synth
+(#154, ADR-0008). Each call answers as Windows does, from Microsoft's page for it and from Wine's
+`dlls/winmm/winmm.c` and its conformance tests (`dlls/winmm/tests/midi.c`), which pass on Windows,
+read as documentation. No title hears it yet: the machine has a MIDI out only with the player's bank
+(#156), and without one `midiStreamOpen` and the mapper's caps answer `MMSYSERR_BADDEVICEID`, as
+before.
+
+- WINMM's `midiStreamOpen`, `midiStreamClose`, `midiStreamProperty`, `midiStreamOut`,
+  `midiStreamRestart`, `midiStreamPause` and `midiStreamStop`, and `midiOutGetDevCapsA`,
+  `midiOutSetVolume`, `midiOutPrepareHeader`, `midiOutUnprepareHeader` and `midiOutReset`, on the
+  MIDI mapper or the synth, with a `CALLBACK_FUNCTION`. A stream opens paused at Windows' 24 ticks
+  and 500,000 µs a quarter note, and its callback hears `MOM_OPEN` there. It plays each `MIDIEVENT`
+  at its delta in ticks at the tempo then in force, a short message going to the synth at that
+  nanosecond and a tempo applying to the deltas after it; an event marked `MEVT_F_CALLBACK` calls
+  back `MOM_POSITIONCB` with `dwOffset` on it, and a buffer played to its end `MOM_DONE`. Pausing
+  keeps its place and does not count the pause. Stop turns off the notes it turned on, reset sends a
+  note-off for every note and turns sustain off, and both return the queued buffers; close stops
+  first and ends with `MOM_CLOSE`. What no title asks for is a wall: another kind of callback,
+  getting a property or setting the tempo, a SMPTE division, long and comment events, and a stopped
+  stream played again.
+- The mapper's caps are what Windows 11 answers for it, as Wine's tests print them there:
+  "Microsoft MIDI Mapper", `MOD_MAPPER`, support 9 (`MIDICAPS_VOLUME | MIDICAPS_STREAM`).
+- `midiOutSetVolume` sets the synth's own volume (`Synth::volume`, through `Mixer::midi_volume`):
+  decibels straight from 0 dB at 0xFFFF to -96 dB at 0x0000, Microsoft's "interpreted
+  logarithmically" with its silence at the bottom of sixteen-bit sound, the low word alone, since the
+  mapper has no `MIDICAPS_LRVOLUME`. LEGO Chess's own 100 % is 0xDAC0, 14 dB down. Unset, the synth's
+  samples are as they were, so #155's pins hold.
+- The callback runs on WINMM's player, a guest thread the machine makes with the first stream
+  (`kernel32::spawn`, which `CreateThread` now goes through too), standing at a boundary entry of its
+  own between callbacks. It is time-critical, as Wine makes its player: the scheduler gives it the
+  processor ahead of every other thread whenever it can run, so it keeps it until it waits, as
+  Windows runs such a thread on a machine of one processor, and a callback is never interleaved with
+  the title's own code (ADR-0005). A call that hands it work makes its caller give way, so a stop's
+  buffers are back before the caller goes on. A callback that waits for another thread is a wall. No
+  released title makes a stream, so none has such a thread, and no released run moves.
+- `tests/midi.rs` plays two buffers written as LEGO Chess's converter writes them, on a bank of one
+  ramp: every callback at its declared millisecond, a refill from inside the callback, the event it
+  sets waking the main thread's wait, the notes heard from the frames they are due at, and the same
+  every run; stop, reset and close each returning both buffers before their caller goes on; the
+  mapper's caps; and no device without a bank.
+
 AVIFile decodes 16-bit Microsoft Video 1 (`CRAM`, `MSVC`, `WHAM`) streams (#152), written in
 `msv1.rs` from the public 4×4 block format description (skip, solid 1-colour, 2-colour, and
 8-colour 2×2-quadrant blocks in 15-bit RGB555, walked bottom-to-top and left-to-right).

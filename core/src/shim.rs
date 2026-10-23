@@ -43,6 +43,9 @@ pub enum Entry {
     /// Where a guest thread returns to when its own function is done
     /// (ADR-0005): reaching it ends that thread rather than the run.
     ThreadEnd,
+    /// Where WINMM's MIDI stream player thread stands between the callbacks
+    /// it makes (#154): reaching it is the player's turn.
+    MidiPlayer,
 }
 
 /// The addresses a title's imports were bound to, and what stands behind each.
@@ -153,6 +156,15 @@ impl Boundary {
             return address(slot);
         }
         self.push(Entry::ThreadEnd)
+    }
+
+    /// Where WINMM's MIDI stream player thread stands. One address serves
+    /// the machine's one player.
+    pub fn bind_midi_player(&mut self) -> u32 {
+        if let Some(slot) = self.slots.iter().position(|e| *e == Entry::MidiPlayer) {
+            return address(slot);
+        }
+        self.push(Entry::MidiPlayer)
     }
 
     /// Give an interface's slots addresses of their own, and hand back the

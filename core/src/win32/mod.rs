@@ -136,6 +136,9 @@ pub enum Object {
     Mapping { at: u32, len: u32 },
     /// A registry key the guest has open.
     Key { path: String },
+    /// A MIDI stream a title has open; what it is playing is in `State::midi`
+    /// (#154).
+    MidiStream,
     /// A multimedia file over guest memory, and where it is reading; `owned`
     /// when the machine put the file there and frees it on close.
     Mmio {
@@ -210,6 +213,13 @@ pub struct GuestThread {
     /// The handles it is parked on, while it waits for them. Signalling any
     /// of them is what wakes it before its timeout runs out (#60, #130).
     pub waiting_on: Vec<u32>,
+    /// It runs whenever it can run, ahead of every other thread, and keeps
+    /// the processor until it waits: as Windows runs a thread of
+    /// `THREAD_PRIORITY_TIME_CRITICAL` on a machine of one processor. Only
+    /// WINMM's MIDI stream player is, as Wine's `midiStreamOpen` makes it
+    /// (#154); the priority a title asks for its own threads is not honoured
+    /// (`SetThreadPriority`).
+    pub time_critical: bool,
 }
 
 /// Everything the guest holds that is not memory.
@@ -337,6 +347,9 @@ pub struct State {
     pub frame_getters: BTreeMap<u32, avifile::Getter>,
     /// The CD audio device.
     pub cd: winmm::CdAudio,
+    /// The MIDI out's player and the stream on it, once a title has opened
+    /// one (#154).
+    pub midi: Option<winmm::Midi>,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// Which virtual keys have gone down since the guest last asked
@@ -454,6 +467,7 @@ impl State {
                 wake_at: 0,
                 gives_up_at: 0,
                 waiting_on: Vec::new(),
+                time_critical: false,
             }],
             thread: 0,
             next_thread_id: crate::machine::THREAD_ID,
@@ -472,6 +486,7 @@ impl State {
             movie_bytes: BTreeMap::new(),
             frame_getters: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
+            midi: None,
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
             installed_files: 0,

@@ -535,6 +535,22 @@ impl Machine {
                     self.switch_thread(log);
                     None
                 }
+                // A time-critical thread waits only at its own turn. Inside
+                // a callback the machine runs on it, the title's threads
+                // would run in the middle of the callback, and the calls the
+                // machine has parked are one stack for every thread (#154).
+                // ponytail: a wall; a title whose MIDI callback waits wants
+                // each thread's parked calls kept apart.
+                Err(Stop::Blocked)
+                    if self.state.threads[self.state.thread].time_critical
+                        && self.boundary.at(self.cpu.eip)
+                            != Some(&crate::shim::Entry::MidiPlayer) =>
+                {
+                    Some(Outcome::Wall {
+                        what: "a callback WINMM's MIDI player made waits for another thread"
+                            .to_owned(),
+                    })
+                }
                 // Waiting for another thread: the machine leaves the call
                 // where it is, and this thread makes it again when it comes
                 // back round (ADR-0005).
@@ -1098,6 +1114,7 @@ impl Machine {
                         win32::kernel32::end_thread(&mut self.state, self.cpu.r[EAX]);
                         return Err(Stop::ThreadEnded);
                     }
+                    Some(Entry::MidiPlayer) => return self.midi_player(log),
                     // The exception walk ran out of handlers (#54).
                     Some(Entry::Unhandled { what }) => {
                         return Err(Stop::NotWritten {
@@ -1732,9 +1749,19 @@ impl Machine {
             }
         }
         let now = self.clock.millis();
-        let next = (1..=count)
-            .map(|step| (running + step) % count)
-            .find(|i| runnable_at(&self.state.threads[*i], now));
+        // A time-critical thread runs ahead of every other whenever it can,
+        // and so keeps the processor until it waits: a callback the machine
+        // runs on one is never interleaved with the title's own code (#154).
+        let next = self
+            .state
+            .threads
+            .iter()
+            .position(|t| t.time_critical && runnable_at(t, now))
+            .or_else(|| {
+                (1..=count)
+                    .map(|step| (running + step) % count)
+                    .find(|i| runnable_at(&self.state.threads[*i], now))
+            });
         let Some(next) = next else {
             // Nothing else can run; whoever was running carries on, and if it
             // has ended too the run is over by its own exit.
@@ -1825,6 +1852,20 @@ impl Machine {
         let before = self.cpu.r[crate::cpu::ESP];
         self.push_call(function, args)?;
         self.continuations.push((resume_at, answer, before));
+        Ok(())
+    }
+
+    /// WINMM's MIDI stream player takes its turn (#154): it calls the title's
+    /// callback on its own thread, coming back here when the callback
+    /// returns, or it waits until its stream's next event is due.
+    fn midi_player(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let here = self.cpu.eip;
+        let mut ctx = self.ctx(log);
+        let Some((callback, args)) = win32::winmm::player_turn(&mut ctx)? else {
+            return Err(Stop::Blocked);
+        };
+        self.call_guest(callback, &args, here, 0)?;
+        self.clock.retire();
         Ok(())
     }
 

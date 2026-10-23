@@ -34,3 +34,14 @@ an event a device would have signalled, and on this machine the device is the ma
 is over as soon as it is asked for — which is what it has always done here, and what Hot Wheels'
 race is paced by. And when every thread left is waiting for another with no hour at all, the run
 stops and says so, rather than looking busy for ever.
+
+## The machine's own threads
+
+A title's callback can run on a thread the machine makes rather than the title. WINMM calls the
+callback a title gives `midiStreamOpen` on its own player thread, so the machine makes one with the
+first stream and runs the callback there (#154). That thread is time-critical, as Wine makes its
+player: it runs ahead of every other thread whenever it can, and so keeps the processor until it
+waits, as Windows runs a time-critical thread on a machine of one processor. A callback the machine
+runs on it is over before the title's own code goes on, which the machine's one stack of parked
+calls needs; a callback that waits for another thread is a wall. The priorities a title asks for its
+own threads are still not honoured.
