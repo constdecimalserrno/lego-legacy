@@ -356,6 +356,9 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         Kind::Rdtsc => {
             cpu.r[super::EAX] = (cpu.tsc & 0xffff_ffff) as u32;
             cpu.r[super::EDX] = (cpu.tsc >> 32) as u32;
+            // A time the clock's millisecond does not cover: a pass that
+            // reads it is never passed in one step (#217).
+            mem.unwatch();
         }
         Kind::Mov => {
             let src = insn.src.expect("mov has a source");

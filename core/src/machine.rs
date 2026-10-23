@@ -699,7 +699,8 @@ impl Machine {
         one: bool,
     ) -> Option<Outcome> {
         const BURST: u64 = 1 << 16;
-        self.spins.allow(budget, !one && log.trace() < Trace::Shims);
+        self.spins
+            .allow(budget, BURST, !one && log.trace() < Trace::Shims);
         let mut moved = false;
         loop {
             match self.turn {

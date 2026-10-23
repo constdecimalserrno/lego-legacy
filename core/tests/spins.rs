@@ -13,6 +13,8 @@
 //! as `threads.rs` assembles its own.
 
 use lego_legacy_core::cli::Trace;
+use lego_legacy_core::cpu::x87::X87;
+use lego_legacy_core::cpu::Cpu;
 use lego_legacy_core::guest::GuestMem;
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::{Finish, Machine, Outcome, STACK_TOP};
@@ -221,9 +223,23 @@ fn twice(budget: u64, guest: &dyn Fn(&mut Guest)) -> (Guest, Guest) {
 /// the same registers in every thread, the same memory, and the same mix.
 fn assert_one_machine(run: &Guest, every: &Guest) {
     assert_eq!(run.finish, every.finish, "the same end");
-    assert_eq!(run.machine.cpu, every.machine.cpu, "the same registers");
-    let threads = |g: &Guest| -> Vec<_> { g.machine.state.threads.iter().map(|t| t.cpu).collect() };
-    assert_eq!(threads(run), threads(every), "every thread's registers");
+    let threads = |g: &Guest| -> Vec<Cpu> {
+        std::iter::once(g.machine.cpu)
+            .chain(g.machine.state.threads.iter().map(|t| t.cpu))
+            .collect()
+    };
+    let (ours, theirs) = (threads(run), threads(every));
+    assert_eq!(ours.len(), theirs.len(), "as many threads");
+    for (a, b) in ours.iter().zip(&theirs) {
+        // Every register, the floating-point unit's by its bits: `==` on a
+        // float calls no NaN equal to itself.
+        let rest = |c: &Cpu| Cpu {
+            fpu: X87::new(),
+            ..*c
+        };
+        assert_eq!(rest(a), rest(b), "the same registers");
+        assert!(a.fpu.same_bits(&b.fpu), "the same floating-point unit");
+    }
     let data = |g: &Guest| -> Vec<u32> {
         (0..64)
             .map(|n| g.machine.arena.read_u32(word(n)).expect("in the arena"))
@@ -372,8 +388,8 @@ fn a_spin_while_a_sound_plays_mixes_what_running_every_pass_mixes() {
     const LOCK: u8 = 11;
     const PLAY: u8 = 12;
     const UNLOCK: u8 = 19;
-    // A second of 16-bit stereo at the mix's rate is this many bytes; the
-    // buffer holds a ramp of a 1,024 frames, played round and round.
+    // 1,024 frames of 16-bit stereo, about 46 ms at the mix's rate: a ramp,
+    // played round and round through the 120 ms the guest waits.
     const BYTES: u32 = 4096;
     const RAMP: u32 = 0x0050_1000;
     let (desc, format) = (word(32), word(40));
@@ -439,4 +455,88 @@ fn a_spin_while_a_sound_plays_mixes_what_running_every_pass_mixes() {
     );
     assert!(run.passed() > 0, "the spin is passed");
     assert_one_machine(&run, &every);
+}
+
+/// A pass that reads the time stamp counter reads a time the clock's
+/// millisecond does not cover: two passes may go one way and a later one,
+/// in the same millisecond, the other. So it is never passed, even when what
+/// it read is not kept.
+#[test]
+fn a_spin_that_branches_on_the_time_stamp_counter_is_never_passed() {
+    never_passed_with(&|g| {
+        // rdtsc; test eax, 0x100; jz past; inc dword [word 1]; past:
+        g.emit(&[0x0f, 0x31, 0xa9])
+            .emit(&0x100u32.to_le_bytes())
+            .emit(&[0x74, 0x06])
+            .emit32(&[0xff, 0x05], word(1));
+    });
+}
+
+/// A spin whose pass is longer than the scheduler's quantum has bursts that
+/// end inside it, where a thread woken by the clock takes its turn; passed,
+/// they would be gone, so it is never passed.
+#[test]
+fn a_spin_longer_than_the_quantum_beside_a_sleeping_thread_is_never_passed() {
+    let (run, every) = twice(50_000_000, &|g| {
+        g.thread(MAIN)
+            .call(
+                "KERNEL32.dll",
+                "CreateThread",
+                &[Imm(0), Imm(0), Imm(SECOND), Imm(0), Imm(0), Imm(0)],
+            )
+            .wait(Read::GetTickCount, 5, &|g| {
+                g.emit32(&[0xb9], 35_000).emit(&[0x49, 0x75, 0xfd]); // mov ecx, 35000; dec ecx; jnz
+            })
+            .exit();
+        sleeper(g);
+    });
+    assert_eq!(run.passed(), 0, "never passed");
+    assert_one_machine(&run, &every);
+}
+
+/// A thread asleep while the spin is passed wakes on the same instruction it
+/// wakes on when every pass is run: the read that sees its millisecond.
+#[test]
+fn a_thread_that_wakes_in_a_passed_spin_wakes_on_the_same_instruction() {
+    let (run, every) = twice(50_000_000, &|g| {
+        g.thread(MAIN)
+            .call(
+                "KERNEL32.dll",
+                "CreateThread",
+                &[Imm(0), Imm(0), Imm(SECOND), Imm(0), Imm(0), Imm(0)],
+            )
+            .wait(Read::GetTickCount, 5, &|_| {})
+            .exit();
+        sleeper(g);
+    });
+    assert!(run.passed() > 0, "passed while the other sleeps");
+    assert!(
+        run.machine.arena.read_u32(word(1)).expect("in the arena") >= 3,
+        "and it woke"
+    );
+    assert_one_machine(&run, &every);
+}
+
+/// A NaN anywhere in the floating-point unit is a register like any other,
+/// the same bit for bit from one pass to the next.
+#[test]
+fn a_spin_after_a_nan_is_passed() {
+    let (run, every) = twice(50_000_000, &|g| {
+        g.thread(MAIN)
+            .emit(&[0xd9, 0xee, 0xd9, 0xee, 0xde, 0xf9]) // fldz; fldz; fdivp: 0 / 0
+            .wait(Read::QueryPerformanceCounter, 2, &|_| {})
+            .exit();
+    });
+    assert!(run.passed() > 0, "passed");
+    assert_one_machine(&run, &every);
+}
+
+/// The second thread: it sleeps a millisecond and counts that it woke, for ever.
+fn sleeper(g: &mut Guest) {
+    g.thread(SECOND);
+    let top = g.here();
+    g.call("KERNEL32.dll", "Sleep", &[Imm(1)])
+        .emit32(&[0xff, 0x05], word(1)); // inc dword [word 1]
+    let back = top.wrapping_sub(g.here() + 2);
+    g.emit(&[0xeb, back as u8]); // jmp top
 }

@@ -90,8 +90,9 @@ pub struct Arena {
     held: Vec<(u32, u8, [u8; HELD_BYTES])>,
 }
 
-/// The most runs the watch keeps, and the longest. Past either, it stops.
-const HELD: usize = 64;
+/// The most runs the watch keeps, and the longest. Past either, it stops: a
+/// pass of LEGO Chess's spin writes five.
+const HELD: usize = 16;
 const HELD_BYTES: usize = 16;
 
 /// How big a page is for the purpose of watching code, which is the size the
@@ -269,12 +270,12 @@ impl GuestMem for Arena {
 impl Arena {
     /// Watch every write from here: whether any byte changes (ADR-0004,
     /// #217).
-    pub fn watch(&mut self) {
+    pub(crate) fn watch(&mut self) {
         self.watching = true;
         self.held.clear();
     }
 
-    pub fn unwatch(&mut self) {
+    pub(crate) fn unwatch(&mut self) {
         self.watching = false;
     }
 
@@ -282,7 +283,7 @@ impl Arena {
     /// by what the first write to it found there: one written twice found
     /// the first write's bytes the second time, which say nothing of before.
     #[must_use]
-    pub fn unchanged(&self) -> bool {
+    pub(crate) fn unchanged(&self) -> bool {
         self.watching
             && self.held.iter().enumerate().all(|(i, &(at, len, was))| {
                 (0..u32::from(len)).all(|k| {
@@ -299,7 +300,6 @@ impl Arena {
     }
 
     /// Keep what a run handed out to change holds now, to compare when asked.
-    #[cold]
     fn hold(&mut self, addr: u32, len: usize) {
         if len > HELD_BYTES || self.held.len() == HELD {
             self.watching = false;
