@@ -351,6 +351,29 @@ impl Tree {
                 .is_some_and(|path| path.exists())
     }
 
+    /// Whether the declared machine has a directory: a drive's root, one a
+    /// file the tree holds is under, one in what the guest wrote, or one on
+    /// the pressing in the CD drive. A directory with nothing in it is not
+    /// there, which is how every title's installer leaves none (#171).
+    pub fn has_directory(&mut self, guest_path: &str) -> bool {
+        let key = Self::key(guest_path);
+        let key = key.trim_end_matches('\\');
+        let under = format!("{key}\\");
+        (key.len() == 2 && key.ends_with(':'))
+            || self
+                .files
+                .range(under.clone()..)
+                .next()
+                .is_some_and(|(path, _)| path.starts_with(&under))
+            || self.profile_path(key).is_some_and(|path| path.is_dir())
+            || key.strip_prefix("D:\\").is_some_and(|rest| {
+                self.iso.as_mut().is_some_and(|iso| {
+                    iso.entry(&rest.replace('\\', "/"))
+                        .is_ok_and(|entry| entry.is_dir)
+                })
+            })
+    }
+
     /// Whether [`Tree::read`] would find a file, answered without reading it:
     /// a packed entry is there whether or not anyone unpacks it.
     pub fn readable(&mut self, guest_path: &str) -> bool {

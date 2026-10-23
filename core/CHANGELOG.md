@@ -85,16 +85,30 @@ which after a movie Space skipped waits for Space to come up and presents nothin
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
 `SetCurrentDirectoryA` sets a directory by its full path, as `GetFullPathNameA` names it (#171). A
-relative name is the current directory's child, where it was taken as the whole directory, and a
-trailing backslash goes, as Wine's conformance test `test_setdir` finds Windows doing it. An empty
-name fails with `ERROR_INVALID_NAME` and the directory stays, where it was taken as an empty
-directory: an empty name has no full path (`test_GetFullPathNameA`), and Wine's
-`RtlSetCurrentDirectory_U` fails it so. A name through `.` or `..` is a wall. The rest of #171 waits
-for a public source of what Windows 98 answers: a directory the machine does not have is still taken
-as named, and `GetVolumeInformationA` and `SetFileAttributesA` answer as before. LEGO Chess restores
-its saved directory at boot before it has saved it, an empty name, and sets its own folders by name
-(#210). Hot Wheels sets its own install directory by its full name, which resolves to itself, and no
-other released title sets one: the full `ci.sh` on this change moved none of their runs.
+relative name is the current directory's child, where it was taken as the whole directory; one
+rooted by either separator is on the current drive; a trailing separator goes; and `.` names where
+it is: as Wine's conformance test `test_setdir` (checks 1, 6 to 9 and 11) finds Windows doing it.
+Separators of either kind are one, however many, as Microsoft's "File path formats on Windows
+systems" says `GetFullPathName` makes them. A directory the machine does not have fails with
+`ERROR_FILE_NOT_FOUND`, or `ERROR_PATH_NOT_FOUND` when the one it would be in is missing too, as
+Wine's `test_SetCurrentDirectoryA` finds Windows failing it, where it was taken as named: a
+directory is there when the declared tree holds a file under it, the title wrote one there, or the
+disc has it, which is how every title's installer leaves its folders. An empty name, or one of
+nothing but white space, fails with `ERROR_INVALID_NAME`, where it was taken as an empty directory:
+such a name has no full path (`test_GetFullPathNameA`), and Wine's `RtlSetCurrentDirectory_U`, read
+as documentation, fails it so. That is Windows NT's answer; Windows 98's is unmeasured. Whenever it
+fails the directory stays. These are walls, each named: a name through `..`, another machine's
+(`\\server`, by separators of either kind), a drive's own current directory (`C:` alone or
+`C:name`), a drive the machine does not have, a file's name, and a name with white space around it.
+`CreateDirectoryA` still makes nothing, so a title that made a folder that way could not set it;
+none on the roster does both. `Ctx::absolute`, through which every call that takes a path resolves
+it, roots a name on `/` as on `\`, and joins a name to a drive's root with one separator, where it
+made `C:\\x`: no released title's current directory is a root, and none names a path from `/`.
+`GetVolumeInformationA` and `SetFileAttributesA` answer as before, the rest of #171. LEGO Chess
+restores its saved directory at boot before it has saved it, an empty name, and sets its own
+folders by name (#210), each of which its install holds. Hot Wheels sets its own install directory
+by its full name, which resolves to itself and is there, and no other released title sets one: the
+full `ci.sh` on this change moved none of their runs.
 
 LEGO Chess's bumper draws through its DirectX plugin's Direct3D 2 device (#210). Four walls are
 written. `IDirect3D2::CreateMaterial` makes a material, DirectX 5's `IDirect3DMaterial2` being

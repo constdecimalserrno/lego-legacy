@@ -1761,47 +1761,87 @@ fn get_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn set_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // SetCurrentDirectoryA(path), resolved as `GetFullPathNameA` resolves a
-    // name: a relative one is the current directory's child, and trailing and
-    // repeated separators of either kind go, as Wine's conformance test
-    // `test_setdir` (checks 1 and 6 to 9) finds Windows doing it. A name of
-    // nothing but spaces has no full path (`test_GetFullPathNameA`, and Wine's
-    // `get_full_path_helper`), so it fails and the directory stays, as Wine's
-    // `RtlSetCurrentDirectory_U`, read as documentation, fails it, with
-    // `ERROR_INVALID_NAME`. A name through `.` or `..`, another machine's
-    // (`\\server`) or a drive's own current directory (`C:` alone, `C:name`)
-    // is a wall. LEGO Chess sets an empty one at boot, and its own folders by
-    // their names (#171).
+    // name. A relative one is the current directory's child, one rooted by
+    // either separator is on the current drive, a trailing separator goes and
+    // `.` names where it is, as Wine's conformance test `test_setdir` (checks
+    // 1, 6 to 9 and 11) finds Windows doing it. Separators of either kind are
+    // one, however many, as Microsoft's "File path formats on Windows systems"
+    // says `GetFullPathName` makes them. A directory the machine does not have
+    // fails with `ERROR_FILE_NOT_FOUND`, or `ERROR_PATH_NOT_FOUND` when the one
+    // it would be in is missing too, as Wine's `test_SetCurrentDirectoryA`
+    // finds Windows failing it. A name of nothing but white space has no full
+    // path (`test_GetFullPathNameA`, and Wine's `get_full_path_helper`), and
+    // fails with `ERROR_INVALID_NAME`, as Wine's `RtlSetCurrentDirectory_U`,
+    // read as documentation, fails it: Windows NT's answer, Windows 98's being
+    // unmeasured. Whenever it fails the directory stays. LEGO Chess sets an
+    // empty one at boot, and its own folders by their names (#171).
+    // ponytail: only this call collapses separators and drops `.`; moving that
+    // into `Ctx::absolute` would answer every file call the same way, and move
+    // what `GetFullPathNameA` hands every title back.
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    if path.chars().all(|c| c == ' ') {
+    let wall = |why: &str| -> Result<u32, Stop> {
+        Err(Stop::NotWritten {
+            what: format!("KERNEL32.dll!SetCurrentDirectoryA({path:?}): {why}"),
+            caller: 0,
+        })
+    };
+    let name = path.trim();
+    if name.is_empty() {
         ctx.state.last_error = ERROR_INVALID_NAME;
         return Ok(0);
     }
-    if ctx.refuse_on_empty_floppy(&path)? {
+    if name.len() != path.len() {
+        return wall("a name with white space around it");
+    }
+    if ctx.refuse_on_empty_floppy(name)? {
         return Ok(0);
     }
-    let full = ctx.absolute(&path);
-    let rooted = matches!(full.get(1..3), Some(":\\" | ":/"));
-    let parts: Vec<&str> = full
-        .get(2..)
-        .unwrap_or("")
-        .split(['\\', '/'])
-        .filter(|part| !part.is_empty())
-        .collect();
-    let other_machine = path.starts_with("\\\\") || path.starts_with("//");
-    if !rooted || other_machine || parts.iter().any(|&part| part == "." || part == "..") {
-        return Err(Stop::NotWritten {
-            what: format!("KERNEL32.dll!SetCurrentDirectoryA({path:?}), named as {full:?}"),
-            caller: 0,
-        });
+    let separator = |c: char| c == '\\' || c == '/';
+    if name.chars().take(2).filter(|&c| separator(c)).count() == 2 {
+        return wall("another machine's name");
     }
-    // Any other place is taken as it is named, there or not (#171).
-    ctx.state.current_directory = format!("{}\\{}", &full[..2], parts.join("\\"));
+    let full = ctx.absolute(name);
+    let (Some(drive), Some(rest)) = (full.get(..2), full.get(2..)) else {
+        return wall("a drive's own current directory");
+    };
+    if !drive.ends_with(':') || !rest.starts_with(separator) {
+        return wall("a drive's own current directory");
+    }
+    if ctx.drive_type(drive.as_bytes()[0]) == super::DRIVE_NO_ROOT_DIR {
+        return wall("a drive the machine does not have");
+    }
+    let mut parts = Vec::new();
+    for part in rest.split(separator).filter(|part| !part.is_empty()) {
+        match part {
+            "." => {}
+            ".." => return wall("a name through `..`"),
+            part => parts.push(part),
+        }
+    }
+    let resolved = format!("{drive}\\{}", parts.join("\\"));
+    if ctx.tree.readable(&resolved) {
+        return wall("the name of a file");
+    }
+    if !ctx.tree.has_directory(&resolved) {
+        let parent = resolved
+            .rsplit_once('\\')
+            .map_or(drive, |(parent, _)| parent);
+        ctx.state.last_error = if ctx.tree.has_directory(parent) {
+            ERROR_FILE_NOT_FOUND
+        } else {
+            ERROR_PATH_NOT_FOUND
+        };
+        return Ok(0);
+    }
+    ctx.state.current_directory = resolved;
     Ok(1)
 }
 
 /// What a call that could not open a file hands back.
 const INVALID_HANDLE: u32 = 0xffff_ffff;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+/// A directory on the way to the one named is not there.
+const ERROR_PATH_NOT_FOUND: u32 = 3;
 /// A name that names nothing, such as an empty one.
 const ERROR_INVALID_NAME: u32 = 123;
 

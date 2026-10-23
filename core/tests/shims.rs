@@ -4111,17 +4111,26 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
 }
 
 /// A directory is set by its full path, as `GetFullPathNameA` names it: a
-/// relative one is the current directory's child, and trailing and repeated
-/// separators of either kind go, as Wine's conformance test `test_setdir`
-/// finds Windows doing it; an empty one, or one of spaces, fails with
-/// `ERROR_INVALID_NAME` and the directory stays, such a name having no full
-/// path (`test_GetFullPathNameA`). Names through `.` or `..`, another
-/// machine's, and a drive's own current directory are walls. LEGO Chess
-/// restores its saved directory before it has saved it, so an empty one, and
-/// then sets its own folders by their names (#171).
+/// relative one is the current directory's child, one rooted by either
+/// separator is on the current drive, a trailing separator goes and `.` names
+/// where it is, as Wine's conformance test `test_setdir` finds Windows doing
+/// it. One the machine does not have fails as `test_SetCurrentDirectoryA`
+/// finds Windows failing it, and an empty one, or one of white space, fails
+/// with `ERROR_INVALID_NAME`, such a name having no full path
+/// (`test_GetFullPathNameA`); each leaves the directory where it was. Names
+/// through `..`, another machine's, a drive's own current directory, a drive
+/// the machine lacks, a file's, and one with white space around it are walls.
+/// LEGO Chess restores its saved directory before it has saved it, so an
+/// empty one, and then sets its own folders by their names (#171).
 #[test]
 fn a_directory_is_set_by_its_full_path_and_an_empty_one_is_refused() {
     let mut m = machine();
+    for file in [
+        "C:\\GAME\\sounds\\chimp.wav",
+        "C:\\GAME\\menus\\room\\room.txt",
+    ] {
+        m.tree.declare(file, Vec::new());
+    }
     let set = |m: &mut Machine, path: &str| {
         m.arena
             .write(DATA, &[path.as_bytes(), &[0]].concat())
@@ -4133,22 +4142,54 @@ fn a_directory_is_set_by_its_full_path_and_an_empty_one_is_refused() {
         assert!(asked.is_ok_and(|n| n > 0));
         text(m, OUT)
     };
+    let refused = |m: &mut Machine, path: &str| {
+        let before = here(m);
+        assert_eq!(set(m, path), Ok(0), "{path:?}");
+        assert_eq!(here(m), before, "{path:?} leaves it");
+        call(m, "KERNEL32", "GetLastError", &[]).expect("answered")
+    };
     assert_eq!(set(&mut m, "C:\\GAME"), Ok(1));
     assert_eq!(set(&mut m, "sounds\\"), Ok(1));
     assert_eq!(here(&mut m), "C:\\GAME\\sounds");
-    assert_eq!(set(&mut m, ""), Ok(0));
-    assert_eq!(call(&mut m, "KERNEL32", "GetLastError", &[]), Ok(123));
-    assert_eq!(here(&mut m), "C:\\GAME\\sounds", "an empty name leaves it");
-    assert_eq!(set(&mut m, "   "), Ok(0), "nor does one of spaces");
+    for empty in ["", "   ", "\t"] {
+        assert_eq!(refused(&mut m, empty), 123, "ERROR_INVALID_NAME");
+    }
+    assert_eq!(set(&mut m, "C:\\GAME"), Ok(1));
+    assert_eq!(set(&mut m, ".\\sounds"), Ok(1));
+    assert_eq!(here(&mut m), "C:\\GAME\\sounds", "checks 7 and 9");
     assert_eq!(set(&mut m, "\\"), Ok(1));
     assert_eq!(here(&mut m), "C:\\", "the root keeps its backslash");
+    // A name from the root is one separator from it.
+    m.arena.write(DATA, b"x\0").expect("in the arena");
+    let full = call(
+        &mut m,
+        "KERNEL32",
+        "GetFullPathNameA",
+        &[DATA, 0x100, OUT, 0],
+    );
+    assert_eq!((full, text(&m, OUT)), (Ok(4), "C:\\x".to_owned()));
     assert_eq!(set(&mut m, "GAME//menus\\\\room\\"), Ok(1));
     assert_eq!(
         here(&mut m),
         "C:\\GAME\\menus\\room",
         "from the root, one separator"
     );
-    for wall in ["..\\GAME", "./sounds", "C:", "C:GAME", "\\\\SERVER\\GAME"] {
+    assert_eq!(set(&mut m, "/GAME"), Ok(1));
+    assert_eq!(here(&mut m), "C:\\GAME", "rooted by a slash");
+    // ERROR_FILE_NOT_FOUND, and ERROR_PATH_NOT_FOUND with the one above it
+    // missing too.
+    assert_eq!(refused(&mut m, "\\some_dummy_dir"), 2);
+    assert_eq!(refused(&mut m, "\\some_dummy\\subdir"), 3);
+    for wall in [
+        "..\\GAME",
+        "C:",
+        "C:GAME",
+        "\\\\SERVER\\GAME",
+        "/\\SERVER\\GAME",
+        " sounds",
+        "Q:\\",
+        "sounds\\chimp.wav",
+    ] {
         assert!(
             matches!(set(&mut m, wall), Err(Stop::NotWritten { .. })),
             "{wall}"
