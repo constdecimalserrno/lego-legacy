@@ -95,6 +95,16 @@ made before the host is told of a pointer put earlier in the frame, hardly reach
 pointer at 2 of the race's 3,903 flips, and reads its mouse's buffered moves all through a frame.
 No route moved.
 
+Took core 1.2.0's clock-spin pass (#217): none of its committed routes passes a spin, and no
+route moved. The waits its routes reach poll as well as read the clock, so they run pass by pass as
+before. Off its routes it has pure spins, which a run at a window would pass:
+- its frame limiters at 0x4299F2 and 0x42C77B;
+- its reveal waits at 0x42254F, 0x422B43 and 0x422E7E, whenever no music track is set.
+
+They are untested by a route, held by the pass's proof alone, until #229 commits one. Its first
+race, which passes nothing, takes 0.67 % more of the host's instructions on the Mac mini, 2,470.0
+billion where it took 2,453.7.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

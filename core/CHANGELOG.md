@@ -5,33 +5,54 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
-A clock spin is passed in one step (#217), as ADR-0004 now allows. Two crossings in a row may be the
-same clock read (`QueryPerformanceCounter`, `GetTickCount`, `timeGetTime` or `timeGetSystemTime`)
-from the same place, in the same declared millisecond, with the processor the same bit for bit (its
-floating-point unit by its bits), no byte of memory changed between them, and no other thread able
-to run, in a pass no longer than the scheduler's quantum. The arena's new write watch says whether
-memory changed, and `rdtsc` stops it, since the time stamp counter is a time the millisecond does not
-cover. Then the pass between them is one the guest would make again, unchanged, until the clock
-reads the next millisecond. So the machine retires those passes at once, its cycle counter with them,
-and the schedule carries on from the read that sees the next millisecond as it would have
-(`spin.rs`).
+A clock spin is passed (#217), as ADR-0004 now allows, only when:
+- two crossings in a row are the same clock read (`QueryPerformanceCounter`, `GetTickCount`,
+  `timeGetTime` or `timeGetSystemTime`) from the same place, in the same declared millisecond;
+- the processor is the same bit for bit at both, but for its time stamp counter, its floating-point
+  unit compared by its bits;
+- no byte of memory changed between them. The arena's new write watch tells, and `rdtsc` stops it,
+  since the time stamp counter is a time the millisecond does not cover;
+- no other thread can run, and the pass cost the clock its instructions and nothing more, in no
+  more than the scheduler's quantum.
+
+Then the pass between them is one the guest would make again, unchanged, until the clock reads the
+next millisecond (`Clock::first_cycle_of`). So the machine retires those passes at once, its cycle
+counter with them, and the schedule carries on from the read that sees the next millisecond as it
+would have (`spin.rs`).
 - It lands at exactly the cursor, declared clock and state that running every pass gives.
-  `tests/spins.rs` holds each of the four reads to a traced run, which runs every pass. So too a
-  budget that runs out inside a spin, a stepped run, a run stepped on from its budget, a thread that
-  wakes inside a passed spin, a spin after a NaN, a pass that writes a word twice, and a spin through
-  a playing sound, whose mix must be the same.
-- It holds a spin that writes memory, changes a register, keeps or branches on the time stamp counter,
-  polls for input, shares the processor with a thread that can run, or runs longer than the quantum
-  beside a sleeping thread, to never being passed. Every check, taken out in turn, fails a test.
+  `tests/spins.rs` holds each of the four reads to a traced run, which runs every pass, at a rate
+  that is a whole number of kilohertz and at one that is not. So too a budget that runs out inside a
+  spin, a stepped run, a run stepped on from its budget, a thread that wakes inside a passed spin, a
+  spin after a NaN, a pass that writes a word twice, and a spin through a playing sound, whose mix
+  must be the same.
+- It never passes a spin that writes memory, changes a register, keeps or branches on the time stamp
+  counter, polls for input, shares the processor with a thread that can run, runs longer than the
+  quantum beside a sleeping thread, or costs more than its instructions, and a test holds each.
+  Every check, taken out in turn, fails a test.
 - A traced or stepped run runs every pass. A run that passed any says so at its end: `clock spins:`,
-  and the instructions passed.
-- LEGO Chess's movies were 99.996 % such a spin. Headless on the Mac mini they now play at about 36 to
-  38 times real time, where they played at 0.90, and the whole intro ends on the same line, flips,
-  digest and mix as before.
-- Hot Wheels' first race passes none, since its waits poll as well, and no released run moves. The
-  watch is armed only at a read that follows one like it and a pass that came back the same, so a
-  title that never spins pays little: the race took 0.54 % more of the host's instructions on the Mac
-  mini, 2,469.73 billion where main took 2,456.42.
+  and the instructions passed, a millisecond at a time.
+- LEGO Chess's movies were 99.996 % such a spin. Headless on the Mac mini they now play at about 40
+  times real time, where they played at 0.90, and the whole intro takes 7.1 s, where it took 67.6,
+  ending on the same line, flips, digest and mix as before.
+- No released title's committed route passes a spin, and no released run moves. The watch is armed
+  only at a read that follows one like it and a pass that came back the same, so a title that never
+  spins pays little. On the Mac mini, Hot Wheels' first race takes 0.67 % more of the host's
+  instructions, 2,470.0 billion where it took 2,453.7, and Rock Raiders' first mission 0.34 % more,
+  3,298.4 billion where it took 3,287.1.
+
+A machine that runs ahead of real time between flips, as one passing clock spins can, is held to real
+time at a window as it goes (#217), the same for every title:
+- Each block of the mix is held to its own declared time before it is handed over
+  (`Pace::hold_mixed`), so a wait passed between two flips hands its sound over as it plays, not all
+  at once past what the device keeps waiting, where the oldest of it was dropped.
+- A hold that has to wait has found the machine ahead, so the pace there is real time, worked out
+  afresh from that hold. A slow stretch, such as LEGO Chess's silent holds that poll as they wait,
+  no longer stretches the sound after it for up to half a second: at most the one block that
+  straddles the stretch's end is stretched.
+- A flip is held to its own time before its frame is shown, so a frame is shown no sooner than it is
+  due.
+- The feed's simulated runs hold all three: a movie after a slow hold, a wait passed between flips,
+  and a slow run still stretched. A headless run holds nothing, so no run moves.
 
 What a person does reaches a title between flips too, at its own input polls (#215), where it
 reached it only at a flip. A poll is a call that reads the keyboard, the mouse or the message queue,

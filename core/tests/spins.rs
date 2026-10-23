@@ -1,11 +1,11 @@
-//! A clock spin passed in one step, exactly (ADR-0004, #217).
+//! A clock spin passed exactly, a millisecond at a time (ADR-0004, #217).
 //!
 //! A title that waits by asking the clock again and again makes the same pass
 //! thousands of times a declared millisecond. The machine may retire those
 //! passes at once, but only where running every one of them would leave it
 //! exactly as it is: the same cursor, declared clock, registers, memory, flips
 //! and mix. Each guest here runs twice: as a route's run runs it, and traced,
-//! which runs every pass (a traced run shows every call, so it never skips
+//! which runs every pass (a traced run shows every call, so it never passes
 //! one). The two must end as one machine.
 //!
 //! Each guest is a few hand-assembled instructions calling KERNEL32, WINMM,
@@ -71,9 +71,14 @@ struct Guest {
 
 impl Guest {
     fn new() -> Self {
+        Self::on(&STUB)
+    }
+
+    /// A guest on a machine that declares this title's machine.
+    fn on(title: &'static Title) -> Self {
         std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
         let mut host = Headless::new();
-        let machine = Machine::new(&STUB, &mut host).expect("a machine");
+        let machine = Machine::new(title, &mut host).expect("a machine");
         Self {
             machine,
             host,
@@ -208,19 +213,23 @@ impl Guest {
         self
     }
 
-    /// Instructions the machine retired in one step.
+    /// Instructions the machine retired by passing clock spins.
     fn passed(&self) -> u64 {
-        self.machine.spins_passed()
+        self.machine.instructions_passed()
     }
 }
 
 /// The same guest twice, and how each ended: as a route's run runs it, and
 /// traced, which runs every pass.
 fn twice(budget: u64, guest: &dyn Fn(&mut Guest)) -> (Guest, Guest) {
-    let mut run = Guest::new();
+    twice_on(&STUB, budget, guest)
+}
+
+fn twice_on(title: &'static Title, budget: u64, guest: &dyn Fn(&mut Guest)) -> (Guest, Guest) {
+    let mut run = Guest::on(title);
     guest(&mut run);
     run.go(Trace::Off, budget);
-    let mut every = Guest::new();
+    let mut every = Guest::on(title);
     guest(&mut every);
     every.go(Trace::Shims, budget);
     assert_eq!(every.passed(), 0, "a traced run runs every pass");
@@ -278,7 +287,7 @@ fn a_clock_spin_is_passed_in_one_step_and_lands_where_running_every_pass_lands()
             "{read:?}: the wait ends"
         );
         assert_one_machine(&run, &every);
-        assert!(run.passed() > 0, "{read:?}: the spin is passed in one step");
+        assert!(run.passed() > 0, "{read:?}: the spin is passed");
     }
 }
 
@@ -588,4 +597,25 @@ fn a_spin_that_writes_a_word_twice_and_leaves_it_as_it_was_is_passed() {
     });
     assert!(run.passed() > 0, "passed");
     assert_one_machine(&run, &every);
+}
+
+/// A machine whose rate is no whole number of kilohertz, as a real Pentium
+/// 166's 166.67 MHz is not: a millisecond's first cycle is then rounded up,
+/// and a pass must land on it all the same.
+#[test]
+fn a_spin_at_a_rate_that_is_no_whole_number_of_kilohertz_lands_where_running_every_pass_lands() {
+    const ODD_RATE: Title = Title {
+        declared: lego_legacy_core::title::Declared {
+            hz: 166_666_667,
+            ..STUB.declared
+        },
+        ..STUB
+    };
+    for read in READS {
+        let (run, every) = twice_on(&ODD_RATE, 50_000_000, &|g| {
+            g.thread(MAIN).wait(read, 3, &|_| {}).exit();
+        });
+        assert!(run.passed() > 0, "{read:?}: passed");
+        assert_one_machine(&run, &every);
+    }
 }

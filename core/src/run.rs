@@ -156,12 +156,13 @@ pub(crate) fn wrap_up(
         ));
     }
 
-    // How much of the run was a clock spin passed in one step, when any was
-    // (ADR-0004, #217): instructions the cursor counts that no host ran.
-    let passed = machine.spins_passed();
+    // How much of the run was clock spins passed, when any was (ADR-0004,
+    // #217): instructions the cursor counts that no engine ran, passed a
+    // declared millisecond at a time.
+    let passed = machine.instructions_passed();
     if passed > 0 {
         log.line(&format!(
-            "clock spins: {passed} instructions passed in one step"
+            "clock spins: {passed} instructions passed, a millisecond at a time"
         ));
     }
 

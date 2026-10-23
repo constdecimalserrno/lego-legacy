@@ -299,7 +299,8 @@ fn midi_stream_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn time_get_time(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Milliseconds on the declared clock, wrapping as the real counter does
-    // (ADR-0003).
+    // (ADR-0003). A clock spin's pass relies on that grain (`spin.rs`, #217),
+    // and on `timeGetSystemTime`'s, which answers the same.
     Ok((ctx.declared_millis() & 0xffff_ffff) as u32)
 }
 

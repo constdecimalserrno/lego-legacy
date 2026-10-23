@@ -76,6 +76,7 @@ pub fn fill_frames(waiting: &mut Waiting, bytes: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::{add_waiting, fill_frames, Waiting, ENOUGH_TO_PLAY, MOST_WAITING};
+    use crate::host::pace::Pace;
     use crate::host::stretch::Stretch;
     use crate::sound::{BLOCK_FRAMES, RATE};
 
@@ -135,6 +136,117 @@ mod tests {
     fn a_host_at_full_pace_is_unchanged() {
         assert_eq!(a_minute_at(1.0, false), a_minute_at(1.0, true));
         assert_eq!(a_minute_at(1.0, true), 0);
+    }
+
+    /// A run at a window, simulated in declared and wall time (#217).
+    ///
+    /// The machine makes the mix on the declared clock, a declared
+    /// millisecond at a time, at the speed each stretch of the run gives:
+    /// declared seconds it could make a wall second. It flips every `frame`
+    /// declared milliseconds. The host holds each block of the mix with
+    /// `Pace::hold_mixed` and each flip with `Pace::hold`, on a wall clock of
+    /// the test's own, and stretches each block by the pace it is given. The
+    /// device pulls a buffer each buffer's worth of wall time. Each stretch is
+    /// its declared milliseconds, its speed, and whether it sounds. Answers
+    /// how often the device ran dry while a stretch that sounds played, how
+    /// many samples were dropped past its cap, and how many sounding blocks
+    /// were stretched. A silent stretch that is slow can run the device dry
+    /// before its pace is worked out, as it always could, and nobody hears
+    /// silence go missing.
+    fn a_window_run(stretches: &[(u64, f64, bool)], frame: u64) -> (u64, usize, usize) {
+        const MS: u64 = 1_000_000;
+        let pull_nanos = u64::from(BUFFER_FRAMES) * 1_000_000_000 / u64::from(RATE);
+        let end_of =
+            |block: u64| (block + 1) * BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(RATE);
+        let mut pace = Pace::new();
+        pace.simulated = Some(0);
+        let mut stretch = Stretch::default();
+        let mut waiting = Waiting::default();
+        let mut bytes = vec![0u8; BUFFER_FRAMES as usize * 4];
+        let (mut pulled, mut declared, mut blocks, mut flip) = (0u64, 0u64, 0u64, frame * MS);
+        let (mut dry, mut dropped, mut stretched) = (0, 0usize, 0usize);
+        let tone: Vec<i16> = (0..BLOCK_FRAMES as i16 * 2).map(|i| i % 1000 + 1).collect();
+        let silence = vec![0i16; BLOCK_FRAMES * 2];
+        // The device pulls whatever wall time has gone by.
+        let mut pull = |pace: &Pace, waiting: &mut Waiting| {
+            while pulled + pull_nanos <= pace.wall_nanos() {
+                fill_frames(waiting, &mut bytes);
+                pulled += pull_nanos;
+            }
+        };
+        for &(millis, speed, sounds) in stretches {
+            let (end, dry_before) = (declared + millis * MS, waiting.underruns);
+            while declared < end {
+                declared += MS;
+                if let Some(wall) = &mut pace.simulated {
+                    *wall += (MS as f64 / speed) as u64;
+                }
+                pull(&pace, &mut waiting);
+                // Each block of the mix the clock has passed, held and
+                // handed over.
+                while declared >= end_of(blocks) {
+                    let held = pace.hold_mixed();
+                    pull(&pace, &mut waiting);
+                    if sounds && held < 1.0 {
+                        stretched += 1;
+                    }
+                    let out = stretch.block(if sounds { &tone } else { &silence }, held);
+                    let before = waiting.samples.len() + out.len();
+                    add_waiting(&mut waiting, &out);
+                    dropped += before - waiting.samples.len();
+                    blocks += 1;
+                }
+                if declared >= flip {
+                    pace.hold(flip);
+                    pull(&pace, &mut waiting);
+                    flip += frame * MS;
+                }
+            }
+            if sounds {
+                dry += waiting.underruns - dry_before;
+            }
+        }
+        (dry, dropped, stretched)
+    }
+
+    /// LEGO Chess's intro at a window (#217): its silent holds, which poll as
+    /// they wait and so are run pass by pass, at about 0.6 of real time, each
+    /// followed by a movie whose clock spins are passed, at tens of times real
+    /// time, its frames 66 ms apart. After each hold the movie's sound is not
+    /// stretched by the hold's pace: at most the one block that straddles the
+    /// hold's end, handed over before the machine is ahead again, is, where
+    /// the hold's pace once stretched up to a second of it. Nothing is cut,
+    /// and the device never runs dry.
+    #[test]
+    fn a_movie_after_a_slow_hold_is_neither_stretched_nor_cut() {
+        let intro = [
+            (500, 0.6, false),
+            (19_000, 40.0, true),
+            (2_070, 0.6, false),
+            (1_000, 0.6, false),
+            (10_000, 40.0, true),
+        ];
+        let (dry, dropped, stretched) = a_window_run(&intro, 67);
+        assert!(stretched <= 2, "{stretched} blocks of the movies stretched");
+        assert_eq!(dropped, 0, "nothing is cut");
+        assert_eq!(dry, 0, "and the device never runs dry in a movie");
+    }
+
+    /// A wait passed between two flips, as Hot Wheels' reveal waits are,
+    /// hands its sound over at its own pace, not all at once: nothing is
+    /// dropped past the cap (#217).
+    #[test]
+    fn a_wait_passed_between_flips_hands_its_sound_over_at_its_own_pace() {
+        let reveal = [(2_000, 1.5, true), (350, 300.0, true), (2_000, 1.5, true)];
+        let (dry, dropped, stretched) = a_window_run(&reveal, 500);
+        assert_eq!((dry, dropped, stretched), (0, 0, 0));
+    }
+
+    /// A host that cannot keep pace still has the mix stretched, as before.
+    #[test]
+    fn a_slow_run_is_still_stretched() {
+        let (_, _, stretched) = a_window_run(&[(5_000, 0.6, true)], 67);
+        assert!(stretched > 50, "{stretched} blocks stretched");
     }
 
     #[test]

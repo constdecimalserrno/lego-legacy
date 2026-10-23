@@ -677,15 +677,15 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
     );
 }
 
-/// The intro's clock spins pass in one step (ADR-0004, #217). Between frames
+/// The intro's clock spins are passed (ADR-0004, #217). Between frames
 /// the movie player reads `QueryPerformanceCounter` from 0x0044B57D, 38
 /// instructions a time and about 4,400 times a declared millisecond, and the
 /// machine retires the passes that would read the same millisecond at once.
 /// It lands exactly where running every pass lands: the same machine, every
-/// flip at the same cursor, and the same mix, as main at 5d8104c, which ran
-/// every pass, made them.
+/// flip at the same cursor, and the same mix handed over at the same flips,
+/// as main made them running every pass (5d8104c, and e9bed42 after #215).
 #[test]
-fn the_intro_s_clock_spins_pass_in_one_step_and_land_where_running_every_pass_lands() {
+fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() {
     let Some(ran) = intro(&INTRO) else { return };
     let flips: String = ran
         .log
@@ -700,18 +700,28 @@ fn the_intro_s_clock_spins_pass_in_one_step_and_land_where_running_every_pass_la
         .flatten()
         .flat_map(|s| s.to_le_bytes())
         .collect();
+    // And the flip each block of the mix was handed over at.
+    let handed: Vec<u8> = ran
+        .host
+        .audio_flips
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
     assert_eq!(
         (
             ran.digest.as_str(),
             hash::sha256_hex(flips.as_bytes()).as_str(),
             hash::sha256_hex(&mix).as_str(),
+            hash::sha256_hex(&handed).as_str(),
         ),
         (
             "7938e0e28241b721b6c85fd7a999f8e012f9d0d7c54e1cc56ee3751b1fde5dad",
             "e99db84e0baf0ce60ecf7f43007ae0a6eba844bb8ad31e40d250379d101fa24a",
             "70e84ca87ff3133b07ccc0debb9dd4e8b4a06f368854e780d6ae05a8e8e54ef7",
+            "77712d0720f53b658e72e2d3f300da30a2e50d3298feacb51c536e2fba2a7a42",
         ),
-        "the machine, its flips and its mix, as running every pass made them"
+        "the machine, its flips, its mix and where each block of it was handed over, as \
+         running every pass made them"
     );
     ran.assert_logged("clock spins: ");
 }

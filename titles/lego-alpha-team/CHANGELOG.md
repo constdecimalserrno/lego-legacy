@@ -97,6 +97,9 @@ pointer back every flip: the move heard at the ask is lost, or the frame's first
 the hand is held at the screen's edge until the flip. A person should move the mouse through the
 load after flip 1633 on the MacBook. No route moved.
 
+Took core 1.2.0's clock-spin pass (#217): it reads the clock in straight-line code, or in loops
+that call out as well, so nothing of it is passed, and no route moved.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

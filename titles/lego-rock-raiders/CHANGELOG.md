@@ -102,6 +102,11 @@ rather than at its flip. That is the frame that ends a load, which polls at its 
 flip, and each of the 35 frames of its boot splash, which `Sleep(100)` before they poll. No route
 moved.
 
+Took core 1.2.0's clock-spin pass (#217): every loop round its `timeGetTime` reads also sleeps,
+pumps its messages or calls out, so nothing of it is passed, and no route moved. Its first mission,
+by its committed test, takes 0.34 % more of the host's instructions on the Mac mini, 3,298.4 billion
+where it took 3,287.1.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

@@ -155,16 +155,20 @@ hanging the game once it is let go and the frame has stood core's `ASK_BETWEEN_F
 a person has yet to try on the MacBook. By their code, its 16 waits for an arrow key to come up (0x457200) read
 the keyboard the same way, so a key let go between flips reaches them too.
 
-Its movies' clock spins pass in one step (#217, core 1.2.0). Between frames the movie player reads
+Its movies' clock spins are passed (#217, core 1.2.0). Between frames the movie player reads
 `QueryPerformanceCounter` from 0x0044B57D, 38 instructions a pass and about 4,400 passes a declared
 millisecond: 99.996 % of a frame's instructions. The machine retires the passes that would read the
 same millisecond at once.
-- Headless on the MacBook, from its kit, the intro had played at 0.72 to 0.80 of real time, its music
-  stretched at a window.
-- On the Mac mini the logo now plays at about 38 times real time and the intro at about 36. The
-  whole intro, 58 declared seconds, runs in 8.5 s, against 67.6.
-- It lands on the same machine. `intro.route` ends on main's digest, with every flip at its cursor
-  and the same mix, as its new test pins them. A run with no route still stops in the bumper at
-  cursor 8,613,581,999 after 829 flips.
-- The boot's two waits and Krisalis' hold poll for input as they wait, so they are not passed. No
-  sound plays through them.
+- Headless on the MacBook, from its kit, the intro had played at 0.72 to 0.80 of real time, and at
+  its window at 0.55 to 0.76, its music stretched.
+- On the Mac mini the logo and the intro now play at about 40 times real time. The whole intro, 58
+  declared seconds, runs in 7.1 s, against 67.6.
+- It lands on the same machine. `intro.route` ends on main's digest, with every flip at its cursor,
+  the same mix and each block of it handed over at the same flip, as its new test pins them. A run
+  with no route still stops in the bumper at cursor 8,613,581,999 after 829 flips.
+  `skip-krisalis.route` played to its wall stops in the bumper too, at cursor 7,908,916,035 after
+  796 flips, on main's digest, in 4.0 s.
+- The boot's two waits and Krisalis' hold poll for input as they wait, so they are not passed, and
+  run at about 0.65 of real time on the Mac mini. No sound plays through them. At a window core now
+  takes the pace as real time at the movie's first hold that has to wait, where it stretched up to
+  half a second of the movie's sound by the holds' pace.

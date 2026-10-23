@@ -80,7 +80,8 @@ _Avoid_: beaten, finished, done
 ### Speed is five separate things
 
 **Throughput**:
-Guest instructions retired per wall-second. A property of the engine.
+Guest instructions retired per wall-second, not those of a passed clock spin, which no engine ran.
+A property of the engine.
 _Avoid_: speed, performance, MIPS as a bare synonym
 
 **Pace**:
@@ -119,9 +120,16 @@ _Avoid_: virtual clock, emulated timer, game clock, host timebase
 
 **Clock spin**:
 A guest's wait made by reading the declared clock again and again until it reads a later moment,
-with nothing else in the loop. The machine may pass one in one step, landing exactly where running
-every pass lands (ADR-0004).
-_Avoid_: busy-wait as a synonym, idle loop, skip
+each pass changing nothing but the clock. The machine may pass the passes that would read the same
+declared millisecond, landing exactly where running every pass lands (ADR-0004).
+_Avoid_: busy-wait as a synonym, idle loop
+
+**Pass**:
+As a noun, one trip of a guest's loop from one of its clock reads to the next. As a verb, what the
+machine does to a clock spin: it retires, at once, the passes that would read the same declared
+millisecond, without running them, landing on the cursor, declared clock and state that running
+them gives (ADR-0004).
+_Avoid_: skip, fast-forward
 
 **Host**:
 The real machine and operating system the emulator runs on; everything the guest cannot see.

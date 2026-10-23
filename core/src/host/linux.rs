@@ -1079,7 +1079,8 @@ impl Host for LinuxWindow {
 
     fn audio(&mut self, samples: &[i16]) {
         // Stretched to the pace the host keeps, as on the Mac (#75).
-        let stretched = self.stretch.block(samples, self.pace.current());
+        // Held to its own time first, as on the Mac (#217).
+        let stretched = self.stretch.block(samples, self.pace.hold_mixed());
         if let Some(device) = &self.audio {
             device.play(&stretched);
         }

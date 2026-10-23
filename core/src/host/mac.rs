@@ -1362,7 +1362,9 @@ impl Host for MacWindow {
         // real time, so a host running slower than real time has to stretch
         // it or the device runs dry between blocks (#75). At a pace of 1.0
         // this hands the device the block byte for byte.
-        let stretched = self.stretch.block(samples, self.pace.current());
+        // Held to its own time first, so a machine ahead of real time hands
+        // it over no sooner than it is due (#217).
+        let stretched = self.stretch.block(samples, self.pace.hold_mixed());
         if let Some(device) = &self.audio {
             device.play(&stretched);
         }

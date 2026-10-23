@@ -2781,11 +2781,16 @@ fn get_volume_information(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> 
 }
 
 fn get_tick_count(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // The declared clock, not the host's (ADR-0003).
+    // The declared clock, not the host's (ADR-0003). It moves a millisecond at
+    // a time, which a clock spin's pass relies on (`spin.rs`, #217): an answer
+    // finer than that needs its own horizon there.
     Ok(u32::try_from(ctx.declared_millis() & 0xffff_ffff).unwrap_or(0))
 }
 
 fn query_performance_counter(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // In whole declared milliseconds, which a clock spin's pass relies on
+    // (`spin.rs`, #217): a counter finer than that, as Windows 98's 1,193,182
+    // Hz one is, needs its own horizon there.
     let ticks = ctx.declared_millis() * 1000;
     ctx.mem
         .write_u32(args[0], ticks as u32)

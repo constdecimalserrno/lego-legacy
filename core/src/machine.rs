@@ -182,7 +182,7 @@ pub struct Machine {
     ask_at: u64,
     /// How many of the route's events have been delivered (#215).
     delivered: usize,
-    /// The last clock read, for a spin to be passed in one step (#217).
+    /// The guest's recent clock reads, from which a clock spin is passed (#217).
     spins: crate::spin::Spins,
 }
 
@@ -297,10 +297,11 @@ impl Machine {
         self.flips
     }
 
-    /// Instructions passed in one step as clock spins (#217).
+    /// Instructions the machine retired by passing clock spins (#217): ones
+    /// the cursor counts and no engine ran.
     #[must_use]
-    pub fn spins_passed(&self) -> u64 {
-        self.spins.passed()
+    pub fn instructions_passed(&self) -> u64 {
+        self.spins.instructions()
     }
 
     /// Present the declared surface, charge the clock for it, and take
@@ -1083,7 +1084,7 @@ impl Machine {
     /// would have left it.
     fn cross(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Result<(), Stop> {
         use crate::shim::{Entry, THUNK_BASE, THUNK_STRIDE};
-        self.spins.forget(&mut self.arena);
+        self.spins.crossed(&mut self.arena);
         let addr = self.cpu.eip;
         let index = (addr.wrapping_sub(THUNK_BASE) / THUNK_STRIDE) as usize;
         let (bound, poll) = match self.bound.get(index).copied().flatten() {
@@ -1992,6 +1993,19 @@ impl Machine {
             }
         }
 
+        self.clock.present(self.flip_cost);
+        log.line(&format!(
+            "flip {} cursor {} {}x{}x{}",
+            self.flips,
+            self.clock.cursor(),
+            frame.width,
+            frame.height,
+            frame.depth
+        ));
+        // Held to the flip's own time before it is shown, so a frame a
+        // machine ahead of real time made is shown no sooner than it is due
+        // (#217).
+        self.pace(host, log);
         let out = Frame {
             width: frame.width,
             height: frame.height,
@@ -2011,16 +2025,6 @@ impl Machine {
                 log.line(&format!("screenshot {} refused: {e}", self.flips));
             }
         }
-        self.clock.present(self.flip_cost);
-        log.line(&format!(
-            "flip {} cursor {} {}x{}x{}",
-            self.flips,
-            self.clock.cursor(),
-            frame.width,
-            frame.height,
-            frame.depth
-        ));
-        self.pace(host, log);
         // One pointer on the screen: the host stops drawing its own once the
         // title has said it draws one itself (ShowCursor's count).
         let shown = self.state.cursor_shown >= 0;

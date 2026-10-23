@@ -135,6 +135,16 @@ impl Clock {
     pub fn millis(self) -> u64 {
         self.nanos() / 1_000_000
     }
+
+    /// The first declared cycle that [`Clock::millis`] reads as `millis`:
+    /// since a millisecond is `cycles × 1000 ÷ hz` rounded down, its first
+    /// cycle is `millis × hz ÷ 1000` rounded up. Where a clock spin is
+    /// passed to (#217).
+    #[must_use]
+    pub fn first_cycle_of(self, millis: u64) -> u64 {
+        let first = (u128::from(millis) * u128::from(self.hz)).div_ceil(1000);
+        u64::try_from(first).unwrap_or(u64::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +172,24 @@ mod tests {
         let put_back = Clock::resumed(cursor, cycles, clock.hz());
         assert_eq!(put_back.hz(), 166_000_000);
         assert_eq!(put_back.nanos(), clock.nanos());
+    }
+
+    #[test]
+    fn a_millisecond_s_first_cycle_reads_as_it_and_the_cycle_before_does_not() {
+        // A rate that is no whole number of kilohertz, as a real Pentium 166
+        // runs at, so the rounding up is needed; and the roster's own.
+        for hz in [166_666_667, 166_000_000, DECLARED_HZ] {
+            for millis in [1, 2, 3, 999, 1_000, 123_457] {
+                let first = Clock::at(hz).first_cycle_of(millis);
+                let at = |cycles: u64| Clock::resumed(cycles, cycles, hz).millis();
+                assert_eq!(at(first), millis, "{hz} Hz: {first} is in {millis} ms");
+                assert_eq!(
+                    at(first - 1),
+                    millis - 1,
+                    "{hz} Hz: the cycle before is not"
+                );
+            }
+        }
     }
 
     #[test]

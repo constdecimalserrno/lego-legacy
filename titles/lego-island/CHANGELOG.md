@@ -103,6 +103,9 @@ core's `ASK_BETWEEN_FLIPS_MILLIS` or more of declared time reaches it at the fra
 rather than at its flip. It polls at the start of each frame, before it waits, so it is never asked
 between its flips. No route moved.
 
+Took core 1.2.0's clock-spin pass (#217): its `QueryPerformanceCounter` reads that come back to back
+are from different callers, so nothing of it is passed, and no route moved.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from

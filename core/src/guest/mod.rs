@@ -93,7 +93,10 @@ pub struct Arena {
 
 /// The most runs the watch keeps, and the longest. Past either, it stops: a
 /// pass of LEGO Chess's spin hands out five.
-const HELD: usize = 16;
+// ponytail: a list judged by a quadratic scan for each byte's first holder,
+// so a pass of more than 16 runs, or one wider than 16 bytes, is never
+// passed. Upgrade path: ranges held in address order, merged as they come.
+const HELD_RUNS: usize = 16;
 const HELD_BYTES: usize = 16;
 
 /// How big a page is for the purpose of watching code, which is the size the
@@ -316,7 +319,7 @@ impl Arena {
     /// compare when asked.
     #[cold]
     fn hold(&mut self, addr: u32, len: usize) {
-        if len > HELD_BYTES || self.held.len() == HELD {
+        if len > HELD_BYTES || self.held.len() == HELD_RUNS {
             self.watching = false;
             return;
         }

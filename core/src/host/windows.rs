@@ -1108,8 +1108,9 @@ impl Host for WinWindow {
 
     fn audio(&mut self, samples: &[i16]) {
         // Stretched as on macOS, so a host running slower than real time
-        // does not leave the device dry between blocks (#75).
-        let stretched = self.stretch.block(samples, self.pace.current());
+        // does not leave the device dry between blocks (#75), and held to its
+        // own time first, as there (#217).
+        let stretched = self.stretch.block(samples, self.pace.hold_mixed());
         if let Some(device) = &self.audio {
             device.play(&stretched);
         }
