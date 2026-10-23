@@ -3376,12 +3376,12 @@ fn create_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// Make a guest thread that starts at `start` with `parameter`, on a stack
-/// of `stack_bytes` (the default for none), and hand back its handle: none
+/// of `bytes` (the default for none), and hand back its handle: none
 /// when the heap has no room for its stack. It is the last of the machine's
 /// threads, and the newest thread id is its own.
 pub(super) fn spawn(
     ctx: &mut Ctx<'_>,
-    stack_bytes: u32,
+    bytes: u32,
     start: u32,
     parameter: u32,
     suspended: bool,
@@ -3389,11 +3389,7 @@ pub(super) fn spawn(
     // A stack of its own, and a thread block of its own for `fs` to be based
     // at. Both come off the guest heap, which is where everything the machine
     // hands a guest comes from.
-    let bytes = if stack_bytes == 0 {
-        THREAD_STACK
-    } else {
-        stack_bytes
-    };
+    let bytes = if bytes == 0 { THREAD_STACK } else { bytes };
     let stack = ctx.state.heap.alloc(bytes);
     let block = ctx.state.heap.alloc(0x1000);
     if stack == 0 || block == 0 {

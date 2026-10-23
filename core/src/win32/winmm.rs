@@ -359,22 +359,15 @@ struct Stream {
     /// It has been closed, and is kept only while the player gives back the
     /// buffers the close returned: their callbacks may still name it.
     closing: bool,
-    /// The notes it has turned on and not off, a bit a key, by channel, and
-    /// the status a message without one runs on with.
+    /// The notes it has turned on and not off, a bit a key, by channel.
     sounding: [u128; 16],
-    running: u8,
 }
 
 impl Stream {
-    /// Note what a short message does to the notes sounding.
+    /// Note what a short message does to the notes sounding. MSTREAM writes
+    /// every message with its status, as LEGO Chess's converter does.
     fn track(&mut self, message: u32) {
-        let [mut status, mut key, mut velocity, _] = message.to_le_bytes();
-        match status {
-            0..0x80 => (status, key, velocity) = (self.running, status, key),
-            0x80..0xf0 => self.running = status,
-            0xf0..0xf8 => self.running = 0,
-            _ => {}
-        }
+        let [status, key, velocity, _] = message.to_le_bytes();
         let (channel, bit) = (usize::from(status & 0x0f), 1u128 << (key & 0x7f));
         match status & 0xf0 {
             0x90 if velocity > 0 => self.sounding[channel] |= bit,
@@ -555,7 +548,6 @@ fn open_stream(
             stopped: false,
             closing: false,
             sounding: [0; 16],
-            running: 0,
         });
     }
     ctx.call_guest = Some((callback, vec![handle, MOM_OPEN, instance, 0, 0]));
