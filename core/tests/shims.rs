@@ -368,6 +368,200 @@ fn a_thread_that_asked_to_quit_is_handed_wm_quit_after_what_was_posted() {
     );
 }
 
+/// The key messages and the character message.
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
+const WM_CHAR: u32 = 0x0102;
+
+/// Take every message waiting and translate each as it is taken, as a title's
+/// pump does (LEGO Chess's, 0x0045C4B0): what was taken, its `wParam` and
+/// `lParam`, and what `TranslateMessage` answered for it.
+fn pump(m: &mut Machine) -> Vec<(u32, u32, u32, u32)> {
+    let mut taken = Vec::new();
+    while call(m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 1]) == Ok(1) {
+        let read = |o: u32| m.arena.read_u32(OUT + o).expect("in the arena");
+        let (message, wparam, lparam) = (read(4), read(8), read(12));
+        let answer = call(m, "USER32", "TranslateMessage", &[OUT]).expect("translated");
+        taken.push((message, wparam, lparam, answer));
+    }
+    taken
+}
+
+/// A key that types a character is translated into it as the title takes
+/// its key-down (#157): `TranslateMessage` posts `WM_CHAR` with the key-down's
+/// `lParam`, and the pump takes it next, ahead of the key-ups already
+/// waiting. The character is the declared US keyboard's, with Shift as the
+/// title has read its keys, as Windows translates with a thread's own key
+/// state: a Shift let go after the A went down, but before the title took the
+/// A, still types a capital. A key going down or up is answered nonzero,
+/// whether it typed anything or not, and any other message zero, as Microsoft
+/// documents.
+#[test]
+fn a_typed_key_is_translated_into_its_character_as_the_title_takes_it() {
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    m.state.messages.clear();
+    let key = |code, down| Input::Key { code, down };
+    // Left Shift and A, by where they sit.
+    for event in [
+        key(0x2a, true),
+        key(0x1e, true),
+        key(0x2a, false),
+        key(0x1e, false),
+    ] {
+        win32::user32::deliver(&mut m.state, event, 0);
+    }
+    assert_eq!(
+        pump(&mut m),
+        [
+            (WM_KEYDOWN, 0x10, 0x002a_0001, 1),
+            (WM_KEYDOWN, 0x41, 0x001e_0001, 1),
+            (WM_CHAR, u32::from(b'A'), 0x001e_0001, 0),
+            (WM_KEYUP, 0x10, 0xc02a_0001, 1),
+            (WM_KEYUP, 0x41, 0xc01e_0001, 1),
+        ]
+    );
+}
+
+/// Each key types what it types on a US keyboard, with the modifiers held
+/// (#157). Alone and with Shift, as Microsoft's US keyboard page (`kbdus_7`)
+/// gives each key, and the keypad as Num Lock on types. With Ctrl, a
+/// character only where a source shows one: that page for Backspace, Return
+/// and Space, and Wine's `test_ToUnicode` table, which passes on Windows, for
+/// the rest. With Alt, none: a key typed with Alt is a system keystroke, which
+/// Windows translates into `WM_SYSCHAR` (Microsoft's "Keyboard Input
+/// Overview"), and with Ctrl and Alt the US page gives no key a character.
+#[test]
+fn each_key_types_what_it_types_on_a_us_keyboard() {
+    const SHIFT: u32 = 0x2a;
+    const CTRL: u32 = 0x1d;
+    const ALT: u32 = 0x38;
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    let typed = |m: &mut Machine, held: &[u32], code: u32| {
+        m.state.messages.clear();
+        let mut press = |code, down| {
+            win32::user32::deliver(&mut m.state, Input::Key { code, down }, 0);
+        };
+        for &modifier in held {
+            press(modifier, true);
+        }
+        press(code, true);
+        press(code, false);
+        for &modifier in held {
+            press(modifier, false);
+        }
+        let chars: Vec<u32> = pump(m)
+            .into_iter()
+            .filter(|(message, ..)| *message == WM_CHAR)
+            .map(|(_, wparam, ..)| wparam)
+            .collect();
+        assert!(
+            chars.len() < 2,
+            "one key, one character at most: {chars:x?}"
+        );
+        chars.first().copied()
+    };
+    let c = |byte: u8| Some(u32::from(byte));
+    let rows: &[(&[u32], u32, Option<u32>)] = &[
+        // Alone and with Shift, by where each key sits.
+        (&[], 0x1e, c(b'a')),
+        (&[SHIFT], 0x1e, c(b'A')),
+        (&[], 0x2c, c(b'z')),
+        (&[SHIFT], 0x36, None),
+        (&[0x36], 0x2c, c(b'Z')),
+        (&[], 0x02, c(b'1')),
+        (&[SHIFT], 0x02, c(b'!')),
+        (&[SHIFT], 0x03, c(b'@')),
+        (&[SHIFT], 0x07, c(b'^')),
+        (&[], 0x0b, c(b'0')),
+        (&[SHIFT], 0x0b, c(b')')),
+        (&[], 0x0c, c(b'-')),
+        (&[SHIFT], 0x0c, c(b'_')),
+        (&[], 0x0d, c(b'=')),
+        (&[SHIFT], 0x0d, c(b'+')),
+        (&[], 0x1a, c(b'[')),
+        (&[SHIFT], 0x1a, c(b'{')),
+        (&[], 0x1b, c(b']')),
+        (&[SHIFT], 0x1b, c(b'}')),
+        (&[], 0x2b, c(b'\\')),
+        (&[SHIFT], 0x2b, c(b'|')),
+        (&[], 0x56, c(b'\\')),
+        (&[SHIFT], 0x56, c(b'|')),
+        (&[], 0x27, c(b';')),
+        (&[SHIFT], 0x27, c(b':')),
+        (&[], 0x28, c(b'\'')),
+        (&[SHIFT], 0x28, c(b'"')),
+        (&[], 0x29, c(b'`')),
+        (&[SHIFT], 0x29, c(b'~')),
+        (&[], 0x33, c(b',')),
+        (&[SHIFT], 0x33, c(b'<')),
+        (&[], 0x34, c(b'.')),
+        (&[SHIFT], 0x34, c(b'>')),
+        (&[], 0x35, c(b'/')),
+        (&[SHIFT], 0x35, c(b'?')),
+        (&[], 0x39, c(b' ')),
+        (&[SHIFT], 0x39, c(b' ')),
+        (&[], 0x1c, c(b'\r')),
+        (&[SHIFT], 0x1c, c(b'\r')),
+        (&[], 0x0e, c(0x08)),
+        (&[SHIFT], 0x0e, c(0x08)),
+        (&[], 0x0f, c(b'\t')),
+        (&[SHIFT], 0x0f, c(b'\t')),
+        (&[], 0x01, c(0x1b)),
+        // The keypad's, as the machine numbers it with Num Lock on.
+        (&[], 0x47, c(b'7')),
+        (&[], 0x52, c(b'0')),
+        (&[], 0x53, c(b'.')),
+        (&[], 0x37, c(b'*')),
+        (&[], 0x4a, c(b'-')),
+        (&[], 0x4e, c(b'+')),
+        (&[], 0x9c, c(b'\r')),
+        // Ctrl, by Microsoft's US page.
+        (&[CTRL], 0x0e, c(0x7f)),
+        (&[CTRL], 0x1c, c(b'\n')),
+        (&[CTRL], 0x39, c(b' ')),
+        (&[SHIFT, CTRL], 0x0e, None),
+        (&[SHIFT, CTRL], 0x39, None),
+        // Ctrl, by Wine's table: a letter is its place in the alphabet, with
+        // Shift too, and five more keys have a character.
+        (&[CTRL], 0x1e, c(0x01)),
+        (&[SHIFT, CTRL], 0x1e, c(0x01)),
+        (&[0x9d], 0x2c, c(0x1a)),
+        (&[SHIFT, CTRL], 0x03, c(0x00)),
+        (&[CTRL], 0x1a, c(0x1b)),
+        (&[CTRL], 0x2b, c(0x1c)),
+        (&[CTRL], 0x1b, c(0x1d)),
+        (&[SHIFT, CTRL], 0x07, c(0x1e)),
+        (&[SHIFT, CTRL], 0x0c, c(0x1f)),
+        (&[SHIFT, CTRL], 0x1c, None),
+        (&[CTRL], 0x0f, None),
+        (&[SHIFT, CTRL], 0x0f, None),
+        (&[CTRL], 0x05, None),
+        (&[SHIFT, CTRL], 0x05, None),
+        (&[CTRL], 0x0c, None),
+        (&[CTRL], 0x29, None),
+        (&[CTRL], 0x33, None),
+        // Alt.
+        (&[ALT], 0x1e, None),
+        (&[0xb8], 0x02, None),
+        (&[CTRL, ALT], 0x1e, None),
+        (&[SHIFT, CTRL, ALT], 0x1e, None),
+        // And the keys that type nothing.
+        (&[], 0xcb, None),
+        (&[], 0x3b, None),
+        (&[], 0xd3, None),
+        (&[], CTRL, None),
+    ];
+    for (held, code, expected) in rows {
+        assert_eq!(
+            typed(&mut m, held, *code),
+            *expected,
+            "key {code:#04x} with {held:x?} held"
+        );
+    }
+}
+
 #[test]
 fn mouse_trails_go_off_and_nothing_else_is_answered() {
     const SPI_SETMOUSETRAILS: u32 = 0x005d;

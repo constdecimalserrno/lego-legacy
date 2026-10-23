@@ -342,6 +342,11 @@ pub struct State {
     /// Which virtual keys have gone down since the guest last asked
     /// `GetAsyncKeyState` about each.
     pub keys_pressed: Vec<u32>,
+    /// Which keys are down as the title has read them, numbered as
+    /// `keys_down`: the key messages it has taken off its queue, which is the
+    /// key state Windows keeps for a thread and translates its keys with
+    /// (#157), where `keys_down` is what is down now.
+    pub keys_read: Vec<u32>,
     /// How far the pointer moved since the guest last looked.
     pub mouse_delta: (i32, i32),
     /// What a person did, waiting in the buffered lane: where in the device's
@@ -497,6 +502,7 @@ impl State {
             present: None,
             keys_down: Vec::new(),
             keys_pressed: Vec::new(),
+            keys_read: Vec::new(),
             mouse_delta: (0, 0),
             mouse_data: VecDeque::new(),
             keyboard_data: VecDeque::new(),

@@ -499,6 +499,11 @@ const WM_RBUTTONUP: u32 = 0x0205;
 const WM_RBUTTONDBLCLK: u32 = 0x0206;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
+const WM_CHAR: u32 = 0x0102;
+/// The virtual keys of Shift, Ctrl and Alt, whichever side.
+const VK_SHIFT: u32 = 0x10;
+const VK_CONTROL: u32 = 0x11;
+const VK_MENU: u32 = 0x12;
 const MK_LBUTTON: u32 = 0x0001;
 const MK_RBUTTON: u32 = 0x0002;
 
@@ -913,11 +918,28 @@ fn take_message(ctx: &mut Ctx<'_>, filter: &[u32], remove: bool) -> Result<bool,
     let message = ctx.state.messages[index];
     if remove {
         ctx.state.messages.remove(index);
+        read_key(ctx.state, &message);
     }
     if msg != 0 {
         write_message(ctx, msg, &message)?;
     }
     Ok(true)
+}
+
+/// A key message the title takes off its queue changes the key state it has
+/// read, which is what `TranslateMessage` translates with (#157). Windows keeps
+/// that state for a thread, and it "changes as a thread reads key messages
+/// from its message queue" (Microsoft's `GetKeyState` page); Wine changes it
+/// as each one is removed (`release_hardware_message`, `server/queue.c`, read
+/// as documentation). The key is the one the message's `lParam` names, by its
+/// scan code and extended bit, so the two Shifts are two keys.
+fn read_key(state: &mut super::State, m: &super::Message) {
+    let code = ((m.lparam >> 16) & 0x7f) | ((m.lparam >> 17) & 0x80);
+    match m.message {
+        WM_KEYDOWN if !state.keys_read.contains(&code) => state.keys_read.push(code),
+        WM_KEYUP => state.keys_read.retain(|k| *k != code),
+        _ => {}
+    }
 }
 
 fn peek_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1223,10 +1245,107 @@ fn timer_due(
     })
 }
 
-fn translate_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    // Key messages are posted (#59), and no character message is ever made
-    // from one.
-    Ok(0)
+/// TranslateMessage(msg): a key going down that types a character has the
+/// character posted, `WM_CHAR`, with the key-down's `lParam`, where the
+/// title's loop takes it next, ahead of the input still waiting (Microsoft's
+/// `TranslateMessage` page and its "Keyboard Input Overview", #157). LEGO
+/// Chess's New Player form takes a name this way (0x0045C746). The character
+/// is the declared keyboard's, with the modifiers as the title has read its
+/// keys. The answer is nonzero for a key going down or up, whether it typed
+/// anything or not, and zero for any other message, as Microsoft documents;
+/// this machine makes no system keystrokes. No title on the roster reads it.
+fn translate_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let at = args[0];
+    let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
+    let (window, message, wparam, lparam) = (read(0)?, read(4)?, read(8)?, read(12)?);
+    match message {
+        WM_KEYDOWN => {
+            let held = |key| {
+                ctx.state
+                    .keys_read
+                    .iter()
+                    .any(|c| virtual_key(*c) == Some(key))
+            };
+            if let Some(typed) = character(wparam, held(VK_SHIFT), held(VK_CONTROL), held(VK_MENU))
+            {
+                let posted = super::Message {
+                    window,
+                    message: WM_CHAR,
+                    wparam: typed,
+                    lparam,
+                    time: u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0),
+                    point: ctx.state.pointer,
+                };
+                post_behind_the_posted(ctx.state, posted);
+            }
+            Ok(1)
+        }
+        WM_KEYUP => Ok(1),
+        _ => Ok(0),
+    }
+}
+
+/// What a virtual key types on the declared machine's keyboard, a US one, as
+/// the ANSI character an `A` window class is handed, with Shift, Ctrl and Alt
+/// held or not (#157).
+///
+/// Alone and with Shift, each key types what Microsoft's US keyboard page
+/// (`kbdus_7`) gives it, and the keypad what it types with Num Lock on, which
+/// is how [`virtual_key`] numbers it. With Ctrl, a key types a character only
+/// where a source shows one: that page for Backspace, Return and Space, and
+/// Wine's `test_ToUnicode` table, which passes on Windows, for the rest. With
+/// Alt, none: a key typed with Alt is a system keystroke, which Windows
+/// translates into `WM_SYSCHAR` (Microsoft's "Keyboard Input Overview"), and
+/// with Ctrl and Alt the US page gives no key a character.
+// ponytail: Caps Lock is off, since no host sends it; and Shift does not turn
+// the keypad into the cursor pad Windows makes of it with Num Lock on, as
+// `virtual_key` never does either.
+fn character(key: u32, shift: bool, control: bool, alt: bool) -> Option<u32> {
+    if alt {
+        return None;
+    }
+    if control {
+        return match (key, shift) {
+            // A to Z: the letter's place in the alphabet.
+            (0x41..=0x5a, _) => Some(key - 0x40),
+            (0x32, true) => Some(0x00),  // @
+            (0x36, true) => Some(0x1e),  // ^
+            (0xbd, true) => Some(0x1f),  // _
+            (0xdb, false) => Some(0x1b), // [
+            (0xdc, false) => Some(0x1c), // \
+            (0xdd, false) => Some(0x1d), // ]
+            (0x0d, false) => Some(0x0a), // Return: a line feed
+            (0x08, false) => Some(0x7f), // Backspace: DEL
+            (0x20, false) => Some(0x20), // Space
+            _ => None,
+        };
+    }
+    let (alone, shifted) = match key {
+        0x41..=0x5a => (key as u8 + 0x20, key as u8),
+        0x30..=0x39 => (key as u8, b")!@#$%^&*("[key as usize - 0x30]),
+        // Backspace, Tab, Return, Escape and Space type themselves.
+        0x08 | 0x09 | 0x0d | 0x1b | 0x20 => (key as u8, key as u8),
+        0xba => (b';', b':'),
+        0xbb => (b'=', b'+'),
+        0xbc => (b',', b'<'),
+        0xbd => (b'-', b'_'),
+        0xbe => (b'.', b'>'),
+        0xbf => (b'/', b'?'),
+        0xc0 => (b'`', b'~'),
+        0xdb => (b'[', b'{'),
+        // Backslash, and the extra key an ISO keyboard has beside Shift.
+        0xdc | 0xe2 => (b'\\', b'|'),
+        0xdd => (b']', b'}'),
+        0xde => (b'\'', b'"'),
+        // The keypad's digits, its point and its signs.
+        0x60..=0x69 => (key as u8 - 0x30, key as u8 - 0x30),
+        0x6e => (b'.', b'.'),
+        0x6a => (b'*', b'*'),
+        0x6b => (b'+', b'+'),
+        0x6d => (b'-', b'-'),
+        _ => return None,
+    };
+    Some(u32::from(if shift { shifted } else { alone }))
 }
 
 fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
