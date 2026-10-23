@@ -1,6 +1,7 @@
 #lego-legacy-route 1
-# LEGO Chess, from its boot into its throne room and out: Space skips Krisalis' logo and the intro,
-# a new player is made at the New Player form with no name typed, and the window is closed (#210).
+# LEGO Chess, from its boot into its throne room and onto its Quick Game screen: Space skips
+# Krisalis' logo and the intro, a player named Ada is made at the New Player form, the chess board
+# in the throne room is clicked, and the window is closed (#210, #157). #158 plays a game from here.
 #
 # Replay it with a fresh `--data-root <empty dir>`, never beside the rip. It reaches the New Player
 # form only when no profile is saved, and it saves one: the game writes profiles\prof1.lcp and
@@ -18,20 +19,43 @@
 # black, and from flip 307 the New Player form stands on parchment between the inkpot and the
 # quill, its name box's caret first on at flip 319.
 #
-# The pointer goes to the tick at flip 320, and the left button goes down at flip 330: the game
-# waits for it to come up, presenting nothing, which it does at the 300th poll after the flip. With
-# no name typed the game names the player LEGO® Chess 1, saves it, and lists it under "Who's
-# playing?". The tick, pressed again at flip 370 and let go at its 300th poll, takes the only player
-# in: the game decodes twelve more sounds, and the throne room presents from flip 372, the camera
-# flying in to the King by flip 380 as he starts speaking, heard from flip 374. The window is closed
-# at flip 400, and the game leaves.
+# The name is typed a key at a time, each let go before the next goes down. The name box
+# (0x00448320) takes a character once a frame, from the WM_CHAR its key types (#157), when it is
+# not the one it took last and at least 50 ms after it, so a key down and up inside one frame, or
+# two keys, would lose one. Left Shift goes down at flip 320 and A at 321, and the box shows A from
+# flip 322; Shift is let go at 325, so D at 328 shows Ad from 329, and A at 334 Ada from 335.
+#
+# The pointer goes to the tick at flip 345, and the left button goes down at flip 350: the game
+# waits for it to come up, presenting nothing, which it does at the 300th poll after the flip. The
+# game saves the player and lists Ada under "Who's playing?" from flip 352. The tick, pressed again
+# at flip 390 and let go at its 300th poll, takes her in: the game decodes twelve more sounds, and
+# the throne room presents from flip 392, the camera flying in to the King as he starts speaking.
+#
+# The room's camera turns after the pointer, so what is under a pointer held still changes as it
+# turns: at (385,285) the chess board stays under it once the camera has turned, and the game names
+# it "Quick game". The pointer goes there at flip 405, and the button goes down at flip 430, the
+# camera still, and up at 431, since the game does not wait for it here. The Quick Game screen
+# presents whole from flip 432, white played by a person and black by the computer, a normal game
+# at a difficulty of 25, its tick starting the game. The window is closed at flip 470, and the
+# game leaves.
 flip 290 key Space down
 flip 290 poll 300 key Space up
 flip 300 key Space down
 flip 300 poll 300 key Space up
-flip 320 move 576 420
-flip 330 down
-flip 330 poll 300 up
-flip 370 down
-flip 370 poll 300 up
-flip 400 close
+flip 320 key LeftShift down
+flip 321 key A down
+flip 324 key A up
+flip 325 key LeftShift up
+flip 328 key D down
+flip 331 key D up
+flip 334 key A down
+flip 337 key A up
+flip 345 move 576 420
+flip 350 down
+flip 350 poll 300 up
+flip 390 down
+flip 390 poll 300 up
+flip 405 move 385 285
+flip 430 down
+flip 431 up
+flip 470 close

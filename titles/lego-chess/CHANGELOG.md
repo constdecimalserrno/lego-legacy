@@ -264,3 +264,27 @@ flip 291 is at 2,706,399,631 and its flip 305 at 2,971,352,027, 44 instructions 
 `throne-room.route` exits 0 at 3,167,796,074 after 401 flips, 26 later, its flip 372 at
 3,115,117,468, the throne room's first. Their pictures, mixes and saves are unchanged.
 `first-light.route` and `intro.route` press no key and do not move.
+
+A name is typed at its New Player form, and its throne room's chess board opens the Quick Game
+screen (#157). `routes/throne-room.route` now types Ada into the name box a key at a time, Shift for
+her capital, where it typed nothing and the game named its player LEGO® Chess 1. The box takes one
+character a frame from the `WM_CHAR` its key types (0x00448320), when it is not the one it took
+last and at least 50 ms after it, so the route lets each key go before the next goes down: A from
+flip 322, Ad from 329 and Ada from 335. The tick saves her, `profiles\prof1.lcp` beginning with her
+name, lists her under "Who's playing?" from flip 352, and takes her into the throne room from flip
+392, where the King starts speaking at 394. The room's camera turns after the pointer, so what is
+under a pointer held still changes as it turns; at (385,285) the board stays under it, named
+"Quick game". The route points there at flip 405 and clicks at 430, and the Quick Game screen
+presents whole from flip 432, white played by a person and black by the computer, where #158
+starts a game. The window is closed at flip 470, and the game exits 0 at 3,246,017,664 after 471
+flips. The test reads the name out of the saved profile and pins the named form, "Who's playing?",
+the King and the Quick Game screen, the mix from the throne room on, and its determinism gate.
+
+Its pointer, which it draws itself with the Windows one hidden, follows the mouse one for one, as
+before. Its one `SetCursorPos` (0x00457810, from 0x004113C0) is not its camera presets but Tab in a
+game (0x0040F5F0): it steps the pointer through six points on the screen, the game's buttons, as its
+manual's "TAB cycles through the buttons on the game screen" says. The game reads its pointer only
+from `WM_MOUSEMOVE`, and core posts none at a `SetCursorPos`, where Wine's server queues one at
+every call; so after Tab its pointer stays where it was until the mouse moves. That is #157's open
+question for the maintainer, since Hot Wheels, Alpha Team and Rock Raiders call `SetCursorPos` too,
+Hot Wheels every frame.

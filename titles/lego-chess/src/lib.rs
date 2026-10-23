@@ -116,8 +116,9 @@ pub const LEGO_CHESS: Title = Title {
     // steers it by how far the mouse goes and this is the value that steers
     // it. It draws it at the place each `WM_MOUSEMOVE` carries, kept whole
     // (0x457830 stores its x and y), so a move should be drawn as far as it
-    // went, as Hot Wheels' is (#37). It also puts the pointer at its camera
-    // presets with `SetCursorPos` (0x457810, from 0x4113C0), which #157
-    // measures.
+    // went, as Hot Wheels' is (#37). It puts the pointer itself only for Tab
+    // in a game (0x40F5F0), stepping it through six of its buttons with
+    // `SetCursorPos` (0x457810, from 0x4113C0), and reads it back only from
+    // `WM_MOUSEMOVE`, which core does not post at a `SetCursorPos` (#157).
     pointer_speed: (1.0, 1.0),
 };

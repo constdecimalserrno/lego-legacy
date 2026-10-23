@@ -870,37 +870,41 @@ fn the_skip_route_replays_to_the_same_machine_every_time() {
     );
 }
 
-/// The flips the throne-room route keeps (#210): the bumper's first; the New
-/// Player form's buttons and boxes on black, its first whole frame, and its
-/// first with the name box's caret on; "Who's playing?" with the new player
-/// in it; and the throne room's first, as the camera starts to fly in, and one
-/// with the King there.
+/// The flips the throne-room route keeps (#210, #157): the bumper's first; the
+/// New Player form's buttons and boxes on black, its first whole frame, its
+/// first with the name box's caret on, and the name typed; "Who's playing?"
+/// with the new player in it; the throne room's first, as the camera starts to
+/// fly in, and one with the King there; and the Quick Game screen's first.
 const BUMPER: u64 = 303;
 const FORM_ON_BLACK: u64 = 306;
 const NEW_PLAYER: u64 = 307;
 const CARET: u64 = 319;
-const WHO_IS_PLAYING: u64 = 340;
-const THRONE_ROOM: u64 = 372;
-const THE_KING: u64 = 380;
-const THRONE_ROOM_KEPT: [u64; 7] = [
+const NAMED: u64 = 335;
+const WHO_IS_PLAYING: u64 = 360;
+const THRONE_ROOM: u64 = 392;
+const THE_KING: u64 = 400;
+const QUICK_GAME: u64 = 432;
+const THRONE_ROOM_KEPT: [u64; 9] = [
     BUMPER,
     FORM_ON_BLACK,
     NEW_PLAYER,
     CARET,
+    NAMED,
     WHO_IS_PLAYING,
     THRONE_ROOM,
     THE_KING,
+    QUICK_GAME,
 ];
 
-/// Enough instructions for the route to close the window at flip 400 and the
-/// game to leave, at 3,167,796,074, and room to spare: a run that reaches
+/// Enough instructions for the route to close the window at flip 470 and the
+/// game to leave, at 3,246,017,664, and room to spare: a run that reaches
 /// the end of it has not left.
-const THRONE_ROOM_BUDGET: u64 = 3_200_000_000;
+const THRONE_ROOM_BUDGET: u64 = 3_300_000_000;
 
-/// The committed route into the throne room and out, replayed, keeping its
-/// flips and, when `shots`, writing the bumper, the form and the room as
-/// pictures in its run directory. Two slots, so the determinism gate's two
-/// runs can go side by side.
+/// The committed route into the throne room and onto the Quick Game screen,
+/// replayed, keeping its flips and, when `shots`, writing the bumper, the named
+/// form, the King and the Quick Game screen as pictures in its run directory.
+/// Two slots, so the determinism gate's two runs can go side by side.
 fn throne_room(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
     shots: bool,
@@ -911,7 +915,7 @@ fn throne_room(
         ),
         screenshots: Screenshots {
             at: if shots {
-                vec![BUMPER, NEW_PLAYER, THE_KING]
+                vec![BUMPER, NAMED, THE_KING, QUICK_GAME]
             } else {
                 Vec::new()
             },
@@ -931,24 +935,38 @@ fn throne_room(
 
 static THRONE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
+/// What a run saved, read from where its log says it went.
+fn saved(ran: &testkit::Ran, name: &str) -> Vec<u8> {
+    let line = ran
+        .log
+        .lines()
+        .find(|l| l.starts_with("file written") && l.contains(name))
+        .unwrap_or_else(|| panic!("{name} is saved"));
+    let (_, at) = line.rsplit_once(" to ").expect("where it went");
+    std::fs::read(at).expect("it is there")
+}
+
 /// Past the intro, the bumper, the New Player form and the throne room draw
-/// through Direct3D 2, and the King is heard (#210). Space skips Krisalis'
-/// logo and the intro; the bumper's two textures draw by their handles on
-/// white; the rooms' files load from the folders the game names (#171) and
-/// their sounds decode (#153); with no profile saved the game asks for a new
-/// player, every letter of its form drawn at the one depth it is given; the
-/// tick, with no name typed, makes one the game names LEGO® Chess 1 and saves;
-/// and the throne room, drawn with `D3DTBLEND_MODULATEALPHA` too, presents as
-/// the King starts speaking, a sound decoded through ACM, the only one in the
-/// mix since the bumper while the machine has no MIDI port for the room's tune
-/// (#154). The window is closed at flip 400 and the game leaves. The pinned
-/// pictures are this build's own. Of them only the form's, 307 and 319, were
-/// compared by eye with a picture, the old tree's one kept New Player frame,
-/// as the changelog says; the bumper, 303, only with the old tree's hash of
-/// it, which differs; and "Who's playing?", 340, and the room, 380, with
-/// nothing, the old tree never having got there.
+/// through Direct3D 2, and the King is heard (#210); a name is typed, and the
+/// chess board opens the Quick Game screen (#157). Space skips Krisalis' logo
+/// and the intro; the bumper's two textures draw by their handles on white; the
+/// rooms' files load from the folders the game names (#171) and their sounds
+/// decode (#153); with no profile saved the game asks for a new player, every
+/// letter of its form drawn at the one depth it is given. Ada is typed into its
+/// name box a key at a time, through the `WM_CHAR` each key types, Shift for her
+/// capital, and the tick makes her and saves her under that name. The throne
+/// room, drawn with `D3DTBLEND_MODULATEALPHA` too, presents as the King starts
+/// speaking, a sound decoded through ACM, the only one in the mix since the
+/// bumper while the machine has no MIDI port for the room's tune (#154). The
+/// board, clicked once the camera has turned after the pointer, opens the Quick
+/// Game screen, where #158 starts a game. The window is closed at flip 470 and
+/// the game leaves. The pinned pictures are this build's own. Of them only the
+/// form's, 307 and 319, were compared by eye with a picture, the old tree's
+/// one kept New Player frame, as the changelog says; the bumper, 303, only with
+/// the old tree's hash of it, which differs; and the rest with nothing, the old
+/// tree never having got there.
 #[test]
-fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
+fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
     let Some(ran) = throne_room(&THRONE, true) else {
         return;
     };
@@ -963,10 +981,10 @@ fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
     // room's tune, on the tick, are both refused.
     assert_eq!(ran.log.matches("midi stream open answered 2").count(), 2);
     assert_eq!(ran.flip_before("midi stream open answered 2"), 304);
-    ran.assert_logged("flip 372 cursor 3115117468 640x480x16")
-        .assert_logged("flip 400 cursor 3167725044 640x480x16")
-        .assert_logged("end exited 0 cursor 3167796074 flips 401 declared-ms 23667")
-        .assert_flips(401)
+    ran.assert_logged("flip 392 cursor 3116426918 640x480x16")
+        .assert_logged("flip 432 cursor 3201786127 640x480x16")
+        .assert_logged("end exited 0 cursor 3246017664 flips 471 declared-ms 24867")
+        .assert_flips(471)
         .assert_logged("profiles\\prof1.lcp, asked from 0x0045656a")
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof1.lcp, 4544 bytes",
@@ -974,11 +992,13 @@ fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\1save.lcs, 190920 bytes",
         );
+    // The profile starts with the name typed, ended by a zero.
+    assert_eq!(saved(ran, "prof1.lcp")[..4], *b"Ada\0");
     // The rooms' sounds, all of them MS ADPCM: fifteen while the bumper
     // stands, and twelve more as the tick takes the player in.
     assert_eq!(ran.log.matches("acm stream ").count(), 27);
     assert_eq!(ran.flip_before("acm stream 15:"), 304);
-    assert_eq!(ran.flip_before("acm stream 16:"), 371);
+    assert_eq!(ran.flip_before("acm stream 16:"), 391);
     let at = |flip: u64| {
         let frame = ran.host.frame(flip).expect("presented");
         assert!(!frame.pixels.is_empty(), "flip {flip} is kept");
@@ -1006,19 +1026,27 @@ fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
             "6f7337264d3cc3382e8af771c53d01a8fb980159d541b76e248edb24f263d019",
         ),
         (
+            NAMED,
+            "421e501c247ad1d59f2262e3db30d850914c9e9a671686eab254a4c5884a5821",
+        ),
+        (
             WHO_IS_PLAYING,
-            "0f9bb78d4a0fac2cfec609ab0082fc769976b25270ef1b38450a19f1842c53fd",
+            "a004e6381b53e9b76d8270069b220387b3884cb8c77aade563a2beef8a173fe9",
         ),
         (
             THE_KING,
             "1b7c3ce91f27a20b6a7564093c3be1e49af50760dea99d980252fa19f1ec41e7",
+        ),
+        (
+            QUICK_GAME,
+            "590d5c72c8adfe0d247d2bc3902d126579ece1343bb0b46a7f437365b5510efc",
         ),
     ] {
         assert_eq!(hash::sha256_hex(&at(flip).pixels), pinned, "flip {flip}");
     }
     assert!(!at(THRONE_ROOM).is_uniform(), "the throne room presents");
     // Nothing is heard from the bumper on until the King speaks, from flip
-    // 374; and the mix from the throne room on, his line, is pinned block by
+    // 394; and the mix from the throne room on, his line, is pinned block by
     // block.
     let silence = ran.loudness(BUMPER + 1, THRONE_ROOM);
     assert!(!silence.is_empty() && silence.iter().all(|r| *r == 0.0));
@@ -1033,17 +1061,17 @@ fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
         .iter()
         .find(|(block, _)| block.iter().any(|s| *s != 0))
         .map(|(_, flip)| *flip);
-    assert_eq!(onset, Some(374), "the King starts speaking");
+    assert_eq!(onset, Some(394), "the King starts speaking");
     let voice: Vec<u8> = throne_mix
         .iter()
         .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
         .collect();
     assert_eq!(
         hash::sha256_hex(&voice),
-        "2c45769dbac91c8dad4ea58609995674b8d354a29dc5dee4be31b8e02af18fb8",
+        "cc927b8ad2ab5b58c547db9109172fb3bd940e98e82a71041fa62e8e9da6928c",
         "the King's line"
     );
-    for flip in [BUMPER, NEW_PLAYER, THE_KING] {
+    for flip in [BUMPER, NAMED, THE_KING, QUICK_GAME] {
         let shot = ran.dir.join(format!("shots/{flip:010}.png"));
         assert!(shot.is_file(), "{} is written", shot.display());
     }
@@ -1074,15 +1102,6 @@ fn the_throne_room_route_replays_to_the_same_machine_every_time() {
         "and what it mixed"
     );
     // And what it saved, read from where its log says each went.
-    let saved = |ran: &testkit::Ran, name: &str| {
-        let line = ran
-            .log
-            .lines()
-            .find(|l| l.starts_with("file written") && l.contains(name))
-            .unwrap_or_else(|| panic!("{name} is saved"));
-        let (_, at) = line.rsplit_once(" to ").expect("where it went");
-        std::fs::read(at).expect("it is there")
-    };
     for name in ["prof1.lcp", "1save.lcs"] {
         assert!(
             saved(first, name) == saved(second, name),
