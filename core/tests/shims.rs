@@ -3792,7 +3792,8 @@ fn a_texture_is_loaded_from_one_in_system_memory_and_has_one_handle() {
 /// DirectX 5's device draws vertices already on the screen, triangle lists
 /// of `D3DTLVERTEX`, with the texture its handle names, as a decal or
 /// modulated by the vertices' colour, taking the texture's alpha when it has
-/// one and the vertices' when not, cut to the viewport the title described:
+/// one and the vertices' when not, or modulated in alpha too, cut to the
+/// viewport the title described:
 /// as LEGO Chess's DirectX plugin draws all it draws (#210). Another vertex
 /// type, a blend not written and a handle that names no texture are walls.
 #[test]
@@ -4033,8 +4034,49 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
         fill(&mut m, 0);
         assert_eq!(draw(&mut m, 3), Ok(0));
         assert_eq!(quadrants(&m), [red, 0, 0, white, 0], "{masks:x?}");
+        // D3DTBLEND_MODULATEALPHA takes the vertices' alpha too, where
+        // MODULATE takes the texels' alone; and multiplies both colour and
+        // alpha, so a vertex half clear or half grey halves what is seen.
+        square_of(&mut m, 4.0, 0x00ff_ffff);
+        for (blend, seen) in [(2, [red, 0, 0, white, 0]), (4, [0; 5])] {
+            set(&mut m, 21, blend);
+            fill(&mut m, 0);
+            assert_eq!(draw(&mut m, 3), Ok(0));
+            assert_eq!(quadrants(&m), seen, "{masks:x?}, blend {blend}");
+        }
+        set(&mut m, 21, 4);
+        for diffuse in [0x80ff_ffff, 0xff80_8080] {
+            square_of(&mut m, 4.0, diffuse);
+            fill(&mut m, 0);
+            assert_eq!(draw(&mut m, 3), Ok(0));
+            assert_eq!(
+                quadrants(&m),
+                [halved(255, 0, 0), 0, 0, halved(255, 255, 255), 0],
+                "{masks:x?}, blend 4, {diffuse:#x}"
+            );
+        }
+        set(&mut m, 21, 2);
+        square_of(&mut m, 4.0, 0xffff_ffff);
     }
     set(&mut m, 1, handle);
+    // A texture without alpha under blend 4 takes the vertices' alpha, and
+    // halves every texel.
+    set(&mut m, 21, 4);
+    square_of(&mut m, 4.0, 0x80ff_ffff);
+    fill(&mut m, 0);
+    assert_eq!(draw(&mut m, 3), Ok(0));
+    assert_eq!(
+        quadrants(&m),
+        [
+            halved(255, 0, 0),
+            halved(0, 255, 0),
+            halved(0, 0, 255),
+            halved(255, 255, 255),
+            0
+        ],
+        "blend 4 on 565"
+    );
+    set(&mut m, 21, 2);
     let behind = rgb(0, 0, 255);
     square_of(&mut m, 4.0, 0x00ff_ffff);
     fill(&mut m, behind);
@@ -4047,11 +4089,16 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
         set(&mut m, state, value);
     }
 
-    // D3DVT_LVERTEX, D3DTBLEND_MODULATEALPHA, and a handle that names no
+    // D3DVT_LVERTEX, the blends not written, and a handle that names no
     // texture.
     assert!(matches!(draw(&mut m, 2), Err(Stop::NotWritten { .. })));
-    set(&mut m, 21, 4);
-    assert!(matches!(draw(&mut m, 3), Err(Stop::NotWritten { .. })));
+    for blend in [0, 3, 5, 6, 8, 9] {
+        set(&mut m, 21, blend);
+        assert!(
+            matches!(draw(&mut m, 3), Err(Stop::NotWritten { .. })),
+            "blend {blend}"
+        );
+    }
     set(&mut m, 21, 1);
     set(&mut m, 1, 99);
     assert!(matches!(draw(&mut m, 3), Err(Stop::NotWritten { .. })));

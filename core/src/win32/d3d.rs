@@ -581,7 +581,7 @@ fn write_triangle_caps(
     put(at + 0x1c, 0x0000_440a)?; // dwShadeCaps: flat and Gouraud in colour, with alpha
     put(at + 0x20, 0x0000_0001)?; // dwTextureCaps: perspective correction
     put(at + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
-    put(at + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate
+    put(at + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate, less than it draws (#231)
     put(at + 0x2c, 0x0000_0001) // dwTextureAddressCaps: wrap
 }
 
@@ -1828,9 +1828,11 @@ fn combine(op: u32, arg1: u32, arg2: u32) -> Option<crate::raster::Combine> {
 
 /// How DirectX 5's `D3DTEXTUREBLEND` makes a pixel's colour and alpha, as
 /// Wine's `d3d_device3_SetRenderState` maps each onto the first texture stage:
-/// `D3DTBLEND_DECAL` and `D3DTBLEND_COPY` take the texel's, and
+/// `D3DTBLEND_DECAL` and `D3DTBLEND_COPY` take the texel's,
 /// `D3DTBLEND_MODULATE` multiplies the colours and takes the texel's alpha if
-/// the texture has alpha and the vertex's if not. The others are walls.
+/// the texture has alpha and the vertex's if not, and
+/// `D3DTBLEND_MODULATEALPHA` (4 in d3dtypes.h) multiplies both, which LEGO
+/// Chess's throne room draws with (#210). The others are walls.
 fn texture_map_blend(
     blend: u32,
     texture_alpha: bool,
@@ -1843,6 +1845,7 @@ fn texture_map_blend(
         1 | 7 => (Some(Combine::Texture), Some(Combine::Texture)),
         2 if texture_alpha => (Some(Combine::Modulate), Some(Combine::Texture)),
         2 => (Some(Combine::Modulate), Some(Combine::Diffuse)),
+        4 => (Some(Combine::Modulate), Some(Combine::Modulate)),
         _ => (None, None),
     }
 }

@@ -84,6 +84,17 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
+DirectX 5's `D3DTBLEND_MODULATEALPHA` draws (#210): a texel's colour and alpha each multiplied by
+the vertex's, as Wine's `d3d_device3_SetRenderState`, read as documentation, maps it onto the first
+texture stage, d3dtypes.h numbering it 4; no public copy of Microsoft's own `D3DTEXTUREBLEND` page
+was found. LEGO Chess draws its throne room with it. No released run reaches it: it walled before.
+LEGO Island also drives a DirectX 5 device (#117), but its retained mode draws through
+`d3d::rasterise` itself and never reaches `texture_map_blend`, and its disc tests on this change end
+on the lines they ended on before. Rock Raiders draws through its `IDirect3DDevice3` face, and the
+legacy blends are taken only on a DirectX 5 face, so it never reaches them either. The blends still
+not written stay walls, each tested. The device's `dwTextureBlendCaps` still declares modulate
+alone, less than it now draws, which #231 is to correct.
+
 A triangle at one depth, its three depths equal bit for bit, has that depth at every pixel it covers
 (#210): the steps of its depth are differences of equal floats, which are exactly zero, so a depth
 interpolated linearly across it is that depth throughout. The edge planes it was interpolated
