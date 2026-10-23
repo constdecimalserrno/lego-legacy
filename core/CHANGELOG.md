@@ -5,6 +5,27 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+A clock spin is passed in one step (#217), as ADR-0004 now allows. Two crossings in a row may be the
+same clock read (`QueryPerformanceCounter`, `GetTickCount`, `timeGetTime` or `timeGetSystemTime`)
+from the same place, in the same declared millisecond, with the processor the same bit for bit, no
+byte of memory changed between them, and no other thread able to run. The arena's new write watch
+says whether memory changed. Then the pass between them is one the guest would make again, unchanged,
+until the clock reads the next millisecond. So the machine retires those passes at once, its cycle
+counter with them, and the schedule carries on from the read that sees the next millisecond as it
+would have (`spin.rs`).
+- It lands at exactly the cursor, declared clock and state that running every pass gives.
+  `tests/spins.rs` holds each of the four reads to a traced run, which runs every pass: so too a
+  budget that runs out inside a spin, a stepped run, and a spin through a playing sound, whose mix
+  must be the same.
+- It holds a spin that writes memory, changes a register, keeps the time stamp counter, polls for
+  input, or shares the processor with a thread that can run, to never being passed.
+- A traced or stepped run runs every pass. A run that passed any says so at its end: `clock spins:`,
+  and the instructions passed.
+- LEGO Chess's movies were 99.996 % such a spin. Headless on the Mac mini they now play at about 36 to
+  38 times real time, where they played at 0.90, and the whole intro ends on the same line, flips,
+  digest and mix as before.
+- Hot Wheels' first race passes none, since its waits poll as well, and no released run moves.
+
 What a person does reaches a title between flips too, at its own input polls (#215), where it
 reached it only at a flip. A poll is a call that reads the keyboard, the mouse or the message queue,
 and every reader core has written is one: `PeekMessageA`, `GetMessageA`, `WaitMessage`,

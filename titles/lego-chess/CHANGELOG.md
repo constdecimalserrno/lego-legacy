@@ -154,3 +154,17 @@ million instructions, with its determinism gate. At a window, Space should skip 
 hanging the game once it is let go and the frame has stood core's `ASK_BETWEEN_FLIPS_MILLIS`, which
 a person has yet to try on the MacBook. By their code, its 16 waits for an arrow key to come up (0x457200) read
 the keyboard the same way, so a key let go between flips reaches them too.
+
+Its movies' clock spins pass in one step (#217, core 1.2.0). Between frames the movie player reads
+`QueryPerformanceCounter` from 0x0044B57D, 38 instructions a pass and about 4,400 passes a declared
+millisecond: 99.996 % of a frame's instructions. The machine retires the passes that would read the
+same millisecond at once.
+- Headless on the MacBook, from its kit, the intro had played at 0.72 to 0.80 of real time, its music
+  stretched at a window.
+- On the Mac mini the logo now plays at about 38 times real time and the intro at about 36. The
+  whole intro, 58 declared seconds, runs in 8.5 s, against 67.6.
+- It lands on the same machine. `intro.route` ends on main's digest, with every flip at its cursor
+  and the same mix, as its new test pins them. A run with no route still stops in the bumper at
+  cursor 8,613,581,999 after 829 flips.
+- The boot's two waits and Krisalis' hold poll for input as they wait, so they are not passed. No
+  sound plays through them.

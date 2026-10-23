@@ -117,6 +117,12 @@ The declared machine's own sense of elapsed time, derived from instructions reti
 costs. The guest cannot reach the host's wall clock.
 _Avoid_: virtual clock, emulated timer, game clock, host timebase
 
+**Clock spin**:
+A guest's wait made by reading the declared clock again and again until it reads a later moment,
+with nothing else in the loop. The machine may pass one in one step, landing exactly where running
+every pass lands (ADR-0004).
+_Avoid_: busy-wait as a synonym, idle loop, skip
+
 **Host**:
 The real machine and operating system the emulator runs on; everything the guest cannot see.
 _Avoid_: platform, native, system

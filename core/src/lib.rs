@@ -32,6 +32,7 @@ pub mod runlog;
 pub mod shim;
 pub mod snap;
 pub mod sound;
+pub mod spin;
 pub mod stub;
 pub mod synth;
 pub mod testkit;

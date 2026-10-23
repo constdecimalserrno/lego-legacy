@@ -81,7 +81,18 @@ pub struct Arena {
     /// More pages were written than the list above keeps, so the engine has
     /// to forget everything rather than work out what changed.
     pub written_all: bool,
+    /// A watch on every write, armed by the machine at a clock read, for
+    /// whether any byte changes before the next crossing (ADR-0004, #217). It
+    /// stops at the first write it can tell changed something, or one it
+    /// cannot keep, which is never wrong, only not passed for.
+    watching: bool,
+    /// Each run handed out to change while watching, and what it held then.
+    held: Vec<(u32, u8, [u8; HELD_BYTES])>,
 }
+
+/// The most runs the watch keeps, and the longest. Past either, it stops.
+const HELD: usize = 64;
+const HELD_BYTES: usize = 16;
 
 /// How big a page is for the purpose of watching code, which is the size the
 /// engine's own cache is indexed by.
@@ -99,6 +110,8 @@ impl Arena {
             code_written: false,
             written_code: Vec::new(),
             written_all: false,
+            watching: false,
+            held: Vec::new(),
             mapping: host.map(len)?,
             floor: 0,
         })
@@ -194,6 +207,9 @@ impl GuestMem for Arena {
         if self.wrote_over_code(addr, bytes.len()) {
             self.note_written(addr, bytes.len());
         }
+        if self.watching && self.slice(addr, bytes.len())? != bytes {
+            self.watching = false;
+        }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length.
         unsafe {
@@ -235,6 +251,9 @@ impl GuestMem for Arena {
         if self.wrote_over_code(addr, len) {
             self.note_written(addr, len);
         }
+        if self.watching {
+            self.hold(addr, len);
+        }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length, and the borrow is the arena's only
         // one for as long as it lasts.
@@ -248,6 +267,49 @@ impl GuestMem for Arena {
 }
 
 impl Arena {
+    /// Watch every write from here: whether any byte changes (ADR-0004,
+    /// #217).
+    pub fn watch(&mut self) {
+        self.watching = true;
+        self.held.clear();
+    }
+
+    pub fn unwatch(&mut self) {
+        self.watching = false;
+    }
+
+    /// Whether, since [`Arena::watch`], no byte has changed. A byte is judged
+    /// by what the first write to it found there: one written twice found
+    /// the first write's bytes the second time, which say nothing of before.
+    #[must_use]
+    pub fn unchanged(&self) -> bool {
+        self.watching
+            && self.held.iter().enumerate().all(|(i, &(at, len, was))| {
+                (0..u32::from(len)).all(|k| {
+                    let byte = at + k;
+                    let earlier = self.held[..i]
+                        .iter()
+                        .any(|&(a, l, _)| (a..a + u32::from(l)).contains(&byte));
+                    earlier
+                        || self
+                            .slice(byte, 1)
+                            .is_ok_and(|now| now[0] == was[k as usize])
+                })
+            })
+    }
+
+    /// Keep what a run handed out to change holds now, to compare when asked.
+    #[cold]
+    fn hold(&mut self, addr: u32, len: usize) {
+        if len > HELD_BYTES || self.held.len() == HELD {
+            self.watching = false;
+            return;
+        }
+        let mut was = [0; HELD_BYTES];
+        was[..len].copy_from_slice(self.slice(addr, len).expect("bounds checked"));
+        self.held.push((addr, len as u8, was));
+    }
+
     /// Say that the engine has decoded instructions out of this address, so
     /// that a write over them is noticed.
     pub fn mark_code(&mut self, addr: u32) {
@@ -335,6 +397,7 @@ impl Arena {
         if self.wrote_over_code(write, write_len) {
             self.note_written(write, write_len);
         }
+        self.watching = false;
         // Safety: both runs are bounds checked directly above and do not
         // overlap, so the shared borrow and the exclusive one never alias;
         // the mapping is live for both, and neither outlives the arena's own

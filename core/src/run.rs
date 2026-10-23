@@ -156,6 +156,15 @@ pub(crate) fn wrap_up(
         ));
     }
 
+    // How much of the run was a clock spin passed in one step, when any was
+    // (ADR-0004, #217): instructions the cursor counts that no host ran.
+    let passed = machine.spins.passed();
+    if passed > 0 {
+        log.line(&format!(
+            "clock spins: {passed} instructions passed in one step"
+        ));
+    }
+
     // Whether the device taking this run's audio ever ran dry. Said out loud
     // because it is the one thing a person hears that no test can catch: the
     // mix is made on the declared clock and a test reads it as it was mixed,

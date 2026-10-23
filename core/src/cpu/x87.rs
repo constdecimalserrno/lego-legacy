@@ -65,6 +65,18 @@ impl X87 {
         }
     }
 
+    /// The whole unit the same bit for bit, which `==` on its registers is
+    /// not: it calls 0.0 and -0.0 one, and a NaN no number.
+    #[must_use]
+    pub fn same_bits(&self, other: &Self) -> bool {
+        self.regs
+            .iter()
+            .zip(&other.regs)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+            && (self.top, self.used, self.control, self.status)
+                == (other.top, other.used, other.control, other.status)
+    }
+
     /// Put the unit back the way `fninit` leaves it.
     pub fn init(&mut self) {
         *self = Self::new();

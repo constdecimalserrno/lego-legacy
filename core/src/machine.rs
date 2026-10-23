@@ -182,6 +182,8 @@ pub struct Machine {
     ask_at: u64,
     /// How many of the route's events have been delivered (#215).
     delivered: usize,
+    /// The last clock read, for a spin to be passed in one step (#217).
+    pub spins: crate::spin::Spins,
 }
 
 /// Where the machine is in the one schedule every run keeps (#131).
@@ -244,6 +246,7 @@ impl Machine {
             polls: 0,
             ask_at: 0,
             delivered: 0,
+            spins: crate::spin::Spins::default(),
         })
     }
 
@@ -696,6 +699,7 @@ impl Machine {
         one: bool,
     ) -> Option<Outcome> {
         const BURST: u64 = 1 << 16;
+        self.spins.allow(budget, !one && log.trace() < Trace::Shims);
         let mut moved = false;
         loop {
             match self.turn {
@@ -809,7 +813,7 @@ impl Machine {
 }
 
 /// Whether a thread can be given the processor at this moment (ADR-0005).
-fn runnable_at(thread: &crate::win32::GuestThread, now: u64) -> bool {
+pub(crate) fn runnable_at(thread: &crate::win32::GuestThread, now: u64) -> bool {
     !thread.ended && !thread.suspended && thread.wake_at <= now
 }
 
@@ -1070,6 +1074,7 @@ impl Machine {
     /// would have left it.
     fn cross(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Result<(), Stop> {
         use crate::shim::{Entry, THUNK_BASE, THUNK_STRIDE};
+        self.spins.forget(&mut self.arena);
         let addr = self.cpu.eip;
         let index = (addr.wrapping_sub(THUNK_BASE) / THUNK_STRIDE) as usize;
         let (bound, poll) = match self.bound.get(index).copied().flatten() {
@@ -1139,6 +1144,10 @@ impl Machine {
             }
             Bound::Shim(shim) => shim,
         };
+        if let Some(shim) = found {
+            self.spins
+                .crossing(shim, &self.cpu, &self.clock, &mut self.arena);
+        }
         let boundary = &self.boundary;
         let what = || match boundary.at(addr) {
             Some(Entry::Import(import)) => format!("{}!{}", import.dll, import.name),
@@ -1640,7 +1649,14 @@ impl Machine {
                 .run(&mut self.cpu, &mut self.arena, count, Boundary::RANGE);
         self.clock.retire_many(retired);
         match result {
-            Ok(()) => self.stopped(host).then_some(Outcome::Closed),
+            Ok(()) => {
+                // A clock spin is passed here, where its burst ends, so what
+                // follows is what follows the burst that would have reached
+                // the same read (#217).
+                self.spins
+                    .pass(&mut self.cpu, &mut self.clock, &self.arena, &self.state);
+                self.stopped(host).then_some(Outcome::Closed)
+            }
             Err(Stop::Interrupt(n)) => Some(Outcome::Wall {
                 what: format!("int {n:#04x}"),
             }),
