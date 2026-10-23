@@ -460,18 +460,24 @@ const FIRST_BRICK: u64 = 10;
 const FIRST_LIGHT_BUDGET: u64 = 84_000_000;
 
 /// The committed route to first light, replayed, keeping the frame before
-/// first light, first light and the brick, and writing the last two as
-/// pictures in its run directory. Two slots, so the determinism gate's two
-/// runs can go side by side.
+/// first light, first light and the brick, and, when `shots`, writing the
+/// last two as pictures in its run directory. Two slots, so the determinism
+/// gate's two runs can go side by side; its second writes none, since nothing
+/// reads them.
 fn first_light(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
 ) -> Option<&'static testkit::Ran> {
     let cli = Cli {
         route: Some(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/first-light.route"),
         ),
         screenshots: Screenshots {
-            at: vec![FIRST_LIGHT, FIRST_BRICK],
+            at: if shots {
+                vec![FIRST_LIGHT, FIRST_BRICK]
+            } else {
+                Vec::new()
+            },
             every: None,
         },
         ..Cli::default()
@@ -509,7 +515,9 @@ static LIT: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new
 /// repeated, it is `6f73eca7`.
 #[test]
 fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
-    let Some(ran) = first_light(&LIT) else { return };
+    let Some(ran) = first_light(&LIT, true) else {
+        return;
+    };
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
@@ -594,9 +602,9 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     // The second replay runs beside the first rather than after it.
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| first_light(&AGAIN));
+        let second = scope.spawn(|| first_light(&AGAIN, false));
         (
-            first_light(&LIT),
+            first_light(&LIT, true),
             second.join().expect("the second replay ran"),
         )
     });
@@ -605,9 +613,8 @@ fn the_first_light_route_replays_to_the_same_machine_every_time() {
     };
     first.assert_same_machine(second);
     for flip in [FIRST_LIGHT, FIRST_BRICK] {
-        assert_eq!(
-            first.host.frame(flip).map(|f| &f.pixels),
-            second.host.frame(flip).map(|f| &f.pixels),
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
             "including what it presented at flip {flip}"
         );
     }
@@ -626,17 +633,19 @@ const INTRO_TENTH: u64 = 338;
 const INTRO_BUDGET: u64 = 3_700_000_000;
 
 /// The committed route through the intro's first two movies and into the
-/// third, replayed, keeping the flips a person checks and writing each as a
-/// picture in its run directory. Two slots, so the determinism gate's two
-/// runs can go side by side.
+/// third, replayed, keeping the flips a person checks and, when `shots`,
+/// writing each as a picture in its run directory. Two slots, so the
+/// determinism gate's two runs can go side by side; its second writes none,
+/// since nothing reads them.
 fn intro(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
 ) -> Option<&'static testkit::Ran> {
     let kept = [LOGO_NEAR_ITS_END, KRISALIS_LAST, INTRO_TENTH];
     let cli = Cli {
         route: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/intro.route")),
         screenshots: Screenshots {
-            at: kept.to_vec(),
+            at: if shots { kept.to_vec() } else { Vec::new() },
             every: None,
         },
         ..Cli::default()
@@ -654,7 +663,9 @@ static INTRO: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::n
 /// The logo is heard, Krisalis' logo has no sound, and the intro is heard.
 #[test]
 fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
-    let Some(ran) = intro(&INTRO) else { return };
+    let Some(ran) = intro(&INTRO, true) else {
+        return;
+    };
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
@@ -705,7 +716,9 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
 /// flip's cursor and leave the mix where it was.
 #[test]
 fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() {
-    let Some(ran) = intro(&INTRO) else { return };
+    let Some(ran) = intro(&INTRO, true) else {
+        return;
+    };
     let flips: String = ran
         .log
         .lines()
@@ -749,17 +762,19 @@ fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() 
 fn the_intro_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| intro(&AGAIN));
-        (intro(&INTRO), second.join().expect("the second replay ran"))
+        let second = scope.spawn(|| intro(&AGAIN, false));
+        (
+            intro(&INTRO, true),
+            second.join().expect("the second replay ran"),
+        )
     });
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
     first.assert_same_machine(second);
     for flip in [LOGO_NEAR_ITS_END, KRISALIS_LAST, INTRO_TENTH] {
-        assert_eq!(
-            first.host.frame(flip).map(|f| &f.pixels),
-            second.host.frame(flip).map(|f| &f.pixels),
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
             "including what it presented at flip {flip}"
         );
     }
@@ -776,10 +791,12 @@ const SKIPPED_TO_THE_TENTH: u64 = 305;
 const SKIP_BUDGET: u64 = 2_975_000_000;
 
 /// The committed route that skips Krisalis' logo with Space, replayed, keeping
-/// the intro's tenth frame and writing it as a picture in its run directory.
-/// Two slots, so the determinism gate's two runs can go side by side.
+/// the intro's tenth frame and, when `shots`, writing it as a picture in its
+/// run directory. Two slots, so the determinism gate's two runs can go side by
+/// side; its second writes none, since nothing reads them.
 fn skipped(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
 ) -> Option<&'static testkit::Ran> {
     let kept = [SKIPPED_TO_THE_TENTH];
     let cli = Cli {
@@ -787,7 +804,7 @@ fn skipped(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/skip-krisalis.route"),
         ),
         screenshots: Screenshots {
-            at: kept.to_vec(),
+            at: if shots { kept.to_vec() } else { Vec::new() },
             every: None,
         },
         ..Cli::default()
@@ -805,7 +822,9 @@ static SKIPPED: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock:
 /// 294, where with Krisalis' logo played through it opened after flip 327.
 #[test]
 fn space_skips_krisalis_logo_and_let_go_between_flips_gets_past_the_wait() {
-    let Some(ran) = skipped(&SKIPPED) else { return };
+    let Some(ran) = skipped(&SKIPPED, true) else {
+        return;
+    };
     assert_eq!(
         ran.finish.outcome,
         lego_legacy_core::machine::Outcome::BudgetExhausted,
@@ -834,9 +853,9 @@ fn space_skips_krisalis_logo_and_let_go_between_flips_gets_past_the_wait() {
 fn the_skip_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| skipped(&AGAIN));
+        let second = scope.spawn(|| skipped(&AGAIN, false));
         (
-            skipped(&SKIPPED),
+            skipped(&SKIPPED, true),
             second.join().expect("the second replay ran"),
         )
     });
@@ -844,11 +863,232 @@ fn the_skip_route_replays_to_the_same_machine_every_time() {
         return;
     };
     first.assert_same_machine(second);
-    assert_eq!(
-        first.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels),
-        second.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels),
+    assert!(
+        first.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels)
+            == second.host.frame(SKIPPED_TO_THE_TENTH).map(|f| &f.pixels),
         "including what it presented at flip {SKIPPED_TO_THE_TENTH}"
     );
+}
+
+/// The flips the throne-room route keeps (#210): the bumper's first; the New
+/// Player form's buttons and boxes on black, its first whole frame, and its
+/// first with the name box's caret on; "Who's playing?" with the new player
+/// in it; and the throne room's first, as the camera starts to fly in, and one
+/// with the King there.
+const BUMPER: u64 = 303;
+const FORM_ON_BLACK: u64 = 306;
+const NEW_PLAYER: u64 = 307;
+const CARET: u64 = 319;
+const WHO_IS_PLAYING: u64 = 340;
+const THRONE_ROOM: u64 = 372;
+const THE_KING: u64 = 380;
+const THRONE_ROOM_KEPT: [u64; 7] = [
+    BUMPER,
+    FORM_ON_BLACK,
+    NEW_PLAYER,
+    CARET,
+    WHO_IS_PLAYING,
+    THRONE_ROOM,
+    THE_KING,
+];
+
+/// Enough instructions for the route to close the window at flip 400 and the
+/// game to leave, at 3,167,796,048, and room to spare: a run that reaches
+/// the end of it has not left.
+const THRONE_ROOM_BUDGET: u64 = 3_200_000_000;
+
+/// The committed route into the throne room and out, replayed, keeping its
+/// flips and, when `shots`, writing the bumper, the form and the room as
+/// pictures in its run directory. Two slots, so the determinism gate's two
+/// runs can go side by side.
+fn throne_room(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/throne-room.route"),
+        ),
+        screenshots: Screenshots {
+            at: if shots {
+                vec![BUMPER, NEW_PLAYER, THE_KING]
+            } else {
+                Vec::new()
+            },
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(
+        slot,
+        scratch,
+        &CHESS,
+        &cli,
+        &THRONE_ROOM_KEPT,
+        THRONE_ROOM_BUDGET,
+    )
+}
+
+static THRONE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// Past the intro, the bumper, the New Player form and the throne room draw
+/// through Direct3D 2, and the King is heard (#210). Space skips Krisalis'
+/// logo and the intro; the bumper's two textures draw by their handles on
+/// white; the rooms' files load from the folders the game names (#171) and
+/// their sounds decode (#153); with no profile saved the game asks for a new
+/// player, every letter of its form drawn at the one depth it is given; the
+/// tick, with no name typed, makes one the game names LEGO® Chess 1 and saves;
+/// and the throne room, drawn with `D3DTBLEND_MODULATEALPHA` too, presents as
+/// the King starts speaking, a sound decoded through ACM, the only one in the
+/// mix since the bumper while the machine has no MIDI port for the room's tune
+/// (#154). The window is closed at flip 400 and the game leaves. The pinned
+/// pictures are this build's own. Of them only the form's, 307 and 319, were
+/// compared by eye with a picture, the old tree's one kept New Player frame,
+/// as the changelog says; the bumper, 303, only with the old tree's hash of
+/// it, which differs; and "Who's playing?", 340, and the room, 380, with
+/// nothing, the old tree never having got there.
+#[test]
+fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
+    let Some(ran) = throne_room(&THRONE, true) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::Exited { code: 0 },
+        "the game leaves when its window is closed\nlog:\n{}",
+        ran.log
+    );
+    // The machine has no MIDI port until #154, whose author re-pins the mix
+    // below: the game's MIDI init, while the bumper stands, and the throne
+    // room's tune, on the tick, are both refused.
+    assert_eq!(ran.log.matches("midi stream open answered 2").count(), 2);
+    assert_eq!(ran.flip_before("midi stream open answered 2"), 304);
+    ran.assert_logged("flip 372 cursor 3115117442 640x480x16")
+        .assert_logged("flip 400 cursor 3167725018 640x480x16")
+        .assert_logged("end exited 0 cursor 3167796048 flips 401 declared-ms 23667")
+        .assert_flips(401)
+        .assert_logged("profiles\\prof1.lcp, asked from 0x0045656a")
+        .assert_logged(
+            "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof1.lcp, 4544 bytes",
+        )
+        .assert_logged(
+            "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\1save.lcs, 190920 bytes",
+        );
+    // The rooms' sounds, all of them MS ADPCM: fifteen while the bumper
+    // stands, and twelve more as the tick takes the player in.
+    assert_eq!(ran.log.matches("acm stream ").count(), 27);
+    assert_eq!(ran.flip_before("acm stream 15:"), 304);
+    assert_eq!(ran.flip_before("acm stream 16:"), 371);
+    let at = |flip: u64| {
+        let frame = ran.host.frame(flip).expect("presented");
+        assert!(!frame.pixels.is_empty(), "flip {flip} is kept");
+        frame
+    };
+    // The name box is the old tree's grey, 0x424142, at a vertex alpha of
+    // 0x40 with alpha blending on, which over black is 0x101010 on the 565
+    // screen.
+    let name_box = (228 * 640 + 315) * 4;
+    assert_eq!(
+        at(FORM_ON_BLACK).pixels[name_box..name_box + 3],
+        [0x10, 0x10, 0x10]
+    );
+    for (flip, pinned) in [
+        (
+            BUMPER,
+            "52f3a8d879a16ee445d1681881960d4ad103a34718c5ce9f3ae58aa5cdb7e33c",
+        ),
+        (
+            NEW_PLAYER,
+            "5b3ad2079334df2ffc199be9258fc444d2810ef823c75136a85ad7b9b62f886c",
+        ),
+        (
+            CARET,
+            "6f7337264d3cc3382e8af771c53d01a8fb980159d541b76e248edb24f263d019",
+        ),
+        (
+            WHO_IS_PLAYING,
+            "0f9bb78d4a0fac2cfec609ab0082fc769976b25270ef1b38450a19f1842c53fd",
+        ),
+        (
+            THE_KING,
+            "1b7c3ce91f27a20b6a7564093c3be1e49af50760dea99d980252fa19f1ec41e7",
+        ),
+    ] {
+        assert_eq!(hash::sha256_hex(&at(flip).pixels), pinned, "flip {flip}");
+    }
+    assert!(!at(THRONE_ROOM).is_uniform(), "the throne room presents");
+    // Nothing is heard from the bumper on until the King speaks, from flip
+    // 374; and the mix from the throne room on, his line, is pinned block by
+    // block.
+    let silence = ran.loudness(BUMPER + 1, THRONE_ROOM);
+    assert!(!silence.is_empty() && silence.iter().all(|r| *r == 0.0));
+    let throne_mix: Vec<(&Vec<i16>, u64)> = ran
+        .host
+        .audio_blocks
+        .iter()
+        .zip(ran.host.audio_flips.iter().copied())
+        .filter(|(_, flip)| *flip >= THRONE_ROOM)
+        .collect();
+    let onset = throne_mix
+        .iter()
+        .find(|(block, _)| block.iter().any(|s| *s != 0))
+        .map(|(_, flip)| *flip);
+    assert_eq!(onset, Some(374), "the King starts speaking");
+    let voice: Vec<u8> = throne_mix
+        .iter()
+        .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
+        .collect();
+    assert_eq!(
+        hash::sha256_hex(&voice),
+        "2c45769dbac91c8dad4ea58609995674b8d354a29dc5dee4be31b8e02af18fb8",
+        "the King's line"
+    );
+    for flip in [BUMPER, NEW_PLAYER, THE_KING] {
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+}
+
+#[test]
+fn the_throne_room_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| throne_room(&AGAIN, false));
+        (
+            throne_room(&THRONE, true),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    for flip in THRONE_ROOM_KEPT {
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
+            "including what it presented at flip {flip}"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks,
+        "and what it mixed"
+    );
+    // And what it saved, read from where its log says each went.
+    let saved = |ran: &testkit::Ran, name: &str| {
+        let line = ran
+            .log
+            .lines()
+            .find(|l| l.starts_with("file written") && l.contains(name))
+            .unwrap_or_else(|| panic!("{name} is saved"));
+        let (_, at) = line.rsplit_once(" to ").expect("where it went");
+        std::fs::read(at).expect("it is there")
+    };
+    for name in ["prof1.lcp", "1save.lcs"] {
+        assert!(
+            saved(first, name) == saved(second, name),
+            "and saved {name} the same"
+        );
+    }
 }
 
 // The machine has the floppy drive its CD check needs: the check at 0x405420

@@ -1,0 +1,37 @@
+#lego-legacy-route 1
+# LEGO Chess, from its boot into its throne room and out: Space skips Krisalis' logo and the intro,
+# a new player is made at the New Player form with no name typed, and the window is closed (#210).
+#
+# Replay it with a fresh `--data-root <empty dir>`, never beside the rip. It reaches the New Player
+# form only when no profile is saved, and it saves one: the game writes profiles\prof1.lcp and
+# profiles\1save.lcs for the player it makes, which beside the rip would land among the live saves
+# in game-data/chess/profile, and the next replay would boot past the form.
+#
+# The logo plays through, and Space skips Krisalis' logo as in skip-krisalis.route: down at flip
+# 290 and up at the 300th poll after it, and the intro opens after flip 294. Space goes down again
+# at flip 300, as the intro plays: the game ends it, waits for Space to come up (0x0040D220),
+# presenting nothing, and Space comes up at the 300th poll after the flip. The movie player clears
+# the screen twice, flips 301 and 302, and the game draws its bumper through Direct3D 2, flips 303 and
+# 304. While the bumper stands it loads its rooms' files and decodes their first fifteen sounds
+# (#153), going on without the one neither pressing ships, sounds\YAHOO.wav; flip 305 is black.
+# With no profile saved it asks for a new player: flip 306 has the form's buttons and boxes on
+# black, and from flip 307 the New Player form stands on parchment between the inkpot and the
+# quill, its name box's caret first on at flip 319.
+#
+# The pointer goes to the tick at flip 320, and the left button goes down at flip 330: the game
+# waits for it to come up, presenting nothing, which it does at the 300th poll after the flip. With
+# no name typed the game names the player LEGO® Chess 1, saves it, and lists it under "Who's
+# playing?". The tick, pressed again at flip 370 and let go at its 300th poll, takes the only player
+# in: the game decodes twelve more sounds, and the throne room presents from flip 372, the camera
+# flying in to the King by flip 380 as he starts speaking, heard from flip 374. The window is closed
+# at flip 400, and the game leaves.
+flip 290 key Space down
+flip 290 poll 300 key Space up
+flip 300 key Space down
+flip 300 poll 300 key Space up
+flip 320 move 576 420
+flip 330 down
+flip 330 poll 300 up
+flip 370 down
+flip 370 poll 300 up
+flip 400 close

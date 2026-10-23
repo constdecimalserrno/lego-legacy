@@ -212,3 +212,45 @@ each overlapping the one before, and a triangle at one depth now has that depth 
 ulp of noise hid a third of them behind the ones they overlap. From flip 833 on a run with no route,
 the first that shows the form whole, its words are the old tree's New Player form's to the eye; its
 name and age boxes are not, the old tree having drawn them darker.
+
+Its throne room presents, and the King is heard (#210, core 1.2.0). `routes/throne-room.route` plays
+the logo through, skips Krisalis' logo and the intro with Space, each let go at the 300th poll after
+the flip it went down at (#215), makes a new player at the New Player form with no name typed, which
+the game names LEGO® Chess 1, takes it into the throne room, and closes the window. The bumper
+presents at flips 303 and 304, while the game loads its rooms' files and decodes their first fifteen
+sounds; with no profile saved it asks for a new player, flip 306 the form's buttons and boxes on
+black and flip 307, at cursor 3,040,494,470, the form on parchment between the inkpot and the quill,
+its name box's caret first on at flip 319. The route moves the pointer to the tick and presses it at
+flip 330, letting go at the 300th poll, since the game waits for the button to come up presenting
+nothing; the game saves the player, `profiles\prof1.lcp` and `profiles\1save.lcs`, and lists it
+under "Who's playing?", and the tick, pressed again at flip 370, takes the only player in. The game
+decodes twelve more sounds, draws the throne room with `D3DTBLEND_MODULATEALPHA` too, where the run
+walled before, and presents it from flip 372, at 3,115,117,442, the camera flying in to the King by
+flip 380, as he starts speaking at flip 374: one of those sounds, decoded through ACM (#153). It is
+the only one in the mix since the bumper while the machine has no MIDI port for the room's tune,
+which the game asks for on the tick and is refused (#154). The window is closed at flip 400, and the
+game leaves, exiting 0 at 3,167,796,048 after 401 flips: the line a headless run of the route from
+the kit ends on, given a fresh `--data-root`, as the route says, since beside the rip its save would
+land among the live ones. Its test pins five of its pictures, the blend of the form's name box, the
+King's line in the mix and where it starts, and has its determinism gate. No 3D buffer plays on the
+way; the first a run meets is likely in a game of chess (#158), whose pieces' sounds move.
+
+Compared by eye with the old tree's New Player form (the frame its earlier, private tree reached and
+kept, `fixtures/menus/lego-chess.png` there, which no committed doc of this repo holds), the form is
+the same parchment, room, words and buttons, and these differ. The name and age boxes: the plugin
+draws them in the old tree's own grey, 0x424142, at a vertex alpha of 0x40 with alpha blending on,
+so they are a quarter grey over the parchment, 0x101010 over black, where the old tree drew that
+grey opaque. The letters: thinner and softer here, and the age box 30 pixels wide where it was 34,
+its 1 two pixels further right, since the game makes its font a 4444 texture from the formats this
+machine's device lists, where the old tree's device offered 1555 and the font was one bit of alpha
+there. The caret: the old frame has it on, opaque white; here it is off at flip 307 and on, half
+white, from flip 319, the two taken at different points of its blink. Elsewhere 73,503 of 307,200
+pixels differ at all, but only 10,954 by more than 24 in a channel: a pixel wide along edges and in
+the quill's and the inkpot label's fine textures, and by one 565 step over flat parchment and desk,
+most likely because the two sample textures from different texel centres. Of the test's five pinned
+pictures, these two, the form at flip 307 and with its caret at 319, are the ones compared by eye
+with a picture. The bumper, 303, was compared only with the hash the old tree kept of its 565
+screen, `0cb0900f…`, where this one's is `25f14ef6…`; "Who's playing?", 340, and the throne room,
+380, with nothing, the old tree never having got there. The route then closes the window at flip 400
+and the game exits 0; left alone it would wait in the throne room for the player to choose what to
+play, which #157 and #158 take.
