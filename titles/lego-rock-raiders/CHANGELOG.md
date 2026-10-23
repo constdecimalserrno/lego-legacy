@@ -107,6 +107,11 @@ pumps its messages or calls out, so nothing of it is passed, and no route moved.
 by its committed test, takes 0.34 % more of the host's instructions on the Mac mini, 3,298.4 billion
 where it took 3,287.1.
 
+Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
+handed a character after Space and Escape. `first-mission.route`, which presses Space twice, and the
+test's skip of the intro with Escape each end at the same cursor, flips and declared time with
+another digest. The move awaits the maintainer's blessing.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. A person played the first mission through on 2026-09-10, on an older build, and

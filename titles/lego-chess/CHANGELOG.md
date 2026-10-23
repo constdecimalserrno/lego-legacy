@@ -254,3 +254,13 @@ screen, `0cb0900f…`, where this one's is `25f14ef6…`; "Who's playing?", 340,
 380, with nothing, the old tree never having got there. The route then closes the window at flip 400
 and the game exits 0; left alone it would wait in the throne room for the player to choose what to
 play, which #157 and #158 take.
+
+Its pump hears the characters its keys type (#157, core 1.2.0): `TranslateMessage` now posts a key's
+`WM_CHAR`, the US keyboard's character with the modifiers the game has read, and its window
+procedure keeps it for its text boxes (0x0045C746), which take it once a frame (0x00448320). Its
+routes that press Space hear a space after it, one more message for its pump, so a Space let go at
+a poll after its flip is let go two polls sooner in the game's own work. `skip-krisalis.route`'s
+flip 291 is at 2,706,399,631 and its flip 305 at 2,971,352,027, 44 instructions sooner, and
+`throne-room.route` exits 0 at 3,167,796,074 after 401 flips, 26 later, its flip 372 at
+3,115,117,468, the throne room's first. Their pictures, mixes and saves are unchanged.
+`first-light.route` and `intro.route` press no key and do not move.

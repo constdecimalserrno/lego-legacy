@@ -105,6 +105,13 @@ They are untested by a route, held by the pass's proof alone, until #229 commits
 race, which passes nothing, takes 0.67 % more of the host's instructions on the Mac mini, 2,470.0
 billion where it took 2,453.7.
 
+Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
+handed a character after Escape and Space, 40 instructions each. Its two runs that exit move, their
+flips, declared milliseconds and exit code unchanged: `first-race.route` ends at 13,462,673,313
+where it ended at 13,462,673,233, and the escape route at 583,424,210 where it ended at 583,424,170.
+The move awaits the maintainer's blessing. Its run moved, so a person should drive the first race
+again before this version is released.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-race.route` drives the first race to the finish.

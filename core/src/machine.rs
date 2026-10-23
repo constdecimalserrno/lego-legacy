@@ -1300,6 +1300,14 @@ impl Machine {
         if input.screen_saver_running {
             hash.update(&[2]);
         }
+        // And the keys the title has read as held, which its next translated
+        // key types with, likewise only when there are some (#157).
+        if !input.keys_read.is_empty() {
+            hash.update(&[3]);
+            for key in &input.keys_read {
+                hash.update(&key.to_le_bytes());
+            }
+        }
 
         // The regions anything writes to, which are the ones a snapshot
         // carries.

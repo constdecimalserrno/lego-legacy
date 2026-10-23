@@ -423,14 +423,38 @@ fn a_typed_key_is_translated_into_its_character_as_the_title_takes_it() {
     );
 }
 
+/// A system keystroke handed to `TranslateMessage` is one this machine never
+/// makes, since it delivers a key typed with Alt as `WM_KEYDOWN`: its key-up
+/// is answered nonzero, as Microsoft documents, and its key-down, whose
+/// `WM_SYSCHAR` is not written, stops the run at a wall (#157). A key that
+/// types a character for a window that is gone types nothing, as a post to a
+/// window that is not there posts nothing.
+#[test]
+fn a_system_keystroke_is_a_wall_and_a_key_with_no_window_types_nothing() {
+    let mut m = machine();
+    let translate = |m: &mut Machine, message: u32, wparam: u32| {
+        for (at, value) in [(0, WINDOW), (4, message), (8, wparam), (12, 0x001e_0001)] {
+            m.arena.write_u32(OUT + at, value).expect("in the arena");
+        }
+        call(m, "USER32", "TranslateMessage", &[OUT])
+    };
+    assert_eq!(translate(&mut m, 0x0105, 0x41), Ok(1), "WM_SYSKEYUP");
+    assert!(
+        matches!(translate(&mut m, 0x0104, 0x41), Err(Stop::NotWritten { ref what, .. }) if what.contains("system keystroke")),
+        "WM_SYSKEYDOWN"
+    );
+    assert_eq!(translate(&mut m, WM_KEYDOWN, 0x41), Ok(1), "no window yet");
+    assert!(m.state.messages.is_empty(), "and nothing posted");
+}
+
 /// Each key types what it types on a US keyboard, with the modifiers held
-/// (#157). Alone and with Shift, as Microsoft's US keyboard page (`kbdus_7`)
-/// gives each key, and the keypad as Num Lock on types. With Ctrl, a
-/// character only where a source shows one: that page for Backspace, Return
-/// and Space, and Wine's `test_ToUnicode` table, which passes on Windows, for
-/// the rest. With Alt, none: a key typed with Alt is a system keystroke, which
-/// Windows translates into `WM_SYSCHAR` (Microsoft's "Keyboard Input
-/// Overview"), and with Ctrl and Alt the US page gives no key a character.
+/// (#157): what the US layout Microsoft publishes with its driver samples
+/// (`input/layout/kbdus/kbdus.c`) gives it alone, with Shift, with Ctrl and
+/// with both, the keypad with Num Lock on; and Ctrl with a letter, which that
+/// layout leaves to Windows, as Wine's `test_ToUnicode` table, which passes on
+/// Windows, finds it. With Alt, none: a key typed with Alt is a system
+/// keystroke, which Windows translates into `WM_SYSCHAR` (Microsoft's
+/// "Keyboard Input Overview"), and with Ctrl and Alt the layout gives none.
 #[test]
 fn each_key_types_what_it_types_on_a_us_keyboard() {
     const SHIFT: u32 = 0x2a;
@@ -509,32 +533,44 @@ fn each_key_types_what_it_types_on_a_us_keyboard() {
         (&[], 0x0f, c(b'\t')),
         (&[SHIFT], 0x0f, c(b'\t')),
         (&[], 0x01, c(0x1b)),
-        // The keypad's, as the machine numbers it with Num Lock on.
+        (&[SHIFT], 0x01, c(0x1b)),
+        // The keypad's, as the machine numbers it with Num Lock on: its
+        // digits alone, its point and signs with Shift too.
         (&[], 0x47, c(b'7')),
         (&[], 0x52, c(b'0')),
+        (&[SHIFT], 0x47, None),
         (&[], 0x53, c(b'.')),
+        (&[SHIFT], 0x53, c(b'.')),
         (&[], 0x37, c(b'*')),
         (&[], 0x4a, c(b'-')),
         (&[], 0x4e, c(b'+')),
+        (&[], 0xb5, c(b'/')),
+        (&[SHIFT], 0xb5, c(b'/')),
         (&[], 0x9c, c(b'\r')),
-        // Ctrl, by Microsoft's US page.
+        // Ctrl, with Shift or not, by the layout.
+        (&[CTRL], 0x1a, c(0x1b)),
+        (&[CTRL], 0x2b, c(0x1c)),
+        (&[CTRL], 0x56, c(0x1c)),
+        (&[CTRL], 0x1b, c(0x1d)),
         (&[CTRL], 0x0e, c(0x7f)),
+        (&[CTRL], 0x01, c(0x1b)),
         (&[CTRL], 0x1c, c(b'\n')),
         (&[CTRL], 0x39, c(b' ')),
+        (&[SHIFT, CTRL], 0x03, c(0x00)),
+        (&[SHIFT, CTRL], 0x07, c(0x1e)),
+        (&[SHIFT, CTRL], 0x0c, c(0x1f)),
+        (&[CTRL], 0x03, None),
+        (&[SHIFT, CTRL], 0x1a, None),
         (&[SHIFT, CTRL], 0x0e, None),
+        (&[SHIFT, CTRL], 0x01, None),
+        (&[SHIFT, CTRL], 0x1c, None),
         (&[SHIFT, CTRL], 0x39, None),
-        // Ctrl, by Wine's table: a letter is its place in the alphabet, with
-        // Shift too, and five more keys have a character.
+        (&[CTRL], 0x47, None),
+        // Ctrl with a letter, by Wine's table: its place in the alphabet,
+        // with Shift too.
         (&[CTRL], 0x1e, c(0x01)),
         (&[SHIFT, CTRL], 0x1e, c(0x01)),
         (&[0x9d], 0x2c, c(0x1a)),
-        (&[SHIFT, CTRL], 0x03, c(0x00)),
-        (&[CTRL], 0x1a, c(0x1b)),
-        (&[CTRL], 0x2b, c(0x1c)),
-        (&[CTRL], 0x1b, c(0x1d)),
-        (&[SHIFT, CTRL], 0x07, c(0x1e)),
-        (&[SHIFT, CTRL], 0x0c, c(0x1f)),
-        (&[SHIFT, CTRL], 0x1c, None),
         (&[CTRL], 0x0f, None),
         (&[SHIFT, CTRL], 0x0f, None),
         (&[CTRL], 0x05, None),

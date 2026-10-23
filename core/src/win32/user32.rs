@@ -570,7 +570,8 @@ fn virtual_key(code: u32) -> Option<u32> {
         0x32 => 0x4d,                      // M
         0x33 => 0xbc,                      // Comma
         0x34 => 0xbe,                      // Period
-        0x35 | 0xb5 => 0xbf,               // Slash, and the keypad's divide
+        0x35 => 0xbf,                      // Slash
+        0xb5 => 0x6f,                      // Keypad divide
         0x37 => 0x6a,                      // Keypad multiply
         0x38 | 0xb8 => 0x12,               // Alt, either of them
         0x39 => 0x20,                      // Space
@@ -1251,10 +1252,18 @@ fn timer_due(
 /// `TranslateMessage` page and its "Keyboard Input Overview", #157). LEGO
 /// Chess's New Player form takes a name this way (0x0045C746). The character
 /// is the declared keyboard's, with the modifiers as the title has read its
-/// keys. The answer is nonzero for a key going down or up, whether it typed
-/// anything or not, and zero for any other message, as Microsoft documents;
-/// this machine makes no system keystrokes. No title on the roster reads it.
+/// keys, and it is posted to the title's window while there is one, as
+/// `PostMessageA` posts. The answer is nonzero for every key message, whether
+/// it typed anything or not, and zero for any other, as Microsoft documents.
+/// No title on the roster reads it.
+// ponytail: this machine makes `WM_KEYDOWN` for a key typed with Alt, where
+// Windows makes `WM_SYSKEYDOWN` and translates it into `WM_SYSCHAR`, which no
+// title on the roster reads; so such a key types nothing here, as it types no
+// `WM_CHAR` there. Upgrade path, when a title reads one: deliver a key with
+// Alt as a system keystroke and translate it here.
 fn translate_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const WM_SYSKEYDOWN: u32 = 0x0104;
+    const WM_SYSKEYUP: u32 = 0x0105;
     let at = args[0];
     let read = |o: u32| ctx.mem.read_u32(at + o).map_err(Stop::Fault);
     let (window, message, wparam, lparam) = (read(0)?, read(4)?, read(8)?, read(12)?);
@@ -1266,8 +1275,8 @@ fn translate_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
                     .iter()
                     .any(|c| virtual_key(*c) == Some(key))
             };
-            if let Some(typed) = character(wparam, held(VK_SHIFT), held(VK_CONTROL), held(VK_MENU))
-            {
+            let typed = character(wparam, held(VK_SHIFT), held(VK_CONTROL), held(VK_MENU));
+            if let (Some(typed), WINDOW, true) = (typed, window, ctx.state.window_made) {
                 let posted = super::Message {
                     window,
                     message: WM_CHAR,
@@ -1280,7 +1289,13 @@ fn translate_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             }
             Ok(1)
         }
-        WM_KEYUP => Ok(1),
+        WM_KEYUP | WM_SYSKEYUP => Ok(1),
+        WM_SYSKEYDOWN => Err(Stop::NotWritten {
+            what: "USER32.dll!TranslateMessage: a system keystroke, which this machine never \
+                   makes, and whose WM_SYSCHAR is not written"
+                .to_owned(),
+            caller: 0,
+        }),
         _ => Ok(0),
     }
 }
@@ -1289,34 +1304,37 @@ fn translate_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// the ANSI character an `A` window class is handed, with Shift, Ctrl and Alt
 /// held or not (#157).
 ///
-/// Alone and with Shift, each key types what Microsoft's US keyboard page
-/// (`kbdus_7`) gives it, and the keypad what it types with Num Lock on, which
-/// is how [`virtual_key`] numbers it. With Ctrl, a key types a character only
-/// where a source shows one: that page for Backspace, Return and Space, and
-/// Wine's `test_ToUnicode` table, which passes on Windows, for the rest. With
-/// Alt, none: a key typed with Alt is a system keystroke, which Windows
-/// translates into `WM_SYSCHAR` (Microsoft's "Keyboard Input Overview"), and
-/// with Ctrl and Alt the US page gives no key a character.
-// ponytail: Caps Lock is off, since no host sends it; and Shift does not turn
-// the keypad into the cursor pad Windows makes of it with Num Lock on, as
-// `virtual_key` never does either.
+/// Each key types what the US layout Microsoft publishes with its driver
+/// samples gives it (`input/layout/kbdus/kbdus.c`, read as documentation):
+/// alone, with Shift, with Ctrl, and with both. Ctrl with a letter, which the
+/// layout leaves to Windows itself, types the letter's place in the alphabet,
+/// as Wine's `test_ToUnicode` table finds on Windows. With Alt, none: a key
+/// typed with Alt alone is a system keystroke, which Windows translates into
+/// `WM_SYSCHAR` (Microsoft's "Keyboard Input Overview"), and the layout gives
+/// no key a character with Ctrl and Alt.
+// ponytail: Caps Lock is off, since no host sends it, and Num Lock is on, as
+// `virtual_key` numbers the keypad whatever Num Lock does: a Mac's Clear key,
+// which reaches the machine as Num Lock, does not make the keypad a cursor
+// pad. Upgrade path, when a host sends either: keep its light as Windows does
+// and number the keypad by it.
 fn character(key: u32, shift: bool, control: bool, alt: bool) -> Option<u32> {
+    let c = |byte: u8| Some(u32::from(byte));
     if alt {
         return None;
     }
     if control {
         return match (key, shift) {
-            // A to Z: the letter's place in the alphabet.
-            (0x41..=0x5a, _) => Some(key - 0x40),
-            (0x32, true) => Some(0x00),  // @
-            (0x36, true) => Some(0x1e),  // ^
-            (0xbd, true) => Some(0x1f),  // _
-            (0xdb, false) => Some(0x1b), // [
-            (0xdc, false) => Some(0x1c), // \
-            (0xdd, false) => Some(0x1d), // ]
-            (0x0d, false) => Some(0x0a), // Return: a line feed
-            (0x08, false) => Some(0x7f), // Backspace: DEL
-            (0x20, false) => Some(0x20), // Space
+            (0x41..=0x5a, _) => Some(key - 0x40), // A to Z
+            (0x32, true) => c(0x00),              // @
+            (0x36, true) => c(0x1e),              // ^
+            (0xbd, true) => c(0x1f),              // _
+            (0xdb, false) => c(0x1b),             // [
+            (0xdd, false) => c(0x1d),             // ]
+            (0xdc | 0xe2, false) => c(0x1c),      // \ and the ISO keyboard's key beside Shift
+            (0x08, false) => c(0x7f),             // Backspace: DEL
+            (0x1b, false) => c(0x1b),             // Escape
+            (0x0d, false) => c(b'\n'),            // Return: a line feed
+            (0x20, false) => c(b' '),             // Space
             _ => None,
         };
     }
@@ -1333,19 +1351,20 @@ fn character(key: u32, shift: bool, control: bool, alt: bool) -> Option<u32> {
         0xbf => (b'/', b'?'),
         0xc0 => (b'`', b'~'),
         0xdb => (b'[', b'{'),
-        // Backslash, and the extra key an ISO keyboard has beside Shift.
         0xdc | 0xe2 => (b'\\', b'|'),
         0xdd => (b']', b'}'),
         0xde => (b'\'', b'"'),
-        // The keypad's digits, its point and its signs.
-        0x60..=0x69 => (key as u8 - 0x30, key as u8 - 0x30),
-        0x6e => (b'.', b'.'),
+        // The keypad's digits type only alone; its point and signs with Shift
+        // too.
+        0x60..=0x69 if !shift => return c(key as u8 - 0x30),
         0x6a => (b'*', b'*'),
         0x6b => (b'+', b'+'),
         0x6d => (b'-', b'-'),
+        0x6e => (b'.', b'.'),
+        0x6f => (b'/', b'/'),
         _ => return None,
     };
-    Some(u32::from(if shift { shifted } else { alone }))
+    c(if shift { shifted } else { alone })
 }
 
 fn dispatch_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

@@ -115,6 +115,15 @@ between its flips. No route moved.
 Took core 1.2.0's clock-spin pass (#217): its `QueryPerformanceCounter` reads that come back to back
 are from different callers, so nothing of it is passed, and no route moved.
 
+Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
+handed a character after each letter its routes type into its register, L, E, G and O, and hands
+each to `DefWindowProcA` (0x00401E56), 72 instructions a letter. Its three runs that exit end 288
+instructions later, their flips, declared milliseconds and exit code unchanged: `first-save.route`
+past its end at 13,071,130,021, `pizza-delivery.route` at 10,657,537,990, and the hand that closes
+its window in the Information Center, recorded and replayed, at 4,998,299,127. Every other run that
+types the name ends at the same cursor, flips and declared time with another digest. The move
+awaits the maintainer's blessing.
+
 ## 1.0.0 — 2026-10-21
 
 Playable (#128). `routes/pizza-delivery.route` plays one whole activity, Nick Brick's pizza from

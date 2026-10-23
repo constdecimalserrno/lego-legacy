@@ -5,6 +5,44 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`TranslateMessage` makes `WM_CHAR` (#157), where it answered zero and posted nothing. A key going
+down that types a character on the declared machine's keyboard has the character posted to the
+title's window with the key-down's `lParam`, and the title's loop takes it next, ahead of the input
+still waiting, as Microsoft's `TranslateMessage` page and its "Keyboard Input Overview" describe.
+LEGO Chess's New Player form takes a name this way (0x0045C746).
+- The keyboard is the US layout Microsoft publishes with its driver samples
+  (`input/layout/kbdus/kbdus.c`, read as documentation): what each key types alone, with Shift,
+  with Ctrl and with both, the keypad with Num Lock on. Ctrl with a letter types its place in the
+  alphabet, which the layout leaves to Windows, as Wine's `test_ToUnicode` table finds on Windows.
+  A key typed with Alt types nothing: Windows makes it a system keystroke and translates it into
+  `WM_SYSCHAR`, which this machine does not make. Caps Lock is off, since no host sends it.
+  `tests/shims.rs` holds every row.
+- The modifiers are the ones the title has read: the key messages it has taken off its queue, kept
+  as `State::keys_read`, as Windows keeps a thread's own key state, and Wine changes it as each one
+  is removed. So a Shift let go between a letter going down and the title taking it still types a
+  capital. The digest hashes the keys read as held when there are any.
+- The keypad's divide is `VK_DIVIDE`, which types a slash with Shift too, where it was the main
+  keyboard's slash, which types a question mark.
+- The answer is nonzero for every key message, as Microsoft documents. A `WM_SYSKEYDOWN`, which
+  this machine never makes, is a wall. No title on the roster reads the answer: Rock Raiders' pump
+  at 0x00478341, Hot Wheels' three at 0x00415461, 0x004154B0 and 0x00416001, Alpha Team's at
+  0x004050F3, LEGO Island's at 0x00401B5B and LEGO Chess's at 0x0045C4F8 each drop it.
+
+Every title on the roster translates its keys, so each now hears a `WM_CHAR` after a key that types
+one. Alpha Team's window procedure hands it to a handler of its own (0x00404CF5), LEGO Island's
+hands it to `DefWindowProcA` (0x00401E56), and LEGO Chess's keeps it for its text boxes; Hot
+Wheels' and Rock Raiders' were not read. Every released run of a route that presses Space, Escape
+or a letter moves, and no other: no flip, declared millisecond or exit code moves, so the moves are
+the instructions the new messages cost. The move awaits the maintainer's blessing. Each title's
+changelog lists its own:
+- Hot Wheels' two runs that exit, `first-race.route` at 13,462,673,313 where it ended at
+  13,462,673,233, and the escape route at 583,424,210 where it ended at 583,424,170;
+- LEGO Island's three that exit, each 288 instructions later: `first-save.route` past its end at
+  13,071,130,021, `pizza-delivery.route` at 10,657,537,990, and the hand that closes its window in
+  the Information Center at 4,998,299,127;
+- and the digest alone of every other run of such a route: Alpha Team's five, Rock Raiders' two and
+  LEGO Island's others, each ending at the same cursor, flips and declared time.
+
 A clock spin is passed (#217), as ADR-0004 now allows, only when:
 - two crossings in a row are the same clock read (`QueryPerformanceCounter`, `GetTickCount`,
   `timeGetTime` or `timeGetSystemTime`) from the same place, in the same declared millisecond;

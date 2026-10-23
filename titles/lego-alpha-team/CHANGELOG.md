@@ -100,6 +100,12 @@ load after flip 1633 on the MacBook. No route moved.
 Took core 1.2.0's clock-spin pass (#217): it reads the clock in straight-line code, or in loops
 that call out as well, so nothing of it is passed, and no route moved.
 
+Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
+handed a space after Space, and an escape after the Escape a click in its intro is (#66), and it
+hands each to a handler of its own (0x00404CF5). Each of its runs that presses one, `menu.route`,
+`select-adventure.route`, `first-mission.route` and the two clicks in the intro, ends at the same
+cursor, flips and declared time with another digest. The move awaits the maintainer's blessing.
+
 ## 1.0.0 — 2026-10-18
 
 Playable. `routes/first-mission.route` plays the Training Area to its end and back to the main

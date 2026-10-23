@@ -786,7 +786,7 @@ const KRISALIS_FIFTH: u64 = 290;
 const SKIPPED_TO_THE_TENTH: u64 = 305;
 
 /// Enough instructions for the logo to play through, Krisalis' logo to be
-/// skipped, and the intro to reach its frame 10, flip 305 at 2,971,352,071,
+/// skipped, and the intro to reach its frame 10, flip 305 at 2,971,352,027,
 /// and no more.
 const SKIP_BUDGET: u64 = 2_975_000_000;
 
@@ -837,9 +837,9 @@ fn space_skips_krisalis_logo_and_let_go_between_flips_gets_past_the_wait() {
     .assert_logged(&format!(
         "input flip {KRISALIS_FIFTH} poll 300 Key {{ code: 57, down: false }}"
     ))
-    .assert_logged("flip 305 cursor 2971352071 640x480x16");
+    .assert_logged("flip 305 cursor 2971352027 640x480x16");
     // The two clears follow at once: the hold was over as Space was seen.
-    ran.assert_logged("flip 291 cursor 2706399675 640x480x16");
+    ran.assert_logged("flip 291 cursor 2706399631 640x480x16");
     assert_eq!(ran.flip_before("movie D:\\intro\\intro.avi opened"), 294);
     let tenth = ran.host.frame(SKIPPED_TO_THE_TENTH).expect("kept");
     assert!(!tenth.is_uniform(), "the intro plays");
@@ -893,7 +893,7 @@ const THRONE_ROOM_KEPT: [u64; 7] = [
 ];
 
 /// Enough instructions for the route to close the window at flip 400 and the
-/// game to leave, at 3,167,796,048, and room to spare: a run that reaches
+/// game to leave, at 3,167,796,074, and room to spare: a run that reaches
 /// the end of it has not left.
 const THRONE_ROOM_BUDGET: u64 = 3_200_000_000;
 
@@ -963,9 +963,9 @@ fn the_route_makes_a_player_and_the_king_speaks_in_the_throne_room() {
     // room's tune, on the tick, are both refused.
     assert_eq!(ran.log.matches("midi stream open answered 2").count(), 2);
     assert_eq!(ran.flip_before("midi stream open answered 2"), 304);
-    ran.assert_logged("flip 372 cursor 3115117442 640x480x16")
-        .assert_logged("flip 400 cursor 3167725018 640x480x16")
-        .assert_logged("end exited 0 cursor 3167796048 flips 401 declared-ms 23667")
+    ran.assert_logged("flip 372 cursor 3115117468 640x480x16")
+        .assert_logged("flip 400 cursor 3167725044 640x480x16")
+        .assert_logged("end exited 0 cursor 3167796074 flips 401 declared-ms 23667")
         .assert_flips(401)
         .assert_logged("profiles\\prof1.lcp, asked from 0x0045656a")
         .assert_logged(
