@@ -98,9 +98,10 @@ flip 10,667 and 274,650 declared milliseconds, but it no longer ends in their ow
 ends at `6b5eca98…`, since their play predates the two messages. A move the maintainer blessed on
 2026-10-22. A person should replay its first save on the MacBook before its next release.
 
-Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
-tenth of a second or more reaches it at the frame's next input poll rather than at its flip, and no
-frame on its committed routes stands half that long. No route moved.
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands
+core's `ASK_BETWEEN_FLIPS_MILLIS` or more of declared time reaches it at the frame's next input poll
+rather than at its flip. It polls at the start of each frame, before it waits, so it is never asked
+between its flips. No route moved.
 
 ## 1.0.0 — 2026-10-21
 

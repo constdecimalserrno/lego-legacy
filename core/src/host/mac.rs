@@ -601,7 +601,8 @@ pub struct MacWindow {
     /// else kept across pumps is, whatever AppKit does with the view's own
     /// (#180).
     layer: Id,
-    /// Events a person made since the last flip.
+    /// Events a person made since the host was last asked
+    /// ([`Host::poll_input`]).
     pending: Vec<Input>,
     /// The keys the guest has been told are down.
     held: Vec<u32>,

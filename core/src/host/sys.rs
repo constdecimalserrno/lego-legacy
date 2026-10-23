@@ -89,7 +89,8 @@ pub fn listen() {
 }
 
 /// Ask for the close, which is all a handler can safely do: the title is told
-/// at the next flip, and a second signal ends the run at its next burst,
+/// the next time the host is asked ([`super::Host::poll_input`]), and a
+/// second signal ends the run at its next burst,
 /// writing its `end` line and digest and giving the pointer back as it ends
 /// (#110, #140).
 ///

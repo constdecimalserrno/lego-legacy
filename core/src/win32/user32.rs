@@ -10,6 +10,8 @@ use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use std::collections::BTreeMap;
 
+/// A call here that reads what a person did is an input poll, and is named in
+/// `machine::POLLS` as well (#215).
 pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "RegisterClassA", 1, register_class),
     stdcall("USER32", "CreateWindowExA", 12, create_window),
@@ -1316,9 +1318,9 @@ pub fn set_pointer_back(state: &mut super::State, (x, y): (i32, i32)) {
 fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     // Waiting here could wait for ever: a title inside a call is not
     // flipping, and between flips what a person did comes only before an
-    // input poll, which this call is, once a frame has stood a tenth of a
-    // second (#215). It comes back at once and the title looks at its queue,
-    // which is what it would have done anyway.
+    // input poll, which this call is, once a frame has stood
+    // `ASK_BETWEEN_FLIPS_MILLIS` (#215). It comes back at once and the title
+    // looks at its queue, which is what it would have done anyway.
     Ok(1)
 }
 

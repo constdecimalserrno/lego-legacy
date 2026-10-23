@@ -39,7 +39,9 @@ pub static DIRECT_INPUT: Interface = Interface {
     ],
 };
 
-/// `IDirectInputDeviceA`, in slot order.
+/// `IDirectInputDeviceA`, in slot order. Its reads of what a person did,
+/// `GetDeviceState` and `GetDeviceData`, are input polls, and are named in
+/// `machine::POLLS` as well (#215).
 pub static DIRECT_INPUT_DEVICE: Interface = Interface {
     name: "IDirectInputDeviceA",
     methods: &[

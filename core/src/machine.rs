@@ -68,17 +68,20 @@ pub const CLOSE_GRACE_MILLIS: u64 = 5_000;
 /// How long a frame stands, in declared milliseconds, before the host is
 /// asked at the title's next input poll for what a person did, and again
 /// each time as long again goes by before the next flip (#215, ADR-0003).
+/// Declared time, so the waits a frame makes count, its `Sleep`s among them.
 ///
-/// A tenth of a second, so that a title waiting on a key without flipping,
-/// as LEGO Chess waits after a movie it skipped, hears a person within it,
-/// while no released title's ordinary frame stands that long: LEGO Island's
-/// longest is 47 ms, and the 99th percentile is Hot Wheels' 53, Rock Raiders'
-/// 23 and Alpha Team's 13.5. So at a window their play takes a person's input
-/// between flips only in their loads, boot and finish. Once a refresh would
-/// be closer to Windows, but would ask the host in most of Hot Wheels'
-/// frames, and each ask starts again the put-back its steered pointer is
-/// measured by (`Steer::drained`). It moves only where a person's input
-/// lands, never what a route replays.
+/// A tenth of a second, the maintainer's choice of 2026-10-22: a title waiting
+/// on a key without flipping, as LEGO Chess waits after a movie it skipped,
+/// hears a person within it. In the released titles' gate runs, measured in
+/// declared time with their waits, it is met only where a frame waits or
+/// loads: in Rock Raiders' frame that ends a load, and in each of the 35
+/// frames of its boot splash, which `Sleep(100)` before they poll; and in Hot
+/// Wheels' boot and its race's finish. Alpha Team and LEGO Island poll at the
+/// start of each frame, before they wait, so their ordinary frames are never
+/// asked. Once a refresh would hand Hot Wheels a person's input mid-frame in
+/// most of its race frames, which a person would have to play first, and it
+/// is no one constant: each title declares its own refresh. It moves only
+/// where a person's input lands, never what a route replays.
 pub const ASK_BETWEEN_FLIPS_MILLIS: u64 = 100;
 
 /// A run that has ended, and what it spent.
@@ -351,10 +354,10 @@ impl Machine {
     /// counted from the flip before it, and what is due by it is delivered
     /// first: the route's events, and what the host has once the frame has
     /// stood [`ASK_BETWEEN_FLIPS_MILLIS`] since the flip or since the host was
-    /// last asked.
+    /// last asked, the host holding the pace there as it does at a flip.
     // ponytail: from the first flip on. A poll before it is neither counted
     // nor handed anything, so a title that waited on a key before its first
-    // frame would wait for ever; none on the roster does.
+    // frame would wait for ever; none of the five with a crate does.
     fn poll(&mut self, host: &mut dyn Host, log: &mut RunLog) {
         let Some(flip) = self.flips.checked_sub(1) else {
             return;
@@ -364,6 +367,20 @@ impl Machine {
         let ask = self.clock.cycles() >= self.ask_at;
         if ask {
             self.ask_again();
+            // A wait that sleeps runs ahead of the wall clock by a threshold
+            // at most, rather than by however long the person held the key,
+            // which the flip after it would sleep off with its window frozen.
+            // ponytail: the host is asked before it is told of a put the
+            // title made earlier in the frame, which it hears only at the
+            // flip: `Steer` is drained against the place the title has left.
+            // So a title that puts its pointer back every frame and polls a
+            // threshold into one (Alpha Team, if a load of its polls late)
+            // loses the move heard at the ask, or reads the frame's first
+            // move twice, and its hand is held at the screen's edge until
+            // the flip. Upgrade path, needed before any shorter threshold:
+            // tell the host of a pending put before an ask, as
+            // `present_guest` does, and keep `puts_back` across that drain.
+            self.pace(host, log);
         }
         let events = self.input_at(at, ask, host);
         self.deliver(at, events, log);
@@ -371,10 +388,9 @@ impl Machine {
 
     /// The host is next asked between flips once the frame has stood
     /// [`ASK_BETWEEN_FLIPS_MILLIS`] from now (#215).
-    // ponytail: asked by declared time, and not paced in between: the wall
-    // clock is caught up with at the next flip, as `Pace::hold` adds up, and
-    // a frame that stands without polling still pumps no window. Upgrade
-    // path: hold the pace when the host is asked here too.
+    // ponytail: only at a poll. A frame that stands without polling pumps no
+    // window and holds no pace until its flip, as before #215. Upgrade path:
+    // ask at the burst ends too, where the mix already reaches the host.
     fn ask_again(&mut self) {
         self.ask_at = self.clock.cycles() + ASK_BETWEEN_FLIPS_MILLIS * self.clock.hz() / 1000;
     }
@@ -811,7 +827,9 @@ enum Bound {
 /// written, on every thread and whatever they filter, by name, so another
 /// DirectInput device's `GetDeviceState` is one too. A reader written later
 /// joins them as it is written, and that renumbers no committed route's
-/// polls: until then a call to it was a wall, so no route got past one.
+/// polls: until then a call to it was a wall, so no route got past one. A
+/// test fails on any USER32 or DirectInput call that is named neither here
+/// nor as not a poll.
 const POLLS: &[&str] = &[
     "PeekMessageA",
     "GetMessageA",
@@ -824,7 +842,7 @@ const POLLS: &[&str] = &[
 ];
 
 /// Whether what a slot stands for is an input poll (#215).
-fn polls(bound: Bound) -> bool {
+fn is_poll(bound: Bound) -> bool {
     match bound {
         Bound::Shim(Some(shim)) => POLLS.contains(&shim.name),
         Bound::Method(Some(method)) => POLLS.contains(&method.name),
@@ -1100,7 +1118,7 @@ impl Machine {
                         })
                     }
                 };
-                let bound = (bound, polls(bound));
+                let bound = (bound, is_poll(bound));
                 if self.bound.len() <= index {
                     self.bound.resize(index + 1, None);
                 }
@@ -2055,5 +2073,52 @@ impl Machine {
             || modules.iter().any(|m| inside(m.base, m.size))
             || self.state.claimed.iter().any(|(s, e)| inside(*s, e - s))
             || inside(crate::guest::heap::HEAP_BASE, self.state.heap.extent()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every other call core has written in USER32 and DirectInput: none of
+    /// them reads what a person did (#215).
+    const NOT_POLLS: &str = "RegisterClassA CreateWindowExA DestroyWindow ShowWindow UpdateWindow \
+        InvalidateRect BeginPaint EndPaint SetFocus TranslateAcceleratorA LoadAcceleratorsA \
+        FindWindowA GetActiveWindow TranslateMessage DispatchMessageA DefWindowProcA \
+        PostQuitMessage GetSystemMetrics ShowCursor SetWindowsHookExA UnhookWindowsHookEx \
+        CallNextHookEx SetCursor LoadCursorA LoadIconA GetClientRect GetWindowRect \
+        AdjustWindowRect AdjustWindowRectEx SetWindowPos SetWindowLongA GetWindowLongA \
+        MessageBoxA GetDC ReleaseDC SetCursorPos ClipCursor GetClipCursor DialogBoxParamA \
+        EndDialog GetDlgItem SendMessageA GetDesktopWindow PostMessageA SetActiveWindow SetTimer \
+        KillTimer ClientToScreen MoveWindow EnableWindow SetWindowTextA IsWindow SetCapture \
+        ReleaseCapture wsprintfA SystemParametersInfoA DirectInputCreateA QueryInterface AddRef \
+        Release CreateDevice EnumDevices GetDeviceStatus RunControlPanel Initialize \
+        GetCapabilities EnumObjects GetProperty SetProperty Acquire Unacquire SetDataFormat \
+        SetEventNotification SetCooperativeLevel GetObjectInfo GetDeviceInfo";
+
+    /// Every USER32 and DirectInput call core has written is a poll or named
+    /// as not one, so a reader written later cannot be left off `POLLS`, and
+    /// renumber the polls of routes recorded meanwhile when it joins (#215).
+    #[test]
+    fn every_input_library_call_is_a_poll_or_named_as_not_one() {
+        use crate::win32::{dinput, user32};
+        let not_polls: Vec<&str> = NOT_POLLS.split_whitespace().collect();
+        let calls: Vec<&str> = user32::SHIMS
+            .iter()
+            .chain(dinput::SHIMS)
+            .map(|shim| shim.name)
+            .chain(
+                dinput::INTERFACES
+                    .iter()
+                    .flat_map(|interface| interface.methods.iter().map(|method| method.name)),
+            )
+            .collect();
+        for call in &calls {
+            assert!(
+                super::POLLS.contains(call) != not_polls.contains(call),
+                "{call} is a poll or not one, and only one"
+            );
+        }
+        for name in super::POLLS.iter().chain(&not_polls) {
+            assert!(calls.contains(name), "{name} is a call core has written");
+        }
     }
 }

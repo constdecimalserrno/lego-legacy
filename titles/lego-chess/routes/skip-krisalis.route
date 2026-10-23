@@ -4,13 +4,13 @@
 #
 # The logo, intro\lmi.avi, cannot be skipped, and plays its 280 frames through as in intro.route.
 # Krisalis' logo, intro\krisalis.avi, can: its frames start at flip 286, and Space goes down at the
-# fifth, flip 290. The game sees it at its check after that frame's flip (0x0044B47C), once its pump
-# and its keyboard have been read, the first four of the polls after the flip, and ends the movie.
-# Krisalis' two-second hold reads the keyboard again, the sixth poll, finds Space still down and is
-# over at once. Then the game waits for Space to come up (0x0040D220), presenting nothing: each turn
-# its pump's PeekMessageA, its keyboard's GetDeviceState and its mouse's, three polls a turn from the
+# fifth, flip 290. The game sees it at its check after that frame's flip (0x0044B47C), after its pump
+# and its keyboard poll, the first four of the polls after the flip, and ends the movie. Krisalis'
+# two-second hold polls the keyboard again, the sixth poll, finds Space still down and is over at
+# once. Then the game waits for Space to come up (0x0040D220), presenting nothing: each turn its
+# pump's PeekMessageA, its keyboard's GetDeviceState and its mouse's, three polls a turn from the
 # seventh. Space comes up at the 300th, the mouse's in the wait's 98th turn, the next turn's keyboard
-# read finds it up, and the game goes on. The player clears the screen twice, main waits a second,
+# poll finds it up, and the game goes on. The player clears the screen twice, main waits a second,
 # and the intro opens after flip 294, where with Krisalis' logo played through it opened after flip
 # 327. The route ends at the intro's tenth frame, flip 305, at three billion instructions.
 flip 290 key Space down

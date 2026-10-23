@@ -144,7 +144,7 @@ _Avoid_: frame as a count, vsync, tick
 **Poll**:
 A guest call that reads the keyboard, the mouse or the message queue, such as `PeekMessageA` or
 DirectInput's `GetDeviceState`. Counted from the flip before it, it is where an event between flips
-reaches the guest (ADR-0003).
+reaches the guest (ADR-0003). A flip, or a poll after one, is a point: where an event is delivered.
 _Avoid_: tick, sample, read
 
 **Cursor**:

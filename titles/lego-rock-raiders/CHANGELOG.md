@@ -96,9 +96,11 @@ run that makes its window ends in another state at the same instruction, flip an
 millisecond; core's changelog lists the digests. A move the maintainer blessed on 2026-10-22. A
 person should play it on the MacBook before its next release.
 
-Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
-tenth of a second or more, as its loads do, reaches it at the frame's next input poll rather than at
-its flip. It polls at a frame's end, just before the flip. No route moved.
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands
+core's `ASK_BETWEEN_FLIPS_MILLIS` or more of declared time reaches it at the frame's next input poll
+rather than at its flip. That is the frame that ends a load, which polls at its end, just before its
+flip, and each of the 35 frames of its boot splash, which `Sleep(100)` before they poll. No route
+moved.
 
 ## 1.0.0 — 2026-10-18
 

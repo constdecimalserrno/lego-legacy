@@ -170,37 +170,76 @@ struct Waited {
     recorded: Route,
 }
 
+/// How the guest asks whether Space is down.
+#[derive(Clone, Copy)]
+enum Reader {
+    /// `GetAsyncKeyState(VK_SPACE)`, by its top bit.
+    Async,
+    /// The keyboard's `IDirectInputDeviceA::GetDeviceState`, by Space's byte.
+    Device,
+}
+
 /// A guest that waits for Space to come up between flips, as LEGO Chess waits
-/// after a movie it skipped (#215), run replaying `route` if there is one and
-/// recording either way.
+/// after a movie it skipped (#215).
 ///
 /// It has just finished its first frame, left for the machine to present as
-/// a title's own `Flip` leaves one. Then it asks `GetAsyncKeyState(VK_SPACE)`
-/// until the key is up, sleeping `nap` declared milliseconds after each ask
-/// that finds it down, and exits with 7. Hand-assembled into the machine, as
-/// threads.rs's guests are, calling through the boundary as a title's imports
-/// do.
-fn waiting_for_space(host: &mut dyn Host, route: Option<&str>, nap: u32, budget: u64) -> Waited {
+/// a title's own `Flip` leaves one. Then it asks whether Space is down until
+/// it is up, sleeping `nap` declared milliseconds after each ask that finds it
+/// down, and exits with 7. Hand-assembled into the machine, as threads.rs's
+/// guests are, calling through the boundary as a title's imports and its
+/// DirectInput device's table do.
+fn guest(host: &mut dyn Host, nap: u32, reader: Reader) -> Machine {
     scratch();
     let mut machine = Machine::new(&STUB, host).expect("a machine");
-    let ask = machine
-        .boundary
-        .bind_named("USER32.dll", "GetAsyncKeyState");
     let sleep = machine.boundary.bind_named("KERNEL32.dll", "Sleep");
     let exit = machine.boundary.bind_named("KERNEL32.dll", "ExitProcess");
     let call = |to: u32| [&[0xb8][..], &to.to_le_bytes(), &[0xff, 0xd0]].concat(); // mov eax, to; call eax
+                                                                                   // The ask, leaving the zero flag set when Space is up.
+    let ask = match reader {
+        // push VK_SPACE; GetAsyncKeyState; test eax, 0x8000
+        Reader::Async => [
+            &[0x68, 0x20, 0, 0, 0][..],
+            &call(
+                machine
+                    .boundary
+                    .bind_named("USER32.dll", "GetAsyncKeyState"),
+            ),
+            &[0xa9, 0x00, 0x80, 0x00, 0x00],
+        ]
+        .concat(),
+        // push the state's room; push 256; push the keyboard; GetDeviceState;
+        // test byte [the room + DIK_SPACE], 0x80
+        Reader::Device => {
+            const KEYBOARD: u32 = 0x0050_0000;
+            const ROOM: u32 = 0x0050_1000;
+            machine.state.add_com(
+                KEYBOARD,
+                "IDirectInputDeviceA",
+                lego_legacy_core::win32::ComState::Device { keyboard: true },
+            );
+            let table = machine.boundary.bind_interface("IDirectInputDeviceA", 18);
+            [
+                &[0x68][..],
+                &ROOM.to_le_bytes(),
+                &[0x68, 0, 1, 0, 0, 0x68],
+                &KEYBOARD.to_le_bytes(),
+                &call(table[9]),
+                &[0xf6, 0x05],
+                &(ROOM + SPACE).to_le_bytes(),
+                &[0x80],
+            ]
+            .concat()
+        }
+    };
+    // jz the exit, past the nap; push nap; Sleep; jmp back to the ask; push
+    // 7; ExitProcess
+    let back = u8::try_from(256 - ask.len() - 2 - 14).expect("a short jump back");
     let code = [
-        // push VK_SPACE; GetAsyncKeyState
-        &[0x68, 0x20, 0, 0, 0][..],
-        &call(ask),
-        // test eax, 0x8000; jz the exit, past the nap
-        &[0xa9, 0x00, 0x80, 0x00, 0x00, 0x74, 14],
-        // push nap; Sleep; jmp back to the ask
-        &[0x68],
+        &ask[..],
+        &[0x74, 14, 0x68],
         &nap.to_le_bytes(),
         &call(sleep),
-        &[0xeb, 0xdf],
-        // push 7; ExitProcess
+        &[0xeb, back],
         &[0x68, 7, 0, 0, 0],
         &call(exit),
     ]
@@ -216,6 +255,11 @@ fn waiting_for_space(host: &mut dyn Host, route: Option<&str>, nap: u32, budget:
         pitch: 16,
         depth: 32,
     });
+    machine
+}
+
+/// Run a guest, replaying `route` if there is one and recording either way.
+fn run(mut machine: Machine, host: &mut dyn Host, route: Option<&str>, budget: u64) -> Waited {
     machine.route = route.map(|text| Route::parse(text).expect("the route reads"));
     machine.recording = Some(Route::new());
     let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
@@ -226,6 +270,12 @@ fn waiting_for_space(host: &mut dyn Host, route: Option<&str>, nap: u32, budget:
         digest: machine.state_digest(),
         recorded: machine.recording.take().expect("it recorded"),
     }
+}
+
+/// The guest that asks `GetAsyncKeyState`, run.
+fn waiting_for_space(host: &mut dyn Host, route: Option<&str>, nap: u32, budget: u64) -> Waited {
+    let machine = guest(host, nap, Reader::Async);
+    run(machine, host, route, budget)
 }
 
 /// A key let go at a poll between flips reaches a title waiting on it without
@@ -290,17 +340,40 @@ fn a_tap_at_one_flip_is_never_seen_by_a_title_asking_whether_the_key_is_down() {
 }
 
 /// A person at a window, as a host hands over what they did: Space pressed as
-/// the first frame comes up, and let go by the next time the host is asked.
+/// the first frame comes up, and, unless they hold it, let go by the next time
+/// the host is asked. One who closes asks the window to close from then on. It
+/// keeps the declared millisecond it was last told to hold the pace at, and
+/// that millisecond at each time it was asked.
 struct Person {
     headless: Headless,
-    asked: usize,
+    holds: bool,
+    closes: bool,
+    paced: u64,
+    asked: Vec<u64>,
 }
 
 impl Person {
     fn new() -> Self {
         Self {
             headless: Headless::new(),
-            asked: 0,
+            holds: false,
+            closes: false,
+            paced: 0,
+            asked: Vec::new(),
+        }
+    }
+
+    fn holding() -> Self {
+        Self {
+            holds: true,
+            ..Self::new()
+        }
+    }
+
+    fn closing() -> Self {
+        Self {
+            closes: true,
+            ..Self::holding()
         }
     }
 }
@@ -311,10 +384,10 @@ impl Host for Person {
     }
 
     fn poll_input(&mut self, _flip: u64) -> Vec<Input> {
-        self.asked += 1;
-        match self.asked {
+        self.asked.push(self.paced);
+        match self.asked.len() {
             1 => vec![space(true)],
-            2 => vec![space(false)],
+            2 if !self.holds => vec![space(false)],
             _ => Vec::new(),
         }
     }
@@ -323,6 +396,15 @@ impl Host for Person {
 
     fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
         self.headless.map(len)
+    }
+
+    fn closes(&self) -> u32 {
+        u32::from(self.closes && self.asked.len() >= 2)
+    }
+
+    fn pace(&mut self, declared_nanos: u64) -> f64 {
+        self.paced = declared_nanos / 1_000_000;
+        1.0
     }
 }
 
@@ -341,7 +423,11 @@ fn a_person_who_lets_go_between_flips_is_heard_at_the_next_poll_and_replays_ther
         "{}",
         heard.log
     );
-    assert_eq!(person.asked, 2, "at the flip, and at the poll past it");
+    assert_eq!(
+        person.asked.len(),
+        2,
+        "at the flip, and at the poll past it"
+    );
     let route = heard.recorded.to_text();
     assert_eq!(
         route,
@@ -363,7 +449,11 @@ fn the_host_is_asked_between_flips_only_once_a_frame_has_stood_the_threshold() {
     let mut person = Person::new();
     let quick = waiting_for_space(&mut person, None, 0, 1_000_000);
     assert_eq!(quick.finish.outcome, Outcome::BudgetExhausted);
-    assert_eq!(person.asked, 1, "only at the flip: two milliseconds stood");
+    assert_eq!(
+        person.asked.len(),
+        1,
+        "only at the flip: two milliseconds stood"
+    );
 
     let mut person = Person::new();
     let nap = u32::try_from(ASK_BETWEEN_FLIPS_MILLIS).expect("small") - 1;
@@ -397,4 +487,106 @@ fn the_headless_host_asked_between_flips_keeps_a_later_flip_s_input_for_it() {
     assert!(waited.finish.declared_millis > 1_000, "it was asked often");
     assert!(!waited.log.contains(" poll "), "{}", waited.log);
     assert_eq!(host.undelivered(), [(1, space(false))]);
+}
+
+/// The host is asked again between flips each time another threshold goes by,
+/// and no oftener, and holds the pace there as at a flip (#215): a guest that
+/// sleeps half a threshold a turn while Space is held is asked at every other
+/// poll, a threshold apart, with the declared time of each ask, so a wait that
+/// sleeps runs no further ahead of the wall clock than a threshold.
+#[test]
+fn a_wait_that_sleeps_is_asked_once_a_threshold_and_holds_the_pace_there() {
+    let half = u32::try_from(ASK_BETWEEN_FLIPS_MILLIS / 2).expect("small");
+    let mut person = Person::holding();
+    let held = waiting_for_space(&mut person, None, half, 1_000);
+    assert_eq!(held.finish.outcome, Outcome::BudgetExhausted);
+    assert_eq!(person.asked[0], 0, "at the flip");
+    assert!(person.asked.len() > 10, "{:?}", person.asked);
+    for (before, ask) in person.asked.iter().zip(&person.asked[1..]) {
+        assert!(
+            (ASK_BETWEEN_FLIPS_MILLIS..ASK_BETWEEN_FLIPS_MILLIS + u64::from(half))
+                .contains(&(ask - before)),
+            "asked at {:?}",
+            person.asked
+        );
+    }
+}
+
+/// While a route replays, what the host hands over between flips is drained
+/// and dropped, as at a flip (#215): a person letting go at a window does not
+/// cut short a route that lets go later.
+#[test]
+fn a_replay_drops_what_the_host_hands_over_between_flips() {
+    let nap = u32::try_from(ASK_BETWEEN_FLIPS_MILLIS).expect("small") + 50;
+    let route = "#lego-legacy-route 1\nflip 0 key Space down\nflip 0 poll 4 key Space up\n";
+    let mut person = Person::new();
+    let replayed = run(
+        guest(&mut person, nap, Reader::Async),
+        &mut person,
+        Some(route),
+        1_000_000,
+    );
+    assert_eq!(
+        replayed.finish.outcome,
+        Outcome::Exited { code: 7 },
+        "{}",
+        replayed.log
+    );
+    assert_eq!(person.asked.len(), 4, "at the flip and at polls 2, 3 and 4");
+    assert!(!replayed.log.contains(" poll 2 "), "{}", replayed.log);
+    assert_eq!(replayed.recorded.to_text(), route);
+}
+
+/// A person's close heard between flips is delivered at the poll the host was
+/// asked at, and recorded there, and the title's grace to leave runs from
+/// that poll, not from the flip (#140, #215).
+#[test]
+fn a_close_heard_between_flips_starts_its_grace_at_that_poll() {
+    let nap = u32::try_from(ASK_BETWEEN_FLIPS_MILLIS).expect("small") + 50;
+    let mut person = Person::closing();
+    let mut machine = guest(&mut person, nap, Reader::Async);
+    // A title with a window is told, and given its grace.
+    machine.state.window_made = true;
+    let closed = run(machine, &mut person, None, 1_000_000);
+    assert_eq!(closed.finish.outcome, Outcome::Closed, "{}", closed.log);
+    assert!(
+        closed.log.lines().any(|l| l == "input flip 0 poll 2 Close"),
+        "{}",
+        closed.log
+    );
+    assert!(closed
+        .recorded
+        .to_text()
+        .ends_with("\nflip 0 poll 2 close\n"));
+    let told = u64::from(nap) + lego_legacy_core::machine::CLOSE_GRACE_MILLIS;
+    assert!(
+        (told..told + u64::from(nap)).contains(&closed.finish.declared_millis),
+        "{}",
+        closed.finish.declared_millis
+    );
+}
+
+/// A title that reads its keyboard through DirectInput's `GetDeviceState` is
+/// handed a key let go at that poll, as one asking `GetAsyncKeyState` is
+/// (#215).
+#[test]
+fn a_key_let_go_at_a_directinput_poll_reaches_a_title_reading_its_keyboard() {
+    let route = "#lego-legacy-route 1\nflip 0 key Space down\nflip 0 poll 3 key Space up\n";
+    let mut host = Headless::new();
+    let waited = run(
+        guest(&mut host, 0, Reader::Device),
+        &mut host,
+        Some(route),
+        1_000_000,
+    );
+    assert_eq!(
+        waited.finish.outcome,
+        Outcome::Exited { code: 7 },
+        "{}",
+        waited.log
+    );
+    assert!(waited
+        .log
+        .lines()
+        .any(|l| l == "input flip 0 poll 3 Key { code: 57, down: false }"));
 }

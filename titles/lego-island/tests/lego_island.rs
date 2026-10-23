@@ -607,8 +607,8 @@ fn the_information_center_route_replays_to_the_same_machine_every_time() {
 }
 
 /// A person's hand, as a run in a window takes it: through the host, whose
-/// `poll_input` hands the machine what was done since the last flip, and not
-/// through a route (#124). A route replaces the hand, and a whole class of
+/// `poll_input` hands the machine what was done since it was last asked, and
+/// not through a route (#124). A route replaces the hand, and a whole class of
 /// fault is only met by a hand: the old tree's LEGO Island "crashed right
 /// away" for a person and never for a replay, because no route of it pressed
 /// anything.

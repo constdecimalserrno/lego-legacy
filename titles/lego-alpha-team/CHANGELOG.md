@@ -89,9 +89,13 @@ two moved routes still reach the states they are named for, the first mission pl
 Adventure open, which is why ADR-0007 makes this a patch. A move the maintainer blessed on
 2026-10-22. A person should play it on the MacBook before its next release.
 
-Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands a
-tenth of a second or more, as its loads do, reaches it at the frame's next input poll rather than at
-its flip. No route moved.
+Took core 1.2.0's input between flips (#215): at a window, what a person does while a frame stands
+core's `ASK_BETWEEN_FLIPS_MILLIS` or more of declared time reaches it at the frame's next input poll
+rather than at its flip. Its ordinary frames poll at their start and are never asked; a load might
+be, if it polls late, which is untraced. There core's put-back ceiling applies, since it puts its
+pointer back every flip: the move heard at the ask is lost, or the frame's first is read twice, and
+the hand is held at the screen's edge until the flip. A person should move the mouse through the
+load after flip 1633 on the MacBook. No route moved.
 
 ## 1.0.0 — 2026-10-18
 

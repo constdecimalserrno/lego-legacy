@@ -468,7 +468,8 @@ pub struct LinuxWindow {
     pitch: usize,
     /// The frame scaled to the window, as the X server is handed it.
     shown: Vec<u8>,
-    /// Events a person made since the last flip.
+    /// Events a person made since the host was last asked
+    /// ([`Host::poll_input`]).
     pending: Vec<Input>,
     /// The keys the guest has been told are down.
     keys: Vec<u32>,

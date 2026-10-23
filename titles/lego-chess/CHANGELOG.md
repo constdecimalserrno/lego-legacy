@@ -151,6 +151,6 @@ Krisalis' logo's fifth frame, flip 290, and lets it go at the 300th poll after i
 flip 294, where with Krisalis' logo played through it opened after flip 327. Its frame 10, flip
 305, is byte for byte the frame `intro.route` presents at flip 338. The route ends there, at 2,975
 million instructions, with its determinism gate. At a window, Space should skip a movie without
-hanging the game once it is let go and the frame has stood a tenth of a second, which a person has
-yet to try on the MacBook. By their code, its 16 waits for an arrow key to come up (0x457200) read
+hanging the game once it is let go and the frame has stood core's `ASK_BETWEEN_FLIPS_MILLIS`, which
+a person has yet to try on the MacBook. By their code, its 16 waits for an arrow key to come up (0x457200) read
 the keyboard the same way, so a key let go between flips reaches them too.

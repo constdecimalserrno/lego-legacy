@@ -429,7 +429,8 @@ pub struct WinWindow {
     user: User32,
     gdi: Gdi32,
     window: Handle,
-    /// Events a person made since the last flip.
+    /// Events a person made since the host was last asked
+    /// ([`Host::poll_input`]).
     pending: Vec<Input>,
     /// The keys the guest has been told are down.
     held: Vec<u32>,
@@ -1219,8 +1220,9 @@ mod way_back {
     /// event handled, and false hands it on to the next handler, which ends
     /// the process.
     ///
-    /// Ctrl-C and Ctrl-Break are handled: the title is told at the next flip,
-    /// and a second press ends the run at its next burst, and the process
+    /// Ctrl-C and Ctrl-Break are handled: the title is told the next time the
+    /// host is asked ([`Host::poll_input`]), and a second press ends the run
+    /// at its next burst, and the process
     /// with it (#140). A third, with the run already ending, is handed on, so
     /// a run that never gets there can still be stopped. A console closing
     /// ends the process as soon as this returns, or five seconds after it was
