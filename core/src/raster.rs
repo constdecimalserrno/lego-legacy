@@ -515,12 +515,16 @@ pub fn triangle(
         out
     };
     let over_w = |f: fn(&Vertex) -> f32| plane([f(&a) * a.rhw, f(&b) * b.rhw, f(&c) * c.rhw]);
-    // A level triangle, its three depths one, has that depth at every pixel,
-    // as a rasteriser that takes its gradients from the vertices' differences
-    // gives it. These planes would carry an ulp of noise across it, enough for
-    // a quad to fail `LESSEQUAL` against one under it at the same depth: LEGO
-    // Chess draws its glyphs so (#210).
-    let depth = if a.z == b.z && b.z == c.z {
+    // A triangle at one depth, its three depths equal bit for bit, has that
+    // depth at every pixel: the steps of its depth are differences of equal
+    // floats, which are exactly zero. These planes would carry an ulp of noise
+    // across it, enough for a quad to fail `LESSEQUAL` against one under it at
+    // the same depth: LEGO Chess draws its glyphs so (#210).
+    // ponytail: exact for bit-equal depths only; depths equal to within
+    // rounding, and sloped triangles sharing a plane, keep the noise. Planes
+    // from the vertices' differences for every triangle would mend them, and
+    // move every released title's frames, so that waits on a blessing.
+    let depth = if a.z == b.z && b.z == c.z && a.z.is_finite() {
         (0.0, 0.0, a.z)
     } else {
         plane([a.z, b.z, c.z])
@@ -839,13 +843,14 @@ mod tests {
             .collect()
     }
 
-    /// Level quads, each at one depth, overlapping under `LESSEQUAL`: the later
-    /// one covers the earlier wherever on the screen it lies, as on a card
-    /// (#210). LEGO Chess's glyphs are such quads, at a third. With an ulp of
-    /// interpolated depth across each, 215 of these 270 placements lost
-    /// pixels.
+    /// Quads at one depth, overlapping under `LESSEQUAL`: the later one covers
+    /// the earlier wherever on the screen it lies, as on a card (#210). LEGO
+    /// Chess's glyphs are such quads, at a third. With an ulp of interpolated
+    /// depth across each, 215 of these 270 placements lost pixels. The rows are
+    /// near those of the New Player form's lines of text, across the middle of
+    /// the screen.
     #[test]
-    fn a_level_quad_covers_another_at_its_depth_wherever_it_lies() {
+    fn a_quad_at_one_depth_covers_another_at_it_wherever_it_lies() {
         let (w, h) = (640, 480);
         let mut pixels = vec![0u8; w * h * 2];
         let mut depth = vec![1.0f32; w * h];
@@ -880,8 +885,8 @@ mod tests {
                     clip: [0, 0, w as i32, h as i32],
                     first_row: 0,
                 };
-                for (at, blue) in [(x, false), (x + 8, true)] {
-                    for t in quad(at as f32, y as f32, blue) {
+                for (left, blue) in [(x, false), (x + 8, true)] {
+                    for t in quad(left as f32, y as f32, blue) {
                         triangle(&mut target, t, None, &States::default());
                     }
                 }
