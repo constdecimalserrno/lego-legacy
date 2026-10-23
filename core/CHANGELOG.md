@@ -84,20 +84,32 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
-The Audio Compression Manager's streams decode Microsoft's ADPCM (#153): MSACM32's
-`acmStreamOpen`, `acmStreamSize`, `acmStreamPrepareHeader`, `acmStreamUnprepareHeader` and
-`acmStreamConvert`, which were walls, answer as Windows 98's own ADPCM codec does, as Wine's
-`msacm32` and `msadp32`, read as documentation, and its conformance test `test_prepareheader` have
-them. A stream turns MS ADPCM into PCM of the same rate and channels, sixteen or eight bits a
-sample, an eight-bit sample its sixteen-bit one's top byte unsigned; another rate or channels is
-`ACMERR_NOTPOSSIBLE`, no conversion the codec makes. Its size counts a short last block whole, and
-its conversion decodes whole blocks only, as `msadp32` does, saying how much of each side it used.
-A header with no ADPCM is `MMSYSERR_INVALPARAM`, less than a block `ACMERR_NOTPOSSIBLE`, a reserved
-flag `MMSYSERR_INVALFLAG`, an unprepared one `ACMERR_UNPREPARED`, and an unknown stream
-`MMSYSERR_INVALHANDLE`. Another format, a driver, a filter, a callback, sizing from the destination
-or another conversion flag is a wall. The decoding is `sound.rs`'s, Rock Raiders' movies' own, now
-open to the crate, and unchanged; LEGO Chess's `sounds\chimp.wav` decodes through it to FFmpeg's
-PCM byte for byte. Only LEGO Chess imports MSACM32, so no released run moves.
+The Audio Compression Manager's streams decode Microsoft's ADPCM (#153): MSACM32's `acmStreamOpen`,
+`acmStreamSize`, `acmStreamPrepareHeader`, `acmStreamUnprepareHeader` and `acmStreamConvert`, which
+were walls, answer as Microsoft's pages and Wine's conformance test `test_prepareheader`, which
+passes on Windows, have them, and otherwise as Wine's `msacm32` and `msadp32`, read as
+documentation. A stream turns MS ADPCM into sixteen-bit PCM of the same rate and channels, a block
+as many samples as its format's `wSamplesPerBlock` says (mmreg.h's `ADPCMWAVEFORMAT`). Another rate
+or channels, or eight bits at a rate off `msadp32`'s own table, is `ACMERR_NOTPOSSIBLE`, no
+conversion the codec makes. Its size counts a short last block whole, in a `DWORD` as `msadp32`
+counts it. Its conversion decodes whole blocks, and a short last block at least its header long
+after them, unless `ACM_STREAMCONVERTF_BLOCKALIGN` asks for whole blocks only, which Microsoft's
+`acmStreamConvert` page says it alone does; it says how much of each side it used. A header with no
+ADPCM is `MMSYSERR_INVALPARAM`, less than a block `ACMERR_NOTPOSSIBLE`, prepared with its reserved
+argument set `MMSYSERR_INVALFLAG`, unprepared `ACMERR_UNPREPARED`, and an unknown stream
+`MMSYSERR_INVALHANDLE`. These are walls: eight-bit PCM, since the one measurement of Windows' own
+codec into eight bits, `test_prepareheader`'s, has a 512-byte block of 1,012 samples convert to
+1,010 bytes, which is unmeasured on a real block; a destination shorter than one block's PCM, which
+Windows there fills from the whole source; another format; a driver, a filter or a callback; asking
+only whether it can, with `ACM_STREAMOPENF_QUERY`; no format, or no handle to answer; a block too
+small for its own header, other predictors than Microsoft's seven, or a `wSamplesPerBlock` its size
+does not hold; sizing from the destination; `ACM_STREAMCONVERTF_END`; and unprepare's reserved
+argument set. `acmStreamClose` is not written, since LEGO Chess does not import it. The decoding is
+`sound.rs`'s, Rock Raiders' movies' own, now open to the crate, its delta's steps now wrapping as
+the codec's own integers do where corrupt data runs them past 32 bits, which only a debug build
+answered otherwise; LEGO Chess's `sounds\chimp.wav`, its short block too, decodes through it to
+FFmpeg's PCM byte for byte. Only LEGO Chess imports MSACM32, so no released run moves; a
+`LoadLibraryA("MSACM32")` now loads it, which no released title asks for.
 
 `SetCurrentDirectoryA` sets a directory by its full path, as `GetFullPathNameA` names it (#171). A
 relative name is the current directory's child, where it was taken as the whole directory; one

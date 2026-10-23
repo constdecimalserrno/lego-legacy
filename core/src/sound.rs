@@ -158,12 +158,15 @@ impl Format {
                 for (n, nibble) in [packed >> 4, packed & 0x0f].into_iter().enumerate() {
                     let c = if channels == 2 { n } else { 0 };
                     let signed = i32::from(nibble) - if nibble & 8 != 0 { 16 } else { 0 };
-                    let predicted =
-                        (s1[c] * coef[c].0 + s2[c] * coef[c].1) / 256 + signed * delta[c];
+                    // Wrapping where a step can run past 32 bits, as the
+                    // codec's own `int` arithmetic does, on corrupt data only.
+                    let predicted = ((s1[c] * coef[c].0 + s2[c] * coef[c].1) / 256)
+                        .wrapping_add(signed.wrapping_mul(delta[c]));
                     let sample = predicted.clamp(-32768, 32767);
                     s2[c] = s1[c];
                     s1[c] = sample;
-                    delta[c] = ((ADAPTATION[usize::from(nibble)] * delta[c]) >> 8).max(16);
+                    delta[c] =
+                        (ADAPTATION[usize::from(nibble)].wrapping_mul(delta[c]) >> 8).max(16);
                     out.push(sample as i16);
                 }
             }

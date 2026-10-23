@@ -2,12 +2,16 @@
 //! wave format into another (#153).
 //!
 //! What is written is what LEGO Chess's sample loader asks of it (0x0044F950):
-//! Microsoft's ADPCM into PCM of the same rate and channels, eight or sixteen
-//! bits a sample, which Windows 98 does with its own ADPCM codec. The decoding
-//! is `sound.rs`'s, which Rock Raiders' movies already use; the stream calls
-//! answer as Wine's `msacm32` and `msadp32`, read as documentation, and its
-//! conformance tests, which pass on Windows, have them answer. Any other
-//! conversion, a driver, a filter or a callback is a wall.
+//! Microsoft's ADPCM into sixteen-bit PCM of the same rate and channels, a
+//! block as many samples as the format's `wSamplesPerBlock` says (mmreg.h's
+//! `ADPCMWAVEFORMAT`, as Microsoft's ADPCM format description counts them).
+//! The decoding is `sound.rs`'s, which Rock Raiders' movies already use. The
+//! stream calls answer as Microsoft's pages and Wine's conformance tests, which
+//! pass on Windows, have them answer, and otherwise as Wine's `msacm32` and
+//! `msadp32`, read as documentation. Eight-bit PCM, any other conversion, a
+//! driver, a filter or a callback is a wall: the one measurement of Windows' own
+//! codec into eight bits, Wine's `test_prepareheader`, does not answer what
+//! that count gives.
 
 use super::{stdcall, Ctx, Shim};
 use crate::cpu::Stop;
@@ -22,12 +26,10 @@ pub const SHIMS: &[Shim] = &[
     stdcall("MSACM32", "acmStreamConvert", 3, convert),
 ];
 
-/// An open stream: the ADPCM it reads, and how many bits a sample of the PCM
-/// it writes has.
+/// An open stream: the ADPCM it reads into sixteen-bit PCM.
 #[derive(Clone, Debug)]
 pub struct Stream {
     source: Format,
-    bits: u16,
 }
 
 impl Stream {
@@ -40,8 +42,7 @@ impl Stream {
     /// and two a byte after it, as `ADPCMWAVEFORMAT`'s page and `msadp32`
     /// count them.
     fn block_out(&self) -> u32 {
-        let samples = samples_per_block(&self.source);
-        samples * u32::from(self.source.channels) * u32::from(self.bits / 8)
+        samples_per_block(&self.source) * u32::from(self.source.channels) * 2
     }
 }
 
@@ -67,6 +68,9 @@ const STATUSF_DONE: u32 = 0x0001_0000;
 const STATUSF_PREPARED: u32 = 0x0002_0000;
 const STATUSF_INQUEUE: u32 = 0x0010_0000;
 const RESERVED: u32 = 0x2c;
+/// Where among them the four buffers it was prepared with are kept:
+/// `ACMDRVSTREAMHEADER`'s `pbPreparedSrc` and the three after it.
+const PREPARED_BUFFERS: u32 = RESERVED + 0x18;
 
 /// Microsoft's seven predictor pairs, the ones its codec decodes with.
 const COEFFICIENTS: [(i32, i32); 7] = [
@@ -86,18 +90,18 @@ fn unwritten(what: String) -> Stop {
     }
 }
 
-/// A `WAVEFORMATEX`, and what follows it for a format that is not PCM, as
-/// long as its `cbSize` says, as `msacm32` reads one; and an ADPCM format's
-/// own samples a block, which follow its `cbSize`.
+/// A format as `msacm32` reads one: PCM's 16-byte `PCMWAVEFORMAT`, and for
+/// anything else a `WAVEFORMATEX` and as much after it as its `cbSize` says;
+/// and an ADPCM format's own samples a block, which follow its `cbSize`.
 fn wave_format(ctx: &Ctx<'_>, at: u32) -> Result<(Format, u32), Stop> {
-    let head = ctx.mem.slice(at, 18).map_err(Stop::Fault)?;
-    let pcm = u16::from_le_bytes([head[0], head[1]]) == 1;
-    let extra = if pcm {
-        0
+    let tag = ctx.mem.slice(at, 2).map_err(Stop::Fault)?;
+    let len = if u16::from_le_bytes([tag[0], tag[1]]) == 1 {
+        16
     } else {
-        usize::from(u16::from_le_bytes([head[16], head[17]]))
+        let head = ctx.mem.slice(at, 18).map_err(Stop::Fault)?;
+        18 + usize::from(u16::from_le_bytes([head[16], head[17]]))
     };
-    let bytes = ctx.mem.slice(at, 18 + extra).map_err(Stop::Fault)?;
+    let bytes = ctx.mem.slice(at, len).map_err(Stop::Fault)?;
     let format = Format::parse(bytes).map_err(|e| unwritten(format!("acmStreamOpen: {e}")))?;
     let per_block = bytes
         .get(18..20)
@@ -107,28 +111,26 @@ fn wave_format(ctx: &Ctx<'_>, at: u32) -> Result<(Format, u32), Stop> {
 
 fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // acmStreamOpen(out, driver, source, destination, filter, callback,
-    // instance, flags). Asked only whether it can, it answers without a
-    // stream, as `msacm32` ignores the handle then; a stream it does not open
-    // is no handle.
-    const QUERY: u32 = 0x1;
+    // instance, flags). A stream it does not open is no handle.
     const NONREALTIME: u32 = 0x4;
     let (out, from, to, flags) = (args[0], args[2], args[3], args[7]);
-    if args[1] != 0 || args[4] != 0 || args[5] != 0 || flags & !(QUERY | NONREALTIME) != 0 {
+    if args[1] != 0 || args[4] != 0 || args[5] != 0 || flags & !NONREALTIME != 0 {
         return Err(unwritten(format!(
             "acmStreamOpen: driver {:#x}, filter {:#x}, callback {:#x}, flags {flags:#x}",
             args[1], args[4], args[5]
         )));
     }
-    let out = if flags & QUERY == 0 { out } else { 0 };
-    let answer = |ctx: &mut Ctx<'_>, refused: u32| -> Result<u32, Stop> {
-        if out != 0 {
-            ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
-        }
-        Ok(refused)
-    };
-    if from == 0 || to == 0 {
-        return answer(ctx, MMSYSERR_INVALPARAM);
+    // No format, or no handle to hand back: what Windows answers has no
+    // source, and Wine reads through the first and opens without the second.
+    if out == 0 || from == 0 || to == 0 {
+        return Err(unwritten(format!(
+            "acmStreamOpen: handle at {out:#x}, formats at {from:#x} and {to:#x}"
+        )));
     }
+    let refused = |ctx: &mut Ctx<'_>, answer: u32| -> Result<u32, Stop> {
+        ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
+        Ok(answer)
+    };
     let ((source, per_block), (destination, _)) = (wave_format(ctx, from)?, wave_format(ctx, to)?);
     if (source.tag, destination.tag) != (2, 1) {
         return Err(unwritten(format!(
@@ -137,32 +139,40 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         )));
     }
     // The ADPCM codec changes neither the rate nor the channels, and writes
-    // eight or sixteen bits (`msadp32`'s `ADPCM_StreamOpen`); and a block too
-    // small for its own header decodes to nothing. Nothing on the machine
-    // converts those, which is `ACMERR_NOTPOSSIBLE`.
+    // eight or sixteen bits, eight only at the rates of its own table, as
+    // `msadp32`'s `ADPCM_StreamOpen` and `ADPCM_GetFormatIndex` take them.
+    // Nothing on the machine converts the rest, which is `ACMERR_NOTPOSSIBLE`.
     let channels = source.channels;
     if source.bits != 4
         || !(1..=2).contains(&channels)
-        || source.block_align < 7 * channels
         || (source.rate, channels) != (destination.rate, destination.channels)
         || !matches!(destination.bits, 8 | 16)
+        || (destination.bits == 8 && ![8_000, 11_025, 22_050, 44_100].contains(&destination.rate))
     {
-        return answer(ctx, ACMERR_NOTPOSSIBLE);
+        return refused(ctx, ACMERR_NOTPOSSIBLE);
     }
-    // The codec decodes with its own seven predictor pairs, a block as many
-    // samples as its size holds: a format that says otherwise is not written.
-    if source.coefficients != COEFFICIENTS || per_block != samples_per_block(&source) {
+    // The codec decodes with its own seven predictor pairs, a block holding at
+    // least its header and as many samples as its size holds: a format that
+    // says otherwise is not written, `msadp32` checking none of it.
+    if source.block_align < 7 * channels
+        || source.coefficients != COEFFICIENTS
+        || per_block != samples_per_block(&source)
+    {
         return Err(unwritten(format!(
             "acmStreamOpen: MS ADPCM of {per_block} samples a block of {}, predictors {:?}",
             source.block_align, source.coefficients
         )));
     }
-    if out == 0 {
-        return Ok(if flags & QUERY == 0 {
-            MMSYSERR_INVALPARAM
-        } else {
-            MMSYSERR_NOERROR
-        });
+    // Into eight bits, the one measurement of Windows, Wine's
+    // `test_prepareheader`, has a 512-byte block of 1,012 samples convert to
+    // 1,010 bytes: unmeasured on a real block, so not written.
+    if destination.bits == 8 {
+        return Err(unwritten(format!(
+            "acmStreamOpen: MS ADPCM to eight-bit PCM, which Windows converts a 512-byte block of \
+             1,012 samples to 1,010 bytes of (test_prepareheader), unmeasured on a real block; \
+             {} samples a block here",
+            per_block
+        )));
     }
     let handle = ctx.state.next_acm_stream;
     ctx.state.next_acm_stream += 1;
@@ -170,20 +180,14 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         "acm stream {handle}: MS ADPCM at {} Hz in {channels} channels to {}-bit PCM",
         source.rate, destination.bits
     ));
-    ctx.state.acm_streams.insert(
-        handle,
-        Stream {
-            source,
-            bits: destination.bits,
-        },
-    );
+    ctx.state.acm_streams.insert(handle, Stream { source });
     ctx.mem.write_u32(out, handle).map_err(Stop::Fault)?;
     Ok(MMSYSERR_NOERROR)
 }
 
 fn size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // acmStreamSize(stream, bytes, out, flags): how much PCM `bytes` of ADPCM
-    // decodes to, a short last block counted whole, in a `DWORD` as
+    // decodes to at most, a short last block counted whole, in a `DWORD` as
     // `msadp32` counts it; less than a block is `ACMERR_NOTPOSSIBLE`. Sized
     // from the destination is a wall.
     const SOURCE: u32 = 0;
@@ -234,11 +238,12 @@ fn buffers(ctx: &Ctx<'_>, header: u32) -> Result<[u32; 4], Stop> {
 /// lets one go.
 fn as_prepared(ctx: &Ctx<'_>, header: u32) -> Result<bool, Stop> {
     let [from, from_bytes, to, to_bytes] = buffers(ctx, header)?;
-    let read = |o: u32| ctx.mem.read_u32(header + RESERVED + o).map_err(Stop::Fault);
-    Ok(read(0x18)? == from
-        && read(0x1c)? >= from_bytes
-        && read(0x20)? == to
-        && read(0x24)? >= to_bytes)
+    let read = |i: u32| {
+        ctx.mem
+            .read_u32(header + PREPARED_BUFFERS + 4 * i)
+            .map_err(Stop::Fault)
+    };
+    Ok(read(0)? == from && read(1)? >= from_bytes && read(2)? == to && read(3)? >= to_bytes)
 }
 
 fn prepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -265,11 +270,15 @@ fn prepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let status = status & !STATUSF_INQUEUE | STATUSF_PREPARED;
     ctx.mem.write_u32(header + 4, status).map_err(Stop::Fault)?;
     // `fdwConvert`, the next header and the driver's words, then
-    // `fdwPrepared`, `dwPrepared` and the four buffers.
-    let kept = [0, 0, 0, 0, status, 0, from, from_bytes, to, to_bytes];
-    for (i, value) in (0..).zip(kept) {
+    // `fdwPrepared` and `dwPrepared`; and the four buffers.
+    for (i, value) in (0..).zip([0, 0, 0, 0, status, 0]) {
         ctx.mem
             .write_u32(header + RESERVED + 4 * i, value)
+            .map_err(Stop::Fault)?;
+    }
+    for (i, value) in (0..).zip([from, from_bytes, to, to_bytes]) {
+        ctx.mem
+            .write_u32(header + PREPARED_BUFFERS + 4 * i, value)
             .map_err(Stop::Fault)?;
     }
     Ok(MMSYSERR_NOERROR)
@@ -302,14 +311,26 @@ fn unprepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(MMSYSERR_NOERROR)
 }
 
+/// `bytes` of ADPCM at `at`, in blocks of `format`'s, decoded.
+fn decoded(ctx: &Ctx<'_>, format: &Format, at: u32, bytes: u32) -> Result<Vec<i16>, Stop> {
+    let adpcm = ctx.mem.slice(at, bytes as usize).map_err(Stop::Fault)?;
+    format
+        .ms_adpcm(adpcm)
+        .map_err(|e| unwritten(format!("acmStreamConvert: {e}")))
+}
+
 fn convert(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // acmStreamConvert(stream, header, flags): as many whole blocks as there
     // are and the destination holds, decoded, and how much of each side was
-    // used, as `msadp32`'s converters do; a short last block is left. The
-    // header is then done.
+    // used, as `msadp32`'s converters do; and a short last block after them,
+    // at least its header long, unless `ACM_STREAMCONVERTF_BLOCKALIGN` asks
+    // for whole blocks only, which Microsoft's `acmStreamConvert` page says
+    // it alone does. The header is then done. A destination shorter than one
+    // block's PCM is a wall: Windows, unlike `msadp32`, uses the whole source
+    // and fills such a one (`test_prepareheader`), measured only into eight
+    // bits.
     const BLOCKALIGN: u32 = 0x4;
     const START: u32 = 0x10;
-    const END: u32 = 0x20;
     let (stream, status) = match stream_and_header(ctx, args)? {
         Ok(found) => found,
         Err(refused) => return Ok(refused),
@@ -324,29 +345,39 @@ fn convert(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if !as_prepared(ctx, header)? {
         return Ok(MMSYSERR_INVALPARAM);
     }
-    if args[2] & !(BLOCKALIGN | START | END) != 0 {
+    if args[2] & !(BLOCKALIGN | START) != 0 {
         return Err(unwritten(format!("acmStreamConvert: flags {:#x}", args[2])));
     }
     let [from, from_bytes, to, to_bytes] = buffers(ctx, header)?;
-    let blocks = (from_bytes / stream.align()).min(to_bytes / stream.block_out());
-    let adpcm = ctx
-        .mem
-        .slice(from, (blocks * stream.align()) as usize)
-        .map_err(Stop::Fault)?;
-    let samples = stream
-        .source
-        .ms_adpcm(adpcm)
-        .map_err(|e| unwritten(format!("acmStreamConvert: {e}")))?;
-    let pcm: Vec<u8> = if stream.bits == 16 {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    } else {
-        // The top byte, unsigned, as an eight-bit sample is.
-        samples.iter().map(|s| s.to_le_bytes()[1] ^ 0x80).collect()
-    };
+    let (align, block_out) = (stream.align(), stream.block_out());
+    if to_bytes < block_out {
+        return Err(unwritten(format!(
+            "acmStreamConvert: {to_bytes} bytes of PCM for blocks of {block_out}, which \
+             Windows fills from the whole source (test_prepareheader), unmeasured at sixteen bits"
+        )));
+    }
+    let blocks = (from_bytes / align).min(to_bytes / block_out);
+    let mut used = blocks * align;
+    let mut samples = decoded(ctx, &stream.source, from, used)?;
+    // After the last whole block, a short one at least its header long,
+    // decoded as a block its own length, when the destination holds it.
+    let rest = from_bytes - used;
+    let channels = u32::from(stream.source.channels);
+    if args[2] & BLOCKALIGN == 0 && blocks == from_bytes / align && rest >= 7 * channels {
+        let short = Format {
+            block_align: u16::try_from(rest).expect("shorter than a block"),
+            ..stream.source.clone()
+        };
+        if blocks * block_out + 2 * channels * samples_per_block(&short) <= to_bytes {
+            samples.extend(decoded(ctx, &short, from + used, rest)?);
+            used = from_bytes;
+        }
+    }
+    let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     ctx.mem.write(to, &pcm).map_err(Stop::Fault)?;
     for (offset, value) in [
-        (0x14, blocks * stream.align()),
-        (0x24, blocks * stream.block_out()),
+        (0x14, used),
+        (0x24, pcm.len() as u32),
         (RESERVED, args[2]),
         (4, status | STATUSF_DONE),
     ] {
