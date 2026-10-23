@@ -101,10 +101,11 @@ Took core 1.2.0's clock-spin pass (#217): it reads the clock in straight-line co
 that call out as well, so nothing of it is passed, and no route moved.
 
 Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
-handed a space after Space, and an escape after the Escape a click in its intro is (#66), and it
-hands each to a handler of its own (0x00404CF5). Each of its runs that presses one, `menu.route`,
-`select-adventure.route`, `first-mission.route` and the two clicks in the intro, ends at the same
-cursor, flips and declared time with another digest. The move awaits the maintainer's blessing.
+handed a space after Space, and an escape after the Escape a click in its intro is (#66): it asks a
+handler of its own (0x00404B10), which answers that it is not its, and hands each to
+`DefWindowProcA`. Each of its runs that presses one, `menu.route`, `select-adventure.route`,
+`first-mission.route` and the two clicks in the intro, ends at the same cursor, flips and declared
+time with another digest. The move awaits the maintainer's blessing.
 
 ## 1.0.0 — 2026-10-18
 

@@ -29,12 +29,14 @@ LEGO Chess's New Player form takes a name this way (0x0045C746).
   0x004050F3, LEGO Island's at 0x00401B5B and LEGO Chess's at 0x0045C4F8 each drop it.
 
 Every title on the roster translates its keys, so each now hears a `WM_CHAR` after a key that types
-one. Alpha Team's window procedure hands it to a handler of its own (0x00404CF5), LEGO Island's
-hands it to `DefWindowProcA` (0x00401E56), and LEGO Chess's keeps it for its text boxes; Hot
-Wheels' and Rock Raiders' were not read. Every released run of a route that presses Space, Escape
-or a letter moves, and no other: no flip, declared millisecond or exit code moves, so the moves are
-the instructions the new messages cost. The move awaits the maintainer's blessing. Each title's
-changelog lists its own:
+one. Alpha Team's window procedure asks a handler of its own (0x00404B10), which answers that it is
+not its, and hands it to `DefWindowProcA`, as LEGO Island's does (0x00401E56); LEGO Chess's keeps it
+for its text boxes; Hot Wheels' and Rock Raiders' were not read through. Every released run of a
+route that presses Space, Escape or a letter moves, and no other: no flip, declared millisecond or
+exit code moves, so the moves are the instructions the new messages cost, and, for the three runs
+that end with a key read as held, Hot Wheels' two exits and Alpha Team's click at flip 600, the
+digest's hash of it. The move awaits the maintainer's blessing. Each title's changelog lists its
+own:
 - Hot Wheels' two runs that exit, `first-race.route` at 13,462,673,313 where it ended at
   13,462,673,233, and the escape route at 583,424,210 where it ended at 583,424,170;
 - LEGO Island's three that exit, each 288 instructions later: `first-save.route` past its end at
