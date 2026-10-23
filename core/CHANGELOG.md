@@ -84,6 +84,18 @@ the host's instructions on the Mac mini, 2,453.46 billion where it took 2,449.16
 which after a movie Space skipped waits for Space to come up and presents nothing while it waits,
 gets past the wait. ADR-0003 says how input is delivered and keyed, and CONTEXT.md has **Poll**.
 
+`SetCurrentDirectoryA` sets a directory by its full path, as `GetFullPathNameA` names it (#171). A
+relative name is the current directory's child, where it was taken as the whole directory, and a
+trailing backslash goes, as Wine's conformance test `test_setdir` finds Windows doing it. An empty
+name fails with `ERROR_INVALID_NAME` and the directory stays, where it was taken as an empty
+directory: an empty name has no full path (`test_GetFullPathNameA`), and Wine's
+`RtlSetCurrentDirectory_U` fails it so. A name through `.` or `..` is a wall. The rest of #171 waits
+for a public source of what Windows 98 answers: a directory the machine does not have is still taken
+as named, and `GetVolumeInformationA` and `SetFileAttributesA` answer as before. LEGO Chess restores
+its saved directory at boot before it has saved it, an empty name, and sets its own folders by name
+(#210). Hot Wheels sets its own install directory by its full name, which resolves to itself, and no
+other released title sets one: the full `ci.sh` on this change moved none of their runs.
+
 LEGO Chess's bumper draws through its DirectX plugin's Direct3D 2 device (#210). Four walls are
 written. `IDirect3D2::CreateMaterial` makes a material, DirectX 5's `IDirect3DMaterial2` being
 DirectX 6's slot for slot (d3d.h), and the material answers `IID_IDirect3DMaterial2` as the viewport

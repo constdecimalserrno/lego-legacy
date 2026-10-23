@@ -1153,7 +1153,8 @@ impl Ctx<'_> {
             };
             format!("{drive}{path}")
         } else {
-            format!("{here}\\{path}")
+            // A drive's root ends in its separator already.
+            format!("{}\\{path}", here.strip_suffix('\\').unwrap_or(here))
         }
     }
 

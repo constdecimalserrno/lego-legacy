@@ -183,3 +183,16 @@ a run with no route. The run then stops at `KERNEL32.dll!UnhandledExceptionFilte
 directories it sets by relative names too, which the machine does not yet resolve against its
 current directory, and at boot it sets an empty one (`SetCurrentDirectoryA` from 0x0045691B at
 cursor 260,327), which Windows refuses and the machine takes (#171).
+
+Its strings load, and its room's files are found (#171, core 1.2.0). At boot its main restores its
+saved directory before it has saved it, `SetCurrentDirectoryA` of an empty name from 0x0045691B at
+cursor 260,327, which now fails as Windows fails it: the directory stays where the game was
+installed, and `text.txt` is found beside it, where every run before looked for it at the root and
+missed. Every run moves by 23,170 instructions from there, its flips unchanged: first light is flip
+7 at cursor 45,117,051, the brick flip 10 at 72,784,709, the intro route's flip 340 at
+3,695,193,660, and `skip-krisalis.route`'s flip 291 at 2,706,399,675 and its flip 305 at
+2,971,352,071; the test of the intro's clock spins (#217) pins the intro route's new digest and flip
+lines, its mix unchanged. Past the bumper the game sets its own folders by name, `profiles`, `sounds` and
+`menus\room`, each now its install directory's child, and loads what is in them. The run stops at
+#153's wall, `MSACM32.dll!acmStreamOpen`, called from 0x0044FA83 at cursor 8,616,780,716 after 831
+flips, as the game decodes `sounds\chimp.wav`, an MS ADPCM sound.

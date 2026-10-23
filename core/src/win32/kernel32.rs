@@ -1760,18 +1760,50 @@ fn get_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn set_current_directory(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetCurrentDirectoryA(path), resolved as `GetFullPathNameA` resolves a
+    // name: a relative one is the current directory's child, and trailing and
+    // repeated separators of either kind go, as Wine's conformance test
+    // `test_setdir` (checks 1 and 6 to 9) finds Windows doing it. A name of
+    // nothing but spaces has no full path (`test_GetFullPathNameA`, and Wine's
+    // `get_full_path_helper`), so it fails and the directory stays, as Wine's
+    // `RtlSetCurrentDirectory_U`, read as documentation, fails it, with
+    // `ERROR_INVALID_NAME`. A name through `.` or `..`, another machine's
+    // (`\\server`) or a drive's own current directory (`C:` alone, `C:name`)
+    // is a wall. LEGO Chess sets an empty one at boot, and its own folders by
+    // their names (#171).
     let path = ctx.string(args[0]).map_err(Stop::Fault)?;
-    // Any other place is taken as it is named, there or not (#171).
+    if path.chars().all(|c| c == ' ') {
+        ctx.state.last_error = ERROR_INVALID_NAME;
+        return Ok(0);
+    }
     if ctx.refuse_on_empty_floppy(&path)? {
         return Ok(0);
     }
-    ctx.state.current_directory = path;
+    let full = ctx.absolute(&path);
+    let rooted = matches!(full.get(1..3), Some(":\\" | ":/"));
+    let parts: Vec<&str> = full
+        .get(2..)
+        .unwrap_or("")
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let other_machine = path.starts_with("\\\\") || path.starts_with("//");
+    if !rooted || other_machine || parts.iter().any(|&part| part == "." || part == "..") {
+        return Err(Stop::NotWritten {
+            what: format!("KERNEL32.dll!SetCurrentDirectoryA({path:?}), named as {full:?}"),
+            caller: 0,
+        });
+    }
+    // Any other place is taken as it is named, there or not (#171).
+    ctx.state.current_directory = format!("{}\\{}", &full[..2], parts.join("\\"));
     Ok(1)
 }
 
 /// What a call that could not open a file hands back.
 const INVALID_HANDLE: u32 = 0xffff_ffff;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+/// A name that names nothing, such as an empty one.
+const ERROR_INVALID_NAME: u32 = 123;
 
 /// The access bits that make a handle one the guest can read and write
 /// through, and the sharing bits that let another handle on the same file do

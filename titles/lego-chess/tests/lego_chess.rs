@@ -280,6 +280,23 @@ fn the_game_s_main_finds_its_disc_and_picks_direct3d_2() {
     );
 }
 
+/// Its strings load where it was installed (#171). Its main restores its
+/// saved directory before it has saved it, at 0x0045691B, an empty name,
+/// which Windows refuses and the directory stays, so `text.txt` is found
+/// beside the game; with the directory emptied, it was looked for at the
+/// root and missed, as it was in every run before.
+#[test]
+fn the_game_s_strings_load_from_where_it_was_installed() {
+    let Some(ran) = boot() else { return };
+
+    ran.assert_logged(&format!("file opened {ROOT}\\text.txt"));
+    assert!(
+        !ran.log.contains("file missing \\text.txt"),
+        "log:\n{}",
+        ran.log
+    );
+}
+
 /// Its DirectX plugin lists the device's texture formats and makes it a
 /// viewport (#148), and its framework then takes the screen: it confines the
 /// pointer to it and says a screen saver is running, as programs of the time
@@ -406,7 +423,7 @@ fn the_boot_runs_to_its_budget_in_the_logo_s_first_frame() {
         ran.log
     );
     ran.assert_flips(3)
-        .assert_logged("flip 2 cursor 770297 640x480x16");
+        .assert_logged("flip 2 cursor 793467 640x480x16");
 }
 
 #[test]
@@ -439,7 +456,7 @@ const FIRST_LIGHT: u64 = 7;
 const FIRST_BRICK: u64 = 10;
 
 /// Enough instructions for the logo to reach the brick, flip 10 at
-/// 72,761,539, and a movie frame more.
+/// 72,784,709, and a movie frame more.
 const FIRST_LIGHT_BUDGET: u64 = 84_000_000;
 
 /// The committed route to first light, replayed, keeping the frame before
@@ -499,7 +516,7 @@ fn the_route_reaches_first_light_as_the_logo_s_first_brick_comes_in() {
         "nothing on the way to first light stops the run\nlog:\n{}",
         ran.log
     );
-    ran.assert_logged("flip 7 cursor 45093881 640x480x16");
+    ran.assert_logged("flip 7 cursor 45117051 640x480x16");
 
     let lit = ran
         .host
@@ -604,7 +621,7 @@ const KRISALIS_LAST: u64 = 323;
 const INTRO_TENTH: u64 = 338;
 
 /// Enough instructions for the logo and Krisalis' logo to play through and
-/// the intro to reach its frame 12, flip 340 at 3,695,170,490, and no more:
+/// the intro to reach its frame 12, flip 340 at 3,695,193,660, and no more:
 /// the route's cap, as its own comment gives it.
 const INTRO_BUDGET: u64 = 3_700_000_000;
 
@@ -644,7 +661,7 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
         "nothing in the intro stops the run\nlog:\n{}",
         ran.log
     );
-    ran.assert_logged("flip 340 cursor 3695170490 640x480x16");
+    ran.assert_logged("flip 340 cursor 3695193660 640x480x16");
     // Each opens after the player's two clears before it.
     assert_eq!(ran.flip_before("movie D:\\intro\\krisalis.avi opened"), 285);
     assert_eq!(ran.flip_before("movie D:\\intro\\intro.avi opened"), 327);
@@ -683,7 +700,9 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
 /// machine retires the passes that would read the same millisecond at once.
 /// It lands exactly where running every pass lands: the same machine, every
 /// flip at the same cursor, and the same mix handed over at the same flips,
-/// as main made them running every pass (5d8104c, and e9bed42 after #215).
+/// as main made them running every pass (5d8104c, and e9bed42 after #215),
+/// but for #171's 23,170 instructions at boot, which move the digest and every
+/// flip's cursor and leave the mix where it was.
 #[test]
 fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() {
     let Some(ran) = intro(&INTRO) else { return };
@@ -715,8 +734,8 @@ fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() 
             hash::sha256_hex(&handed).as_str(),
         ),
         (
-            "7938e0e28241b721b6c85fd7a999f8e012f9d0d7c54e1cc56ee3751b1fde5dad",
-            "e99db84e0baf0ce60ecf7f43007ae0a6eba844bb8ad31e40d250379d101fa24a",
+            "c917cd49f4f73ff09c22b4b4ff7ccad6681632b24f82c45b6fd689830c5dd4bc",
+            "eacf667e3096f6953aae3553d0260df1ffb463e83eb89de9b05c5a0d0d63d953",
             "70e84ca87ff3133b07ccc0debb9dd4e8b4a06f368854e780d6ae05a8e8e54ef7",
             "77712d0720f53b658e72e2d3f300da30a2e50d3298feacb51c536e2fba2a7a42",
         ),
@@ -752,7 +771,7 @@ const KRISALIS_FIFTH: u64 = 290;
 const SKIPPED_TO_THE_TENTH: u64 = 305;
 
 /// Enough instructions for the logo to play through, Krisalis' logo to be
-/// skipped, and the intro to reach its frame 10, flip 305 at 2,971,328,901,
+/// skipped, and the intro to reach its frame 10, flip 305 at 2,971,352,071,
 /// and no more.
 const SKIP_BUDGET: u64 = 2_975_000_000;
 
@@ -799,9 +818,9 @@ fn space_skips_krisalis_logo_and_let_go_between_flips_gets_past_the_wait() {
     .assert_logged(&format!(
         "input flip {KRISALIS_FIFTH} poll 300 Key {{ code: 57, down: false }}"
     ))
-    .assert_logged("flip 305 cursor 2971328901 640x480x16");
+    .assert_logged("flip 305 cursor 2971352071 640x480x16");
     // The two clears follow at once: the hold was over as Space was seen.
-    ran.assert_logged("flip 291 cursor 2706376505 640x480x16");
+    ran.assert_logged("flip 291 cursor 2706399675 640x480x16");
     assert_eq!(ran.flip_before("movie D:\\intro\\intro.avi opened"), 294);
     let tenth = ran.host.frame(SKIPPED_TO_THE_TENTH).expect("kept");
     assert!(!tenth.is_uniform(), "the intro plays");

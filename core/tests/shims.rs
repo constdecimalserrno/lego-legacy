@@ -4109,3 +4109,49 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     );
     assert!(matches!(drawn6, Err(Stop::NotWritten { .. })));
 }
+
+/// A directory is set by its full path, as `GetFullPathNameA` names it: a
+/// relative one is the current directory's child, and trailing and repeated
+/// separators of either kind go, as Wine's conformance test `test_setdir`
+/// finds Windows doing it; an empty one, or one of spaces, fails with
+/// `ERROR_INVALID_NAME` and the directory stays, such a name having no full
+/// path (`test_GetFullPathNameA`). Names through `.` or `..`, another
+/// machine's, and a drive's own current directory are walls. LEGO Chess
+/// restores its saved directory before it has saved it, so an empty one, and
+/// then sets its own folders by their names (#171).
+#[test]
+fn a_directory_is_set_by_its_full_path_and_an_empty_one_is_refused() {
+    let mut m = machine();
+    let set = |m: &mut Machine, path: &str| {
+        m.arena
+            .write(DATA, &[path.as_bytes(), &[0]].concat())
+            .expect("in the arena");
+        call(m, "KERNEL32", "SetCurrentDirectoryA", &[DATA])
+    };
+    let here = |m: &mut Machine| {
+        let asked = call(m, "KERNEL32", "GetCurrentDirectoryA", &[0x100, OUT]);
+        assert!(asked.is_ok_and(|n| n > 0));
+        text(m, OUT)
+    };
+    assert_eq!(set(&mut m, "C:\\GAME"), Ok(1));
+    assert_eq!(set(&mut m, "sounds\\"), Ok(1));
+    assert_eq!(here(&mut m), "C:\\GAME\\sounds");
+    assert_eq!(set(&mut m, ""), Ok(0));
+    assert_eq!(call(&mut m, "KERNEL32", "GetLastError", &[]), Ok(123));
+    assert_eq!(here(&mut m), "C:\\GAME\\sounds", "an empty name leaves it");
+    assert_eq!(set(&mut m, "   "), Ok(0), "nor does one of spaces");
+    assert_eq!(set(&mut m, "\\"), Ok(1));
+    assert_eq!(here(&mut m), "C:\\", "the root keeps its backslash");
+    assert_eq!(set(&mut m, "GAME//menus\\\\room\\"), Ok(1));
+    assert_eq!(
+        here(&mut m),
+        "C:\\GAME\\menus\\room",
+        "from the root, one separator"
+    );
+    for wall in ["..\\GAME", "./sounds", "C:", "C:GAME", "\\\\SERVER\\GAME"] {
+        assert!(
+            matches!(set(&mut m, wall), Err(Stop::NotWritten { .. })),
+            "{wall}"
+        );
+    }
+}
