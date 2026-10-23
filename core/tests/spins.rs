@@ -172,32 +172,27 @@ impl Guest {
     /// Write the code in and run it from the main thread's first instruction,
     /// within `budget`, as a route's run runs it or traced.
     fn go(&mut self, trace: Trace, budget: u64) -> &mut Self {
-        for (at, bytes) in &self.code {
-            self.machine.arena.write(*at, bytes).expect("the code fits");
-        }
-        self.machine.cpu.eip = self.code[0].0;
-        self.machine.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
+        self.load();
         let mut log = RunLog::create("stub", trace).expect("a run directory");
         self.finish = Some(self.machine.run(&mut self.host, &mut log, budget));
         self
     }
 
-    /// Write the code in and step it one instruction or call at a time, as
-    /// the debugger steps, to its end.
-    fn step_every_instruction(&mut self) -> &mut Self {
+    /// Write the code in and point the processor at the main thread's first
+    /// instruction.
+    fn load(&mut self) {
         for (at, bytes) in &self.code {
             self.machine.arena.write(*at, bytes).expect("the code fits");
         }
         self.machine.cpu.eip = self.code[0].0;
         self.machine.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
-        let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
-        let outcome = loop {
-            if let Some(outcome) = self.machine.step(&mut self.host, &mut log, u64::MAX, true) {
-                break outcome;
-            }
-        };
-        self.finish = Some(self.machine.finish(outcome));
-        self
+    }
+
+    /// Write the code in and step it one instruction or call at a time, as
+    /// the debugger steps, to its end.
+    fn step_every_instruction(&mut self) -> &mut Self {
+        self.load();
+        self.step_on()
     }
 
     /// Step on from where a run stopped, one instruction or call at a time,

@@ -704,9 +704,7 @@ impl Machine {
         budget: u64,
         one: bool,
     ) -> Option<Outcome> {
-        const BURST: u64 = 1 << 16;
-        self.spins
-            .allow(budget, BURST, !one && log.trace() < Trace::Shims);
+        self.spins.allow(budget, !one && log.trace() < Trace::Shims);
         let mut moved = false;
         loop {
             match self.turn {
@@ -818,6 +816,10 @@ impl Machine {
         }
     }
 }
+
+/// The declared quantum: the most of a thread's own instructions a burst
+/// runs before it hands over (ADR-0005).
+pub(crate) const BURST: u64 = 1 << 16;
 
 /// Whether a thread can be given the processor at this moment (ADR-0005).
 pub(crate) fn runnable_at(thread: &crate::win32::GuestThread, now: u64) -> bool {

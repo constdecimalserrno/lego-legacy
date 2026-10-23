@@ -46,7 +46,6 @@ fn reads_clock(shim: &Shim) -> bool {
 }
 
 /// A clock read as the guest stood at it, before it was answered.
-#[derive(Clone, Copy)]
 struct Read {
     /// Which crossing of the run it was.
     crossing: u64,
@@ -70,23 +69,19 @@ pub struct Spins {
     /// processor as it was there: only then is memory worth watching, since
     /// a pass that changes a register is never passed anyway.
     steady: bool,
-    /// How far a pass may take the cursor, the most of the guest's own
-    /// instructions a burst runs before its quantum ends it, and whether a
-    /// pass may be taken at all: a traced run logs every call and a stepped
-    /// one stops at every instruction, so neither is ever passed for.
+    /// How far a pass may take the cursor, and whether one may be taken at
+    /// all: a traced run logs every call and a stepped one stops at every
+    /// instruction, so neither is ever passed for.
     budget: u64,
-    quantum: u64,
     allowed: bool,
     passed: u64,
 }
 
 impl Spins {
-    /// What the schedule allows from here: never past `budget`, no pass of
-    /// more than `quantum` of the guest's own instructions, and nothing
+    /// What the schedule allows from here: never past `budget`, and nothing
     /// unless `allowed`.
-    pub(crate) fn allow(&mut self, budget: u64, quantum: u64, allowed: bool) {
+    pub(crate) fn allow(&mut self, budget: u64, allowed: bool) {
         self.budget = budget;
-        self.quantum = quantum;
         self.allowed = allowed;
     }
 
@@ -145,8 +140,9 @@ impl Spins {
         let len = clock.cursor().saturating_sub(last.cursor);
         if millis != last.millis
             || len == 0
-            // The pass is its own instructions and the read's crossing.
-            || len - 1 > self.quantum
+            // The pass is its own instructions and the read's crossing; more
+            // than a quantum of them and a burst ended inside it.
+            || len - 1 > crate::machine::BURST
             || !same(cpu, &last.cpu)
         {
             return;
