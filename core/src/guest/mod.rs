@@ -83,15 +83,16 @@ pub struct Arena {
     pub written_all: bool,
     /// A watch on every write, armed by the machine at a clock read, for
     /// whether any byte changes before the next crossing (ADR-0004, #217). It
-    /// stops at the first write it can tell changed something, or one it
-    /// cannot keep, which is never wrong, only not passed for.
+    /// stops at the first write it can tell changed something, at one it
+    /// cannot keep, and at `rdtsc`, a time the clock's millisecond does not
+    /// cover: never wrong, only not passed for.
     watching: bool,
     /// Each run handed out to change while watching, and what it held then.
     held: Vec<(u32, u8, [u8; HELD_BYTES])>,
 }
 
 /// The most runs the watch keeps, and the longest. Past either, it stops: a
-/// pass of LEGO Chess's spin writes five.
+/// pass of LEGO Chess's spin hands out five.
 const HELD: usize = 16;
 const HELD_BYTES: usize = 16;
 
@@ -208,8 +209,8 @@ impl GuestMem for Arena {
         if self.wrote_over_code(addr, bytes.len()) {
             self.note_written(addr, bytes.len());
         }
-        if self.watching && self.slice(addr, bytes.len())? != bytes {
-            self.watching = false;
+        if self.watching {
+            self.compare(addr, bytes);
         }
         // Safety: bounds checked directly above; the mapping is live and
         // writable for its whole length.
@@ -280,18 +281,21 @@ impl Arena {
     }
 
     /// Whether, since [`Arena::watch`], no byte has changed. A byte is judged
-    /// by what the first write to it found there: one written twice found
-    /// the first write's bytes the second time, which say nothing of before.
+    /// by what the first run over it held: a later run found what an earlier
+    /// one left there, which says nothing of before. Asked only once the
+    /// processor is the same, so the runs are kept cheaply and judged here.
     #[must_use]
     pub(crate) fn unchanged(&self) -> bool {
+        let first = |i: usize, byte: u32| {
+            !self.held[..i]
+                .iter()
+                .any(|&(at, len, _)| (at..at + u32::from(len)).contains(&byte))
+        };
         self.watching
             && self.held.iter().enumerate().all(|(i, &(at, len, was))| {
                 (0..u32::from(len)).all(|k| {
                     let byte = at + k;
-                    let earlier = self.held[..i]
-                        .iter()
-                        .any(|&(a, l, _)| (a..a + u32::from(l)).contains(&byte));
-                    earlier
+                    !first(i, byte)
                         || self
                             .slice(byte, 1)
                             .is_ok_and(|now| now[0] == was[k as usize])
@@ -299,7 +303,18 @@ impl Arena {
             })
     }
 
-    /// Keep what a run handed out to change holds now, to compare when asked.
+    /// A write while watching: what it writes over is what it writes, or the
+    /// watch stops.
+    #[cold]
+    fn compare(&mut self, addr: u32, bytes: &[u8]) {
+        if self.slice(addr, bytes.len()).ok() != Some(bytes) {
+            self.watching = false;
+        }
+    }
+
+    /// A run handed out to change while watching: keep what it holds now, to
+    /// compare when asked.
+    #[cold]
     fn hold(&mut self, addr: u32, len: usize) {
         if len > HELD_BYTES || self.held.len() == HELD {
             self.watching = false;

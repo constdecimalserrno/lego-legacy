@@ -183,7 +183,7 @@ pub struct Machine {
     /// How many of the route's events have been delivered (#215).
     delivered: usize,
     /// The last clock read, for a spin to be passed in one step (#217).
-    pub spins: crate::spin::Spins,
+    spins: crate::spin::Spins,
 }
 
 /// Where the machine is in the one schedule every run keeps (#131).
@@ -295,6 +295,12 @@ impl Machine {
     #[must_use]
     pub fn flips(&self) -> u64 {
         self.flips
+    }
+
+    /// Instructions passed in one step as clock spins (#217).
+    #[must_use]
+    pub fn spins_passed(&self) -> u64 {
+        self.spins.passed()
     }
 
     /// Present the declared surface, charge the clock for it, and take

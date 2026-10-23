@@ -66,10 +66,14 @@ pub struct Spins {
     /// The second of two such reads, as the guest stood at it: what the
     /// next is held to.
     last: Option<Read>,
-    /// How far a pass may take the cursor, the longest pass a burst runs to
-    /// its end, and whether a pass may be taken at all: a traced run logs
-    /// every call and a stepped one stops at every instruction, so neither
-    /// is ever passed for.
+    /// The burst before this read came back to the last one with the
+    /// processor as it was there: only then is memory worth watching, since
+    /// a pass that changes a register is never passed anyway.
+    steady: bool,
+    /// How far a pass may take the cursor, the most of the guest's own
+    /// instructions a burst runs before its quantum ends it, and whether a
+    /// pass may be taken at all: a traced run logs every call and a stepped
+    /// one stops at every instruction, so neither is ever passed for.
     budget: u64,
     quantum: u64,
     allowed: bool,
@@ -77,8 +81,9 @@ pub struct Spins {
 }
 
 impl Spins {
-    /// What the schedule allows from here: never past `budget`, no pass
-    /// longer than `quantum`, and nothing unless `allowed`.
+    /// What the schedule allows from here: never past `budget`, no pass of
+    /// more than `quantum` of the guest's own instructions, and nothing
+    /// unless `allowed`.
     pub(crate) fn allow(&mut self, budget: u64, quantum: u64, allowed: bool) {
         self.budget = budget;
         self.quantum = quantum;
@@ -113,15 +118,17 @@ impl Spins {
                 millis: clock.millis(),
                 cpu: *cpu,
             });
-            mem.watch();
+            if std::mem::take(&mut self.steady) {
+                mem.watch();
+            }
         }
     }
 
     /// A burst of the guest's own code has ended. If it ended back at the
     /// clock read the last one was answered at, with nothing crossed since,
     /// in the same millisecond, with the processor as it was there, no byte
-    /// of memory changed and no other thread able to run, and the pass was no
-    /// longer than a burst runs, the pass will be made again, unchanged,
+    /// of memory changed and no other thread able to run, and no quantum
+    /// ended a burst inside the pass, the pass will be made again, unchanged,
     /// until the clock reads the next millisecond. So the cursor goes to the
     /// first read that does, or as far toward it as the budget lets it, and
     /// the schedule carries on there as it would have.
@@ -131,18 +138,21 @@ impl Spins {
         let Some(last) = &self.last else {
             return;
         };
-        if last.crossing != self.crossings || cpu.eip != last.cpu.eip {
+        if !self.allowed || last.crossing != self.crossings || cpu.eip != last.cpu.eip {
             return;
         }
         let millis = clock.millis();
         let len = clock.cursor().saturating_sub(last.cursor);
         if millis != last.millis
             || len == 0
-            || len > self.quantum
+            // The pass is its own instructions and the read's crossing.
+            || len - 1 > self.quantum
             || !same(cpu, &last.cpu)
-            || !mem.unchanged()
-            || another_runs(state, millis)
         {
+            return;
+        }
+        self.steady = true;
+        if !mem.unchanged() || another_runs(state, millis) {
             return;
         }
         // The first declared cycle the clock reads the next millisecond at:

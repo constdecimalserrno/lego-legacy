@@ -69,12 +69,15 @@ impl X87 {
     /// not: it calls 0.0 and -0.0 one, and a NaN no number.
     #[must_use]
     pub fn same_bits(&self, other: &Self) -> bool {
+        let rest = |unit: &Self| Self {
+            regs: [0.0; DEPTH],
+            ..*unit
+        };
         self.regs
             .iter()
             .zip(&other.regs)
             .all(|(a, b)| a.to_bits() == b.to_bits())
-            && (self.top, self.used, self.control, self.status)
-                == (other.top, other.used, other.control, other.status)
+            && rest(self) == rest(other)
     }
 
     /// Put the unit back the way `fninit` leaves it.

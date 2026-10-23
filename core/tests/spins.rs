@@ -200,9 +200,22 @@ impl Guest {
         self
     }
 
+    /// Step on from where a run stopped, one instruction or call at a time,
+    /// to its end.
+    fn step_on(&mut self) -> &mut Self {
+        let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
+        let outcome = loop {
+            if let Some(outcome) = self.machine.step(&mut self.host, &mut log, u64::MAX, true) {
+                break outcome;
+            }
+        };
+        self.finish = Some(self.machine.finish(outcome));
+        self
+    }
+
     /// Instructions the machine retired in one step.
     fn passed(&self) -> u64 {
-        self.machine.spins.passed()
+        self.machine.spins_passed()
     }
 }
 
@@ -539,4 +552,45 @@ fn sleeper(g: &mut Guest) {
         .emit32(&[0xff, 0x05], word(1)); // inc dword [word 1]
     let back = top.wrapping_sub(g.here() + 2);
     g.emit(&[0xeb, back as u8]); // jmp top
+}
+
+/// A run that stops on its budget inside a spin and is then stepped, as the
+/// debugger takes over a run, steps every pass from there: what was armed
+/// while passing was allowed is not passed for once it is not.
+#[test]
+fn a_run_stepped_on_from_its_budget_inside_a_spin_runs_every_pass_from_there() {
+    let guest = |g: &mut Guest| {
+        g.thread(MAIN).wait(Read::GetTickCount, 5, &|_| {}).exit();
+    };
+    let mut run = Guest::new();
+    guest(&mut run);
+    // Two instructions into a pass, after the read that armed it.
+    run.go(Trace::Off, 1_234_569);
+    let before = run.passed();
+    assert!(before > 0, "passed up to its budget");
+    run.step_on();
+    assert_eq!(run.passed(), before, "and nothing once stepped");
+    let mut every = Guest::new();
+    guest(&mut every);
+    every.go(Trace::Shims, 50_000_000);
+    assert_one_machine(&run, &every);
+}
+
+/// A pass may write a word twice and leave it as it found it, as LEGO Chess's
+/// does, its `call _ftol`'s return address and then its next `push` landing
+/// on the same word of the stack: what counts is what the word held before
+/// the pass, not between, so it is passed.
+#[test]
+fn a_spin_that_writes_a_word_twice_and_leaves_it_as_it_was_is_passed() {
+    let (run, every) = twice(50_000_000, &|g| {
+        g.thread(MAIN)
+            .wait(Read::QueryPerformanceCounter, 2, &|g| {
+                // push 0x1234; pop ecx: the word the read's argument is
+                // pushed to holds 0x1234 for a moment, every pass.
+                g.emit32(&[0x68], 0x1234).emit(&[0x59]);
+            })
+            .exit();
+    });
+    assert!(run.passed() > 0, "passed");
+    assert_one_machine(&run, &every);
 }

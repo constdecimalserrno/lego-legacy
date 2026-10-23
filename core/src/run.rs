@@ -158,7 +158,7 @@ pub(crate) fn wrap_up(
 
     // How much of the run was a clock spin passed in one step, when any was
     // (ADR-0004, #217): instructions the cursor counts that no host ran.
-    let passed = machine.spins.passed();
+    let passed = machine.spins_passed();
     if passed > 0 {
         log.line(&format!(
             "clock spins: {passed} instructions passed in one step"

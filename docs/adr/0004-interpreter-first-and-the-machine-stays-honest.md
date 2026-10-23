@@ -16,9 +16,10 @@ reading `QueryPerformanceCounter` again and again: 99.996 % of a frame's instruc
 of its host time, and on the maintainer's MacBook the movies played at 0.72–0.80 of real time
 headless, their music stretched to match. Two crossings in a row may be the same clock read from
 the same place, in the same declared millisecond, with the processor the same bit for bit, no byte
-of memory changed between them, and no other thread able to run. Then the pass between them is one
-the guest would make again, unchanged, until the clock reads the next millisecond, and the machine
-retires those passes at once (`core/src/spin.rs`).
+of memory changed between them, no time stamp counter read, no other thread able to run, and no
+quantum ending inside the pass. Then the pass between them is one the guest would make again,
+unchanged, until the clock reads the next millisecond, and the machine retires those passes at once
+(`core/src/spin.rs`).
 
 Only a loop proven to change nothing but the clock is passed. It lands at exactly the cursor,
 declared clock and state that running every pass gives, and is checked against a run that does.
