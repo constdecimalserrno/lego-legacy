@@ -48,10 +48,11 @@ Every ticket runs the `ticket-runbook` skill (the maintainer's rule, 2026-10-21)
     - `cargo fmt --all -- --check`;
     - `cargo clippy --workspace --all-targets -- -D warnings`;
     - `cargo test --workspace --release --exclude lego-rock-raiders --exclude hotwheels-stunt-track-driver --exclude lego-alpha-team --exclude lego-island`, with the discs;
+    - the four released titles' own tests without their discs (`LEGO_LEGACY_GAME_DATA` pointed at an empty directory, `LEGO_LEGACY_REQUIRE_DISC=0`), so only their disc replays are skipped;
     - `cargo test -p lego-legacy-core --lib`.
   - The full `ci.sh`, with `LEGO_LEGACY_REQUIRE_DISC=1 LEGO_LEGACY_REQUIRE_CORPUS=1`, runs for a version release. It also runs for a change meant to move a released title's runs, whose moves it measures for the blessing.
 - **Deploy (step 11):** `lego-ship`, alone, after the merge, at any time. A ship never touches a game already running, since the MacBook pulls only when a title starts.
-- **Monitor (step 12):** a headless run, from the MacBook's kit, of a committed route of each title the change touches. It must end on the same line as the last full `ci.sh` run of that route, or on the line a blessed change moved it to.
+- **Monitor (step 12):** a headless run, from the MacBook's kit, of a committed route of each title the change touches. It always takes a fresh `--data-root`, never the kit's live saves, since a route can make the game save. It must end on the same line as the last full `ci.sh` run of that route, or on the line a blessed change moved it to.
 - **Freeze:** none.
 - **Shared code that needs extra care:** `core/`, which every title runs on, above all `core/src/host/` (the host behaves the same for every title) and anything that can move a released title's runs. A move in Rock Raiders', Hot Wheels', Alpha Team's or LEGO Island's runs needs the maintainer's blessing before its merge. A move that only a version release's full `ci.sh` finds needs it before the tag.
 - **Outages confirmed as expected, and who confirmed them:** none yet.
