@@ -50,7 +50,8 @@ before.
 - `tests/midi.rs` plays two buffers written as LEGO Chess's converter writes them, on a bank of one
   ramp: every callback at its declared millisecond, a refill from inside the callback, the event it
   sets waking the main thread's wait, the notes heard from the frames they are due at, and the same
-  every run; stop, reset and close each returning both buffers before their caller goes on, the
+  every run; a pause of three tenths of a second holding every event back by that, its note sounding
+  through it; stop, reset and close each returning both buffers before their caller goes on, the
   callback unpreparing each; the mapper's caps; and no device without a bank.
 
 AVIFile decodes 16-bit Microsoft Video 1 (`CRAM`, `MSVC`, `WHAM`) streams (#152), written in

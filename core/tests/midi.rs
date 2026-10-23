@@ -260,11 +260,13 @@ fn callback(m: &mut Machine) -> Code {
 }
 
 /// How the main thread ends the stream once it has played: by waiting for
-/// the callback to say both buffers came back and closing, or a tenth of a
+/// the callback to say both buffers came back and closing, the same after
+/// pausing it a tenth of a second in for three tenths, or a tenth of a
 /// second in by stopping, resetting or closing it with both still queued.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Ending {
     Played,
+    Paused,
     Stop,
     Reset,
     Close,
@@ -358,8 +360,14 @@ fn run(synth: bool, refills: u32, ending: Ending) -> Ran {
         // The time division may not be set while it plays.
         let timediv = [At(HANDLE), Imm(TIMEDIV), Imm(MIDIPROP_SET_TIMEDIV)];
         step(&mut main, &mut m, wm, "midiStreamProperty", &timediv);
+        if ending == Ending::Paused {
+            step(&mut main, &mut m, k32, "Sleep", &[Imm(100)]);
+            step(&mut main, &mut m, wm, "midiStreamPause", &[At(HANDLE)]);
+            step(&mut main, &mut m, k32, "Sleep", &[Imm(300)]);
+            step(&mut main, &mut m, wm, "midiStreamRestart", &[At(HANDLE)]);
+        }
         match ending {
-            Ending::Played => {
+            Ending::Played | Ending::Paused => {
                 step(
                     &mut main,
                     &mut m,
@@ -608,6 +616,41 @@ fn stop_reset_and_close_return_both_buffers_before_the_caller_goes_on() {
             "{ending:?}: silent from the call on"
         );
     }
+}
+
+/// Time a stream is paused for is not counted, as the conformance tests
+/// measure on Windows, and a note sounding when it was paused goes on
+/// sounding, nothing documenting otherwise: paused a tenth of a second in for
+/// three tenths, each event comes three tenths later than it would have.
+#[test]
+fn a_pause_holds_the_stream_where_it_was_and_is_not_counted() {
+    let ran = run(true, 0, Ending::Paused);
+    assert_eq!(ran.outcome, Outcome::Exited { code: 0 });
+    let (t0, paused, restarted) = (ran.answers[11], ran.answers[15], ran.answers[17]);
+    assert_eq!((paused, restarted), (0, 0));
+    let [first, second] = HEADERS;
+    let got: Vec<(u32, u32, u32)> = ran.log.iter().map(|e| (e[0], e[1], e[2])).collect();
+    assert_eq!(
+        got[1..4],
+        [
+            (MOM_POSITIONCB, first, t0),
+            (MOM_DONE, first, t0 + 800),
+            (MOM_DONE, second, t0 + 1800),
+        ],
+        "half a second and a second and a half in, and three tenths more"
+    );
+    // The first note sounds through the pause and stops three tenths late;
+    // the second starts three tenths late.
+    let heard = onsets(&ran.left);
+    assert_eq!(heard.len(), 2, "two notes: {heard:?}");
+    assert_eq!(heard[1], frame(t0 + 1300));
+    assert_ne!(
+        ran.left[frame(t0 + 250) as usize],
+        0,
+        "sounding in the pause"
+    );
+    let between = &ran.left[frame(t0 + 801) as usize..frame(t0 + 1299) as usize];
+    assert!(between.iter().all(|s| *s == 0), "and off at eight tenths");
 }
 
 /// Without the player's bank the machine has no MIDI out, the mapper
