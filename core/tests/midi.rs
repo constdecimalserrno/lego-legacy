@@ -41,6 +41,9 @@ const RETURNED: u32 = DATA + 20;
 const TIMEDIV: u32 = DATA + 24;
 /// What each call answered, a word apiece, in the order made.
 const ANSWERS: u32 = DATA + 0x40;
+/// What `midiOutUnprepareHeader` answered the callback for each buffer it
+/// counted back.
+const UNPREPARED: u32 = DATA + 0xc0;
 /// What the callback writes down, sixteen bytes a message: the message, its
 /// first parameter (the header, or zero), `timeGetTime` as it ran, and the
 /// header's `dwOffset` then.
@@ -205,7 +208,8 @@ impl Code {
 /// stdcall: it writes down the message, its first parameter, the time and the
 /// header's `dwOffset`; and at `MOM_DONE` it queues the header again with
 /// `midiStreamOut` while it has refills left, as LEGO Chess's does, and
-/// otherwise counts it back, setting the event at the second.
+/// otherwise counts it back and unprepares it, setting the event at the
+/// second.
 fn callback(m: &mut Machine) -> Code {
     let mut c = Code::new(CALLBACK);
     c.emit32(&[0x8b, 0x0d], LOGGED) // mov ecx, [LOGGED]
@@ -238,6 +242,12 @@ fn callback(m: &mut Machine) -> Code {
     let refilled = c.jump(0xeb); // jmp
     c.land(counted)
         .emit32(&[0xff, 0x05], RETURNED) // inc dword [RETURNED]
+        .emit(&[0x6a, 0x40]) // push 0x40
+        .emit(&[0xff, 0x74, 0x24, 0x14]) // push dword [esp+0x14]: the header
+        .emit(&[0xff, 0x74, 0x24, 0x0c]) // push dword [esp+0x0c]: the stream
+        .call(m, "WINMM.dll", "midiOutUnprepareHeader", &[])
+        .emit32(&[0x8b, 0x0d], RETURNED) // mov ecx, [RETURNED]
+        .emit32(&[0x89, 0x04, 0x8d], UNPREPARED - 4) // mov [ecx*4+UNPREPARED-4], eax
         .emit32(&[0x83, 0x3d], RETURNED)
         .emit(&[2]); // cmp dword [RETURNED], 2
     let not_both = c.jump(0x75); // jne
@@ -267,6 +277,7 @@ struct Ran {
     answers: Vec<u32>,
     log: Vec<[u32; 4]>,
     headers: [(u32, u32); 2],
+    unprepared: [u32; 2],
     caps: Vec<u8>,
     left: Vec<i16>,
 }
@@ -428,6 +439,7 @@ fn run(synth: bool, refills: u32, ending: Ending) -> Ran {
             .map(|n| std::array::from_fn(|i| word(LOG + n * 16 + i as u32 * 4)))
             .collect(),
         headers: HEADERS.map(|h| (word(h + 16), word(h + 28))),
+        unprepared: [word(UNPREPARED), word(UNPREPARED + 4)],
         caps: m.arena.slice(CAPS, 52).expect("in the arena").to_vec(),
         left: host
             .audio_blocks
@@ -516,14 +528,12 @@ fn the_stream_reaches_each_event_at_its_moment_and_calls_back_on_its_thread() {
         t0 + 2000,
         "the main thread woke as the event was set"
     );
-    // Done, a stream's, and out of the queue: the first played last from its
-    // note off, at 48.
+    // Done, a stream's, out of the queue, and unprepared by the callback:
+    // the first played last from its note off, at 48.
+    assert_eq!(ran.unprepared, [0, 0]);
     assert_eq!(
         ran.headers,
-        [
-            (MHDR_PREPARED | MHDR_DONE | MHDR_ISSTRM, 48),
-            (MHDR_PREPARED | MHDR_DONE | MHDR_ISSTRM, 12)
-        ]
+        [(MHDR_DONE | MHDR_ISSTRM, 48), (MHDR_DONE | MHDR_ISSTRM, 12)]
     );
 
     // The notes, heard from the frames they are due at: the first as the
@@ -581,8 +591,15 @@ fn stop_reset_and_close_return_both_buffers_before_the_caller_goes_on() {
             "{ending:?}: both returned at the call, a tenth of a second in, and the close last"
         );
         assert_eq!(at, t0 + 100, "{ending:?}");
+        // Out of the queue, so the callback could unprepare each, the stream
+        // still there to name as a close gave them back.
+        assert_eq!(ran.unprepared, [0, 0], "{ending:?}");
         for (flags, _) in ran.headers {
-            assert_eq!(flags & (MHDR_DONE | MHDR_INQUEUE), MHDR_DONE, "{ending:?}");
+            assert_eq!(
+                flags & (MHDR_DONE | MHDR_INQUEUE | MHDR_PREPARED),
+                MHDR_DONE,
+                "{ending:?}"
+            );
         }
         // The note sounding when it was stopped is heard no more.
         let from = frame(at) as usize + 1;

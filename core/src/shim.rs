@@ -158,12 +158,9 @@ impl Boundary {
         self.push(Entry::ThreadEnd)
     }
 
-    /// Where WINMM's MIDI stream player thread stands. One address serves
-    /// the machine's one player.
+    /// Where WINMM's MIDI stream player thread stands: bound once, for the
+    /// machine's one player.
     pub fn bind_midi_player(&mut self) -> u32 {
-        if let Some(slot) = self.slots.iter().position(|e| *e == Entry::MidiPlayer) {
-            return address(slot);
-        }
         self.push(Entry::MidiPlayer)
     }
 
