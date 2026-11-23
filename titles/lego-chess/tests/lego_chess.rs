@@ -948,7 +948,7 @@ fn saved(ran: &testkit::Ran, name: &str) -> std::path::PathBuf {
         .filter(|l| l.starts_with("file written") && l.contains(name));
     let line = written.next().unwrap_or_else(|| panic!("{name} is saved"));
     assert!(written.next().is_none(), "{name} is saved once");
-    let (_, at) = line.rsplit_once(" to ").expect("where it went");
+    let (_, at) = line.rsplit_once(", to ").expect("where it went");
     at.into()
 }
 
@@ -1129,7 +1129,8 @@ fn the_throne_room_route_replays_to_the_same_machine_every_time() {
         let (one, two) = (saved(first, name), saved(second, name));
         assert_ne!(one, two, "two replays, two files");
         assert!(
-            std::fs::read(one).ok() == std::fs::read(two).ok(),
+            std::fs::read(&one).expect("first save is there")
+                == std::fs::read(&two).expect("second save is there"),
             "and saved {name} the same"
         );
     }

@@ -288,6 +288,6 @@ before. Its one `SetCursorPos` (0x00457810, from 0x004113C0) is not its camera p
 game (0x0040F5F0): it steps the pointer through six points on the screen, the game's buttons, as its
 manual's "TAB cycles through the buttons on the game screen" says. The game reads its pointer only
 from `WM_MOUSEMOVE`, and core posts none at a `SetCursorPos`, where Wine's server queues one at
-every call; so after Tab its pointer stays where it was until the mouse moves. That is #157's open
-question for the maintainer, since Hot Wheels, Alpha Team and Rock Raiders call `SetCursorPos` too,
-Hot Wheels every frame.
+every call; so after Tab its pointer stays where it was until the mouse moves. That is tracked as
+#235 under #142, since Hot Wheels, Alpha Team and Rock Raiders call `SetCursorPos` too, Hot Wheels
+every frame.

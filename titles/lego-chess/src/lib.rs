@@ -119,6 +119,6 @@ pub const LEGO_CHESS: Title = Title {
     // went, as Hot Wheels' is (#37). It puts the pointer itself only for Tab
     // in a game (0x40F5F0), stepping it through six of its buttons with
     // `SetCursorPos` (0x457810, from 0x4113C0), and reads it back only from
-    // `WM_MOUSEMOVE`, which core does not post at a `SetCursorPos` (#157).
+    // `WM_MOUSEMOVE`, which core does not post at a `SetCursorPos` (#157, #235).
     pointer_speed: (1.0, 1.0),
 };
