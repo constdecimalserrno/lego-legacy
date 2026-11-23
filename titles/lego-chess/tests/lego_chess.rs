@@ -1528,120 +1528,98 @@ const LOAD_GAME_KEPT: [u64; 6] = [
 const LOAD_GAME_BUDGET: u64 = 5_400_000_000;
 
 /// Two runs over one shared `--data-root`: `routes/save-game.route` followed by
-/// `routes/load-game.route`, with snapshots of every file under `profile/`
-/// between and after them.
-struct SavedSession {
+/// `routes/load-game.route`, with copies of the saved files read between and
+/// after them before the temporary data root is removed.
+struct SaveLoadRuns {
     save_run: testkit::Ran,
     load_run: testkit::Ran,
-    saved_files: std::collections::BTreeMap<String, Vec<u8>>,
-    after_load_files: std::collections::BTreeMap<String, Vec<u8>>,
-}
-
-/// Every file under `<data-root>/profile`, keyed by its `/`-separated relative
-/// path, so tests can verify both the files written and that nothing else
-/// (such as the unreferenced `ChessSave.che`) was created.
-fn profile_files_in(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-    fn walk(
-        base: &std::path::Path,
-        dir: &std::path::Path,
-        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
-    ) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(base, &path, out);
-            } else if path.is_file() {
-                let rel = path
-                    .strip_prefix(base)
-                    .expect("inside profile")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.insert(rel, std::fs::read(&path).expect("saved file reads"));
-            }
-        }
-    }
-    let profile = root.join("profile");
-    let mut out = std::collections::BTreeMap::new();
-    walk(&profile, &profile, &mut out);
-    out
+    prof_bytes: Vec<u8>,
+    save_bytes: Vec<u8>,
+    after_load_prof: Vec<u8>,
+    after_load_save: Vec<u8>,
 }
 
 fn save_and_load(
-    slot: &'static std::sync::OnceLock<Option<SavedSession>>,
-    tag: &str,
+    slot: &'static std::sync::OnceLock<Option<SaveLoadRuns>>,
     shots: bool,
-) -> Option<&'static SavedSession> {
+) -> Option<&'static SaveLoadRuns> {
     slot.get_or_init(|| {
         if !(scratch() && testkit::any_rip(&roster::GM16).is_some()) {
             return None;
         }
+        let tag = if shots { "main" } else { "again" };
         let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("chess-save-load-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
-        let save_cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/save-game.route"),
-            ),
-            data_root: Some(root.clone()),
-            screenshots: Screenshots {
-                at: if shots {
-                    SAVE_GAME_KEPT.to_vec()
-                } else {
-                    Vec::new()
+        let run = |route: &str, kept: &[u64], budget: u64| {
+            let cli = Cli {
+                route: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(route)),
+                data_root: Some(root.clone()),
+                screenshots: Screenshots {
+                    at: if shots { kept.to_vec() } else { Vec::new() },
+                    every: None,
                 },
-                every: None,
-            },
-            ..Cli::default()
+                ..Cli::default()
+            };
+            testkit::run_on(
+                lego_legacy_core::host::headless::Headless::new().keeping(kept),
+                &CHESS,
+                &cli,
+                budget,
+            )
         };
-        let save_run = testkit::run_on(
-            lego_legacy_core::host::headless::Headless::new().keeping(&SAVE_GAME_KEPT),
-            &CHESS,
-            &save_cli,
-            SAVE_GAME_BUDGET,
-        );
-        let saved_files = profile_files_in(&root);
 
-        let load_cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/load-game.route"),
-            ),
-            data_root: Some(root.clone()),
-            screenshots: Screenshots {
-                at: if shots {
-                    LOAD_GAME_KEPT.to_vec()
-                } else {
-                    Vec::new()
-                },
-                every: None,
-            },
-            ..Cli::default()
-        };
-        let load_run = testkit::run_on(
-            lego_legacy_core::host::headless::Headless::new().keeping(&LOAD_GAME_KEPT),
-            &CHESS,
-            &load_cli,
-            LOAD_GAME_BUDGET,
-        );
-        let after_load_files = profile_files_in(&root);
+        let save_run = run("routes/save-game.route", &SAVE_GAME_KEPT, SAVE_GAME_BUDGET);
+        let prof_path = saved(&save_run, "prof1.lcp");
+        let save_path = saved_times(&save_run, "1save.lcs", 2);
+        let prof_bytes = std::fs::read(&prof_path).expect("prof1.lcp reads");
+        let save_bytes = std::fs::read(&save_path).expect("1save.lcs reads");
 
-        Some(SavedSession {
+        let load_run = run("routes/load-game.route", &LOAD_GAME_KEPT, LOAD_GAME_BUDGET);
+        let after_load_prof = std::fs::read(&prof_path).expect("prof1.lcp still reads");
+        let after_load_save = std::fs::read(&save_path).expect("1save.lcs still reads");
+        let _ = std::fs::remove_dir_all(&root);
+
+        Some(SaveLoadRuns {
             save_run,
             load_run,
-            saved_files,
-            after_load_files,
+            prof_bytes,
+            save_bytes,
+            after_load_prof,
+            after_load_save,
         })
     })
     .as_ref()
 }
 
-static SAVE_LOAD: std::sync::OnceLock<Option<SavedSession>> = std::sync::OnceLock::new();
+static SAVE_LOAD: std::sync::OnceLock<Option<SaveLoadRuns>> = std::sync::OnceLock::new();
 
-const PROFILE_REL: &str = "C/PROGRAM FILES/LEGO MEDIA/GAMES/LEGO CHESS/PROFILES/PROF1.LCP";
-const SAVE_REL: &str = "C/PROGRAM FILES/LEGO MEDIA/GAMES/LEGO CHESS/PROFILES/1SAVE.LCS";
+fn assert_pinned_frames(ran: &testkit::Ran, pinned: &[(u64, &str)], label: &str) {
+    for &(flip, expected) in pinned {
+        let frame = ran.host.frame(flip).expect("presented");
+        assert_eq!(
+            hash::sha256_hex(&frame.pixels),
+            expected,
+            "{label} flip {flip}"
+        );
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+}
+
+/// Count pixels matching `pred` (given `[b, g, r]`) inside `(x0..x1, y0..y1)`.
+fn matching_pixels(
+    frame: &lego_legacy_core::host::headless::Presented,
+    (x0, y0, x1, y1): (usize, usize, usize, usize),
+    pred: impl Fn([u8; 3]) -> bool,
+) -> usize {
+    let stride = frame.width as usize;
+    (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (y * stride + x) * 4))
+        .filter(|&at| pred([frame.pixels[at], frame.pixels[at + 1], frame.pixels[at + 2]]))
+        .count()
+}
 
 /// Run 1 (#159): `routes/save-game.route` registers `Ada`, plays `1. e4 e5` in
 /// a two-player Western Quick Game, opens Options -> Save Game, names slot 1
@@ -1651,10 +1629,10 @@ const SAVE_REL: &str = "C/PROGRAM FILES/LEGO MEDIA/GAMES/LEGO CHESS/PROFILES/1SA
 /// never written (its routines at 0x0040EA10 / 0x0040EBF0 are unreferenced).
 #[test]
 fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
-    let Some(session) = save_and_load(&SAVE_LOAD, "main", true) else {
+    let Some(runs) = save_and_load(&SAVE_LOAD, true) else {
         return;
     };
-    let ran = &session.save_run;
+    let ran = &runs.save_run;
     ran.assert_exited(0)
         .assert_flips(1081)
         .assert_logged("end exited 0 cursor 6114083756 flips 1081 declared-ms 47500")
@@ -1664,23 +1642,16 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\1save.lcs, 190920 bytes",
         );
-    // prof1.lcp written once at player creation; 1save.lcs written twice
+    // Exactly 3 writes total: prof1.lcp once at creation and 1save.lcs twice
     // (initialized empty at creation, then updated with slot 0 'Game' on save).
-    let _ = saved_times(ran, "prof1.lcp", 1);
-    let _ = saved_times(ran, "1save.lcs", 2);
+    assert_eq!(ran.log.matches("file written ").count(), 3);
     assert!(
         !ran.log.contains("ChessSave.che"),
         "ChessSave.che is unreferenced dead code"
     );
 
-    // Exactly two files land in the run's profile.
-    assert_eq!(
-        session.saved_files.keys().collect::<Vec<_>>(),
-        vec![SAVE_REL, PROFILE_REL]
-    );
-
     // profiles\prof1.lcp (4,544 bytes = 0x11C0).
-    let prof = &session.saved_files[PROFILE_REL];
+    let prof = &runs.prof_bytes;
     assert_eq!(prof.len(), 4_544);
     assert!(prof.starts_with(b"Ada\0"));
     assert_eq!(prof[0x0014], 0, "empty last name");
@@ -1701,27 +1672,27 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
     );
 
     // profiles\1save.lcs (190,920 bytes = 10 slots x 19,092 bytes [0x4A94]).
-    let saves = &session.saved_files[SAVE_REL];
+    let saves = &runs.save_bytes;
     const SLOT_LEN: usize = 0x4A94;
     assert_eq!(saves.len(), 10 * SLOT_LEN);
     let slot0 = &saves[..SLOT_LEN];
     assert!(slot0.starts_with(b"Game\0"), "slot 0 label is 'Game'");
     assert_eq!(
-        u16::from_le_bytes(slot0[0x0028..0x002A].try_into().unwrap()),
-        0,
+        &slot0[0x0028..0x002A],
+        0u16.to_le_bytes(),
         "computer-control mask 0 (two-player human vs human)"
     );
     // Ply 0: e2 (0x34) -> e4 (0x24); Ply 1: e7 (0x0C) -> e5 (0x1C).
     assert_eq!(&slot0[0x002A..0x002C], &[0x34, 0x24], "1. e2-e4");
     assert_eq!(&slot0[0x0032..0x0034], &[0x0C, 0x1C], "1... e7-e5");
     assert_eq!(
-        u32::from_le_bytes(slot0[0x402C..0x4030].try_into().unwrap()),
-        2,
+        &slot0[0x402C..0x4030],
+        2u32.to_le_bytes(),
         "2 plies recorded"
     );
     assert_eq!(
-        i32::from_le_bytes(slot0[0x4030..0x4034].try_into().unwrap()),
-        0,
+        &slot0[0x4030..0x4034],
+        0i32.to_le_bytes(),
         "slot 0 active (not -1)"
     );
     assert_eq!(
@@ -1729,16 +1700,8 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
         &[0, 0, 0, 0, 75],
         "Western, diff 25 (75% rand)"
     );
-    assert_eq!(
-        u32::from_le_bytes(slot0[0x4048..0x404C].try_into().unwrap()),
-        1,
-        "White human"
-    );
-    assert_eq!(
-        u32::from_le_bytes(slot0[0x404C..0x4050].try_into().unwrap()),
-        1,
-        "Black human"
-    );
+    assert_eq!(&slot0[0x4048..0x404C], 1u32.to_le_bytes(), "White human");
+    assert_eq!(&slot0[0x404C..0x4050], 1u32.to_le_bytes(), "Black human");
     // Starting 8x8 piece-ID map at +0x4A54 (piece IDs 1..=32 on ranks 8,7,2,1).
     let board64 = &slot0[0x4A54..0x4A94];
     assert_eq!(board64.iter().filter(|&&id| id != 0).count(), 32);
@@ -1747,8 +1710,8 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
         let sl = &saves[s * SLOT_LEN..(s + 1) * SLOT_LEN];
         assert!(sl.starts_with(b"....\0"), "slot {s} empty label");
         assert_eq!(
-            i32::from_le_bytes(sl[0x4030..0x4034].try_into().unwrap()),
-            -1,
+            &sl[0x4030..0x4034],
+            (-1i32).to_le_bytes(),
             "slot {s} empty marker"
         );
     }
@@ -1758,33 +1721,24 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
         "10f16ddfe254aa5b2608bbd1d1360ba262c40368e727b60220c7aee5c0149b0c"
     );
 
-    let actual: Vec<(u64, String)> = SAVE_GAME_KEPT
-        .iter()
-        .map(|&flip| {
-            let frame = ran.host.frame(flip).expect("presented");
-            let shot = ran.dir.join(format!("shots/{flip:010}.png"));
-            assert!(shot.is_file(), "{} is written", shot.display());
-            (flip, hash::sha256_hex(&frame.pixels))
-        })
-        .collect();
-    let expected: Vec<(u64, String)> = [
-        (
-            SAVE_BOARD_BEFORE,
-            "c7977c4f3dca2b38d1cc908d372ed6f1bcd1786c7bae47f77fcfe5e503141639",
-        ),
-        (
-            SAVE_DIALOG_NAMED,
-            "4c8ac04ba26e4cc011ffcafcc2cc3acee31638de7301eb4c1e864654cc32f59b",
-        ),
-        (
-            SAVE_RETURNED,
-            "569e88ac949c0bc29240022fdd375d0c4e1da767fe69c146a93110c885976a85",
-        ),
-    ]
-    .into_iter()
-    .map(|(f, h)| (f, h.to_owned()))
-    .collect();
-    assert_eq!(actual, expected, "save-game pinned frames");
+    assert_pinned_frames(
+        ran,
+        &[
+            (
+                SAVE_BOARD_BEFORE,
+                "c7977c4f3dca2b38d1cc908d372ed6f1bcd1786c7bae47f77fcfe5e503141639",
+            ),
+            (
+                SAVE_DIALOG_NAMED,
+                "4c8ac04ba26e4cc011ffcafcc2cc3acee31638de7301eb4c1e864654cc32f59b",
+            ),
+            (
+                SAVE_RETURNED,
+                "569e88ac949c0bc29240022fdd375d0c4e1da767fe69c146a93110c885976a85",
+            ),
+        ],
+        "save",
+    );
 }
 
 /// Run 2 (#159): `routes/load-game.route` over the exact `--data-root` left by
@@ -1795,13 +1749,17 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
 /// Quick Game), and exits 0 without overwriting the saves.
 #[test]
 fn a_second_run_over_the_same_data_root_finds_the_player_and_loads_the_game() {
-    let Some(session) = save_and_load(&SAVE_LOAD, "main", true) else {
+    let Some(runs) = save_and_load(&SAVE_LOAD, true) else {
         return;
     };
-    let ran = &session.load_run;
+    let ran = &runs.load_run;
     ran.assert_exited(0)
         .assert_flips(826)
-        .assert_logged("end exited 0 cursor 5168222319 flips 826 declared-ms 37717");
+        .assert_logged("end exited 0 cursor 5168222319 flips 826 declared-ms 37717")
+        // Positive proof that 0x0041DE60 opened prof1.lcp and continued to prof2.lcp.
+        .assert_logged(
+            "file missing C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof2.lcp, asked from 0x0045656a",
+        );
     assert!(
         !ran.log.contains(
             "file missing C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof1.lcp"
@@ -1809,112 +1767,130 @@ fn a_second_run_over_the_same_data_root_finds_the_player_and_loads_the_game() {
         "Run 2 finds Ada's existing prof1.lcp without asking for a new player"
     );
     assert!(
+        !ran.log.contains(
+            "file missing C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\1save.lcs"
+        ),
+        "Run 2 finds Ada's existing 1save.lcs"
+    );
+    assert!(
         !ran.log.contains("file written"),
         "Run 2 only reads the saved profile and game"
     );
     assert!(
-        session.after_load_files == session.saved_files,
+        runs.after_load_prof == runs.prof_bytes && runs.after_load_save == runs.save_bytes,
         "Run 2 leaves the saved files on disk intact"
     );
 
-    // Visual pixel-diff proof that loading 'Game' genuinely changed the board
-    // from the fresh starting position (flip 495) to 1. e4 e5 (flip 580):
-    // e2 vacated and e4/e5 now hold the two opposing pawns.
+    // Camera-shift-invariant pawn-color proof on the unoccluded e-file squares
+    // that loading 'Game' changed the board from the initial position (flip 495)
+    // to 1. e4 e5 (flip 580): e7's red pawn vacates, and red/blue pawns appear
+    // on e5 and e4.
     let initial = ran.host.frame(LOAD_BOARD_INITIAL).expect("initial board");
     let restored = ran.host.frame(LOAD_BOARD_RESTORED).expect("restored board");
-    let center_diff = testkit::differing(initial, restored, (310, 175, 385, 275));
+    let red_pawn = |[b, g, r]: [u8; 3]| r > 150 && g < 60 && b < 60;
+    let blue_pawn = |[b, _g, r]: [u8; 3]| b > 140 && r < 80;
     assert!(
-        center_diff > 1_000,
-        "restored 1. e4 e5 pawns visibly occupy center squares: {center_diff} px"
+        matching_pixels(initial, (320, 150, 380, 170), red_pawn) > 50
+            && matching_pixels(restored, (320, 150, 380, 170), red_pawn) == 0,
+        "e7 red pawn vacates after loading 1. e4 e5"
     );
-    let e2_diff = testkit::differing(initial, restored, (325, 285, 385, 335));
     assert!(
-        e2_diff > 300,
-        "restored position visibly vacates e2: {e2_diff} px"
+        matching_pixels(initial, (320, 185, 380, 215), red_pawn) == 0
+            && matching_pixels(restored, (320, 185, 380, 215), red_pawn) > 50,
+        "e5 holds Black's red pawn after loading 1. e4 e5"
+    );
+    assert!(
+        matching_pixels(initial, (320, 215, 380, 245), blue_pawn) == 0
+            && matching_pixels(restored, (320, 215, 380, 245), blue_pawn) > 50,
+        "e4 holds White's blue pawn after loading 1. e4 e5"
     );
 
-    let actual: Vec<(u64, String)> = LOAD_GAME_KEPT
-        .iter()
-        .map(|&flip| {
-            let frame = ran.host.frame(flip).expect("presented");
-            let shot = ran.dir.join(format!("shots/{flip:010}.png"));
-            assert!(shot.is_file(), "{} is written", shot.display());
-            (flip, hash::sha256_hex(&frame.pixels))
-        })
-        .collect();
-    let expected: Vec<(u64, String)> = [
-        (
-            LOAD_WHO_IS_PLAYING,
-            "61c5f8202fb6516557d6bfb7556d39f7725d41da522bd095d9e33c9b2d3f7849",
-        ),
-        (
-            LOAD_BOARD_INITIAL,
-            "305d4c40aa3d4d9c32c0f2afdf0bb3f191e201d8411f2574761714a39f8ea76f",
-        ),
-        (
-            LOAD_DIALOG,
-            "960d1ab0c58ccb288b72cec8a02bae1c8655c4f2f007ce7b4d2a59313199b178",
-        ),
-        (
-            LOAD_BOARD_RESTORED,
-            "d5a01927fdcf6ac4e4cd218812435a28ecd55f1ebbc84fedc289acdad7453770",
-        ),
-        (
-            LOAD_MOVE_PLAYED,
-            "df2217a77c502c92805dbeb53dc25a0dc9e682855f69e042361186b08843c516",
-        ),
-        (
-            LOAD_RETURNED_2P,
-            "76cfbd23120a2b6af184754b8ef3130849aeb4a18775f6cf61ae9098ba7daad1",
-        ),
-    ]
-    .into_iter()
-    .map(|(f, h)| (f, h.to_owned()))
-    .collect();
-    assert_eq!(actual, expected, "load-game pinned frames");
+    assert_pinned_frames(
+        ran,
+        &[
+            (
+                LOAD_WHO_IS_PLAYING,
+                "61c5f8202fb6516557d6bfb7556d39f7725d41da522bd095d9e33c9b2d3f7849",
+            ),
+            (
+                LOAD_BOARD_INITIAL,
+                "305d4c40aa3d4d9c32c0f2afdf0bb3f191e201d8411f2574761714a39f8ea76f",
+            ),
+            (
+                LOAD_DIALOG,
+                "960d1ab0c58ccb288b72cec8a02bae1c8655c4f2f007ce7b4d2a59313199b178",
+            ),
+            (
+                LOAD_BOARD_RESTORED,
+                "d5a01927fdcf6ac4e4cd218812435a28ecd55f1ebbc84fedc289acdad7453770",
+            ),
+            (
+                LOAD_MOVE_PLAYED,
+                "df2217a77c502c92805dbeb53dc25a0dc9e682855f69e042361186b08843c516",
+            ),
+            (
+                LOAD_RETURNED_2P,
+                "76cfbd23120a2b6af184754b8ef3130849aeb4a18775f6cf61ae9098ba7daad1",
+            ),
+        ],
+        "load",
+    );
 }
 
 #[test]
 fn the_save_and_load_routes_replay_to_the_same_machine_every_time() {
-    static AGAIN: std::sync::OnceLock<Option<SavedSession>> = std::sync::OnceLock::new();
+    static AGAIN: std::sync::OnceLock<Option<SaveLoadRuns>> = std::sync::OnceLock::new();
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| save_and_load(&AGAIN, "again", false));
+        let second = scope.spawn(|| save_and_load(&AGAIN, false));
         (
-            save_and_load(&SAVE_LOAD, "main", true),
+            save_and_load(&SAVE_LOAD, true),
             second.join().expect("the second save/load replay ran"),
         )
     });
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
-    first.save_run.assert_same_machine(&second.save_run);
-    first.load_run.assert_same_machine(&second.load_run);
-    for flip in SAVE_GAME_KEPT {
+    for (label, a, b, kept) in [
+        (
+            "save",
+            &first.save_run,
+            &second.save_run,
+            &SAVE_GAME_KEPT[..],
+        ),
+        (
+            "load",
+            &first.load_run,
+            &second.load_run,
+            &LOAD_GAME_KEPT[..],
+        ),
+    ] {
+        a.assert_same_machine(b);
+        for &flip in kept {
+            assert!(
+                a.host.frame(flip).map(|f| &f.pixels) == b.host.frame(flip).map(|f| &f.pixels),
+                "{label} run presented the same at flip {flip}"
+            );
+        }
         assert!(
-            first.save_run.host.frame(flip).map(|f| &f.pixels)
-                == second.save_run.host.frame(flip).map(|f| &f.pixels),
-            "save run presented the same at flip {flip}"
+            a.host.audio_blocks == b.host.audio_blocks && a.host.audio_flips == b.host.audio_flips,
+            "{label} run mixed the same"
         );
     }
-    for flip in LOAD_GAME_KEPT {
-        assert!(
-            first.load_run.host.frame(flip).map(|f| &f.pixels)
-                == second.load_run.host.frame(flip).map(|f| &f.pixels),
-            "load run presented the same at flip {flip}"
-        );
-    }
-    assert!(
-        first.save_run.host.audio_blocks == second.save_run.host.audio_blocks
-            && first.save_run.host.audio_flips == second.save_run.host.audio_flips,
-        "save run mixed the same"
+    assert_ne!(
+        saved(&first.save_run, "prof1.lcp"),
+        saved(&second.save_run, "prof1.lcp"),
+        "two replays, two data roots"
+    );
+    assert_ne!(
+        saved_times(&first.save_run, "1save.lcs", 2),
+        saved_times(&second.save_run, "1save.lcs", 2),
+        "two replays, two save files"
     );
     assert!(
-        first.load_run.host.audio_blocks == second.load_run.host.audio_blocks
-            && first.load_run.host.audio_flips == second.load_run.host.audio_flips,
-        "load run mixed the same"
-    );
-    assert!(
-        first.saved_files == second.saved_files,
-        "both runs wrote byte-identical profiles and saves"
+        first.prof_bytes == second.prof_bytes
+            && first.save_bytes == second.save_bytes
+            && first.after_load_prof == second.after_load_prof
+            && first.after_load_save == second.after_load_save,
+        "both runs wrote and kept byte-identical profiles and saves"
     );
 }

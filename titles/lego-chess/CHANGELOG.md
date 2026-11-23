@@ -382,10 +382,11 @@ via `CreateFileA` until missing, and all saves land in `<data-root>/profile/` th
 Observed saved file formats (proven from `Lego Chess.exe` disassembly and the test run's bytes):
 - `profiles\prof%d.lcp` (4,544 bytes / `0x11C0`, buffer `0x00653C60`, sha256 `dfd46ce8…`): first
   name (`0x0000`, 20 B NUL-terminated, `"Ada\0"`), last name (`0x0014`, 20 B), age (`0x0028`, 1 B,
-  hardcoded `0x18` = 24 at `0x00416A92`), story/scrapbook progress tables (`0x002C..0x112B`), 27
-  dwords initialized to `-1` (`0x112C..0x1197`, tutorial/puzzle completion markers), SFX and music
-  volumes (`0x11AC..0x11AD`, default `200`, `200`), 15 in-game settings toggle bytes
-  (`0x11AE..0x11BC`), and default timed-game clock minutes (`0x11BD..0x11BE`, `60`, `60`).
+  hardcoded `0x18` = 24 at `0x00416A92`), zeroed on a fresh profile (`0x002C..0x112B`,
+  story/scrapbook progress tables from disassembly), 27 dwords initialized to `-1`
+  (`0x112C..0x1197`, tutorial/puzzle completion markers), SFX and music volumes (`0x11AC..0x11AD`,
+  default `200`, `200`), 15 in-game settings toggle bytes (`0x11AE..0x11BC`), and default
+  timed-game clock minutes (`0x11BD..0x11BE`, `60`, `60`).
 - `profiles\%dsave.lcs` (190,920 bytes / `0x2E9C8`, buffer `0x004C82E0`, sha256 `10f16ddf…`): 10
   fixed-size slots of 19,092 bytes (`0x4A94`) each (slots 0..7 exposed in the Save/Load UI,
   initialized to `"....\0"` with empty marker `-1` at `+0x4030`; slots 8..9 zeroed). Each slot
@@ -395,9 +396,9 @@ Observed saved file formats (proven from `Lego Chess.exe` disassembly and the te
   (`+0x402C`, u32 = `2`), active marker (`+0x4030`, i32 = `0`), board theme / White & Black piece
   sets / sub-variant / engine randomness (`+0x4035..+0x4039` = `0, 0, 0, 0, 75`), clocks and mode /
   cartoons / human-player flags (`+0x403C..+0x4050`: `whuman = 1`, `bhuman = 1`), the initial
-  32 x 80-byte 3D piece snapshot (`+0x4054..+0x4A53`), and the initial 64-byte piece-ID board map
-  (`+0x4A54..+0x4A93`). On load (`0x004078E0`), the game restores the settings and starting snapshot
-  and replays the recorded move list.
+  32 x 80-byte 3D piece table (`+0x4054..+0x4A53`), and the initial 64-byte piece-ID board map
+  (`+0x4A54..+0x4A93`). On load (`0x004078E0`), the game restores the settings and starting board
+  state and replays the recorded move list.
 - `ChessSave.che`: confirmed unreferenced dead code in Masterpiece V2.06 `Lego Chess.exe`. The
   string (`0x004810BC`) is referenced only by `0x0040EA10` (save with `asctime(localtime(time()))`)
   and `0x0040EBF0` (load), which — along with their Oxford Softworks harness helpers `0x0040E580`,
@@ -405,6 +406,6 @@ Observed saved file formats (proven from `Lego Chess.exe` disassembly and the te
   in the binary.
 
 Its tests pin the exact fields and sha256s of `PROF1.LCP` and `1SAVE.LCS`, all 9 key visual frames
-across both runs, a pixel-diff check proving the restored board differs from the initial position on
-`e4`/`e5` and `e2`, and a side-by-side determinism gate verifying identical machine state, frames,
-audio mixes, and saved files across two independent data roots.
+across both runs, camera-shift-invariant pawn-color checks on `e7`, `e5`, and `e4` proving the
+restored board differs from the initial position, and a side-by-side determinism gate verifying
+identical machine state, frames, audio mixes, and saved files across two independent data roots.
