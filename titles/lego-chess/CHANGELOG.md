@@ -313,3 +313,51 @@ s, -25.5 dBFS RMS and -9.5 at its peak; `stune.mid`, a Staunton game's, 3,162 no
 -24.2 and -8.3; `ptune.MID`, Pirates', 3,535 over 240.0 s, -23.5 and -6.2; `wtune.mid`, Western's, 4,961
 over 236.0 s, -25.9 and -8.8; none past full scale. The Western tune's Shaker, the GS kit's key 82,
 sounds: its 536 hits alone peak at -27.2 dBFS.
+
+A game of chess plays to checkmate, and a game against the computer starts (#158, core 1.2.0).
+Oxford Softworks' chess engine allocates its working table with `GlobalAlloc(0x20, size + 4)`
+(`GMEM_NODISCARD`, fixed memory) and `GlobalLock` at 0x0046E9FE as a match starts, and frees it with
+`GlobalUnlock` (0x0046EA2E) and `GlobalFree` (0x0046EA38) on leaving the match; core now answers
+`GlobalLock` and `GlobalUnlock` for fixed blocks, and no further wall appears across a full game.
+`routes/checkmate.route` extends `throne-room.route` from the Quick Game screen: it toggles Black
+from computer to human (keeping matched Western sets with capture animations on), clicks the green
+tick, opens both 16-bit Video 1 Advisors (`sherriff.avi`, `baddude.avi`, #152) and `wtune.mid`
+(#156), and plays Scholar's Mate (`1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7#`), rotating the board
+180 degrees after each move. `4. Qxf7#` launches the pawn-shaped iris wipe into the Western
+Queen-captures-Pawn 3D capture cartoon (12 stereo MS ADPCM sound effects) and presents `"Checkmate!
+Congratulations, you win!"` with its checkmate fanfare. Clicking the dialog's green tick frees the
+engine table, returns to the throne room (`tune.mid` and its 12 sounds), and closing the window at
+flip 4310 exits 0 at cursor 11,685,933,862 after 4,311 flips (109,017 declared ms). Its test pins
+five frames (board ready at 555, capture wipe at 2180, capture cartoon at 3500, checkmate dialog at
+4250, throne room return at 4295), all 54 ACM streams, all three MIDI opens, the mix from the match
+onward, and its side-by-side determinism gate (machine, frames, audio mix and saves). Sending
+`Close` mid-game does not exit on `WM_QUIT` (it hits core's 5,000 ms close grace); leaving through
+the checkmate dialog returns to the throne room where `Close` exits 0.
+
+No 3D DirectSound secondary buffer is ever created in LEGO Chess (the check carried from #153).
+`0x0044FF80` is the sole function referencing `IID_IDirectSound3DBuffer` (0x47D628 at 0x0045009A),
+gated on KLIB sample flag `0x8000` (`DSBCAPS_CTRL3D | DSBCAPS_MUTE3DATMAXDISTANCE`); its only caller
+is `0x004506A0` (at 0x00450705), whose 17 direct callers (and 0 indirect references) in
+`Lego Chess.exe` all pass flag `0x1` (`DSBCAPS_CTRLVOLUME`), never `0x8000`. The game initializes
+`IDirectSound3DListener` at boot as part of KLIB's shared sound init, and plays all 54 decoded
+samples across a match (15 UI/room, 12 throne room, 2 Western board, 12 capture cartoon stereo SFX,
+1 checkmate fanfare, 12 throne room re-entry) as 2D `IDirectSoundBuffer` voices mixed alongside the
+GS Wavetable synth.
+
+Against the computer, a Quick Game plays three replies (`1. e4`, `2. Nf3`, `3. Nc3` answered on
+ranks 5-8) with no wall, covered by its own test rather than a committed route. At engine init
+(0x0046B3A3 -> 0x0046EEFF) the engine seeds the CRT LCG (`srand(time(NULL))`, 1-second resolution on
+the declared clock), and each computer turn (0x00466F52) draws from that same CRT `rand()` — shared
+with 3D piece and Advisor animations — playing a random legal move before iterative deepening
+(0x00464F6E) when `rand() % 100 + 1 <= 100 - difficulty` (75% at default difficulty 25, 0% at
+difficulty 100); during search, `0x0040D4B0` yields every 9th call once 15 declared ms have elapsed
+to pump messages and draw. Because any core change that shifts instruction count can cross a
+declared-second boundary at `srand(time())`, alter how many animation `rand()` calls run before or
+during search yields, or shift timed search bounds (0x00464C7A), a core change can alter the
+computer's replies and break a recorded vs-computer route; the test therefore checks that Black's
+half of the board changes after each of White's three moves without pinning fragile engine-move
+hashes. Measured at the declared Pentium 166 MHz processor: default difficulty 25 replies in under
+1 flip (< 17 declared ms) both in opening book (`RCBOOK.BOK`: `1. e4 e5 2. Nf3 Nc6 3. Nc3 Bb4`) and
+out of book on random-move hits (`1. h3 e6 2. a3 f5 3. g3 Nf6`); difficulty 100 (0% random, full
+alpha-beta search) out of book (`1. h3 Nc6 2. a3 e5 3. g3 Bc5`) thinks for 4,166 ms (126 flips,
+~692M insns), 1,144 ms (36 flips, ~190M insns), and 4,666 ms (142 flips, ~775M insns) declared.

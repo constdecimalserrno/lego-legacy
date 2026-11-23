@@ -1197,6 +1197,301 @@ fn the_throne_room_route_replays_to_the_same_machine_every_time() {
     }
 }
 
+/// The flips the two-player checkmate route keeps (#158): the Western board
+/// ready with both Video 1 Advisors live, the pawn-shaped iris wipe into the
+/// Western Queen-captures-Pawn capture cartoon, the red pawn scratching his
+/// head over his pit trap in the capture cartoon, the "Checkmate!
+/// Congratulations, you win!" dialog, and the throne room after clicking its
+/// green tick.
+const BOARD_READY: u64 = 555;
+const CAPTURE_WIPE: u64 = 2180;
+const CAPTURE_CARTOON: u64 = 3500;
+const CHECKMATE_DIALOG: u64 = 4250;
+const RETURNED_TO_THRONE: u64 = 4295;
+const CHECKMATE_KEPT: [u64; 5] = [
+    BOARD_READY,
+    CAPTURE_WIPE,
+    CAPTURE_CARTOON,
+    CHECKMATE_DIALOG,
+    RETURNED_TO_THRONE,
+];
+
+/// Enough instructions for the two-player Scholar's Mate route to play all
+/// seven plies, its Western capture cartoon, checkmate, return to the throne
+/// room and exit 0 at 11,685,933,862, with headroom so a run that reaches the
+/// budget has not left.
+const CHECKMATE_BUDGET: u64 = 12_000_000_000;
+
+fn checkmate(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/checkmate.route"),
+        ),
+        screenshots: Screenshots {
+            at: if shots {
+                CHECKMATE_KEPT.to_vec()
+            } else {
+                Vec::new()
+            },
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(
+        slot,
+        || scratch() && testkit::any_rip(&roster::GM16).is_some(),
+        &CHESS,
+        &cli,
+        &CHECKMATE_KEPT,
+        CHECKMATE_BUDGET,
+    )
+}
+
+static CHECKMATE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// A two-player (hot-seat) Quick Game played to checkmate with its capture
+/// cartoon (#158). Extends `throne-room.route` from the Quick Game screen:
+/// Black is toggled to human (keeping the matched Western sets and capture
+/// animations on), the green tick starts the game, the engine allocates its
+/// working table with `GlobalAlloc`/`GlobalLock`, both 16-bit Video 1 Advisors
+/// (`sherriff.avi`, `baddude.avi`, #152) open, and `wtune.mid` plays on the GS
+/// Wavetable synth (#156). Scholar's Mate (`1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6
+/// 4. Qxf7#`) triggers the Western Queen-takes-Pawn 3D capture cartoon (12
+/// stereo MS ADPCM effects) and reaches "Checkmate! Congratulations, you win!"
+/// with its fanfare. Clicking the green tick frees the engine table with
+/// `GlobalUnlock`/`GlobalFree` and returns to the throne room, where closing
+/// the window exits 0.
+#[test]
+fn two_players_play_scholars_mate_with_capture_cartoon_to_checkmate() {
+    let Some(ran) = checkmate(&CHECKMATE, true) else {
+        return;
+    };
+    ran.assert_exited(0)
+        .assert_flips(4311)
+        .assert_logged("midi bank ")
+        .assert_logged("GM16.DLS from ")
+        .assert_logged("movie Advisors\\sherriff.avi opened through AVIFile: 1 streams")
+        .assert_logged("movie Advisors\\baddude.avi opened through AVIFile: 1 streams")
+        .assert_logged("flip 555 cursor 3628985280 640x480x16")
+        .assert_logged("flip 2180 cursor 9651005871 640x480x16")
+        .assert_logged("flip 3500 cursor 10594060919 640x480x16")
+        .assert_logged("flip 4250 cursor 11473961220 640x480x16")
+        .assert_logged("flip 4295 cursor 11651873111 640x480x16")
+        .assert_logged("end exited 0 cursor 11685933862 flips 4311 declared-ms 109017");
+    // Three MIDI opens: boot init (tune.mid), Western match (wtune.mid), and
+    // throne room return (tune.mid).
+    assert_eq!(ran.log.matches("midi stream open answered 0").count(), 3);
+    // 27 menu/throne-room sounds + 2 Western board + 12 capture cartoon stereo
+    // effects + 1 checkmate fanfare + 12 throne room re-entry.
+    assert_eq!(ran.log.matches("acm stream ").count(), 54);
+    assert_eq!(ran.flip_before("acm stream 28:"), 512);
+    assert_eq!(ran.flip_before("acm stream 30:"), 2190);
+    assert_eq!(ran.flip_before("acm stream 43:"), 4260);
+    for (flip, pinned) in [
+        (
+            BOARD_READY,
+            "f21ff4e02f47c252d6b88a62b3ce5ad8e47db6f000a233f848dcdf079426c8d9",
+        ),
+        (
+            CAPTURE_WIPE,
+            "e7c820de1852cecbed04ef3fcf841bb7f21d58dd5d0dace61145d19526578237",
+        ),
+        (
+            CAPTURE_CARTOON,
+            "8c596cd7f4d090ebefc08e6aec2d4c946785809a3d123ab40fe8cd6081e770bc",
+        ),
+        (
+            CHECKMATE_DIALOG,
+            "d067caf185f7213c9ed0df690b3f2ff37ef144c187d57669a37cf88c0350d2da",
+        ),
+        (
+            RETURNED_TO_THRONE,
+            "a27b0a9581d3c47dfef9f8f0accf3909b5280758593722e504d545220fb26488",
+        ),
+    ] {
+        let frame = ran.host.frame(flip).expect("presented");
+        assert!(!frame.pixels.is_empty(), "flip {flip} is kept");
+        assert_eq!(hash::sha256_hex(&frame.pixels), pinned, "flip {flip}");
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+    for (label, from, to) in [
+        ("chess match", BOARD_READY, CAPTURE_WIPE),
+        ("capture cartoon", CAPTURE_WIPE, CHECKMATE_DIALOG),
+        ("checkmate", CHECKMATE_DIALOG, RETURNED_TO_THRONE),
+    ] {
+        let rms = ran.loudness(from, to);
+        assert!(
+            !rms.is_empty() && rms.iter().any(|r| *r > 0.0),
+            "{label} is heard"
+        );
+    }
+    let game_mix: Vec<u8> = ran
+        .host
+        .audio_blocks
+        .iter()
+        .zip(ran.host.audio_flips.iter().copied())
+        .filter(|(_, flip)| *flip >= BOARD_READY)
+        .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
+        .collect();
+    assert_eq!(
+        hash::sha256_hex(&game_mix),
+        "92bfd3351f48a6159f792c34d8a528f885d4c1c49fa8dc57b0e735439e07126d",
+        "the Western match, capture cartoon, checkmate fanfare and throne-room return mix"
+    );
+}
+
+#[test]
+fn the_checkmate_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| checkmate(&AGAIN, false));
+        (
+            checkmate(&CHECKMATE, true),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    for flip in CHECKMATE_KEPT {
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
+            "including what it presented at flip {flip}"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks
+            && first.host.audio_flips == second.host.audio_flips,
+        "and what it mixed"
+    );
+    for (name, writes) in [("prof1.lcp", 2usize), ("1save.lcs", 1usize)] {
+        let path_of = |ran: &testkit::Ran| -> std::path::PathBuf {
+            let paths: Vec<&str> = ran
+                .log
+                .lines()
+                .filter(|l| l.starts_with("file written") && l.contains(name))
+                .map(|l| l.rsplit_once(", to ").expect("where it went").1)
+                .collect();
+            assert_eq!(paths.len(), writes, "{name} is saved {writes} time(s)");
+            assert!(
+                paths.iter().all(|p| *p == paths[0]),
+                "{name} goes to one path"
+            );
+            paths[0].into()
+        };
+        let (one, two) = (path_of(first), path_of(second));
+        assert_ne!(one, two, "two replays, two files");
+        assert!(
+            std::fs::read(&one).expect("first save is there")
+                == std::fs::read(&two).expect("second save is there"),
+            "and saved {name} the same"
+        );
+    }
+}
+
+/// A Quick Game against the computer plays three replies without a wall (#158).
+/// Not a committed route: the computer's replies depend on `srand(time(NULL))`
+/// at engine init (`0x0046b3a3`) and the CRT `rand()` shared with animations,
+/// so a core change shifting instruction counts can change which reply the
+/// engine picks. White plays `1. e4`, `2. Nf3`, `3. Nc3` (on ranks 1-4) and
+/// the test verifies that the Black half of the board (ranks 5-8) changes
+/// after each of the three moves, without pinning fragile engine-move hashes.
+#[test]
+fn a_quick_game_against_the_computer_plays_three_replies_without_a_wall() {
+    if !scratch() || testkit::any_rip(&roster::GM16).is_none() {
+        return;
+    }
+    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("vs-computer-158.route");
+    std::fs::write(
+        &route,
+        concat!(
+            "#lego-legacy-route 1\n",
+            "flip 290 key Space down\n",
+            "flip 290 poll 300 key Space up\n",
+            "flip 300 key Space down\n",
+            "flip 300 poll 300 key Space up\n",
+            "flip 320 key LeftShift down\n",
+            "flip 321 key A down\n",
+            "flip 324 key A up\n",
+            "flip 325 key LeftShift up\n",
+            "flip 328 key D down\n",
+            "flip 331 key D up\n",
+            "flip 334 key A down\n",
+            "flip 337 key A up\n",
+            "flip 345 move 576 420\n",
+            "flip 350 down\n",
+            "flip 350 poll 300 up\n",
+            "flip 390 down\n",
+            "flip 390 poll 300 up\n",
+            "flip 405 move 385 285\n",
+            "flip 430 down\n",
+            "flip 431 up\n",
+            "flip 435 move 590 410\n",
+            "flip 440 down\n",
+            "flip 440 poll 300 up\n",
+            "flip 555 move 356 308\n",
+            "flip 560 down\n",
+            "flip 563 up\n",
+            "flip 568 move 351 241\n",
+            "flip 573 down\n",
+            "flip 576 up\n",
+            "flip 810 move 511 349\n",
+            "flip 815 down\n",
+            "flip 818 up\n",
+            "flip 823 move 419 272\n",
+            "flip 828 down\n",
+            "flip 831 up\n",
+            "flip 1260 move 129 349\n",
+            "flip 1265 down\n",
+            "flip 1268 up\n",
+            "flip 1273 move 221 272\n",
+            "flip 1278 down\n",
+            "flip 1281 up\n",
+        ),
+    )
+    .expect("scratch route writes");
+    const KEPT: [u64; 4] = [550, 800, 1250, 1749];
+    const BUDGET: u64 = 8_100_000_000;
+    let cli = Cli {
+        route: Some(route),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(
+        lego_legacy_core::host::headless::Headless::new().keeping(&KEPT),
+        &CHESS,
+        &cli,
+        BUDGET,
+    );
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "three replies against the computer hit no wall\nlog:\n{}",
+        ran.log
+    );
+    ran.assert_logged("movie Advisors\\sherriff.avi opened through AVIFile: 1 streams")
+        .assert_logged("movie Advisors\\baddude.avi opened through AVIFile: 1 streams");
+    // White's three moves (e2-e4, Ng1-f3, Nb1-c3) stay on ranks 1-4; ranks
+    // 5-8 (y 155..238) change only as the computer moves its pieces.
+    let black_side = (90, 155, 550, 238);
+    for (reply, pair) in KEPT.windows(2).enumerate() {
+        let before = ran.host.frame(pair[0]).expect("before reply");
+        let after = ran.host.frame(pair[1]).expect("after reply");
+        let changed = testkit::differing(before, after, black_side);
+        assert!(
+            changed > 500,
+            "computer reply {} changed only {changed} pixels on ranks 5-8 (flips {} -> {})",
+            reply + 1,
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
 // The machine has the floppy drive its CD check needs: the check at 0x405420
 // looks at no drive without A: (#145). Core's shim tests run its calls on a
 // machine with one and find D:.
