@@ -247,6 +247,36 @@ pub fn rips(image: &EntryImage) -> bool {
     ripped(&disc::pressing_path(image.disc_dir, image.pressing))
 }
 
+/// As [`rips`], when any one of several pressings will do (such as the
+/// pressings carrying a shared sound bank): returns the first whose rip is
+/// present, or `None` when none is.
+///
+/// # Panics
+/// When none of the pressings is present and `LEGO_LEGACY_REQUIRE_DISC` is set.
+#[must_use]
+pub fn any_rip(images: &[EntryImage]) -> Option<&EntryImage> {
+    point_at_rips();
+    let paths: Vec<_> = images
+        .iter()
+        .map(|i| (i, disc::pressing_path(i.disc_dir, i.pressing)))
+        .collect();
+    if let Some((image, _)) = paths.iter().find(|(_, p)| p.is_file()) {
+        return Some(image);
+    }
+    let list: Vec<String> = paths.iter().map(|(_, p)| p.display().to_string()).collect();
+    let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
+    assert!(
+        !required,
+        "LEGO_LEGACY_REQUIRE_DISC is set but none of [{}] is present",
+        list.join(", ")
+    );
+    eprintln!(
+        "skipping: none of [{}] (rip your own discs there)",
+        list.join(", ")
+    );
+    None
+}
+
 /// As [`rips`], for a pressing's Red Book audio: the cue sheet beside its
 /// image and the raw rip beside that.
 ///

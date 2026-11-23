@@ -110,6 +110,17 @@ pub(crate) fn setup(
             ));
         }
         log.line(&format!("bound {} names", machine.bound_names));
+        // The bank its MIDI out plays, a declared input like the image: with
+        // it the machine has the GS Wavetable synth, and without it no MIDI
+        // out at all (ADR-0008, #156). Kept on the roster rather than `Title`
+        // so adding it does not break every title crate (ADR-0007).
+        let places = crate::roster::ROSTER
+            .iter()
+            .find(|e| e.key == title.key)
+            .map_or(&[][..], |e| e.bank);
+        if !places.is_empty() {
+            log.line(&open_bank(places, &mut machine.state.mixer)?);
+        }
     }
     // A route is the run's only recorded input (ADR-0003).
     if let Some(path) = &cli.route {
@@ -377,5 +388,45 @@ fn debugger(title: &'static Title, cli: &Cli) -> ExitCode {
             eprintln!("lego-legacy: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Open the General MIDI synth on the first place that holds the bank, or
+/// leave the mixer without a MIDI out and return the line to log.
+fn open_bank(
+    places: &[crate::title::EntryImage],
+    mixer: &mut crate::sound::Mixer,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match crate::roster::find_bank(places) {
+        Ok((place, bytes)) => {
+            let bank = crate::dls::Bank::parse(&bytes)
+                .map_err(|e| format!("midi bank {} from {}: {e}", place.path, place.pressing))?;
+            mixer.open_synth(crate::synth::Synth::new(bank));
+            Ok(format!("midi bank {} from {}", place.path, place.pressing))
+        }
+        Err(why) => Ok(format!("midi bank unavailable, so no MIDI out: {why}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_bank;
+    use crate::roster::GM16;
+    use crate::sound::Mixer;
+    use crate::title::EntryImage;
+
+    #[test]
+    fn a_missing_bank_leaves_the_machine_with_no_midi_out() {
+        let absent = EntryImage {
+            pressing: "no-such-pressing",
+            ..GM16[0]
+        };
+        let mut mixer = Mixer::default();
+        let line = open_bank(&[absent], &mut mixer).expect("missing bank is not fatal");
+        assert!(!mixer.midi_out(), "no synth opened without the bank");
+        assert_eq!(
+            line,
+            "midi bank unavailable, so no MIDI out: no rip of the no-such-pressing pressing"
+        );
     }
 }

@@ -901,16 +901,18 @@ const THRONE_ROOM_KEPT: [u64; 10] = [
 ];
 
 /// Enough instructions for the route to close the window at flip 470 and the
-/// game to leave, at 3,246,017,664, and room to spare: a run that reaches
-/// the end of it has not left.
+/// game to leave, at 3,246,057,181 with the bank (3,246,017,664 without), and
+/// room to spare: a run that reaches the end of it has not left.
 const THRONE_ROOM_BUDGET: u64 = 3_300_000_000;
 
 /// The committed route into the throne room and onto the Quick Game screen,
-/// replayed, keeping its flips and, when `shots`, writing the bumper, the named
-/// form, the King and the Quick Game screen as pictures in its run directory.
-/// Two slots, so the determinism gate's two runs can go side by side.
+/// replayed on `title`, keeping its flips and, when `shots`, writing the
+/// bumper, the named form, the King and the Quick Game screen as pictures in
+/// its run directory. Two slots, so the determinism gate's two runs can go
+/// side by side.
 fn throne_room(
     slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    title: &'static Title,
     shots: bool,
 ) -> Option<&'static testkit::Ran> {
     let cli = Cli {
@@ -929,8 +931,10 @@ fn throne_room(
     };
     testkit::replay(
         slot,
-        scratch,
-        &CHESS,
+        // With its music's bank too, on any of the four pressings that carry
+        // it; the run takes the first present (#156).
+        || scratch() && (title.key != CHESS.key || testkit::any_rip(&roster::GM16).is_some()),
+        title,
         &cli,
         &THRONE_ROOM_KEPT,
         THRONE_ROOM_BUDGET,
@@ -938,6 +942,14 @@ fn throne_room(
 }
 
 static THRONE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// LEGO Chess as a title the roster does not list, so with no bank to look
+/// for: the machine of a player whose discs hold none, with no MIDI out
+/// (#156).
+const WITHOUT_A_BANK: Title = Title {
+    key: "lego-chess-with-no-bank",
+    ..CHESS
+};
 
 /// Where a run saved a file, as its log says it went: once, so what is there
 /// at the end of the run is what it wrote then.
@@ -962,36 +974,97 @@ fn saved(ran: &testkit::Ran, name: &str) -> std::path::PathBuf {
 /// name box a key at a time, through the `WM_CHAR` each key types, Shift for her
 /// capital, and the tick makes her and saves her under that name. The throne
 /// room, drawn with `D3DTBLEND_MODULATEALPHA` too, presents as the King starts
-/// speaking, a sound decoded through ACM, the only one in the mix since the
-/// bumper while the machine has no MIDI port for the room's tune (#154). The
-/// board, clicked once the camera has turned after the pointer, opens the Quick
-/// Game screen, where #158 starts a game. The window is closed at flip 470 and
-/// the game leaves. The pinned pictures are this build's own. Of them only the
-/// form's, 307 and 319, were compared by eye with a picture, the old tree's
-/// one kept New Player frame, as the changelog says; the bumper, 303, only with
-/// the old tree's hash of it, which differs; and the rest with nothing, the old
-/// tree never having got there.
+/// speaking, a sound decoded through ACM. The board, clicked once the camera
+/// has turned after the pointer, opens the Quick Game screen, where #158
+/// starts a game. The window is closed at flip 470 and the game leaves. The
+/// pinned pictures are this build's own. Of them only the form's, 307 and 319,
+/// were compared by eye with a picture, the old tree's one kept New Player
+/// frame, as the changelog says; the bumper, 303, only with the old tree's
+/// hash of it, which differs; and the rest with nothing, the old tree never
+/// having got there.
+///
+/// With the player's bank the machine has the GS Wavetable synth (#156): the
+/// game's MIDI init opens its stream while the bumper stands, and the throne
+/// room's tune plays on it from the room's first flip, its callback on
+/// WINMM's player thread (#154), under the King's line. Nothing else the run
+/// pins moves but where the instructions the player and the callback retire
+/// put the flips; the pictures are the ones the run without it presents.
 #[test]
 fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
-    let Some(ran) = throne_room(&THRONE, true) else {
+    let Some(ran) = throne_room(&THRONE, &CHESS, true) else {
         return;
     };
-    assert_eq!(
-        ran.finish.outcome,
-        lego_legacy_core::machine::Outcome::Exited { code: 0 },
-        "the game leaves when its window is closed\nlog:\n{}",
-        ran.log
+    ran.assert_exited(0);
+    ran.assert_logged("midi bank ")
+        .assert_logged("GM16.DLS from ");
+    assert_eq!(ran.log.matches("midi stream open answered").count(), 1);
+    assert_eq!(ran.flip_before("midi stream open answered 0"), 304);
+    ran.assert_logged("flip 392 cursor 3116458135 640x480x16")
+        .assert_logged("flip 432 cursor 3201821254 640x480x16")
+        .assert_logged("end exited 0 cursor 3246057181 flips 471 declared-ms 24867")
+        .assert_flips(471);
+    the_room_is_made_and_presented(ran);
+    // In the throne room its tune starts on the room's first flip, plays under
+    // the King and keeps playing onto the Quick Game screen, the mix from
+    // there pinned block by block.
+    let (onset, mix) = throne_room_mix(ran);
+    assert_eq!(onset, Some(THRONE_ROOM), "the tune from its first bar");
+    let after = ran.loudness(QUICK_GAME + 2, 471);
+    assert!(
+        !after.is_empty() && after.iter().all(|r| *r > 0.0),
+        "the tune keeps playing on the Quick Game screen"
     );
-    // The machine has no MIDI port until #154, whose author re-pins the mix
-    // below: the game's MIDI init, while the bumper stands, and the throne
-    // room's tune, on the tick, are both refused.
+    assert_eq!(
+        mix, "7372b7b8559cae28aaf6e8548e2fddca3849af3936dd9af1b23f041b51e47341",
+        "the tune, and the King's line over it"
+    );
+    for flip in [BUMPER, NAMED, THE_KING, QUICK_GAME] {
+        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
+        assert!(shot.is_file(), "{} is written", shot.display());
+    }
+}
+
+/// Without the player's bank the machine has no MIDI out (#156): both of the
+/// game's MIDI opens are refused, the game's init while the bumper stands and
+/// the throne room's tune on the tick, and the run is the one before the
+/// stream was written, to its end, and silent but for the King's line.
+#[test]
+fn without_the_bank_the_throne_room_is_silent_and_unchanged() {
+    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let Some(ran) = throne_room(&RAN, &WITHOUT_A_BANK, false) else {
+        return;
+    };
+    ran.assert_exited(0);
+    assert!(!ran.log.contains("midi bank"), "no bank to look for");
     assert_eq!(ran.log.matches("midi stream open answered 2").count(), 2);
     assert_eq!(ran.flip_before("midi stream open answered 2"), 304);
     ran.assert_logged("flip 392 cursor 3116426918 640x480x16")
         .assert_logged("flip 432 cursor 3201786127 640x480x16")
         .assert_logged("end exited 0 cursor 3246017664 flips 471 declared-ms 24867")
-        .assert_flips(471)
-        .assert_logged("profiles\\prof1.lcp, asked from 0x0045656a")
+        .assert_flips(471);
+    the_room_is_made_and_presented(ran);
+    // In the throne room nothing is heard until the King speaks, from flip
+    // 394, and nothing after his line, which has died away by the Quick Game
+    // screen's third flip; the mix from the throne room on, his line, is
+    // pinned block by block.
+    let after = ran.loudness(QUICK_GAME + 2, 471);
+    assert!(
+        !after.is_empty() && after.iter().all(|r| *r == 0.0),
+        "the Quick Game screen is silent"
+    );
+    let (onset, voice) = throne_room_mix(ran);
+    assert_eq!(onset, Some(394), "the King starts speaking");
+    assert_eq!(
+        voice, "cc927b8ad2ab5b58c547db9109172fb3bd940e98e82a71041fa62e8e9da6928c",
+        "the King's line"
+    );
+}
+
+/// What the throne-room route pins whatever its machine's MIDI out: the
+/// named player made and saved, the rooms' sounds decoded, silence from the
+/// bumper until the throne room, and the pictures.
+fn the_room_is_made_and_presented(ran: &testkit::Ran) {
+    ran.assert_logged("profiles\\prof1.lcp, asked from 0x0045656a")
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof1.lcp, 4544 bytes",
         )
@@ -1062,17 +1135,13 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
         assert_eq!(hash::sha256_hex(&at(flip).pixels), pinned, "flip {flip}");
     }
     assert!(!at(THRONE_ROOM).is_uniform(), "the throne room presents");
-    // Nothing is heard from the bumper on until the King speaks, from flip
-    // 394, and nothing after his line, which has died away by the Quick Game
-    // screen's third flip; the mix from the throne room on, his line, is
-    // pinned block by block.
     let silence = ran.loudness(BUMPER + 1, THRONE_ROOM);
     assert!(!silence.is_empty() && silence.iter().all(|r| *r == 0.0));
-    let after = ran.loudness(QUICK_GAME + 2, 471);
-    assert!(
-        !after.is_empty() && after.iter().all(|r| *r == 0.0),
-        "the Quick Game screen is silent"
-    );
+}
+
+/// The first flip from the throne room on whose mix is not silent, and the
+/// hash of the mix from there on.
+fn throne_room_mix(ran: &testkit::Ran) -> (Option<u64>, String) {
     let throne_mix: Vec<(&Vec<i16>, u64)> = ran
         .host
         .audio_blocks
@@ -1084,29 +1153,20 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
         .iter()
         .find(|(block, _)| block.iter().any(|s| *s != 0))
         .map(|(_, flip)| *flip);
-    assert_eq!(onset, Some(394), "the King starts speaking");
-    let voice: Vec<u8> = throne_mix
+    let mix: Vec<u8> = throne_mix
         .iter()
         .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
         .collect();
-    assert_eq!(
-        hash::sha256_hex(&voice),
-        "cc927b8ad2ab5b58c547db9109172fb3bd940e98e82a71041fa62e8e9da6928c",
-        "the King's line"
-    );
-    for flip in [BUMPER, NAMED, THE_KING, QUICK_GAME] {
-        let shot = ran.dir.join(format!("shots/{flip:010}.png"));
-        assert!(shot.is_file(), "{} is written", shot.display());
-    }
+    (onset, hash::sha256_hex(&mix))
 }
 
 #[test]
 fn the_throne_room_route_replays_to_the_same_machine_every_time() {
     static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| throne_room(&AGAIN, false));
+        let second = scope.spawn(|| throne_room(&AGAIN, &CHESS, false));
         (
-            throne_room(&THRONE, true),
+            throne_room(&THRONE, &CHESS, true),
             second.join().expect("the second replay ran"),
         )
     });
@@ -1121,7 +1181,8 @@ fn the_throne_room_route_replays_to_the_same_machine_every_time() {
         );
     }
     assert!(
-        first.host.audio_blocks == second.host.audio_blocks,
+        first.host.audio_blocks == second.host.audio_blocks
+            && first.host.audio_flips == second.host.audio_flips,
         "and what it mixed"
     );
     // And what it saved, each replay into a data root of its own.

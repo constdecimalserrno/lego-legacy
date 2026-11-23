@@ -12,6 +12,11 @@ lists LEGO Chess (#143).
 Lists LEGO Chess as the fifth title and starts it, as `lego-legacy lego-chess`, when its rip is
 there (#143). It is in progress: it stops at a wall long before it is playable.
 
+Says where LEGO Chess's music comes from (#156), as it says where Rock Raiders' does (ADR-0006):
+"music is played with GM16.DLS, from the masterpiece-racers pressing", the first of LEGO Racers' and
+Rock Raiders' pressings that holds it; or that the music cannot be played, and why: what a rip that is
+there held instead, or that none of the four is ripped. The title starts either way.
+
 ## 1.1.0 — 2026-10-21
 
 It lists and starts four titles, the fourth LEGO Island, playable at its 1.0.0, and runs on core

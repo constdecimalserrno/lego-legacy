@@ -267,6 +267,12 @@ With part 2 accepted (2026-10-21, for LEGO Chess):
 - The declared MIDI out is the Microsoft GS Wavetable SW Synth, which plays the GS drum kit's notes
   beyond General MIDI's (LEGO Chess's Western tune plays the Shaker, key 82, 536 times).
 
+As built (#154, #156): the bank is read where it lies loose on the player's own rip of either LEGO
+Racers pressing or either Rock Raiders pressing, all four carrying it byte for byte (`roster::GM16`),
+so the player copies nothing out of a disc, and the launcher says which rip it came from or why there
+is none. The game reads the MIDI mapper's caps, which are Windows 11's own answer for it; the callback
+runs on WINMM's player, a time-critical thread of the machine's own (ADR-0005).
+
 ## Sources
 
 - The rip: `game-data/lego-island/lego-island/lego-island.iso`, sha256 `a5e7eefd…`. The MIDI

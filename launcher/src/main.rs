@@ -91,6 +91,23 @@ fn list() -> Vec<Found> {
                 Ok(_) => {}
             }
         }
+        // So may the bank its MIDI music is played with (ADR-0008), and a
+        // title starts without it and plays none.
+        if let Some(first) = entry.bank.first() {
+            match roster::find_bank(entry.bank) {
+                Ok((place, _)) => {
+                    let file = place.path.rsplit('/').next().unwrap_or(place.path);
+                    println!(
+                        "     music is played with {file}, from the {} pressing",
+                        place.pressing
+                    );
+                }
+                Err(why) => {
+                    let file = first.path.rsplit('/').next().unwrap_or(first.path);
+                    println!("     music needs {file}, and cannot be played: {why}");
+                }
+            }
+        }
         found.push(what);
     }
     found

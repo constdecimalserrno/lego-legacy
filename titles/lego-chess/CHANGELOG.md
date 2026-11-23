@@ -291,3 +291,25 @@ from `WM_MOUSEMOVE`, and core posts none at a `SetCursorPos`, where Wine's serve
 every call; so after Tab its pointer stays where it was until the mouse moves. That is tracked as
 #235 under #142, since Hot Wheels, Alpha Team and Rock Raiders call `SetCursorPos` too, Hot Wheels
 every frame.
+
+Its music is heard (#156, core 1.2.0). The roster names Roland's `GM16.DLS` as its bank, read where
+it lies loose on the player's own LEGO Racers or Rock Raiders disc, and with it the machine has
+the GS Wavetable synth: the game's MIDI init opens its stream on the mapper while the bumper stands, at
+flip 304, and the throne room's tune, `staunton\tune.mid`, plays on it from the room's first flip, 392,
+the game's callback refilling a buffer of 48 ticks, a quarter of a second, each time one is done, from
+inside the callback on WINMM's player thread (#154). The game sets the music to 0xFA00 for a new
+player, 2.25 dB down. `throne-room.route` now ends at 3,246,057,181 after 471 flips, its flips later by
+the 31,217 instructions to flip 392 (39,517 to exit) the player and the callback retire, every picture
+the test pins the same; its test pins the one open, the tune from the room's first flip under the
+King's line and on through the Quick Game screen, the mix from there, and its determinism gate holds
+with the bank. A run of the title under a key the roster does not list, so with no bank to find, a
+test of its own, is the bankless run to its end (3,246,017,664 after 471 flips): both opens refused,
+silent from the bumper until the King and silent again on the Quick Game screen, his line keeping its
+hash.
+
+Its four tunes, measured through the synth with that bank at the game's 0xFA00 (each Standard MIDI
+File played straight into the synth, 32 voices): `tune.mid`, the throne room's, 2,975 notes over 240.0
+s, -25.5 dBFS RMS and -9.5 at its peak; `stune.mid`, a Staunton game's, 3,162 notes over 240.0 s,
+-24.2 and -8.3; `ptune.MID`, Pirates', 3,535 over 240.0 s, -23.5 and -6.2; `wtune.mid`, Western's, 4,961
+over 236.0 s, -25.9 and -8.8; none past full scale. The Western tune's Shaker, the GS kit's key 82,
+sounds: its 536 hits alone peak at -27.2 dBFS.

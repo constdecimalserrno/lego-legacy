@@ -83,9 +83,16 @@ on an unmounted disc).
 | Alpha Team | `game-data/alpha-team/alpha-team/alpha-team.iso` | The original pressing. |
 | LEGO Island | `game-data/lego-island/lego-island/lego-island.iso` | The original 1997 pressing. |
 | LEGO Chess | `game-data/chess/masterpiece-chess/masterpiece-chess.iso` | The **Masterpiece** re-release, whose game is V2.06. The original pressing's V2.05 is a different executable and is not accepted. |
+| LEGO Chess music (optional) | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` or `game-data/racers/racers/racers.iso`, or either Rock Raiders image above | Roland's General MIDI bank, `GM16.DLS`, which LEGO Chess's music is played with. It lies loose on both pressings of LEGO Racers (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`) and of Rock Raiders (`DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS`), and is read there, checked by its SHA-256, and never copied out. Without it the game runs without music. |
+
+Roland licenses `GM16.DLS` "under Microsoft's End User License Agreement for use with Microsoft
+operating system products only. All other uses require a separate written license from Roland."
+(its `GMREADME.TXT`, beside it on each disc). The copy played is the one on your own disc; what
+the licence means for your use of it is for you to read.
 
 Running the launcher with no arguments lists each title and says whether its image was found
-and is the right one. Saves land beside the rip, in `game-data/<disc>/profile/`.
+and is the right one, and where Rock Raiders' and LEGO Chess's music comes from. Saves land
+beside the rip, in `game-data/<disc>/profile/`.
 
 ## Playing
 

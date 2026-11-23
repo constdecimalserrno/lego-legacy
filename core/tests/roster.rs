@@ -35,6 +35,7 @@ fn a_wrapped_pressing_is_named_rather_than_offered() {
         name: "LEGO Rock Raiders",
         image: testkit::ROCK_RAIDERS_WRAPPED,
         red_book: None,
+        bank: &[],
     };
     let found = roster::look_for(&wrapped);
     match &found {
@@ -57,6 +58,7 @@ fn a_pressing_that_is_not_there_says_where_it_looked() {
             ..roster::ROCK_RAIDERS.image
         },
         red_book: None,
+        bank: &[],
     };
     match roster::look_for(&absent) {
         Found::Absent { looked_at } => {
@@ -82,6 +84,7 @@ fn a_pressing_holding_different_bytes_is_refused_by_its_digest() {
             ..roster::ROCK_RAIDERS.image
         },
         red_book: None,
+        bank: &[],
     };
     match roster::look_for(&patched) {
         Found::WrongBytes { found, .. } => {
@@ -112,6 +115,21 @@ fn every_title_on_the_roster_can_be_looked_for() {
             "{} says why that pressing",
             entry.key
         );
+        for place in entry.bank {
+            assert_eq!(
+                place.sha256.len(),
+                64,
+                "{} bank on {} names its bytes",
+                entry.key,
+                place.pressing
+            );
+            assert!(
+                !place.why.is_empty(),
+                "{} bank on {} says why",
+                entry.key,
+                place.pressing
+            );
+        }
     }
 }
 
@@ -145,6 +163,7 @@ fn an_image_the_cabinet_does_not_hold_is_named() {
             ..roster::ALPHA_TEAM.image
         },
         red_book: None,
+        bank: &[],
     };
     match roster::look_for(&absent) {
         Found::Unreadable { why } => assert!(why.contains("NoSuchThing.exe"), "{why}"),
@@ -227,4 +246,111 @@ fn a_damaged_rip_is_listed_as_damaged() {
         Found::Unreadable { why } => assert!(why.contains("ripped again"), "{why}"),
         other => panic!("found {other} instead of saying the rip is damaged"),
     }
+}
+
+fn bank_err(places: &[EntryImage]) -> String {
+    match roster::find_bank(places) {
+        Ok((place, _)) => panic!("expected no bank, found {}", place.pressing),
+        Err(why) => why,
+    }
+}
+
+/// Without any game disc, `find_bank` reports empty declarations, missing
+/// pressings (singular and plural), and damaged or non-ISO rips joined in
+/// order, and the roster names a bank only for LEGO Chess (#156).
+#[test]
+fn find_bank_reports_missing_and_damaged_rips_without_a_disc() {
+    assert_eq!(bank_err(&[]), "no bank pressings declared");
+    let missing = [
+        EntryImage {
+            pressing: "no-such-pressing-a",
+            ..roster::GM16[0]
+        },
+        EntryImage {
+            pressing: "no-such-pressing-b",
+            ..roster::GM16[0]
+        },
+    ];
+    assert_eq!(
+        bank_err(&missing[..1]),
+        "no rip of the no-such-pressing-a pressing"
+    );
+    assert_eq!(
+        bank_err(&missing),
+        "no rip of the no-such-pressing-a, no-such-pressing-b pressings"
+    );
+    // One non-ISO file (fails to open) and one damaged ISO (fails to read).
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("bank-damaged");
+    std::fs::create_dir_all(dir.join("bad-iso")).expect("dir");
+    std::fs::create_dir_all(dir.join("bad-dir")).expect("dir");
+    std::fs::write(dir.join("bad-iso/bad-iso.iso"), b"not an iso").expect("write");
+    damaged_rip("bank-damaged/bad-dir/bad-dir.iso", 2048, &[20]);
+    let disc_dir: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+    let absent = EntryImage {
+        pressing: "no-such-pressing-a",
+        ..roster::GM16[0]
+    };
+    let bad_open = EntryImage {
+        disc_dir,
+        pressing: "bad-iso",
+        ..roster::GM16[0]
+    };
+    let bad_read = EntryImage {
+        disc_dir,
+        pressing: "bad-dir",
+        ..roster::GM16[0]
+    };
+    let err = bank_err(&[absent, bad_open, bad_read]);
+    assert!(
+        err.contains("the bad-iso rip will not open:")
+            && err.contains("; the bad-dir rip will not give it up:"),
+        "both present-rip failures reported in order: {err}"
+    );
+    // The roster names LEGO Chess's bank, and no other title's.
+    assert_eq!(roster::LEGO_CHESS.bank.len(), 4);
+    for entry in roster::ROSTER
+        .iter()
+        .filter(|e| e.key != roster::LEGO_CHESS.key)
+    {
+        assert!(entry.bank.is_empty(), "{} has no MIDI bank", entry.key);
+    }
+}
+
+/// Roland's bank is found where it lies loose on the player's own disc and
+/// checked by its SHA-256: a rip that is not there, and a place whose file
+/// does not hash to the sha256 it declares, are passed over for the next
+/// place, and said when none holds it (#156).
+#[test]
+fn the_bank_is_found_on_the_first_rip_that_holds_it() {
+    let Some(rip) = testkit::any_rip(&roster::GM16) else {
+        return;
+    };
+    let absent = EntryImage {
+        pressing: "no-such-pressing",
+        ..roster::GM16[0]
+    };
+    let wrong = EntryImage {
+        disc_dir: rip.disc_dir,
+        pressing: rip.pressing,
+        path: rip.path,
+        sha256: "not the bank's",
+        ..roster::GM16[0]
+    };
+    let present = EntryImage {
+        disc_dir: rip.disc_dir,
+        pressing: rip.pressing,
+        path: rip.path,
+        ..roster::GM16[0]
+    };
+    let places = [absent, wrong, present];
+    let (place, bytes) = roster::find_bank(&places).expect("on the present rip");
+    assert_eq!((place.pressing, bytes.len()), (rip.pressing, 3_440_660));
+    let err = bank_err(&places[..2]);
+    assert_eq!(
+        err,
+        format!(
+            "the {} rip holds other bytes at {} (3229b09b9d7d9f3f…)",
+            rip.pressing, rip.path
+        )
+    );
 }

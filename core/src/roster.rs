@@ -16,6 +16,98 @@ pub struct Entry {
     pub image: EntryImage,
     /// The pressing whose audio tracks it plays, when it has any.
     pub red_book: Option<&'static str>,
+    /// Where the General MIDI bank its music is played with may be, the
+    /// first found played; none for a title that plays no MIDI (ADR-0008).
+    pub bank: &'static [EntryImage],
+}
+
+/// Roland's `GM16.DLS`, the bank the Microsoft GS Wavetable SW Synth plays
+/// (ADR-0008), where it lies loose on the player's own discs: byte for byte
+/// the same, with Roland's `GMREADME.TXT` beside it, on both pressings of
+/// LEGO Racers, the disc #156 names, and on both of Rock Raiders, whose
+/// Masterpiece every Rock Raiders player has already ripped. It is read
+/// there, as an entry image is, and never copied out (golden rule 6).
+pub const GM16: [EntryImage; 4] = [
+    gm16(
+        "racers",
+        "masterpiece-racers",
+        "REDIST/DIRECTX6/DIRECTX/GM16.DLS",
+    ),
+    gm16("racers", "racers", "REDIST/DIRECTX6/DIRECTX/GM16.DLS"),
+    gm16(
+        "rock-raiders",
+        "masterpiece-rock-raiders",
+        "DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS",
+    ),
+    gm16(
+        "rock-raiders",
+        "rock-raiders",
+        "DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS",
+    ),
+];
+
+const fn gm16(disc_dir: &'static str, pressing: &'static str, path: &'static str) -> EntryImage {
+    EntryImage {
+        disc_dir,
+        pressing,
+        path,
+        kept: Kept::Loose,
+        sha256: "3229b09b9d7d9f3f4793b0d9b34fe6abc75cfa4a2503c0c90f43ff651ba7f2c0",
+        why: "Roland's General MIDI bank, which the Microsoft GS Wavetable SW Synth plays; \
+              licensed by Roland for use with Microsoft operating system products only, and \
+              the player's own copy",
+    }
+}
+
+/// The first of a bank's places that holds it, and the bank's bytes; or why
+/// none does. A rip that is not there, or whose file will not read or does
+/// not hash to the bank's sha256, is passed over; when none holds the bank,
+/// what each present rip held instead is said.
+///
+/// # Errors
+/// When no place holds the bank: what each rip that is there held instead,
+/// or that none of them is ripped.
+pub fn find_bank(places: &[EntryImage]) -> Result<(&EntryImage, Vec<u8>), String> {
+    let mut held = Vec::new();
+    for place in places {
+        let mut iso = match crate::disc::open_pressing(place.disc_dir, place.pressing) {
+            Ok(iso) => iso,
+            Err(crate::disc::DiscError::Missing(_)) => continue,
+            Err(e) => {
+                held.push(format!("the {} rip will not open: {e}", place.pressing));
+                continue;
+            }
+        };
+        match place.read(&mut iso) {
+            Ok(bytes) => {
+                let got = crate::hash::sha256_hex(&bytes);
+                if got == place.sha256 {
+                    return Ok((place, bytes));
+                }
+                held.push(format!(
+                    "the {} rip holds other bytes at {} ({}…)",
+                    place.pressing,
+                    place.path,
+                    &got[..16]
+                ));
+            }
+            Err(e) => held.push(format!(
+                "the {} rip will not give it up: {e}",
+                place.pressing
+            )),
+        }
+    }
+    if held.is_empty() {
+        return Err(match places {
+            [] => "no bank pressings declared".to_owned(),
+            [only] => format!("no rip of the {} pressing", only.pressing),
+            many => {
+                let pressings: Vec<&str> = many.iter().map(|p| p.pressing).collect();
+                format!("no rip of the {} pressings", pressings.join(", "))
+            }
+        });
+    }
+    Err(held.join("; "))
 }
 
 /// LEGO Rock Raiders, the roster's first title.
@@ -40,6 +132,7 @@ pub const ROCK_RAIDERS: Entry = Entry {
     // pressing carries none, so the music comes off the disc the executable
     // does not (ADR-0006).
     red_book: Some("rock-raiders"),
+    bank: &[],
 };
 
 /// Hot Wheels Stunt Track Driver, the roster's second title.
@@ -58,6 +151,7 @@ pub const HOT_WHEELS: Entry = Entry {
     // The disc carries one data track and no audio tracks: this title's music
     // is in its own files, not on the disc as Red Book audio.
     red_book: None,
+    bank: &[],
 };
 
 /// LEGO Alpha Team, the roster's third title.
@@ -79,6 +173,7 @@ pub const ALPHA_TEAM: Entry = Entry {
     // Neither pressing has an audio track: this title's music is in Audio.pac
     // and Ambient.pac, inside its own cabinet.
     red_book: None,
+    bank: &[],
 };
 
 /// LEGO Island, the roster's fourth title (#112).
@@ -101,6 +196,7 @@ pub const LEGO_ISLAND: Entry = Entry {
     // One data track and no audio tracks: this title's music is in its own
     // scripts and in MIDI it plays itself.
     red_book: None,
+    bank: &[],
 };
 
 /// LEGO Chess, the roster's fifth title (#142).
@@ -123,6 +219,8 @@ pub const LEGO_CHESS: Entry = Entry {
     // One data track and no audio tracks: this title's music is General MIDI
     // in its own files.
     red_book: None,
+    // Its four General MIDI tunes play through the MIDI mapper (#154, #156).
+    bank: &GM16,
 };
 
 /// The roster's titles that have a crate, in the order they were taken: the

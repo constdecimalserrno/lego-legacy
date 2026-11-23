@@ -5,6 +5,27 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+The player's own bank is a declared input, and LEGO Chess's music is heard (#156, ADR-0008).
+
+- `roster::GM16` names Roland's `GM16.DLS` where it lies loose, byte for byte the same with Roland's
+  `GMREADME.TXT` beside it, on the four pressings of the roster that carry it: LEGO Racers'
+  Masterpiece and original (`REDIST/DIRECTX6/DIRECTX/`) and Rock Raiders' (`DIRECTX6/DIRECTX6/DIRECTX/`),
+  each an `EntryImage`, so it is read off the player's own rip as an entry image is, checked by the
+  same sha256, `3229b09b…`, and never copied out.
+- `roster::Entry::bank` says where a title's bank may be: `GM16` for LEGO Chess, nothing for the
+  others. The roster holds it, as it holds a title's image and music pressing, since the launcher
+  says where it is too, and `run::setup` looks it up there by the title's key so no title's own
+  declaration changes. `roster::find_bank` takes the first place that holds it and otherwise says
+  why none does: what each present rip held instead, or that none is ripped.
+- A run's setup opens the synth on it after the install, and its log says which pressing it came
+  from, or why it has no MIDI out. Without the bank #154's answers stand: no device, and no music.
+- The README names the bank, where it lies, and Roland's licence note, which says it is licensed "for
+  use with Microsoft operating system products only", with the fact that the copy played is the
+  player's own; its reading is the player's.
+- `tests/roster.rs` checks empty, missing, damaged and wrong-hash places without needing a disc, and
+  finds the bank on any of the four pressings present (`testkit::any_rip`).
+- No released title has a bank, so none opens a synth, and no released run moves.
+
 LEGO Chess's MIDI stream runs as Windows runs it, on the declared Microsoft GS Wavetable SW Synth
 (#154, ADR-0008). Each call answers as Windows does, from Microsoft's page for it and from Wine's
 `dlls/winmm/winmm.c` and its conformance tests (`dlls/winmm/tests/midi.c`), which pass on Windows,
