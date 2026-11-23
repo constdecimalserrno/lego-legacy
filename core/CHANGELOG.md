@@ -15,7 +15,8 @@ before.
 - WINMM's `midiStreamOpen`, `midiStreamClose`, `midiStreamProperty`, `midiStreamOut`,
   `midiStreamRestart`, `midiStreamPause` and `midiStreamStop`, and `midiOutGetDevCapsA`,
   `midiOutSetVolume`, `midiOutPrepareHeader`, `midiOutUnprepareHeader` and `midiOutReset`, on the
-  MIDI mapper or the synth, with a `CALLBACK_FUNCTION`. A stream opens paused at Windows' 24 ticks
+  MIDI mapper (with device 0 also accepted by `midiStreamOpen`), with a `CALLBACK_FUNCTION`. A
+  stream opens paused at Windows' 24 ticks
   and 500,000 µs a quarter note, and its callback hears `MOM_OPEN` there. It plays each `MIDIEVENT`
   at its delta in ticks at the tempo then in force, a tempo applying to the deltas after it; an event
   marked `MEVT_F_CALLBACK` calls back `MOM_POSITIONCB` with `dwOffset` on it, and a buffer played to
@@ -52,7 +53,9 @@ before.
   sets waking the main thread's wait, the notes heard from the frames they are due at, and the same
   every run; a pause of three tenths of a second holding every event back by that, its note sounding
   through it; stop, reset and close each returning both buffers before their caller goes on, the
-  callback unpreparing each; the mapper's caps; and no device without a bank.
+  callback unpreparing each; `midiOutSetVolume` attenuation and silence; `midiOutReset` stopping
+  playback, fractional tick remainders, and close-then-reopen on the reused player thread; the
+  mapper's caps; and no device without a bank.
 
 AVIFile decodes 16-bit Microsoft Video 1 (`CRAM`, `MSVC`, `WHAM`) streams (#152), written in
 `msv1.rs` from the public 4×4 block format description (skip, solid 1-colour, 2-colour, and

@@ -3393,6 +3393,12 @@ pub(super) fn spawn(
     let stack = ctx.state.heap.alloc(bytes);
     let block = ctx.state.heap.alloc(0x1000);
     if stack == 0 || block == 0 {
+        if stack != 0 {
+            ctx.state.heap.free(stack);
+        }
+        if block != 0 {
+            ctx.state.heap.free(block);
+        }
         return Ok(None);
     }
     let top = stack + bytes;

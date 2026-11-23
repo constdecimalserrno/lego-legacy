@@ -66,6 +66,7 @@ const MHDR_PREPARED: u32 = 2;
 const MHDR_INQUEUE: u32 = 4;
 const MHDR_ISSTRM: u32 = 8;
 const MMSYSERR_BADDEVICEID: u32 = 2;
+const MMSYSERR_INVALHANDLE: u32 = 5;
 const MMSYSERR_INVALPARAM: u32 = 11;
 const MIDIERR_UNPREPARED: u32 = 64;
 const MIDIERR_STILLPLAYING: u32 = 65;
@@ -683,4 +684,332 @@ fn the_mapper_answers_its_caps_as_windows_does() {
         u32::from_le_bytes([caps[48], caps[49], caps[50], caps[51]]),
         9
     );
+}
+
+/// `midiOutSetVolume` attenuates the synth's output from the declared moment
+/// of the call on: `0xFFFF` is unity, `0xFA00` (LEGO Chess's new-player
+/// setting) attenuates by ~2.25 dB, `0x0000` silences it, and the high word
+/// is ignored because the mapper has no `MIDICAPS_LRVOLUME`.
+#[test]
+fn midi_out_set_volume_attenuates_and_silences_the_synth() {
+    std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
+    let mut host = Headless::new();
+    let mut m = Machine::new(&STUB, &mut host).expect("a machine");
+    m.state.mixer.open_synth(Synth::new(bank()));
+
+    let mut main = Code::new(MAIN);
+    let step = |main: &mut Code, m: &mut Machine, dll: &str, name: &str, args: &[Arg]| {
+        main.call(m, dll, name, args).answer();
+    };
+    let wm = "WINMM.dll";
+    let k32 = "KERNEL32.dll";
+    let open = [
+        Imm(HANDLE),
+        Imm(DEVICE),
+        Imm(1),
+        Imm(CALLBACK),
+        Imm(INSTANCE),
+        Imm(CALLBACK_FUNCTION),
+    ];
+    step(&mut main, &mut m, wm, "midiStreamOpen", &open);
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamProperty",
+        &[At(HANDLE), Imm(TIMEDIV), Imm(MIDIPROP_SET_TIMEDIV)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutPrepareHeader",
+        &[At(HANDLE), Imm(HEADERS[0]), Imm(0x40)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamOut",
+        &[At(HANDLE), Imm(HEADERS[0]), Imm(0x40)],
+    );
+    step(&mut main, &mut m, wm, "timeGetTime", &[]);
+    step(&mut main, &mut m, wm, "midiStreamRestart", &[At(HANDLE)]);
+    // Low word 0xFFFF with high word 0 stays at unity.
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(50)]);
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutSetVolume",
+        &[At(HANDLE), Imm(0x0000_ffff)],
+    );
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(50)]);
+    // LEGO Chess's new-player setting: 0xFA00 (-2.25 dB).
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutSetVolume",
+        &[At(HANDLE), Imm(0xfa00_fa00)],
+    );
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(50)]);
+    // Low word 0 with high word 0xFFFF silences the synth.
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutSetVolume",
+        &[At(HANDLE), Imm(0xffff_0000)],
+    );
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(50)]);
+    step(&mut main, &mut m, wm, "midiStreamClose", &[At(HANDLE)]);
+    // Flush the last audio block to the host.
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(100)]);
+    main.call(&mut m, k32, "ExitProcess", &[Imm(0)]);
+
+    let callback = callback(&mut m);
+    let mem = &mut m.arena;
+    for code in [&main, &callback] {
+        mem.write(code.at, &code.bytes).expect("the code fits");
+    }
+    mem.write_u32(DEVICE, MIDI_MAPPER).expect("in the arena");
+    mem.write_u32(TIMEDIV, 8).expect("in the arena");
+    mem.write_u32(TIMEDIV + 4, 192).expect("in the arena");
+    let bytes: Vec<u8> = buffers()[0]
+        .iter()
+        .flatten()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    mem.write(BUFFERS[0], &bytes).expect("in the arena");
+    for (offset, value) in [(0, BUFFERS[0]), (4, 0x100), (8, bytes.len() as u32)] {
+        mem.write_u32(HEADERS[0] + offset, value)
+            .expect("in the arena");
+    }
+    m.cpu.eip = MAIN;
+    m.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
+    let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
+    let finish = m.run(&mut host, &mut log, 50_000_000);
+    assert_eq!(finish.outcome, Outcome::Exited { code: 0 });
+
+    let t0 = m.arena.read_u32(ANSWERS + 16).expect("t0");
+    let left: Vec<i16> = host
+        .audio_blocks
+        .concat()
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    let peak = |from_ms: u32, to_ms: u32| {
+        left[frame(t0 + from_ms) as usize..frame(t0 + to_ms) as usize]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    };
+    let initial = peak(10, 40);
+    let unity = peak(60, 90);
+    let chess = peak(110, 140);
+    let silent = peak(160, 190);
+    assert_eq!(initial, 700, "full ramp peak before volume call");
+    assert_eq!(
+        unity, initial,
+        "0x0000_FFFF keeps unity (high word ignored)"
+    );
+    assert!(
+        (500..600).contains(&chess),
+        "0xFA00 (-2.25 dB) attenuates 700 to ~540, got {chess}"
+    );
+    assert_eq!(silent, 0, "0xFFFF_0000 silences (high word ignored)");
+}
+
+/// `midiOutReset` stops playback so `midiStreamProperty` succeeds and a new
+/// buffer plays without catching up; fractional tick remainders carry across
+/// events without losing nanoseconds; closing a stream invalidates its handle
+/// (checked before header parameters) and lets a second stream open on the
+/// reused player thread.
+#[test]
+fn reset_stops_playback_remainders_carry_and_a_closed_stream_can_reopen() {
+    std::env::set_var("LEGO_LEGACY_RUNS", env!("CARGO_TARGET_TMPDIR"));
+    let mut host = Headless::new();
+    let mut m = Machine::new(&STUB, &mut host).expect("a machine");
+    m.state.mixer.open_synth(Synth::new(bank()));
+
+    let mut main = Code::new(MAIN);
+    let step = |main: &mut Code, m: &mut Machine, dll: &str, name: &str, args: &[Arg]| {
+        main.call(m, dll, name, args).answer();
+    };
+    let wm = "WINMM.dll";
+    let k32 = "KERNEL32.dll";
+    let open = [
+        Imm(HANDLE),
+        Imm(DEVICE),
+        Imm(1),
+        Imm(CALLBACK),
+        Imm(INSTANCE),
+        Imm(CALLBACK_FUNCTION),
+    ];
+    // Open stream 1, check null property pointer refusal, start with empty
+    // queue, wait 100 ms, reset (must stop playback), then set division to 3.
+    step(&mut main, &mut m, wm, "midiStreamOpen", &open);
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamProperty",
+        &[At(HANDLE), Imm(0), Imm(MIDIPROP_SET_TIMEDIV)],
+    );
+    step(&mut main, &mut m, wm, "midiStreamRestart", &[At(HANDLE)]);
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(100)]);
+    step(&mut main, &mut m, wm, "midiOutReset", &[At(HANDLE)]);
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamProperty",
+        &[At(HANDLE), Imm(TIMEDIV), Imm(MIDIPROP_SET_TIMEDIV)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutPrepareHeader",
+        &[At(HANDLE), Imm(HEADERS[0]), Imm(0x40)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamOut",
+        &[At(HANDLE), Imm(HEADERS[0]), Imm(0x40)],
+    );
+    step(&mut main, &mut m, wm, "timeGetTime", &[]);
+    step(&mut main, &mut m, wm, "midiStreamRestart", &[At(HANDLE)]);
+    // 3 ticks at division=3, tempo=300_000 µs -> 300 ms exact (each tick
+    // 100_000_000 ns; with division=3, tempo=1_000_000 -> 333_333_333.333 ns
+    // per tick, 3 ticks = 1_000 ms exact).
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(1100)]);
+    step(&mut main, &mut m, wm, "midiStreamClose", &[At(HANDLE)]);
+    // Old handle is now invalid; handle is checked before header==0 / size==0.
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamOut",
+        &[At(HANDLE), Imm(0), Imm(0)],
+    );
+    // Reopen stream 2 on the reused player thread and play a short buffer.
+    step(&mut main, &mut m, wm, "midiStreamOpen", &open);
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamProperty",
+        &[At(HANDLE), Imm(TIMEDIV), Imm(MIDIPROP_SET_TIMEDIV)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiOutPrepareHeader",
+        &[At(HANDLE), Imm(HEADERS[1]), Imm(0x40)],
+    );
+    step(
+        &mut main,
+        &mut m,
+        wm,
+        "midiStreamOut",
+        &[At(HANDLE), Imm(HEADERS[1]), Imm(0x40)],
+    );
+    step(&mut main, &mut m, wm, "timeGetTime", &[]);
+    step(&mut main, &mut m, wm, "midiStreamRestart", &[At(HANDLE)]);
+    step(&mut main, &mut m, k32, "Sleep", &[Imm(400)]);
+    step(&mut main, &mut m, wm, "midiStreamClose", &[At(HANDLE)]);
+    main.call(&mut m, k32, "ExitProcess", &[Imm(0)]);
+    let answer_count = (main.next - ANSWERS) / 4;
+
+    let callback = callback(&mut m);
+    let mem = &mut m.arena;
+    for code in [&main, &callback] {
+        mem.write(code.at, &code.bytes).expect("the code fits");
+    }
+    mem.write_u32(DEVICE, MIDI_MAPPER).expect("in the arena");
+    mem.write_u32(TIMEDIV, 8).expect("in the arena");
+    mem.write_u32(TIMEDIV + 4, 3).expect("in the arena");
+    let (on, off) = (0x7f_3c_90, 0x00_3c_80);
+    // Three 1-tick steps at 1_000_000 µs / 3 = 333_333_333 + 1/3 ns each ->
+    // 1_000_000_000 ns (1000 ms) exact when remainder carries.
+    let buf0 = vec![
+        event(0, MEVT_TEMPO | 1_000_000),
+        event(0, 0x00_0a_b0),
+        event(0, on),
+        event(1, MEVT_F_CALLBACK | 0x7f_07_b0),
+        event(1, MEVT_F_CALLBACK | 0x7f_07_b0),
+        event(1, off),
+    ];
+    let buf1 = vec![
+        event(0, MEVT_TEMPO | 300_000),
+        event(0, 0x00_0a_b0),
+        event(0, on),
+        event(3, off),
+    ];
+    for (n, events) in [&buf0, &buf1].iter().enumerate() {
+        let bytes: Vec<u8> = events
+            .iter()
+            .flatten()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        mem.write(BUFFERS[n], &bytes).expect("in the arena");
+        for (offset, value) in [(0, BUFFERS[n]), (4, 0x100), (8, bytes.len() as u32)] {
+            mem.write_u32(HEADERS[n] + offset, value)
+                .expect("in the arena");
+        }
+    }
+    m.cpu.eip = MAIN;
+    m.cpu.r[lego_legacy_core::cpu::ESP] = STACK_TOP - 16;
+    let mut log = RunLog::create("stub", Trace::Off).expect("a run directory");
+    let finish = m.run(&mut host, &mut log, 50_000_000);
+    assert_eq!(finish.outcome, Outcome::Exited { code: 0 });
+
+    let word = |at: u32| m.arena.read_u32(at).expect("in the arena");
+    let answers: Vec<u32> = (0..answer_count).map(|n| word(ANSWERS + n * 4)).collect();
+    assert_eq!(answers[0], 0, "first open");
+    assert_eq!(answers[1], MMSYSERR_INVALPARAM, "null property pointer");
+    assert_eq!(answers[4], 0, "midiOutReset");
+    assert_eq!(answers[5], 0, "midiStreamProperty succeeds after reset");
+    assert_eq!(
+        answers[12], MMSYSERR_INVALHANDLE,
+        "closed handle checked before null header"
+    );
+    assert_eq!(answers[13], 0, "second open reuses player thread");
+    let t1 = answers[8];
+    let t2 = answers[17];
+
+    let logged = word(LOGGED);
+    let entries: Vec<(u32, u32, u32)> = (0..logged)
+        .map(|n| {
+            let base = LOG + n * 16;
+            (word(base), word(base + 4), word(base + 8))
+        })
+        .collect();
+    // Stream 1: MOM_OPEN, two fractional MOM_POSITIONCBs at +334 ms and +667 ms
+    // (ceil of 333.333 ms and 666.666 ms), MOM_DONE at exact +1000 ms, MOM_CLOSE.
+    // Stream 2: MOM_OPEN, MOM_DONE at +300 ms, MOM_CLOSE.
+    assert_eq!(
+        entries[1..4],
+        [
+            (MOM_POSITIONCB, HEADERS[0], t1 + 334),
+            (MOM_POSITIONCB, HEADERS[0], t1 + 667),
+            (MOM_DONE, HEADERS[0], t1 + 1000),
+        ],
+        "fractional tick remainders carry to exact +1000 ms"
+    );
+    assert_eq!(entries[4].0, MOM_CLOSE);
+    assert_eq!(entries[5].0, MOM_OPEN);
+    assert_eq!(
+        entries[6],
+        (MOM_DONE, HEADERS[1], t2 + 300),
+        "second stream plays on reused player thread"
+    );
+    assert_eq!(entries[7].0, MOM_CLOSE);
 }
