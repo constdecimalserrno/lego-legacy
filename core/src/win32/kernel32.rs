@@ -93,6 +93,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "HeapDestroy", 1, heap_destroy),
     stdcall("KERNEL32", "HeapAlloc", 3, heap_alloc),
     stdcall("KERNEL32", "GlobalAlloc", 2, global_alloc),
+    stdcall("KERNEL32", "GlobalLock", 1, global_lock),
+    stdcall("KERNEL32", "GlobalUnlock", 1, global_unlock),
     stdcall("KERNEL32", "GlobalFree", 1, global_free),
     stdcall("KERNEL32", "HeapFree", 3, heap_free),
     stdcall("KERNEL32", "HeapReAlloc", 4, heap_realloc),
@@ -387,6 +389,33 @@ fn global_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx,
         &[0, if flags & GMEM_ZEROINIT != 0 { 0x8 } else { 0 }, size],
     )
+}
+
+fn global_lock(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GlobalLock(memory): core only hands out fixed blocks (`GMEM_MOVEABLE` is
+    // a wall), and for `GMEM_FIXED` Windows hands back the handle itself, which
+    // is already the pointer. A null, unknown, or freed handle fails with
+    // `ERROR_INVALID_HANDLE`.
+    let addr = args[0];
+    if addr != 0 && ctx.state.heap.size_of(addr).is_some() {
+        Ok(addr)
+    } else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        Ok(0)
+    }
+}
+
+fn global_unlock(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GlobalUnlock(memory): for `GMEM_FIXED` Windows keeps a lock count of zero
+    // and answers `TRUE`. A null, unknown, or freed handle fails with
+    // `ERROR_INVALID_HANDLE`.
+    let addr = args[0];
+    if addr != 0 && ctx.state.heap.size_of(addr).is_some() {
+        Ok(1)
+    } else {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        Ok(0)
+    }
 }
 
 fn global_free(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {

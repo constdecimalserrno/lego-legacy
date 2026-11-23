@@ -5333,3 +5333,43 @@ fn a_sound_off_the_disc_decodes_through_acm_as_ffmpeg_decodes_it() {
         "dc8f093547adab95c318016c282b0bba80188140e07aab7a895bc798bdc119b6"
     );
 }
+
+/// Fixed blocks from `GlobalAlloc` are already pointers: `GlobalLock` hands
+/// back the address itself, `GlobalUnlock` answers `TRUE` (lock count stays
+/// zero for `GMEM_FIXED`), and null, unknown, or freed handles fail with
+/// `ERROR_INVALID_HANDLE` (#158). LEGO Chess's engine allocator wraps its
+/// working tables with `GlobalAlloc(0x20, ...)` -> `GlobalLock` (`0x0046e9fe`)
+/// and frees them with `GlobalUnlock` -> `GlobalFree` (`0x0046ea2e`).
+#[test]
+fn global_lock_and_unlock_answer_fixed_blocks_and_refuse_invalid_handles() {
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    const GMEM_NODISCARD: u32 = 0x20;
+    let mut m = machine();
+    let block = call(&mut m, "KERNEL32", "GlobalAlloc", &[GMEM_NODISCARD, 0x104])
+        .expect("fixed block allocates");
+    assert_ne!(block, 0);
+
+    // Fixed memory: GlobalLock hands back the block itself, GlobalUnlock TRUE.
+    assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[block]), Ok(block));
+    assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[block]), Ok(1));
+
+    // Null and unknown handles fail with ERROR_INVALID_HANDLE.
+    for bad in [0, 0xdead_beef, block + 4] {
+        m.state.last_error = 0;
+        assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[bad]), Ok(0));
+        assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+
+        m.state.last_error = 0;
+        assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[bad]), Ok(0));
+        assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+    }
+
+    // Freed blocks are refused as invalid handles too.
+    assert_eq!(call(&mut m, "KERNEL32", "GlobalFree", &[block]), Ok(0));
+    m.state.last_error = 0;
+    assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[block]), Ok(0));
+    assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+    m.state.last_error = 0;
+    assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[block]), Ok(0));
+    assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+}

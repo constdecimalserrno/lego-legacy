@@ -5,6 +5,15 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`GlobalLock` and `GlobalUnlock` answer fixed blocks allocated by `GlobalAlloc` (#158), where
+`GMEM_MOVEABLE` remains a wall. As Microsoft's `GlobalLock` and `GlobalUnlock` pages document for
+`GMEM_FIXED`, a live block hands back its own address from `GlobalLock` and `TRUE` (1) from
+`GlobalUnlock`; a null, unknown, or freed handle fails with `ERROR_INVALID_HANDLE` (6) and returns
+zero. LEGO Chess's chess engine wraps its working-table allocations in `GlobalAlloc(0x20, ...)` ->
+`GlobalLock` (`0x0046e9fe`) and frees them with `GlobalUnlock` -> `GlobalFree` (`0x0046ea2e`).
+`core/tests/shims.rs` tests live, null, unknown, and freed handles. No released title calls either
+shim, so no released run moves.
+
 The player's own bank is a declared input, and LEGO Chess's music is heard (#156, ADR-0008).
 
 - `roster::GM16` names Roland's `GM16.DLS` where it lies loose, byte for byte the same with Roland's
