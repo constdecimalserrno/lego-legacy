@@ -5,6 +5,21 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+AVIFile decodes 16-bit Microsoft Video 1 (`CRAM`, `MSVC`, `WHAM`) streams (#152), written in
+`msv1.rs` from the public 4×4 block format description (skip, solid 1-colour, 2-colour, and
+8-colour 2×2-quadrant blocks in 15-bit RGB555, walked bottom-to-top and left-to-right).
+`AVIStreamGetFrameOpen` accepts 16-bit Video 1 streams into plain bottom-up 16-bit or 24-bit DIBs
+and refuses 8-bit Video 1 or non-multiple-of-four dimensions at a named wall. When expanding 15-bit
+RGB555 pixels to a 24-bit BGR DIB, each 5-bit channel is shifted left three bits (`c << 3`),
+matching Windows' `msvidc32` and turning LEGO Chess's six Advisors' `0x4212` RGB555 background into
+the exact `0x808090` chroma key `Lego Chess.exe` checks at `0x00401242` and `0x00401373` (bit
+replication would yield `0x848494` and leave an opaque box). `core/tests/shims.rs` pins first,
+middle and last 24-bit frames of all six Advisors (`admiral`, `baddude`, `blueking`, `pirate`,
+`redking`, `sherriff`) from `MAIN.Z` against FFmpeg's `rgb555le` frames expanded with `c << 3`, as
+well as synthetic skip, 2-colour, 8-colour, solid, dropped-frame and backward-seek cases. Indeo 5's
+decoder and DIB conversion are untouched, and no released title calls `AVIStreamGetFrameOpen` or
+`AVIStreamGetFrame`, so no released run moves.
+
 `TranslateMessage` makes `WM_CHAR` (#157), where it answered zero and posted nothing. A key going
 down that types a character on the declared machine's keyboard has the character posted to the
 title's window with the key-down's `lParam`, and the title's loop takes it next, ahead of the input

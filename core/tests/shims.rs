@@ -3810,6 +3810,413 @@ fn the_intro_movie_decodes_to_its_last_picture_and_its_sound_to_its_end() {
     assert_eq!((at, bytes), (733_515, 2_934_060));
 }
 
+/// A synthetic Microsoft Video 1 movie: `width` by `height`, `bits`-bit
+/// `codec`, one video stream at 30 fps holding `frames`.
+fn video1_movie(width: u32, height: u32, bits: u16, codec: &[u8; 4], frames: &[&[u8]]) -> Vec<u8> {
+    let avih = words(&[
+        33_333,
+        100_000,
+        0,
+        0x10,
+        frames.len() as u32,
+        0,
+        1,
+        4_096,
+        width,
+        height,
+        0,
+        0,
+        0,
+        0,
+    ]);
+    let video = [
+        b"vidsMSVC".to_vec(),
+        words(&[
+            0,
+            0,
+            0,
+            1,
+            30,
+            0,
+            frames.len() as u32,
+            4_096,
+            10_000,
+            0,
+            0,
+            0,
+        ]),
+    ]
+    .concat();
+    let picture = [
+        words(&[40, width, height]),
+        [1u16.to_le_bytes(), bits.to_le_bytes()].concat(),
+        codec.to_vec(),
+        vec![0; 20],
+    ]
+    .concat();
+    let header = riff_list(
+        b"hdrl",
+        &[
+            riff(b"avih", &avih),
+            riff_list(b"strl", &[riff(b"strh", &video), riff(b"strf", &picture)]),
+        ],
+    );
+    let chunks: Vec<Vec<u8>> = frames.iter().map(|f| riff(b"00dc", f)).collect();
+    let movi = riff_list(b"movi", &chunks);
+    riff(b"RIFF", &[b"AVI ".to_vec(), header, movi].concat())
+}
+
+/// Microsoft Video 1 streams through AVIFile (#152): 16-bit CRAM/MSVC/WHAM
+/// decode into 24-bit BGR (`c << 3`, matching LEGO Chess's 0x808090 Advisor
+/// chroma key) and 16-bit RGB555 DIBs, across skip blocks, empty dropped
+/// frames, and backward seeks; 8-bit Video 1 and non-4-multiple sizes are
+/// walls.
+#[test]
+fn video_1_streams_decode_through_avifile_into_24_and_16_bit_dibs() {
+    const WANTED: u32 = DATA + 0x200;
+    let pack = |ws: &[u16]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    // 8x4 = 2 blocks (left, right).
+    // Frame 0: left = solid 0x4212 (Advisor background: r=16,g=16,b=18 -> BGR 0x90,0x80,0x80),
+    //          right = solid 0x7c00 (red: r=31 -> BGR 0,0,0xf8).
+    let f0 = [pack(&[0xc212, 0xfc00]), vec![0, 0]].concat();
+    // Frame 1: skip 1 block (left stays 0x4212), right = solid 0x03e0 (green: g=31 -> BGR 0,0xf8,0).
+    let f1 = [vec![1, 0x84], pack(&[0x83e0]), vec![0, 0]].concat();
+    // Frame 2: empty dropped chunk (keeps frame 1).
+    let f2: Vec<u8> = Vec::new();
+
+    for codec in [b"CRAM", b"MSVC", b"WHAM", b"cram"] {
+        let mut m = machine();
+        m.tree
+            .declare(MOVIE, video1_movie(8, 4, 16, codec, &[&f0, &f1, &f2]));
+        m.arena
+            .write(DATA, format!("{MOVIE}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+            Ok(0)
+        );
+        let video = m.arena.read_u32(OUT).expect("in the arena");
+
+        // 24-bit DIB (as LEGO Chess's Advisors ask for).
+        m.arena
+            .write(WANTED, &dib_header(8, 4, 24, 96))
+            .expect("in the arena");
+        let getter = call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamGetFrameOpen",
+            &[video, WANTED],
+        )
+        .expect("a getter");
+        assert_ne!(getter, 0);
+
+        let dib0 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0");
+        let bits0 = m.arena.slice(dib0 + 40, 96).expect("in the arena").to_vec();
+        assert_eq!(&bits0[0..3], &[0x90, 0x80, 0x80], "0x4212 -> 0x808090 key");
+        assert_eq!(&bits0[12..15], &[0x00, 0x00, 0xf8], "0x7c00 -> red");
+
+        let dib1 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 1]).expect("frame 1");
+        let bits1 = m.arena.slice(dib1 + 40, 96).expect("in the arena").to_vec();
+        assert_eq!(&bits1[0..3], &[0x90, 0x80, 0x80], "skipped left block kept");
+        assert_eq!(&bits1[12..15], &[0x00, 0xf8, 0x00], "right block updated");
+
+        // Empty chunk repeats frame 1.
+        let dib2 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 2]).expect("frame 2");
+        assert_eq!(m.arena.slice(dib2 + 40, 96).expect("in the arena"), bits1);
+
+        // Seeking backward resets cleanly and reproduces frame 0.
+        let dib0_again =
+            call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0 again");
+        assert_eq!(
+            m.arena.slice(dib0_again + 40, 96).expect("in the arena"),
+            bits0
+        );
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIStreamGetFrameClose", &[getter]),
+            Ok(0)
+        );
+    }
+
+    // 16-bit DIB output too.
+    let mut m = machine();
+    m.tree
+        .declare(MOVIE, video1_movie(8, 4, 16, b"CRAM", &[&f0]));
+    m.arena
+        .write(DATA, format!("{MOVIE}\0").as_bytes())
+        .expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+        Ok(0)
+    );
+    let file = m.arena.read_u32(OUT).expect("in the arena");
+    assert_eq!(
+        call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+        Ok(0)
+    );
+    let video = m.arena.read_u32(OUT).expect("in the arena");
+    m.arena
+        .write(WANTED, &dib_header(8, 4, 16, 64))
+        .expect("in the arena");
+    let getter = call(
+        &mut m,
+        "AVIFIL32",
+        "AVIStreamGetFrameOpen",
+        &[video, WANTED],
+    )
+    .expect("16-bit getter");
+    let dib = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0");
+    let bits16 = m.arena.slice(dib + 40, 64).expect("in the arena");
+    assert_eq!(&bits16[0..2], &0x4212u16.to_le_bytes());
+    assert_eq!(&bits16[8..10], &0x7c00u16.to_le_bytes());
+
+    // 8-bit Video 1 and non-4-multiple Video 1 sizes are refused as walls.
+    for (w, h, depth, says) in [(8, 4, 8, "8-bit Video 1"), (6, 4, 16, "multiple of four")] {
+        let mut m = machine();
+        m.tree
+            .declare(MOVIE, video1_movie(w, h, depth, b"CRAM", &[&f0]));
+        m.arena
+            .write(DATA, format!("{MOVIE}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+            Ok(0)
+        );
+        let video = m.arena.read_u32(OUT).expect("in the arena");
+        m.arena
+            .write(WANTED, &dib_header(w, h, 24, 0))
+            .expect("in the arena");
+        let wall = call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamGetFrameOpen",
+            &[video, WANTED],
+        );
+        assert!(
+            matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains(says)),
+            "{w}x{h} {depth}-bit: {wall:?}"
+        );
+    }
+}
+
+/// LEGO Chess's six Advisors, read out of MAIN.Z off the disc, decoded through
+/// AVIFile as 128x128 24-bit DIBs (#152).
+///
+/// The pinned digests come from FFmpeg (`ffmpeg -i <advisor>.avi -f rawvideo
+/// -pix_fmt rgb555le -`) turned into bottom-up 24-bit BGR with `c << 3`
+/// channel expansion, which turns the Advisors' 0x4212 RGB555 background into
+/// the exact 0x808090 chroma key `Lego Chess.exe` checks at 0x00401242.
+#[test]
+fn the_advisors_decode_through_avifile_off_the_disc() {
+    const WANTED: u32 = DATA + 0x200;
+    const DIB_BYTES: usize = 128 * 128 * 3;
+    let image = &roster::LEGO_CHESS.image;
+    if !testkit::rips(image) {
+        return;
+    }
+    let mut iso = disc::open_pressing(image.disc_dir, image.pressing).expect("the pressing opens");
+    let main_z = iso.read("MAIN.Z").expect("MAIN.Z reads");
+    let archive = lego_legacy_core::is3::Archive::open(&main_z).expect("MAIN.Z opens");
+
+    type Advisor<'a> = (&'a str, u32, [(u32, &'a str); 3]);
+    let cases: &[Advisor<'_>] = &[
+        (
+            "admiral.avi",
+            153,
+            [
+                (
+                    0,
+                    "f96182fc3fae959295c6bcced332aa32b9736e23fd6486ac55b5134079227d28",
+                ),
+                (
+                    76,
+                    "7b4011e870440a66cde14544982ebd62d7a753a8233d7b2819659d4848407fdd",
+                ),
+                (
+                    152,
+                    "c8e1b240502482f1566e14c10059e55d0ae2fcfa2b208bd873c970f44584cfb2",
+                ),
+            ],
+        ),
+        (
+            "baddude.avi",
+            145,
+            [
+                (
+                    0,
+                    "79ad26b8de19f87002c1b0a2ea9a83c35adb0ded1c486d8d803d5c8f7a318534",
+                ),
+                (
+                    72,
+                    "f36505d94117af95109d674ec987d1e1d7be3e243841c0983503402c6e661497",
+                ),
+                (
+                    144,
+                    "0074e5d59ac5fb96d6fb4c16d53b2bb6ed3b179fa314d73d8f9c8fe207a4a828",
+                ),
+            ],
+        ),
+        (
+            "blueking.avi",
+            161,
+            [
+                (
+                    0,
+                    "c01f3cd0c15dddc8948fc46eb88be2e50608a84a7b67ca1acd127ede8bd247f3",
+                ),
+                (
+                    80,
+                    "b615bd00f387749044cc0f6edf13690c622a50d3a9daed0824abb5eaecbad176",
+                ),
+                (
+                    160,
+                    "45c79762935a6ac1c952f05e15b3abf2f3d30ad9a6ccee1c40d028cdfee5e187",
+                ),
+            ],
+        ),
+        (
+            "pirate.avi",
+            137,
+            [
+                (
+                    0,
+                    "98655a829137cf8f6d8813ba5bc7c7413195bfee0590d35322a7816bd8c44f86",
+                ),
+                (
+                    68,
+                    "8b409c747dc900dfb543bf9248c92f8032c103f930a15c347b259b1932af29a2",
+                ),
+                (
+                    136,
+                    "157a9a7dc0b7f62842bf04e40e8ecebbb816bbe7c2cfacb03838b967f4ac5c16",
+                ),
+            ],
+        ),
+        (
+            "redking.avi",
+            161,
+            [
+                (
+                    0,
+                    "2e6b00010cd81a3f825a7ba27c65f741c7cc36ff3e82746ae66493c3d850fafe",
+                ),
+                (
+                    80,
+                    "43f10d05be00a5779b68d9bdacced3c628e38922d7dcc29a32b40d8c9b173da2",
+                ),
+                (
+                    160,
+                    "7f9a91b54cf50570876a72528cd860bcaf822135655f3accfeeabc0a6d0ea20f",
+                ),
+            ],
+        ),
+        (
+            "sherriff.avi",
+            155,
+            [
+                (
+                    0,
+                    "ec7ba76aef68996c7bd46708f067e2d78072e587482e1449644437629e836444",
+                ),
+                (
+                    77,
+                    "025df27694b1653b06925a0ec529c6dd1764316a0cb18d576737bd759bdbfe4b",
+                ),
+                (
+                    154,
+                    "5dcffd67f74855795b2746773b4c940e4f7553a6cef749b6f70987afb75bea5e",
+                ),
+            ],
+        ),
+    ];
+
+    let mut m = machine();
+    for &(name, frames, pinned) in cases {
+        let guest_path = format!("C:\\STUB\\{name}");
+        let bytes = archive
+            .read(&main_z, &format!("Advisors\\{name}"))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        m.tree.declare(&guest_path, bytes);
+        m.arena
+            .write(DATA, format!("{guest_path}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0),
+            "{name}"
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+            Ok(0),
+            "{name}"
+        );
+        let video = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIStreamLength", &[video]),
+            Ok(frames),
+            "{name}"
+        );
+        m.arena
+            .write(WANTED, &dib_header(128, 128, 24, DIB_BYTES as u32))
+            .expect("in the arena");
+        let getter = call(
+            &mut m,
+            "AVIFIL32",
+            "AVIStreamGetFrameOpen",
+            &[video, WANTED],
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_ne!(getter, 0, "{name}");
+
+        let fetch = |m: &mut Machine, n: u32| -> Vec<u8> {
+            let dib = call(m, "AVIFIL32", "AVIStreamGetFrame", &[getter, n]).expect("frame");
+            assert_ne!(dib, 0, "{name} frame {n}");
+            m.arena
+                .slice(dib + 40, DIB_BYTES)
+                .expect("in the arena")
+                .to_vec()
+        };
+        for (frame_idx, expected_hash) in pinned {
+            let bits = fetch(&mut m, frame_idx);
+            assert_eq!(
+                hash::sha256_hex(&bits),
+                expected_hash,
+                "{name} frame {frame_idx}"
+            );
+            // Background chroma key (0x808090 as BGR [0x90, 0x80, 0x80]) and
+            // non-key foreground pixels are both present.
+            let key_pixels = bits
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .filter(|p| **p == [0x90, 0x80, 0x80])
+                .count();
+            assert!(
+                key_pixels > 1_000 && key_pixels < 16_384,
+                "{name} frame {frame_idx}: {key_pixels} key pixels"
+            );
+        }
+        // Loop back to frame 0 and confirm identical bytes.
+        let looped = fetch(&mut m, 0);
+        assert_eq!(hash::sha256_hex(&looped), pinned[0].1, "{name} loop");
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIStreamGetFrameClose", &[getter]),
+            Ok(0),
+            "{name}"
+        );
+    }
+}
+
 /// `DDSCAPS_*` the surface tests ask with (ddraw.h).
 const TEXTURE: u32 = 0x0000_1000;
 const SYSTEMMEMORY: u32 = 0x0000_0800;

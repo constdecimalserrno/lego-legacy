@@ -21,6 +21,7 @@ pub mod is3;
 pub mod iv50;
 pub mod loader;
 pub mod machine;
+pub mod msv1;
 pub mod pe;
 pub mod png;
 pub mod raster;

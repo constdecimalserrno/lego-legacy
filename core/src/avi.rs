@@ -2,7 +2,7 @@
 //! chunks are.
 //!
 //! Byte in, structure out. What is inside a stream is its codec's business
-//! ([`crate::iv50`] for the roster's video).
+//! ([`crate::iv50`] and [`crate::msv1`] for the roster's video).
 
 use crate::pe::{u16_at, u32_at};
 use std::fmt;
@@ -84,6 +84,12 @@ impl Stream {
     #[must_use]
     pub fn compression(&self) -> [u8; 4] {
         self.format_u32(16).to_le_bytes()
+    }
+
+    /// A video stream's bit depth, from its `BITMAPINFOHEADER`.
+    #[must_use]
+    pub fn bit_count(&self) -> u16 {
+        u16_at(&self.format, 14).unwrap_or(0)
     }
 
     /// How many bytes one of its samples is: for a sound, its format's

@@ -7,7 +7,7 @@
 //! streams and reads their headers and formats, and takes each frame as a
 //! DIB, which its DirectX plugin draws with DrawDib on its back buffer's
 //! device context. The file is read by [`crate::avi`], its pictures by
-//! [`crate::iv50`].
+//! [`crate::iv50`] and [`crate::msv1`].
 //! Its handles are the COM objects Windows hands out, with
 //! every method of their own tables a wall, so a title that calls through
 //! one stops at a name; the C API is what is written. Every other entry
@@ -120,6 +120,12 @@ pub static GET_FRAME: Interface = Interface {
 
 pub static INTERFACES: &[&Interface] = &[&AVI_FILE, &AVI_STREAM, &GET_FRAME];
 
+/// The video decoder and picture a frame getter holds across frames.
+enum Codec {
+    Iv50(Box<crate::iv50::Decoder>, crate::iv50::Picture),
+    Video1(crate::msv1::Picture),
+}
+
 /// What `AVIStreamGetFrameOpen` made: the stream it decodes, its picture so
 /// far, and the DIB in guest memory each frame is handed back in.
 pub struct Getter {
@@ -129,8 +135,7 @@ pub struct Getter {
     dib: u32,
     /// Sixteen bits a pixel, which is 555, or 24.
     bits: u16,
-    decoder: crate::iv50::Decoder,
-    picture: crate::iv50::Picture,
+    codec: Codec,
     /// The last frame decoded into the picture, which the DIB holds.
     decoded: Option<usize>,
 }
@@ -732,11 +737,25 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let name = file.name.clone();
     let codec = s.compression();
     let (width, height) = s.picture_size();
-    if !codec.eq_ignore_ascii_case(b"IV50") {
+    let is_iv50 = codec.eq_ignore_ascii_case(b"IV50");
+    let is_video1 = codec.eq_ignore_ascii_case(b"CRAM")
+        || codec.eq_ignore_ascii_case(b"MSVC")
+        || codec.eq_ignore_ascii_case(b"WHAM");
+    if !is_iv50 && !is_video1 {
         return Err(Stop::NotWritten {
             what: format!(
                 "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} is {}, which nothing here decodes",
                 String::from_utf8_lossy(&codec)
+            ),
+            caller: 0,
+        });
+    }
+    if is_video1 && s.bit_count() != 16 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} is {}-bit Video 1, which nothing here \
+                 decodes",
+                s.bit_count()
             ),
             caller: 0,
         });
@@ -803,6 +822,17 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if word(20) == 0 {
         header[20..24].copy_from_slice(&image.to_le_bytes());
     }
+    let codec = if is_iv50 {
+        Codec::Iv50(Box::default(), crate::iv50::Picture::default())
+    } else {
+        let picture = crate::msv1::Picture::new(width as usize, height as usize).map_err(|e| {
+            Stop::NotWritten {
+                what: format!("AVIFIL32.dll!AVIStreamGetFrameOpen: {name}: {e}"),
+                caller: 0,
+            }
+        })?;
+        Codec::Video1(picture)
+    };
     let dib = ctx.state.heap.alloc(DIB_HEADER_BYTES + image);
     if dib == 0 {
         return Err(too_big());
@@ -819,8 +849,7 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             stream: index,
             dib,
             bits,
-            decoder: crate::iv50::Decoder::new(),
-            picture: crate::iv50::Picture::default(),
+            codec,
             decoded: None,
         },
     );
@@ -857,42 +886,58 @@ fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(getter.dib);
     }
     // ponytail: a frame before the last one decoded starts again from the
-    // first. #152's Advisors loop back; decoding on from the nearest key
-    // frame `idx1` marks is the way past.
+    // first. #152's Advisors loop back; all 912 of their frames are keyframes,
+    // and decoding from 0 takes well under a millisecond, so `idx1` keyframe
+    // seeking is deferred unless profiling shows a need.
     if getter.decoded.is_some_and(|last| position < last) {
-        getter.decoder = crate::iv50::Decoder::new();
-        getter.picture = crate::iv50::Picture::default();
+        match &mut getter.codec {
+            Codec::Iv50(decoder, picture) => {
+                **decoder = crate::iv50::Decoder::new();
+                *picture = crate::iv50::Picture::default();
+            }
+            Codec::Video1(picture) => picture.clear(),
+        }
         getter.decoded = None;
     }
     let from = getter.decoded.map_or(0, |last| last + 1);
     for (n, &(start, len)) in chunks.iter().enumerate().take(position + 1).skip(from) {
         // An empty chunk is a dropped frame, which repeats the last.
         if len > 0 {
-            getter
-                .decoder
-                .decode(&file.bytes[start..start + len], &mut getter.picture)
-                .map_err(|e| Stop::NotWritten {
-                    what: format!(
-                        "AVIFIL32.dll!AVIStreamGetFrame: frame {n} of {}: {e}",
-                        file.name
-                    ),
-                    caller: 0,
-                })?;
+            let chunk = &file.bytes[start..start + len];
+            let result = match &mut getter.codec {
+                Codec::Iv50(decoder, picture) => decoder
+                    .decode(chunk, picture)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                Codec::Video1(picture) => picture.decode(chunk).map_err(|e| e.to_string()),
+            };
+            result.map_err(|e| Stop::NotWritten {
+                what: format!(
+                    "AVIFIL32.dll!AVIStreamGetFrame: frame {n} of {}: {e}",
+                    file.name
+                ),
+                caller: 0,
+            })?;
         }
         getter.decoded = Some(n);
     }
-    let (width, height) = s.picture_size();
-    let picture = &getter.picture;
-    if (picture.width, picture.height) != (width as usize, height as usize) {
-        return Err(Stop::NotWritten {
-            what: format!(
-                "AVIFIL32.dll!AVIStreamGetFrame: frame {position} of {} is {}x{} in a {width}x{height} movie",
-                file.name, picture.width, picture.height
-            ),
-            caller: 0,
-        });
-    }
-    let bits = dib_bits(picture, getter.bits);
+    let bits = match &getter.codec {
+        Codec::Iv50(_, picture) => {
+            let (width, height) = s.picture_size();
+            if (picture.width, picture.height) != (width as usize, height as usize) {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "AVIFIL32.dll!AVIStreamGetFrame: frame {position} of {} is {}x{} in a \
+                         {width}x{height} movie",
+                        file.name, picture.width, picture.height
+                    ),
+                    caller: 0,
+                });
+            }
+            dib_bits(picture, getter.bits)
+        }
+        Codec::Video1(picture) => picture.to_dib_bits(getter.bits),
+    };
     let dib = getter.dib;
     ctx.mem
         .write(dib + DIB_HEADER_BYTES, &bits)
