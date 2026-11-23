@@ -951,17 +951,25 @@ const WITHOUT_A_BANK: Title = Title {
     ..CHESS
 };
 
-/// Where a run saved a file, as its log says it went: once, so what is there
-/// at the end of the run is what it wrote then.
-fn saved(ran: &testkit::Ran, name: &str) -> std::path::PathBuf {
-    let mut written = ran
+/// Where a run saved a file, as its log says it went: `writes` times to one
+/// path, so what is there at the end of the run is what it wrote.
+fn saved_times(ran: &testkit::Ran, name: &str, writes: usize) -> std::path::PathBuf {
+    let paths: Vec<&str> = ran
         .log
         .lines()
-        .filter(|l| l.starts_with("file written") && l.contains(name));
-    let line = written.next().unwrap_or_else(|| panic!("{name} is saved"));
-    assert!(written.next().is_none(), "{name} is saved once");
-    let (_, at) = line.rsplit_once(", to ").expect("where it went");
-    at.into()
+        .filter(|l| l.starts_with("file written") && l.contains(name))
+        .map(|l| l.rsplit_once(", to ").expect("where it went").1)
+        .collect();
+    assert_eq!(paths.len(), writes, "{name} is saved {writes} time(s)");
+    assert!(
+        paths.iter().all(|p| *p == paths[0]),
+        "{name} goes to one path"
+    );
+    paths[0].into()
+}
+
+fn saved(ran: &testkit::Ran, name: &str) -> std::path::PathBuf {
+    saved_times(ran, name, 1)
 }
 
 /// Past the intro, the bumper, the New Player form and the throne room draw
@@ -1139,25 +1147,29 @@ fn the_room_is_made_and_presented(ran: &testkit::Ran) {
     assert!(!silence.is_empty() && silence.iter().all(|r| *r == 0.0));
 }
 
-/// The first flip from the throne room on whose mix is not silent, and the
-/// hash of the mix from there on.
-fn throne_room_mix(ran: &testkit::Ran) -> (Option<u64>, String) {
-    let throne_mix: Vec<(&Vec<i16>, u64)> = ran
+/// The first flip from `from` on whose mix is not silent, and the hash of the
+/// mix from there on.
+fn mix_from(ran: &testkit::Ran, from: u64) -> (Option<u64>, String) {
+    let part: Vec<(&Vec<i16>, u64)> = ran
         .host
         .audio_blocks
         .iter()
         .zip(ran.host.audio_flips.iter().copied())
-        .filter(|(_, flip)| *flip >= THRONE_ROOM)
+        .filter(|(_, flip)| *flip >= from)
         .collect();
-    let onset = throne_mix
+    let onset = part
         .iter()
         .find(|(block, _)| block.iter().any(|s| *s != 0))
         .map(|(_, flip)| *flip);
-    let mix: Vec<u8> = throne_mix
+    let mix: Vec<u8> = part
         .iter()
         .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
         .collect();
     (onset, hash::sha256_hex(&mix))
+}
+
+fn throne_room_mix(ran: &testkit::Ran) -> (Option<u64>, String) {
+    mix_from(ran, THRONE_ROOM)
 }
 
 #[test]
@@ -1281,8 +1293,9 @@ fn two_players_play_scholars_mate_with_capture_cartoon_to_checkmate() {
         .assert_logged("flip 4250 cursor 11473961220 640x480x16")
         .assert_logged("flip 4295 cursor 11651873111 640x480x16")
         .assert_logged("end exited 0 cursor 11685933862 flips 4311 declared-ms 109017");
-    // Three MIDI opens: boot init (tune.mid), Western match (wtune.mid), and
-    // throne room return (tune.mid).
+    // Three MIDI opens, none refused: boot init (tune.mid), Western match
+    // (wtune.mid), and throne room return (tune.mid).
+    assert_eq!(ran.log.matches("midi stream open answered").count(), 3);
     assert_eq!(ran.log.matches("midi stream open answered 0").count(), 3);
     // 27 menu/throne-room sounds + 2 Western board + 12 capture cartoon stereo
     // effects + 1 checkmate fanfare + 12 throne room re-entry.
@@ -1313,7 +1326,6 @@ fn two_players_play_scholars_mate_with_capture_cartoon_to_checkmate() {
         ),
     ] {
         let frame = ran.host.frame(flip).expect("presented");
-        assert!(!frame.pixels.is_empty(), "flip {flip} is kept");
         assert_eq!(hash::sha256_hex(&frame.pixels), pinned, "flip {flip}");
         let shot = ran.dir.join(format!("shots/{flip:010}.png"));
         assert!(shot.is_file(), "{} is written", shot.display());
@@ -1329,17 +1341,9 @@ fn two_players_play_scholars_mate_with_capture_cartoon_to_checkmate() {
             "{label} is heard"
         );
     }
-    let game_mix: Vec<u8> = ran
-        .host
-        .audio_blocks
-        .iter()
-        .zip(ran.host.audio_flips.iter().copied())
-        .filter(|(_, flip)| *flip >= BOARD_READY)
-        .flat_map(|(block, _)| block.iter().flat_map(|s| s.to_le_bytes()))
-        .collect();
+    let (_, game_mix) = mix_from(ran, BOARD_READY);
     assert_eq!(
-        hash::sha256_hex(&game_mix),
-        "92bfd3351f48a6159f792c34d8a528f885d4c1c49fa8dc57b0e735439e07126d",
+        game_mix, "92bfd3351f48a6159f792c34d8a528f885d4c1c49fa8dc57b0e735439e07126d",
         "the Western match, capture cartoon, checkmate fanfare and throne-room return mix"
     );
 }
@@ -1369,22 +1373,11 @@ fn the_checkmate_route_replays_to_the_same_machine_every_time() {
             && first.host.audio_flips == second.host.audio_flips,
         "and what it mixed"
     );
-    for (name, writes) in [("prof1.lcp", 2usize), ("1save.lcs", 1usize)] {
-        let path_of = |ran: &testkit::Ran| -> std::path::PathBuf {
-            let paths: Vec<&str> = ran
-                .log
-                .lines()
-                .filter(|l| l.starts_with("file written") && l.contains(name))
-                .map(|l| l.rsplit_once(", to ").expect("where it went").1)
-                .collect();
-            assert_eq!(paths.len(), writes, "{name} is saved {writes} time(s)");
-            assert!(
-                paths.iter().all(|p| *p == paths[0]),
-                "{name} goes to one path"
-            );
-            paths[0].into()
-        };
-        let (one, two) = (path_of(first), path_of(second));
+    for (name, writes) in [("prof1.lcp", 2), ("1save.lcs", 1)] {
+        let (one, two) = (
+            saved_times(first, name, writes),
+            saved_times(second, name, writes),
+        );
         assert_ne!(one, two, "two replays, two files");
         assert!(
             std::fs::read(&one).expect("first save is there")
@@ -1398,65 +1391,51 @@ fn the_checkmate_route_replays_to_the_same_machine_every_time() {
 /// Not a committed route: the computer's replies depend on `srand(time(NULL))`
 /// at engine init (`0x0046b3a3`) and the CRT `rand()` shared with animations,
 /// so a core change shifting instruction counts can change which reply the
-/// engine picks. White plays `1. e4`, `2. Nf3`, `3. Nc3` (on ranks 1-4) and
-/// the test verifies that the Black half of the board (ranks 5-8) changes
+/// engine picks. White plays `1. e3`, `2. Nf3`, `3. d3` (all staying on ranks
+/// 1-3 so moves 1 and 2 cannot be captured and no White piece projects into
+/// ranks 5-8), and the test verifies both that each White origin square vacates
+/// (proving Black's prior reply returned the turn) and that ranks 5-8 change
 /// after each of the three moves, without pinning fragile engine-move hashes.
 #[test]
 fn a_quick_game_against_the_computer_plays_three_replies_without_a_wall() {
-    if !scratch() || testkit::any_rip(&roster::GM16).is_none() {
+    if !scratch() {
         return;
     }
-    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("vs-computer-158.route");
+    let prefix = include_str!("../routes/throne-room.route")
+        .strip_suffix("flip 470 close\n")
+        .expect("throne-room.route ends on flip 470 close");
+    let route = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vs-computer-158-{}.route", std::process::id()));
     std::fs::write(
         &route,
-        concat!(
-            "#lego-legacy-route 1\n",
-            "flip 290 key Space down\n",
-            "flip 290 poll 300 key Space up\n",
-            "flip 300 key Space down\n",
-            "flip 300 poll 300 key Space up\n",
-            "flip 320 key LeftShift down\n",
-            "flip 321 key A down\n",
-            "flip 324 key A up\n",
-            "flip 325 key LeftShift up\n",
-            "flip 328 key D down\n",
-            "flip 331 key D up\n",
-            "flip 334 key A down\n",
-            "flip 337 key A up\n",
-            "flip 345 move 576 420\n",
-            "flip 350 down\n",
-            "flip 350 poll 300 up\n",
-            "flip 390 down\n",
-            "flip 390 poll 300 up\n",
-            "flip 405 move 385 285\n",
-            "flip 430 down\n",
-            "flip 431 up\n",
-            "flip 435 move 590 410\n",
-            "flip 440 down\n",
-            "flip 440 poll 300 up\n",
-            "flip 555 move 356 308\n",
-            "flip 560 down\n",
-            "flip 563 up\n",
-            "flip 568 move 351 241\n",
-            "flip 573 down\n",
-            "flip 576 up\n",
-            "flip 810 move 511 349\n",
-            "flip 815 down\n",
-            "flip 818 up\n",
-            "flip 823 move 419 272\n",
-            "flip 828 down\n",
-            "flip 831 up\n",
-            "flip 1260 move 129 349\n",
-            "flip 1265 down\n",
-            "flip 1268 up\n",
-            "flip 1273 move 221 272\n",
-            "flip 1278 down\n",
-            "flip 1281 up\n",
+        format!(
+            "{prefix}\
+flip 435 move 590 410\n\
+flip 440 down\n\
+flip 440 poll 300 up\n\
+flip 555 move 356 308\n\
+flip 560 down\n\
+flip 563 up\n\
+flip 568 move 353 272\n\
+flip 573 down\n\
+flip 576 up\n\
+flip 850 move 511 349\n\
+flip 855 down\n\
+flip 858 up\n\
+flip 863 move 419 272\n\
+flip 868 down\n\
+flip 871 up\n\
+flip 1300 move 284 308\n\
+flip 1305 down\n\
+flip 1308 up\n\
+flip 1313 move 287 272\n\
+flip 1318 down\n\
+flip 1321 up\n"
         ),
     )
     .expect("scratch route writes");
-    const KEPT: [u64; 4] = [550, 800, 1250, 1749];
-    const BUDGET: u64 = 8_100_000_000;
+    const KEPT: [u64; 4] = [550, 840, 1290, 1790];
+    const BUDGET: u64 = 9_500_000_000;
     let cli = Cli {
         route: Some(route),
         ..Cli::default()
@@ -1475,12 +1454,27 @@ fn a_quick_game_against_the_computer_plays_three_replies_without_a_wall() {
     );
     ran.assert_logged("movie Advisors\\sherriff.avi opened through AVIFile: 1 streams")
         .assert_logged("movie Advisors\\baddude.avi opened through AVIFile: 1 streams");
-    // White's three moves (e2-e4, Ng1-f3, Nb1-c3) stay on ranks 1-4; ranks
-    // 5-8 (y 155..238) change only as the computer moves its pieces.
-    let black_side = (90, 155, 550, 238);
-    for (reply, pair) in KEPT.windows(2).enumerate() {
+    // White's three moves (e2-e3, Ng1-f3, d2-d3) stay on ranks 1-3 (y >= 272);
+    // ranks 5-8 (y 155..220, strictly above rank 4's border) change only as the
+    // computer moves its pieces, and each White origin square vacates only once
+    // the computer's previous reply has returned the turn.
+    let black_side = (90, 155, 550, 220);
+    let white_origins = [
+        ("e2", (330, 285, 382, 330)),
+        ("g1", (485, 325, 538, 372)),
+        ("d2", (258, 285, 310, 330)),
+    ];
+    for (reply, (pair, (square, origin))) in KEPT.windows(2).zip(white_origins).enumerate() {
         let before = ran.host.frame(pair[0]).expect("before reply");
         let after = ran.host.frame(pair[1]).expect("after reply");
+        let vacated = testkit::differing(before, after, origin);
+        assert!(
+            vacated > 200,
+            "White move {} did not vacate {square}: only {vacated} pixels changed (flips {} -> {})",
+            reply + 1,
+            pair[0],
+            pair[1],
+        );
         let changed = testkit::differing(before, after, black_side);
         assert!(
             changed > 500,

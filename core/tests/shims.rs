@@ -5353,23 +5353,17 @@ fn global_lock_and_unlock_answer_fixed_blocks_and_refuse_invalid_handles() {
     assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[block]), Ok(block));
     assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[block]), Ok(1));
 
-    // Null and unknown handles fail with ERROR_INVALID_HANDLE.
+    let refused = |m: &mut lego_legacy_core::machine::Machine, bad: u32| {
+        for name in ["GlobalLock", "GlobalUnlock"] {
+            m.state.last_error = 0;
+            assert_eq!(call(m, "KERNEL32", name, &[bad]), Ok(0));
+            assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+        }
+    };
+    // Null, unknown, interior, and freed handles fail with ERROR_INVALID_HANDLE.
     for bad in [0, 0xdead_beef, block + 4] {
-        m.state.last_error = 0;
-        assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[bad]), Ok(0));
-        assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
-
-        m.state.last_error = 0;
-        assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[bad]), Ok(0));
-        assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+        refused(&mut m, bad);
     }
-
-    // Freed blocks are refused as invalid handles too.
     assert_eq!(call(&mut m, "KERNEL32", "GlobalFree", &[block]), Ok(0));
-    m.state.last_error = 0;
-    assert_eq!(call(&mut m, "KERNEL32", "GlobalLock", &[block]), Ok(0));
-    assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
-    m.state.last_error = 0;
-    assert_eq!(call(&mut m, "KERNEL32", "GlobalUnlock", &[block]), Ok(0));
-    assert_eq!(m.state.last_error, ERROR_INVALID_HANDLE);
+    refused(&mut m, block);
 }

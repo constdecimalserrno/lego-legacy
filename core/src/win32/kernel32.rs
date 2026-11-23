@@ -374,8 +374,8 @@ pub(super) fn heap_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn global_alloc(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // GlobalAlloc(flags, bytes). Fixed memory is an address, which is what a
-    // title that never imports GlobalLock asks for; GMEM_ZEROINIT zeroes it.
+    // GlobalAlloc(flags, bytes). Fixed memory is an address; GMEM_ZEROINIT
+    // zeroes it. Moveable memory (`GMEM_MOVEABLE`) stays a wall.
     const GMEM_MOVEABLE: u32 = 0x2;
     const GMEM_ZEROINIT: u32 = 0x40;
     let (flags, size) = (args[0], args[1]);
@@ -397,7 +397,7 @@ fn global_lock(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // is already the pointer. A null, unknown, or freed handle fails with
     // `ERROR_INVALID_HANDLE`.
     let addr = args[0];
-    if addr != 0 && ctx.state.heap.size_of(addr).is_some() {
+    if ctx.state.heap.size_of(addr).is_some() {
         Ok(addr)
     } else {
         ctx.state.last_error = ERROR_INVALID_HANDLE;
@@ -409,8 +409,7 @@ fn global_unlock(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GlobalUnlock(memory): for `GMEM_FIXED` Windows keeps a lock count of zero
     // and answers `TRUE`. A null, unknown, or freed handle fails with
     // `ERROR_INVALID_HANDLE`.
-    let addr = args[0];
-    if addr != 0 && ctx.state.heap.size_of(addr).is_some() {
+    if ctx.state.heap.size_of(args[0]).is_some() {
         Ok(1)
     } else {
         ctx.state.last_error = ERROR_INVALID_HANDLE;

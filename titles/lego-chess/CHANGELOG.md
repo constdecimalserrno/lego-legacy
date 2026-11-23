@@ -344,8 +344,9 @@ samples across a match (15 UI/room, 12 throne room, 2 Western board, 12 capture 
 1 checkmate fanfare, 12 throne room re-entry) as 2D `IDirectSoundBuffer` voices mixed alongside the
 GS Wavetable synth.
 
-Against the computer, a Quick Game plays three replies (`1. e4`, `2. Nf3`, `3. Nc3` answered on
-ranks 5-8) with no wall, covered by its own test rather than a committed route. At engine init
+Against the computer, a Quick Game plays three replies (`1. e3`, `2. Nf3`, `3. d3`, all staying on
+ranks 1-3 so moves 1 and 2 cannot trigger a capture cartoon, answered by Black on ranks 5-8) with
+no wall, covered by its own test rather than a committed route. At engine init
 (0x0046B3A3 -> 0x0046EEFF) the engine seeds the CRT LCG (`srand(time(NULL))`, 1-second resolution on
 the declared clock), and each computer turn (0x00466F52) draws from that same CRT `rand()` — shared
 with 3D piece and Advisor animations — playing a random legal move before iterative deepening
