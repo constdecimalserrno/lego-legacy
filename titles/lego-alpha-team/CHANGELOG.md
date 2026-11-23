@@ -105,7 +105,7 @@ handed a space after Space, and an escape after the Escape a click in its intro 
 handler of its own (0x00404B10), which answers that it is not its, and hands each to
 `DefWindowProcA`. Each of its runs that presses one, `menu.route`, `select-adventure.route`,
 `first-mission.route` and the two clicks in the intro, ends at the same cursor, flips and declared
-time with another digest. The move awaits the maintainer's blessing.
+time with another digest. The maintainer blessed the move on 2026-11-23.
 
 ## 1.0.0 — 2026-10-18
 

@@ -16,7 +16,7 @@ LEGO Chess's New Player form takes a name this way (0x0045C746).
   alphabet, which the layout leaves to Windows, as Wine's `test_ToUnicode` table finds on Windows.
   A key typed with Alt types nothing: Windows makes it a system keystroke and translates it into
   `WM_SYSCHAR`, which this machine does not make. Caps Lock is off, since no host sends it.
-  `tests/shims.rs` holds every row.
+  `tests/shims.rs` tests the layout.
 - The modifiers are the ones the title has read: the key messages it has taken off its queue, kept
   as `State::keys_read`, as Windows keeps a thread's own key state, and Wine changes it as each one
   is removed. So a Shift let go between a letter going down and the title taking it still types a
@@ -35,7 +35,7 @@ for its text boxes; Hot Wheels' and Rock Raiders' were not read through. Every r
 route that presses Space, Escape or a letter moves, and no other: no flip, declared millisecond or
 exit code moves, so the moves are the instructions the new messages cost, and, for the three runs
 that end with a key read as held, Hot Wheels' two exits and Alpha Team's click at flip 600, the
-digest's hash of it. The move awaits the maintainer's blessing. Each title's changelog lists its
+digest's hash of it. The maintainer blessed the move on 2026-11-23. Each title's changelog lists its
 own:
 - Hot Wheels' two runs that exit, `first-race.route` at 13,462,673,313 where it ended at
   13,462,673,233, and the escape route at 583,424,210 where it ended at 583,424,170;

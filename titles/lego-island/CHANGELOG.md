@@ -121,8 +121,8 @@ each to `DefWindowProcA` (0x00401E56), 72 instructions a letter. Its three runs 
 instructions later, their flips, declared milliseconds and exit code unchanged: `first-save.route`
 past its end at 13,071,130,021, `pizza-delivery.route` at 10,657,537,990, and the hand that closes
 its window in the Information Center, recorded and replayed, at 4,998,299,127. Every other run that
-types the name ends at the same cursor, flips and declared time with another digest. The move
-awaits the maintainer's blessing.
+types the name ends at the same cursor, flips and declared time with another digest. The maintainer
+blessed the move on 2026-11-23.
 
 ## 1.0.0 — 2026-10-21
 

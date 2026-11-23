@@ -445,6 +445,130 @@ fn a_system_keystroke_is_a_wall_and_a_key_with_no_window_types_nothing() {
     );
     assert_eq!(translate(&mut m, WM_KEYDOWN, 0x41), Ok(1), "no window yet");
     assert!(m.state.messages.is_empty(), "and nothing posted");
+    window(&mut m, 0x0040_1000);
+    m.state.messages.clear();
+    for (at, value) in [
+        (0, WINDOW + 1),
+        (4, WM_KEYDOWN),
+        (8, 0x41),
+        (12, 0x001e_0001),
+    ] {
+        m.arena.write_u32(OUT + at, value).expect("in the arena");
+    }
+    assert_eq!(
+        call(&mut m, "USER32", "TranslateMessage", &[OUT]),
+        Ok(1),
+        "another window handle still answers nonzero"
+    );
+    assert!(
+        m.state.messages.is_empty(),
+        "and nothing posted to another window"
+    );
+}
+
+/// `WM_CHAR` is a posted message, not raw hardware input (#157): two queued
+/// characters stay in FIFO order, a subsequent `PostMessageA` lands behind a
+/// queued `WM_CHAR`, and `WM_QUIT` waits for queued `WM_CHAR`s before
+/// preempting raw input.
+#[test]
+fn wm_char_stays_in_the_posted_queue() {
+    const WM_USER_CUSTOM: u32 = 0x0401;
+    const WM_QUIT: u32 = 0x0012;
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    m.state.messages.clear();
+    let translate_key = |m: &mut Machine, vk: u32, lparam: u32| {
+        for (at, value) in [(0, WINDOW), (4, WM_KEYDOWN), (8, vk), (12, lparam)] {
+            m.arena.write_u32(OUT + at, value).expect("in the arena");
+        }
+        assert_eq!(call(m, "USER32", "TranslateMessage", &[OUT]), Ok(1));
+    };
+    // Queue raw input behind the posted messages, then translate two keys,
+    // post a custom message, and request quit.
+    win32::user32::deliver(
+        &mut m.state,
+        Input::Key {
+            code: 0x1e,
+            down: false,
+        },
+        0,
+    );
+    translate_key(&mut m, 0x41, 0x001e_0001);
+    translate_key(&mut m, 0x42, 0x0030_0001);
+    assert_eq!(
+        call(
+            &mut m,
+            "USER32",
+            "PostMessageA",
+            &[WINDOW, WM_USER_CUSTOM, 7, 0]
+        ),
+        Ok(1)
+    );
+    assert_eq!(call(&mut m, "USER32", "PostQuitMessage", &[0]), Ok(0));
+    let taken: Vec<(u32, u32)> = pump(&mut m)
+        .into_iter()
+        .map(|(message, wparam, ..)| (message, wparam))
+        .collect();
+    assert_eq!(
+        taken,
+        [
+            (WM_CHAR, u32::from(b'a')),
+            (WM_CHAR, u32::from(b'b')),
+            (WM_USER_CUSTOM, 7),
+            (WM_QUIT, 0),
+            (WM_KEYUP, 0x41),
+        ]
+    );
+}
+
+/// `keys_read` updates only when a key message is removed (`PM_REMOVE`),
+/// keeps Shift held while either side stays down, and deduplicates repeat
+/// `WM_KEYDOWN`s so one `WM_KEYUP` releases the key (#157).
+#[test]
+fn keys_read_tracks_remove_both_shifts_and_repeats() {
+    const LSHIFT: u32 = 0x2a;
+    const RSHIFT: u32 = 0x36;
+    const KEY_A: u32 = 0x1e;
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    m.state.messages.clear();
+    win32::user32::deliver(
+        &mut m.state,
+        Input::Key {
+            code: LSHIFT,
+            down: true,
+        },
+        0,
+    );
+    // PM_NOREMOVE must not mutate `keys_read`.
+    assert_eq!(
+        call(&mut m, "USER32", "PeekMessageA", &[OUT, 0, 0, 0, 0]),
+        Ok(1)
+    );
+    assert!(
+        m.state.keys_read.is_empty(),
+        "PM_NOREMOVE leaves keys_read alone"
+    );
+    // Repeat LSHIFT down, plus RSHIFT down, then release LSHIFT: RSHIFT keeps Shift held.
+    for (code, down) in [
+        (LSHIFT, true),
+        (RSHIFT, true),
+        (LSHIFT, false),
+        (KEY_A, true),
+        (KEY_A, false),
+        (RSHIFT, false),
+        (KEY_A, true),
+        (KEY_A, false),
+    ] {
+        win32::user32::deliver(&mut m.state, Input::Key { code, down }, 0);
+    }
+    let chars: Vec<u32> = pump(&mut m)
+        .into_iter()
+        .filter(|(message, ..)| *message == WM_CHAR)
+        .map(|(_, wparam, ..)| wparam)
+        .collect();
+    assert_eq!(chars, [u32::from(b'A'), u32::from(b'a')]);
+    assert!(m.state.keys_read.is_empty());
 }
 
 /// The keys the title has read as held are in the digest, since the next key

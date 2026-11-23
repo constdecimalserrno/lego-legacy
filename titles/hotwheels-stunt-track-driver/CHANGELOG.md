@@ -109,7 +109,7 @@ Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window
 handed a character after Escape and Space, 40 instructions each. Its two runs that exit move, their
 flips, declared milliseconds and exit code unchanged: `first-race.route` ends at 13,462,673,313
 where it ended at 13,462,673,233, and the escape route at 583,424,210 where it ended at 583,424,170.
-The move awaits the maintainer's blessing. Its run moved, so a person should drive the first race
+The maintainer blessed the move on 2026-11-23. Its run moved, so a person should drive the first race
 again before this version is released.
 
 ## 1.0.0 — 2026-10-18

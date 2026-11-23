@@ -110,7 +110,7 @@ where it took 3,287.1.
 Took core 1.2.0's `WM_CHAR` (#157). The title translates its keys, so its window procedure is now
 handed a character after Space and Escape. `first-mission.route`, which presses Space twice, and the
 test's skip of the intro with Escape each end at the same cursor, flips and declared time with
-another digest. The move awaits the maintainer's blessing.
+another digest. The maintainer blessed the move on 2026-11-23.
 
 ## 1.0.0 — 2026-10-18
 
