@@ -1,0 +1,62 @@
+#lego-legacy-route 1
+# LEGO Chess: second run over the same `--data-root` as routes/save-game.route (#159).
+# Finds the saved player profile (profiles\prof1.lcp), skips the New Player form straight to
+# "Who's playing?" with Ada highlighted, enters the throne room, starts a Quick Game (leaving
+# Black on its default computer setting), opens Options -> Load Game, loads slot 1 ('Game') from
+# profiles\1save.lcs, visibly restoring 1. e4 e5 and two-player mode, plays 2. Bf1-c4 to prove the
+# loaded position is live, resigns cleanly (showing both sides restored to human on the Quick Game
+# screen), and closes cleanly (exited 0).
+#
+# Replay ONLY over a `--data-root` already populated by routes/save-game.route. On an empty
+# `--data-root`, the game lands on the New Player form instead of "Who's playing?".
+#
+# - Space skips Krisalis' logo (flip 290, up at poll 300) and the intro (flip 300, up at poll 300).
+# - With profiles\prof1.lcp present, the game boots straight to "Who's playing?" with Ada listed
+#   and highlighted (flip 310).
+# - (576,420) clicks the green tick (flip 320, let go at poll 300) to enter the throne room as Ada,
+#   loading profiles\prof1.lcp and profiles\1save.lcs.
+# - (385,285) clicks the chess board (flips 365..366) to open the Quick Game screen.
+# - (590,410) clicks the green tick (flip 380, let go at poll 300) without toggling Black to human,
+#   starting a fresh initial Western board (flip 495).
+# - (200,60) opens Options (flip 505, let go at poll 300); (360,258) opens Load Game (flip 525, let
+#   go at poll 300), showing slot 1 'Game' highlighted (flip 535); (392,194) clicks the green tick
+#   (flip 545, let go at poll 300), replaying 1. e4 e5 and restoring two-player mode (flip 580).
+# - Plays 2. Bf1-c4 (flips 585..606, visible on the board by flip 750).
+# - Escape (flip 760, let go at poll 300) opens "Are you sure you want to resign?", and (360,232)
+#   clicks its green tick (flip 775, let go at poll 300), returning to the Quick Game screen with
+#   both sides now human (flip 815).
+# - Closing the window at flip 825 exits 0 cleanly.
+flip 290 key Space down
+flip 290 poll 300 key Space up
+flip 300 key Space down
+flip 300 poll 300 key Space up
+flip 315 move 576 420
+flip 320 down
+flip 320 poll 300 up
+flip 340 move 385 285
+flip 365 down
+flip 366 up
+flip 375 move 590 410
+flip 380 down
+flip 380 poll 300 up
+flip 500 move 200 60
+flip 505 down
+flip 505 poll 300 up
+flip 515 move 360 258
+flip 525 down
+flip 525 poll 300 up
+flip 540 move 392 194
+flip 545 down
+flip 545 poll 300 up
+flip 585 move 435 349
+flip 590 down
+flip 593 up
+flip 598 move 228 241
+flip 603 down
+flip 606 up
+flip 760 key Escape down
+flip 760 poll 300 key Escape up
+flip 770 move 360 232
+flip 775 down
+flip 775 poll 300 up
+flip 825 close

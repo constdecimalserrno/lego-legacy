@@ -1,0 +1,97 @@
+#lego-legacy-route 1
+# LEGO Chess: register a player, play 1. e4 e5, save the game as 'Game', and quit cleanly (#159).
+# Extends throne-room.route through a two-player Western Quick Game: plays 1. e4 e5, opens the
+# in-game Options menu, opens Save Game, clears the default '....' label in slot 1, types 'Game',
+# confirms the save (writing profiles\1save.lcs), resigns cleanly back to the Quick Game screen,
+# and closes the window cleanly (exited 0).
+#
+# Replay with a fresh `--data-root <empty dir>`, never beside the rip. It writes
+# profiles\prof1.lcp (4,544 bytes) and profiles\1save.lcs (190,920 bytes), which
+# routes/load-game.route reloads in a second run over the same `--data-root`.
+#
+# From flip 432 on the Quick Game screen:
+# - (520,180) toggles Black from computer to human (flip 440, let go at poll 300).
+# - (590,410) clicks the green tick to start the Western match (flip 450, let go at poll 300).
+# - Plays 1. e2-e4 (White, flips 560..581) and 1... e7-e5 (Black, rotated view, flips 730..751).
+#   By flip 895 the board has rotated back to White's view with both e-pawns on e4 and e5.
+# - (200,60) opens the in-game Options menu (flip 905, let go at poll 300).
+# - (282,258) opens the Save Game dialog with slot 1 highlighted (flip 925, let go at poll 300).
+# - Four Backspaces (flips 936..957) clear '....', then Shift+G, a, m, e (flips 960..983) type
+#   'Game' into slot 1's label box.
+# - (392,194) clicks the Save Game green tick (flip 995, let go at poll 300), writing
+#   profiles\1save.lcs (190,920 bytes, 10 x 19,092-byte slots) and returning to the board.
+# - Escape (flip 1015, let go at poll 300) opens "Are you sure you want to resign?", and
+#   (360,232) clicks its green tick (flip 1030, let go at poll 300), freeing the engine table and
+#   returning to the Quick Game screen.
+# - Closing the window at flip 1080 exits 0 cleanly.
+flip 290 key Space down
+flip 290 poll 300 key Space up
+flip 300 key Space down
+flip 300 poll 300 key Space up
+flip 320 key LeftShift down
+flip 321 key A down
+flip 324 key A up
+flip 325 key LeftShift up
+flip 328 key D down
+flip 331 key D up
+flip 334 key A down
+flip 337 key A up
+flip 345 move 576 420
+flip 350 down
+flip 350 poll 300 up
+flip 390 down
+flip 390 poll 300 up
+flip 405 move 385 285
+flip 430 down
+flip 431 up
+flip 435 move 520 180
+flip 440 down
+flip 440 poll 300 up
+flip 445 move 590 410
+flip 450 down
+flip 450 poll 300 up
+flip 560 move 356 308
+flip 565 down
+flip 568 up
+flip 573 move 351 241
+flip 578 down
+flip 581 up
+flip 730 move 284 308
+flip 735 down
+flip 738 up
+flip 743 move 289 241
+flip 748 down
+flip 751 up
+flip 900 move 200 60
+flip 905 down
+flip 905 poll 300 up
+flip 915 move 282 258
+flip 925 down
+flip 925 poll 300 up
+flip 936 key Backspace down
+flip 939 key Backspace up
+flip 942 key Backspace down
+flip 945 key Backspace up
+flip 948 key Backspace down
+flip 951 key Backspace up
+flip 954 key Backspace down
+flip 957 key Backspace up
+flip 960 key LeftShift down
+flip 961 key G down
+flip 964 key G up
+flip 965 key LeftShift up
+flip 968 key A down
+flip 971 key A up
+flip 974 key M down
+flip 977 key M up
+flip 980 key E down
+flip 983 key E up
+flip 990 move 392 194
+flip 995 down
+flip 995 poll 300 up
+flip 1015 key Escape down
+flip 1015 poll 300 key Escape up
+flip 1025 move 360 232
+flip 1030 down
+flip 1030 poll 300 up
+flip 1080 close

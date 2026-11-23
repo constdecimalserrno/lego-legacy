@@ -362,3 +362,49 @@ hashes. Measured at the declared Pentium 166 MHz processor: default difficulty 2
 out of book on random-move hits (`1. h3 e6 2. a3 f5 3. g3 Nf6`); difficulty 100 (0% random, full
 alpha-beta search) out of book (`1. h3 Nc6 2. a3 e5 3. g3 Bc5`) thinks for 4,166 ms (126 flips,
 ~692M insns), 1,144 ms (36 flips, ~190M insns), and 4,666 ms (142 flips, ~775M insns) declared.
+
+Players and saved games persist and reload across runs over a shared `--data-root` with no new core
+walls (#159). `Lego Chess.exe` does not import `FindFirstFileA`; startup profile discovery
+(`0x0041DE60`) changes directory to `profiles` and opens `prof1.lcp`, `prof2.lcp`, ... sequentially
+via `CreateFileA` until missing, and all saves land in `<data-root>/profile/` through the existing
+`Tree::profile` overlay. Two committed routes prove the round-trip:
+- `routes/save-game.route` (Run 1, fresh `--data-root`): registers `Ada`, starts a two-player
+  Western Quick Game, plays `1. e4 e5`, opens Options -> Save Game, clears `....` and names slot 1
+  `'Game'`, confirms the save (writing `profiles\1save.lcs`), resigns cleanly via `Escape` -> green
+  tick, and exits 0 at cursor 6,114,083,756 after 1,081 flips (47,500 declared ms).
+- `routes/load-game.route` (Run 2, over the same `--data-root`): skips the New Player form straight
+  to `"Who's playing?"` with `Ada` highlighted, enters the throne room, starts a default Quick Game
+  (Black = computer), opens Options -> Load Game, loads slot 1 `'Game'` (replaying `1. e4 e5` and
+  restoring two-player mode), plays `2. Bf1-c4` on the restored board, resigns cleanly (showing both
+  sides restored to human on the Quick Game screen), and exits 0 at cursor 5,168,222,319 after 826
+  flips (37,717 declared ms).
+
+Observed saved file formats (proven from `Lego Chess.exe` disassembly and the test run's bytes):
+- `profiles\prof%d.lcp` (4,544 bytes / `0x11C0`, buffer `0x00653C60`, sha256 `dfd46ce8…`): first
+  name (`0x0000`, 20 B NUL-terminated, `"Ada\0"`), last name (`0x0014`, 20 B), age (`0x0028`, 1 B,
+  hardcoded `0x18` = 24 at `0x00416A92`), story/scrapbook progress tables (`0x002C..0x112B`), 27
+  dwords initialized to `-1` (`0x112C..0x1197`, tutorial/puzzle completion markers), SFX and music
+  volumes (`0x11AC..0x11AD`, default `200`, `200`), 15 in-game settings toggle bytes
+  (`0x11AE..0x11BC`), and default timed-game clock minutes (`0x11BD..0x11BE`, `60`, `60`).
+- `profiles\%dsave.lcs` (190,920 bytes / `0x2E9C8`, buffer `0x004C82E0`, sha256 `10f16ddf…`): 10
+  fixed-size slots of 19,092 bytes (`0x4A94`) each (slots 0..7 exposed in the Save/Load UI,
+  initialized to `"....\0"` with empty marker `-1` at `+0x4030`; slots 8..9 zeroed). Each slot
+  (`0x00669800`) packs: slot label (`+0x0000`, 40 B NUL-terminated, `"Game\0"`), engine
+  computer-control bitmask (`+0x0028`, u16, `0` = two-player), up to 2,048 8-byte move structs
+  (`+0x002A..+0x4029`: ply 0 `0x34 -> 0x24` = `e2-e4`, ply 1 `0x0C -> 0x1C` = `e7-e5`), ply count
+  (`+0x402C`, u32 = `2`), active marker (`+0x4030`, i32 = `0`), board theme / White & Black piece
+  sets / sub-variant / engine randomness (`+0x4035..+0x4039` = `0, 0, 0, 0, 75`), clocks and mode /
+  cartoons / human-player flags (`+0x403C..+0x4050`: `whuman = 1`, `bhuman = 1`), the initial
+  32 x 80-byte 3D piece snapshot (`+0x4054..+0x4A53`), and the initial 64-byte piece-ID board map
+  (`+0x4A54..+0x4A93`). On load (`0x004078E0`), the game restores the settings and starting snapshot
+  and replays the recorded move list.
+- `ChessSave.che`: confirmed unreferenced dead code in Masterpiece V2.06 `Lego Chess.exe`. The
+  string (`0x004810BC`) is referenced only by `0x0040EA10` (save with `asctime(localtime(time()))`)
+  and `0x0040EBF0` (load), which — along with their Oxford Softworks harness helpers `0x0040E580`,
+  `0x0040E8B0`, `0x0040E900`, `0x0040E990` — have 0 direct calls and 0 function-pointer references
+  in the binary.
+
+Its tests pin the exact fields and sha256s of `PROF1.LCP` and `1SAVE.LCS`, all 9 key visual frames
+across both runs, a pixel-diff check proving the restored board differs from the initial position on
+`e4`/`e5` and `e2`, and a side-by-side determinism gate verifying identical machine state, frames,
+audio mixes, and saved files across two independent data roots.
