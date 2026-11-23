@@ -41,30 +41,17 @@ impl Picture {
                 "{width}x{height} is not a non-zero multiple of four"
             )));
         }
+        // Bound pixel count so both the u16 frame buffer and a 24-bit DIB fit
+        // within Rust's allocation limit (`isize::MAX` bytes).
         let count = width
             .checked_mul(height)
+            .filter(|c| c.checked_mul(3).is_some_and(|b| b <= isize::MAX as usize))
             .ok_or_else(|| Error(format!("{width}x{height} overflows memory")))?;
         Ok(Self {
             width,
             height,
             pixels: vec![0; count],
         })
-    }
-
-    #[must_use]
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    #[must_use]
-    pub fn height(&self) -> usize {
-        self.height
-    }
-
-    /// Top-down 15-bit RGB555 pixels (`0..=0x7fff`).
-    #[must_use]
-    pub fn pixels(&self) -> &[u16] {
-        &self.pixels
     }
 
     /// Clear every pixel to black, for a seek back to the start of a stream.
@@ -99,7 +86,10 @@ impl Picture {
 
             if (0x84..=0x87).contains(&b) {
                 let skip = (usize::from(b - 0x84) << 8) | usize::from(a);
-                if skip == 0 || blk + skip > total {
+                if skip == 0 {
+                    return Err(Error(format!("zero skip count at block {blk}")));
+                }
+                if blk + skip > total {
                     return Err(Error(format!(
                         "skip {skip} from block {blk} past {total} blocks"
                     )));
@@ -128,30 +118,20 @@ impl Picture {
             let mut mask = u16::from_le_bytes([a, b]);
             let c0 = read_u16(&mut pos)?;
             let c1 = read_u16(&mut pos)?;
+            let (p0, p1) = (c0 & 0x7fff, c1 & 0x7fff);
+            let mut colors = [p0, p1, p0, p1, p0, p1, p0, p1];
             if c0 & 0x8000 != 0 {
-                let mut colors = [0u16; 8];
-                colors[0] = c0 & 0x7fff;
-                colors[1] = c1 & 0x7fff;
                 for slot in &mut colors[2..] {
                     *slot = read_u16(&mut pos)? & 0x7fff;
                 }
-                for row in (0..4).rev() {
-                    let base = (by + row) * self.width + bx;
-                    let q_row = usize::from(row < 2) * 2;
-                    for col in 0..4 {
-                        let q = q_row + usize::from(col >= 2);
-                        self.pixels[base + col] = colors[q * 2 + usize::from(mask & 1 == 0)];
-                        mask >>= 1;
-                    }
-                }
-            } else {
-                let pair = [c0 & 0x7fff, c1 & 0x7fff];
-                for row in (0..4).rev() {
-                    let base = (by + row) * self.width + bx;
-                    for col in 0..4 {
-                        self.pixels[base + col] = pair[usize::from(mask & 1 == 0)];
-                        mask >>= 1;
-                    }
+            }
+            for row in (0..4).rev() {
+                let base = (by + row) * self.width + bx;
+                let q_row = usize::from(row < 2) * 2;
+                for col in 0..4 {
+                    let q = q_row + usize::from(col >= 2);
+                    self.pixels[base + col] = colors[q * 2 + usize::from(mask & 1 == 0)];
+                    mask >>= 1;
                 }
             }
             blk += 1;
@@ -163,9 +143,15 @@ impl Picture {
     /// four bytes: 15-bit RGB555 little-endian at 16 bits, or BGR at 24 bits
     /// with each 5-bit channel shifted left three bits (`c << 3`), as Windows'
     /// `msvidc32` expands 16-bit Video 1 to 24 bits.
+    ///
+    /// # Panics
+    /// When `bits` is neither 16 nor 24.
     #[must_use]
     pub fn to_dib_bits(&self, bits: u16) -> Vec<u8> {
-        debug_assert!(matches!(bits, 16 | 24));
+        assert!(
+            matches!(bits, 16 | 24),
+            "Video 1 DIB depth must be 16 or 24, got {bits}"
+        );
         let bytes = usize::from(bits / 8);
         let stride = (self.width * bytes).next_multiple_of(4);
         let mut out = vec![0u8; stride * self.height];
@@ -198,12 +184,16 @@ mod tests {
 
     #[test]
     fn dimensions_must_be_non_zero_multiples_of_four() {
-        for (w, h) in [(0, 4), (4, 0), (6, 4), (4, 6), (usize::MAX, 4)] {
+        for (w, h) in [(0, 4), (4, 0), (6, 4), (4, 6)] {
             assert!(Picture::new(w, h).is_err(), "{w}x{h} must be refused");
         }
+        for (w, h) in [(usize::MAX & !3, 4), (1usize << (usize::BITS - 4), 4)] {
+            let err = Picture::new(w, h).expect_err("overflow must be refused");
+            assert!(err.0.contains("overflows"), "{w}x{h}: {err}");
+        }
         let pic = Picture::new(8, 4).expect("8x4 is valid");
-        assert_eq!((pic.width(), pic.height(), pic.pixels().len()), (8, 4, 32));
-        assert!(pic.pixels().iter().all(|&p| p == 0));
+        assert_eq!((pic.width, pic.height, pic.pixels.len()), (8, 4, 32));
+        assert!(pic.pixels.iter().all(|&p| p == 0));
     }
 
     #[test]
@@ -211,36 +201,38 @@ mod tests {
         // 8x8 = 2x2 blocks, ordered BL, BR, TL, TR.
         // Exercise 0x80..0x83, 0x88..0x8f, and 0x90..0xff high bytes.
         let mut pic = Picture::new(8, 8).expect("8x8");
-        let chunk = [pack_u16s(&[0x8001, 0x8820, 0x8c40, 0xfc00]), vec![0, 0]].concat();
+        let chunk = [pack_u16s(&[0x8001, 0x83e0, 0x8c40, 0xfc00]), vec![0, 0]].concat();
         pic.decode(&chunk).expect("decodes");
 
         // Top-left (y=0..4, x=0..4) = block 2 = 0x0c40
         // Top-right (y=0..4, x=4..8) = block 3 = 0x7c00
         // Bottom-left (y=4..8, x=0..4) = block 0 = 0x0001
-        // Bottom-right (y=4..8, x=4..8) = block 1 = 0x0820
+        // Bottom-right (y=4..8, x=4..8) = block 1 = 0x03e0
         for y in 0..8 {
             for x in 0..8 {
                 let expected = match (y < 4, x < 4) {
                     (true, true) => 0x0c40,
                     (true, false) => 0x7c00,
                     (false, true) => 0x0001,
-                    (false, false) => 0x0820,
+                    (false, false) => 0x03e0,
                 };
-                assert_eq!(pic.pixels()[y * 8 + x], expected, "pixel ({x},{y})");
+                assert_eq!(pic.pixels[y * 8 + x], expected, "pixel ({x},{y})");
             }
         }
+        pic.clear();
+        assert!(pic.pixels.iter().all(|&p| p == 0));
     }
 
     #[test]
     fn two_color_block_walks_bits_bottom_to_top_left_to_right_and_accepts_zero_flags() {
         // 8x4 = 2 blocks:
-        // Block 0: flags = 0x0000 (all bits 0 -> every pixel takes c1 = 0x03e0).
-        //          Must NOT be mistaken for end-of-frame mid-stream.
+        // Block 0: flags = 0x0000 (all bits 0 -> every pixel takes c1 = 0x03e0,
+        //          with bit 15 set in c1 masked off). Must NOT trigger EOF mid-stream.
         // Block 1: flags = 0x1005 = bits 0 (row 3, col 0), 2 (row 3, col 2),
         //          12 (row 0, col 0) set -> c0 = 0x7c00, others -> c1 = 0x001f.
         let mut pic = Picture::new(8, 4).expect("8x4");
         let chunk = [
-            pack_u16s(&[0x0000, 0x7c00, 0x03e0]),
+            pack_u16s(&[0x0000, 0x7c00, 0x83e0]),
             pack_u16s(&[0x1005, 0x7c00, 0x001f]),
             vec![0, 0],
         ]
@@ -249,7 +241,7 @@ mod tests {
 
         for y in 0..4 {
             for x in 0..4 {
-                assert_eq!(pic.pixels()[y * 8 + x], 0x03e0, "block 0 ({x},{y})");
+                assert_eq!(pic.pixels[y * 8 + x], 0x03e0, "block 0 ({x},{y})");
             }
         }
         for y in 0..4 {
@@ -259,7 +251,7 @@ mod tests {
                 } else {
                     0x001f
                 };
-                assert_eq!(pic.pixels()[y * 8 + 4 + x], expected, "block 1 ({x},{y})");
+                assert_eq!(pic.pixels[y * 8 + 4 + x], expected, "block 1 ({x},{y})");
             }
         }
     }
@@ -270,14 +262,14 @@ mod tests {
         // Quadrant 0 (bottom-left: y=2..4, x=0..2): pair (0x0001, 0x0002), bit 15 of c0 set.
         // Quadrant 1 (bottom-right: y=2..4, x=2..4): pair (0x0003, 0x0004).
         // Quadrant 2 (top-left: y=0..2, x=0..2): pair (0x0005, 0x0006).
-        // Quadrant 3 (top-right: y=0..2, x=2..4): pair (0x0007, 0x0008).
+        // Quadrant 3 (top-right: y=0..2, x=2..4): pair (0x0007, 0x0008), bit 15 on c7 masked.
         // Set bit 0 (y=3,x=0), bit 6 (y=2,x=2), bit 9 (y=1,x=1), bit 14 (y=0,x=2).
         // Bit 15 is always 0 in 2-colour/8-colour mode (byte_b < 0x80).
         let flags: u16 = (1 << 0) | (1 << 6) | (1 << 9) | (1 << 14);
         let mut pic = Picture::new(4, 4).expect("4x4");
         let chunk = [
             pack_u16s(&[
-                flags, 0x8001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008,
+                flags, 0x8001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x8008,
             ]),
             vec![0, 0],
         ]
@@ -292,7 +284,7 @@ mod tests {
         ];
         for (y, row) in expected.iter().enumerate() {
             for (x, &color) in row.iter().enumerate() {
-                assert_eq!(pic.pixels()[y * 4 + x], color, "({x},{y})");
+                assert_eq!(pic.pixels[y * 4 + x], color, "({x},{y})");
             }
         }
     }
@@ -307,29 +299,36 @@ mod tests {
         let frame1 = [vec![2, 0x84], pack_u16s(&[0x83e0]), vec![0, 0]].concat();
         pic.decode(&frame1).expect("frame 1");
 
-        assert_eq!(pic.pixels()[4 * 8], 0x0001, "BL preserved");
-        assert_eq!(pic.pixels()[4 * 8 + 4], 0x0820, "BR preserved");
-        assert_eq!(pic.pixels()[0], 0x03e0, "TL updated");
-        assert_eq!(pic.pixels()[4], 0x7c00, "TR preserved by early EOF");
+        assert_eq!(pic.pixels[4 * 8], 0x0001, "BL preserved");
+        assert_eq!(pic.pixels[4 * 8 + 4], 0x0820, "BR preserved");
+        assert_eq!(pic.pixels[0], 0x03e0, "TL updated");
+        assert_eq!(pic.pixels[4], 0x7c00, "TR preserved by early EOF");
 
-        // Skip across high byte (0x85 0x00 = 256 blocks) on a larger frame.
+        // Exact skip to end (4 blocks of 4).
+        pic.decode(&[4, 0x84, 0, 0]).expect("skip all 4");
+        assert_eq!(pic.pixels[0], 0x03e0);
+
+        // Max skip (0xff, 0x87 = 1023 blocks) on a 128x128 frame (1024 blocks):
+        // paints only the final block (top-right: y=0..4, x=124..128).
         let mut big = Picture::new(128, 128).expect("128x128");
-        big.decode(&[vec![0, 0x85], pack_u16s(&[0xffff]), vec![0, 0]].concat())
-            .expect("skip 256");
-        // Block 256 is row 8 from bottom (by = 32 - 1 - 8 = 23 -> y = 92), x = 0.
-        assert_eq!(big.pixels()[92 * 128], 0x7fff);
-        assert_eq!(big.pixels()[96 * 128], 0x0000);
+        big.decode(&[vec![0xff, 0x87], pack_u16s(&[0xffff]), vec![0, 0]].concat())
+            .expect("skip 1023");
+        assert_eq!(big.pixels[124], 0x7fff);
+        assert_eq!(big.pixels[120], 0x0000);
     }
 
     #[test]
     fn malformed_chunks_are_refused() {
         let mut pic = Picture::new(8, 4).expect("8x4");
         // Skip count 0 (0x84, 0x00).
-        assert!(pic.decode(&[0, 0x84]).is_err());
+        let zero = pic.decode(&[0, 0x84]).expect_err("zero skip");
+        assert!(zero.0.contains("zero skip"), "{zero}");
         // Skip past end (3 blocks in a 2-block picture).
         assert!(pic.decode(&[3, 0x84]).is_err());
-        // Truncated 2-color block (missing c1).
+        // Truncated 2-color block (0 colors or missing c1), including flags=0x0000.
+        assert!(pic.decode(&[0x01, 0x00]).is_err());
         assert!(pic.decode(&[0x01, 0x00, 0x10, 0x00]).is_err());
+        assert!(pic.decode(&[0x00, 0x00, 0x10, 0x00]).is_err());
         // Truncated 8-color block (only 2 of 8 colors).
         assert!(pic.decode(&[0x01, 0x00, 0x10, 0x80, 0x20, 0x00]).is_err());
         // Single stray byte when blocks remain.
@@ -358,9 +357,5 @@ mod tests {
         assert_eq!(&bits24[0..3], &[0xf8, 0xf8, 0xf8]);
         // Top row: 0x4212 -> B=18<<3=0x90, G=16<<3=0x80, R=16<<3=0x80 (Lego Chess 0x808090 key!).
         assert_eq!(&bits24[3 * 12..3 * 12 + 3], &[0x90, 0x80, 0x80]);
-
-        // 12x4 at 24-bit: row = 36 bytes (already multiple of 4); verify 4x4 & 8x4 stride too.
-        // 4x4 at 16-bit: row = 8 bytes (multiple of 4). Every multiple-of-4 width has
-        // width*2 and width*3 already multiples of 4.
     }
 }

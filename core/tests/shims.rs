@@ -3875,61 +3875,74 @@ fn video1_movie(width: u32, height: u32, bits: u16, codec: &[u8; 4], frames: &[&
 fn video_1_streams_decode_through_avifile_into_24_and_16_bit_dibs() {
     const WANTED: u32 = DATA + 0x200;
     let pack = |ws: &[u16]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let open_video1 = |m: &mut Machine,
+                       w: u32,
+                       h: u32,
+                       src_bits: u16,
+                       codec: &[u8; 4],
+                       frames: &[&[u8]],
+                       out_bits: u32,
+                       out_image: u32| {
+        m.tree
+            .declare(MOVIE, video1_movie(w, h, src_bits, codec, frames));
+        m.arena
+            .write(DATA, format!("{MOVIE}\0").as_bytes())
+            .expect("in the arena");
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
+            Ok(0)
+        );
+        let file = m.arena.read_u32(OUT).expect("in the arena");
+        assert_eq!(
+            call(m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
+            Ok(0)
+        );
+        let video = m.arena.read_u32(OUT).expect("in the arena");
+        m.arena
+            .write(WANTED, &dib_header(w, h, out_bits, out_image))
+            .expect("in the arena");
+        call(m, "AVIFIL32", "AVIStreamGetFrameOpen", &[video, WANTED])
+    };
+
     // 8x4 = 2 blocks (left, right).
-    // Frame 0: left = solid 0x4212 (Advisor background: r=16,g=16,b=18 -> BGR 0x90,0x80,0x80),
+    // Frame 0: skip 1 block (left stays black from initial/cleared state),
     //          right = solid 0x7c00 (red: r=31 -> BGR 0,0,0xf8).
-    let f0 = [pack(&[0xc212, 0xfc00]), vec![0, 0]].concat();
-    // Frame 1: skip 1 block (left stays 0x4212), right = solid 0x03e0 (green: g=31 -> BGR 0,0xf8,0).
-    let f1 = [vec![1, 0x84], pack(&[0x83e0]), vec![0, 0]].concat();
+    let f0 = [vec![1, 0x84], pack(&[0xfc00]), vec![0, 0]].concat();
+    // Frame 1: left = solid 0x4212 (Advisor background: r=16,g=16,b=18 -> BGR 0x90,0x80,0x80),
+    //          right = solid 0x03e0 (green: g=31 -> BGR 0,0xf8,0).
+    let f1 = [pack(&[0xc212, 0x83e0]), vec![0, 0]].concat();
     // Frame 2: empty dropped chunk (keeps frame 1).
     let f2: Vec<u8> = Vec::new();
 
     for codec in [b"CRAM", b"MSVC", b"WHAM", b"cram"] {
         let mut m = machine();
-        m.tree
-            .declare(MOVIE, video1_movie(8, 4, 16, codec, &[&f0, &f1, &f2]));
-        m.arena
-            .write(DATA, format!("{MOVIE}\0").as_bytes())
-            .expect("in the arena");
-        assert_eq!(
-            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
-            Ok(0)
-        );
-        let file = m.arena.read_u32(OUT).expect("in the arena");
-        assert_eq!(
-            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
-            Ok(0)
-        );
-        let video = m.arena.read_u32(OUT).expect("in the arena");
-
-        // 24-bit DIB (as LEGO Chess's Advisors ask for).
-        m.arena
-            .write(WANTED, &dib_header(8, 4, 24, 96))
-            .expect("in the arena");
-        let getter = call(
-            &mut m,
-            "AVIFIL32",
-            "AVIStreamGetFrameOpen",
-            &[video, WANTED],
-        )
-        .expect("a getter");
+        // Ask with biSizeImage = 0 so AVIStreamGetFrameOpen fills it in (96).
+        let getter = open_video1(&mut m, 8, 4, 16, codec, &[&f0, &f1, &f2], 24, 0).expect("getter");
         assert_ne!(getter, 0);
 
         let dib0 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0");
+        assert_eq!(m.arena.read_u32(dib0 + 20).expect("biSizeImage"), 96);
         let bits0 = m.arena.slice(dib0 + 40, 96).expect("in the arena").to_vec();
-        assert_eq!(&bits0[0..3], &[0x90, 0x80, 0x80], "0x4212 -> 0x808090 key");
+        assert_eq!(&bits0[0..3], &[0x00, 0x00, 0x00], "skipped left is black");
         assert_eq!(&bits0[12..15], &[0x00, 0x00, 0xf8], "0x7c00 -> red");
+
+        // Requesting the same frame returns the cached DIB unchanged.
+        assert_eq!(
+            call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]),
+            Ok(dib0)
+        );
 
         let dib1 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 1]).expect("frame 1");
         let bits1 = m.arena.slice(dib1 + 40, 96).expect("in the arena").to_vec();
-        assert_eq!(&bits1[0..3], &[0x90, 0x80, 0x80], "skipped left block kept");
-        assert_eq!(&bits1[12..15], &[0x00, 0xf8, 0x00], "right block updated");
+        assert_eq!(&bits1[0..3], &[0x90, 0x80, 0x80], "0x4212 -> 0x808090 key");
+        assert_eq!(&bits1[12..15], &[0x00, 0xf8, 0x00], "0x03e0 -> green");
 
         // Empty chunk repeats frame 1.
         let dib2 = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 2]).expect("frame 2");
         assert_eq!(m.arena.slice(dib2 + 40, 96).expect("in the arena"), bits1);
 
-        // Seeking backward resets cleanly and reproduces frame 0.
+        // Seeking backward clears the previous picture before decoding frame 0,
+        // so the skipped left block returns to black rather than keeping 0x4212.
         let dib0_again =
             call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0 again");
         assert_eq!(
@@ -3944,63 +3957,26 @@ fn video_1_streams_decode_through_avifile_into_24_and_16_bit_dibs() {
 
     // 16-bit DIB output too.
     let mut m = machine();
-    m.tree
-        .declare(MOVIE, video1_movie(8, 4, 16, b"CRAM", &[&f0]));
-    m.arena
-        .write(DATA, format!("{MOVIE}\0").as_bytes())
-        .expect("in the arena");
-    assert_eq!(
-        call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
-        Ok(0)
-    );
-    let file = m.arena.read_u32(OUT).expect("in the arena");
-    assert_eq!(
-        call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
-        Ok(0)
-    );
-    let video = m.arena.read_u32(OUT).expect("in the arena");
-    m.arena
-        .write(WANTED, &dib_header(8, 4, 16, 64))
-        .expect("in the arena");
-    let getter = call(
-        &mut m,
-        "AVIFIL32",
-        "AVIStreamGetFrameOpen",
-        &[video, WANTED],
-    )
-    .expect("16-bit getter");
+    let getter = open_video1(&mut m, 8, 4, 16, b"CRAM", &[&f1], 16, 64).expect("16-bit getter");
     let dib = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]).expect("frame 0");
     let bits16 = m.arena.slice(dib + 40, 64).expect("in the arena");
     assert_eq!(&bits16[0..2], &0x4212u16.to_le_bytes());
-    assert_eq!(&bits16[8..10], &0x7c00u16.to_le_bytes());
+    assert_eq!(&bits16[8..10], &0x03e0u16.to_le_bytes());
+
+    // Malformed Video 1 chunk propagates as a named wall from AVIStreamGetFrame.
+    let mut m = machine();
+    let bad: &[u8] = &[0x00, 0x84];
+    let getter = open_video1(&mut m, 8, 4, 16, b"CRAM", &[bad], 24, 96).expect("getter");
+    let wall = call(&mut m, "AVIFIL32", "AVIStreamGetFrame", &[getter, 0]);
+    assert!(
+        matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains("MS Video 1")),
+        "{wall:?}"
+    );
 
     // 8-bit Video 1 and non-4-multiple Video 1 sizes are refused as walls.
     for (w, h, depth, says) in [(8, 4, 8, "8-bit Video 1"), (6, 4, 16, "multiple of four")] {
         let mut m = machine();
-        m.tree
-            .declare(MOVIE, video1_movie(w, h, depth, b"CRAM", &[&f0]));
-        m.arena
-            .write(DATA, format!("{MOVIE}\0").as_bytes())
-            .expect("in the arena");
-        assert_eq!(
-            call(&mut m, "AVIFIL32", "AVIFileOpenA", &[OUT, DATA, 0, 0]),
-            Ok(0)
-        );
-        let file = m.arena.read_u32(OUT).expect("in the arena");
-        assert_eq!(
-            call(&mut m, "AVIFIL32", "AVIFileGetStream", &[file, OUT, 0, 0]),
-            Ok(0)
-        );
-        let video = m.arena.read_u32(OUT).expect("in the arena");
-        m.arena
-            .write(WANTED, &dib_header(w, h, 24, 0))
-            .expect("in the arena");
-        let wall = call(
-            &mut m,
-            "AVIFIL32",
-            "AVIStreamGetFrameOpen",
-            &[video, WANTED],
-        );
+        let wall = open_video1(&mut m, w, h, depth, b"CRAM", &[&f1], 24, 0);
         assert!(
             matches!(&wall, Err(Stop::NotWritten { what, .. }) if what.contains(says)),
             "{w}x{h} {depth}-bit: {wall:?}"
