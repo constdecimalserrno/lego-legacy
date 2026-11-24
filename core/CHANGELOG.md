@@ -5,6 +5,21 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Cross-platform static host assembly seam and determinism scaffolding (#249, ADR-0009):
+- `arch` (`core/src/arch.rs`) exposes `Tier` (`Rust`, `Aarch64`, `X86_64`), `Tier::native()`,
+  `Tier::active()`, and `arch::use_rust()`, backed by a single `OnceLock` reading the startup
+  environment variable `LEGO_LEGACY_ARCH` (`rust` forces the canonical pure-Rust fallback,
+  `native` or unset uses the compile-time host tier, and any unrecognized value fails loudly).
+  Nothing in `arch` is guest-visible or hashed into machine digests.
+- `core/tests/arch_determinism.rs` enforces ADR-0009's Golden Rule 1 bans across `core/src/`
+  (FMA contraction, `algebraic_*` float operations, approximate reciprocal/rsqrt instructions,
+  host FP control-register mutations, and explicit `aarch64` `x18`/`w18` operands), with unit
+  tests for every forbidden pattern and end-to-end tests for `LEGO_LEGACY_ARCH`.
+- `scripts/check-targets.sh` compiles `lego-legacy-core` as a release library across all six
+  desktop targets (`aarch64` and `x86_64` × macOS, Linux GNU, Windows MSVC) with zero
+  cross-linkers and zero external crates.
+- No guest-visible behaviour or execution path changed, so no released title's run moves.
+
 `GlobalLock` and `GlobalUnlock` answer fixed blocks allocated by `GlobalAlloc` (#158), where
 `GMEM_MOVEABLE` remains a wall. As Microsoft's `GlobalLock` and `GlobalUnlock` pages document for
 `GMEM_FIXED`, a live block hands back its own address from `GlobalLock` and `TRUE` (1) from

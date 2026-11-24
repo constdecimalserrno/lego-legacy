@@ -3,6 +3,7 @@
 //! Nothing here is keyed to a title. A title crate supplies a [`Title`] and
 //! calls [`run::main`]; everything else in a run happens through this crate.
 
+pub mod arch;
 pub mod avi;
 pub mod cabinet;
 pub mod cli;
