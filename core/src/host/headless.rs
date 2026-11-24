@@ -103,27 +103,59 @@ impl Default for Headless {
     }
 }
 
+fn is_uniform_bgra(pixels: &[u8]) -> bool {
+    let (px, _) = pixels.as_chunks::<4>();
+    let Some(&first) = px.first() else {
+        return true;
+    };
+    let first_u32 = u32::from_ne_bytes(first);
+    let quad = [
+        first[0], first[1], first[2], first[3], first[0], first[1], first[2], first[3], first[0],
+        first[1], first[2], first[3], first[0], first[1], first[2], first[3],
+    ];
+    let first_u128 = u128::from_ne_bytes(quad);
+    let (quads, rem) = pixels.as_chunks::<16>();
+    if !quads.iter().all(|&q| u128::from_ne_bytes(q) == first_u128) {
+        return false;
+    }
+    rem.as_chunks::<4>()
+        .0
+        .iter()
+        .all(|&p| u32::from_ne_bytes(p) == first_u32)
+}
+
 impl Host for Headless {
     fn present(&mut self, frame: &Frame<'_>) {
-        let mut pixels = Vec::with_capacity((frame.width * frame.height * 4) as usize);
-        for row in 0..frame.height {
-            let start = (row * frame.pitch) as usize;
-            let end = start + (frame.width * 4) as usize;
-            pixels.extend_from_slice(&frame.pixels[start..end]);
-        }
-        let uniform = pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| p[..] == pixels[..4]);
-        // The latest frame keeps its pixels until another replaces it.
-        if self.frames.len() > KEPT {
-            if let Some(previous) = self.frames.last_mut() {
-                if !self.keep.contains(&previous.flip) {
-                    previous.pixels = Vec::new();
+        let row_bytes = (frame.width * 4) as usize;
+        let byte_len = row_bytes * frame.height as usize;
+        // The latest frame keeps its pixels until another replaces it; recycle
+        // the evicted buffer directly so long headless runs avoid per-flip
+        // megabyte allocations and page faults (#271).
+        let mut pixels = if self.frames.len() > KEPT {
+            match self.frames.last_mut() {
+                Some(previous) if !self.keep.contains(&previous.flip) => {
+                    let mut recycled = std::mem::take(&mut previous.pixels);
+                    recycled.clear();
+                    if recycled.capacity() < byte_len {
+                        recycled.reserve(byte_len);
+                    }
+                    recycled
                 }
+                _ => Vec::with_capacity(byte_len),
+            }
+        } else {
+            Vec::with_capacity(byte_len)
+        };
+        if frame.pitch as usize == row_bytes {
+            pixels.extend_from_slice(&frame.pixels[..byte_len]);
+        } else {
+            for row in 0..frame.height {
+                let start = (row * frame.pitch) as usize;
+                let end = start + row_bytes;
+                pixels.extend_from_slice(&frame.pixels[start..end]);
             }
         }
+        let uniform = is_uniform_bgra(&pixels);
         self.frames.push(Presented {
             flip: self.flips,
             width: frame.width,
@@ -155,5 +187,84 @@ impl Host for Headless {
         let (ptr, len) = sys::map_anon(len)?;
         // Safety: the mapping is live and this is its only owner.
         Ok(unsafe { Mapping::from_raw(ptr, len) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recycles_evicted_pixel_buffer_and_preserves_kept_flips() {
+        let kept_flip = (KEPT + 2) as u64;
+        let mut host = Headless::new().keeping(&[kept_flip]);
+        let buf = vec![0x42u8; 8 * 8 * 4];
+        let frame = Frame {
+            width: 8,
+            height: 8,
+            pitch: 32,
+            pixels: &buf,
+        };
+
+        for _ in 0..=(KEPT + 4) {
+            host.present(&frame);
+        }
+
+        // First `KEPT` frames retain their pixels.
+        for i in 0..KEPT {
+            assert_eq!(host.frames[i].pixels.len(), 256);
+        }
+        // Evicted frames past `KEPT` (not in `keep` and not latest) are empty.
+        assert!(host.frames[KEPT].pixels.is_empty());
+        assert!(host.frames[KEPT + 1].pixels.is_empty());
+        assert_eq!(host.frames[kept_flip as usize].pixels.len(), 256);
+        assert!(host.frames[KEPT + 3].pixels.is_empty());
+        assert_eq!(host.frames.last().unwrap().pixels.len(), 256);
+
+        // Next present recycles the latest evicted buffer's allocation directly.
+        let prev_ptr = host.frames.last().unwrap().pixels.as_ptr();
+        host.present(&frame);
+        assert!(host.frames[host.frames.len() - 2].pixels.is_empty());
+        assert_eq!(host.frames.last().unwrap().pixels.as_ptr(), prev_ptr);
+    }
+
+    #[test]
+    fn padded_and_dense_present_match_and_uniformity_scan_handles_every_position() {
+        let mut host = Headless::new();
+        // Padded 3x2 frame (pitch 16 > width*4 = 12).
+        let mut padded = vec![0u8; 32];
+        for row in 0..2 {
+            for px in 0..3 {
+                padded[row * 16 + px * 4..row * 16 + px * 4 + 4].copy_from_slice(&[1, 2, 3, 0xff]);
+            }
+            // Junk in pitch padding must not affect pixels or uniformity.
+            padded[row * 16 + 12..row * 16 + 16].copy_from_slice(&[9, 9, 9, 9]);
+        }
+        host.present(&Frame {
+            width: 3,
+            height: 2,
+            pitch: 16,
+            pixels: &padded,
+        });
+        assert!(host.frames[0].is_uniform());
+        assert_eq!(host.frames[0].pixels.len(), 24);
+
+        // Check `is_uniform_bgra` across lengths 0..=19 pixels and every differing position.
+        assert!(is_uniform_bgra(&[]));
+        for count in 1..=19usize {
+            let mut pixels = Vec::with_capacity(count * 4);
+            for _ in 0..count {
+                pixels.extend_from_slice(&[0x10, 0x20, 0x30, 0xff]);
+            }
+            assert!(is_uniform_bgra(&pixels), "count={count}");
+            for diff in 0..count {
+                if count == 1 {
+                    continue;
+                }
+                let mut mutated = pixels.clone();
+                mutated[diff * 4 + (diff % 4)] ^= 1;
+                assert!(!is_uniform_bgra(&mutated), "count={count} diff={diff}");
+            }
+        }
     }
 }

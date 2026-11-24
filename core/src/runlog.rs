@@ -6,14 +6,17 @@
 //! nobody can act on. Everything heavier than that is behind `--trace`.
 
 use crate::cli::Trace;
-use std::fmt::Write as _;
+use std::cell::RefCell;
+use std::fmt::{self, Write as _};
 use std::fs::{self, File};
-use std::io::Write as _;
+use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The first line of every log, so a file's format is knowable from its bytes.
 pub const MAGIC: &str = "#lego-legacy-run 1";
+
+const LOG_BUFFER_CAPACITY: usize = 64 * 1024;
 
 /// Where run directories are made. `LEGO_LEGACY_RUNS` overrides it, which is
 /// how tests keep their runs out of the working tree.
@@ -25,7 +28,7 @@ pub fn runs_root() -> PathBuf {
 /// One run's directory and its log.
 pub struct RunLog {
     dir: PathBuf,
-    file: File,
+    file: RefCell<BufWriter<File>>,
     trace: Trace,
 }
 
@@ -35,12 +38,15 @@ impl RunLog {
     /// # Errors
     /// When the directory or the log cannot be created.
     pub fn create(title: &str, trace: Trace) -> std::io::Result<Self> {
+        Self::create_in(&runs_root(), title, trace)
+    }
+
+    fn create_in(root: &Path, title: &str, trace: Trace) -> std::io::Result<Self> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
-        let root = runs_root();
-        fs::create_dir_all(&root)?;
+        fs::create_dir_all(root)?;
         // A run directory is claimed by creating it, never by looking first:
         // two runs starting in the same second with the same pid (a test
         // binary's threads) would otherwise agree on a name and interleave
@@ -58,14 +64,22 @@ impl RunLog {
                 Err(e) => return Err(e),
             }
         };
-        let mut file = File::create(dir.join("log"))?;
+        let mut file =
+            BufWriter::with_capacity(LOG_BUFFER_CAPACITY, File::create(dir.join("log"))?);
         writeln!(file, "{MAGIC}")?;
         writeln!(file, "title {title}")?;
-        Ok(Self { dir, file, trace })
+        Ok(Self {
+            dir,
+            file: RefCell::new(file),
+            trace,
+        })
     }
 
     #[must_use]
     pub fn dir(&self) -> &Path {
+        if let Ok(mut file) = self.file.try_borrow_mut() {
+            let _ = file.flush();
+        }
         &self.dir
     }
 
@@ -74,11 +88,26 @@ impl RunLog {
         self.trace
     }
 
+    /// Flush buffered log lines to disk.
+    pub fn flush(&mut self) {
+        let _ = self.file.get_mut().flush();
+    }
+
     /// Write one line. A log that cannot be written is not worth stopping a run
     /// over, so a failure here is dropped rather than propagated: the run's
     /// own outcome is still reported through its exit status.
     pub fn line(&mut self, line: &str) {
-        let _ = writeln!(self.file, "{line}");
+        let file = self.file.get_mut();
+        let _ = writeln!(file, "{line}");
+        if line.starts_with("end ") || line.starts_with("wall ") || line.starts_with("digest ") {
+            let _ = file.flush();
+        }
+    }
+
+    /// Write one formatted line directly into the buffered log without
+    /// allocating an intermediate [`String`].
+    pub fn line_fmt(&mut self, args: fmt::Arguments<'_>) {
+        let _ = writeln!(self.file.get_mut(), "{args}");
     }
 
     /// Write one line only at or above a trace level. The line is made only
@@ -89,5 +118,49 @@ impl RunLog {
         if self.trace >= level {
             self.line(&line());
         }
+    }
+}
+
+impl Drop for RunLog {
+    fn drop(&mut self) {
+        let _ = self.file.get_mut().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_fmt_matches_line_and_flushes_on_end_wall_dir_and_drop() {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!("lego-legacy-runlog-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        let mut log = RunLog::create_in(&root, "test-title", Trace::Off).expect("create run log");
+        log.line_fmt(format_args!("flip {} cursor {} 640x480x16", 7, 12345));
+        // Reading via `log.dir()` flushes buffered lines before Drop.
+        let path = log.dir().join("log");
+        let after_dir = fs::read_to_string(&path).expect("read after dir");
+        assert!(after_dir.contains("flip 7 cursor 12345 640x480x16"));
+
+        // `end ` and `wall ` lines flush immediately even without calling `dir()`.
+        log.line("end exit 0 cursor 12345 flips 8 declared-ms 100");
+        let after_end = fs::read_to_string(&path).expect("read after end");
+        assert!(after_end.contains("end exit 0 cursor 12345 flips 8 declared-ms 100"));
+
+        log.line("wall report written");
+        let after_wall = fs::read_to_string(&path).expect("read after wall");
+        assert!(after_wall.contains("wall report written"));
+
+        // Subsequent buffered line flushes on Drop.
+        log.line_fmt(format_args!("trailing {}", 99));
+        drop(log);
+        let final_text = fs::read_to_string(&path).expect("read after drop");
+        assert!(final_text.contains("trailing 99"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

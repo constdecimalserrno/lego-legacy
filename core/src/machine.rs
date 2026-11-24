@@ -2043,60 +2043,29 @@ impl Machine {
             }
         };
 
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let pitch = frame.pitch as usize;
         match frame.depth {
             32 => {
-                for y in 0..frame.height as usize {
-                    let from = y * frame.pitch as usize;
-                    let to = y * frame.width as usize * 4;
-                    let width = frame.width as usize * 4;
-                    self.present_buffer[to..to + width]
-                        .copy_from_slice(&source[from..from + width]);
-                }
+                crate::present::copy_bgra32(source, pitch, &mut self.present_buffer, width, height)
             }
-            16 => {
-                // Five-six-five, which is what a title of this era declares.
-                for y in 0..frame.height as usize {
-                    for x in 0..frame.width as usize {
-                        let at = y * frame.pitch as usize + x * 2;
-                        let pixel = u16::from_le_bytes([source[at], source[at + 1]]);
-                        let r = ((pixel >> 11) & 0x1f) as u8;
-                        let g = ((pixel >> 5) & 0x3f) as u8;
-                        let b = (pixel & 0x1f) as u8;
-                        let out = (y * frame.width as usize + x) * 4;
-                        // Widened by repeating the top bits, so white stays
-                        // white rather than landing just short of it.
-                        self.present_buffer[out] = (b << 3) | (b >> 2);
-                        self.present_buffer[out + 1] = (g << 2) | (g >> 4);
-                        self.present_buffer[out + 2] = (r << 3) | (r >> 2);
-                        self.present_buffer[out + 3] = 0xff;
-                    }
-                }
-            }
-            8 => {
-                // Through the palette the guest set. A screen it has not given
-                // a palette to is black: there are no colours to read yet, and
-                // reading them from wherever address zero lands would paint
-                // the screen one nobody chose.
-                let palette = self.state.palette;
-                for y in 0..frame.height as usize {
-                    for x in 0..frame.width as usize {
-                        let index = source[y * frame.pitch as usize + x];
-                        let entry = if palette == 0 {
-                            0
-                        } else {
-                            self.arena
-                                .read_u32(palette + u32::from(index) * 4)
-                                .unwrap_or(0)
-                        };
-                        let out = (y * frame.width as usize + x) * 4;
-                        let [r, g, b, _] = entry.to_le_bytes();
-                        self.present_buffer[out] = b;
-                        self.present_buffer[out + 1] = g;
-                        self.present_buffer[out + 2] = r;
-                        self.present_buffer[out + 3] = 0xff;
-                    }
-                }
-            }
+            16 => crate::present::rgb565_to_bgra(
+                source,
+                pitch,
+                &mut self.present_buffer,
+                width,
+                height,
+            ),
+            8 => crate::present::paletted8_to_bgra(
+                source,
+                pitch,
+                &mut self.present_buffer,
+                width,
+                height,
+                self.state.palette,
+                &self.arena,
+            ),
             other => {
                 log.line(&format!(
                     "flip refused: {other} bits a pixel is not a declared format"
@@ -2106,7 +2075,7 @@ impl Machine {
         }
 
         self.clock.present(self.flip_cost);
-        log.line(&format!(
+        log.line_fmt(format_args!(
             "flip {} cursor {} {}x{}x{}",
             self.flips,
             self.clock.cursor(),

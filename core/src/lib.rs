@@ -25,6 +25,7 @@ pub mod machine;
 pub mod msv1;
 pub mod pe;
 pub mod png;
+pub mod present;
 pub mod raster;
 pub mod repl;
 pub mod roster;
