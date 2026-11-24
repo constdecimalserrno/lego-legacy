@@ -117,6 +117,9 @@ impl X87 {
     #[must_use]
     #[inline(always)]
     pub fn to_whole(&self, x: f64) -> f64 {
+        if x.is_nan() {
+            return answer(x, x, x);
+        }
         match (self.control >> 10) & 3 {
             0 => round_half_to_even(x),
             1 => x.floor(),
@@ -1363,11 +1366,15 @@ pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Res
 #[inline(always)]
 pub fn round_half_to_even(x: f64) -> f64 {
     // IEEE-754 `round_ties_even` matches the previous `round`/`trunc`/`% 2.0`
-    // formula bit-for-bit on every input except `-0.5`, where IEEE produces
-    // `-0.0` while `-1.0 - (-1.0)` produced `+0.0`. Preserve `+0.0` for `-0.5`
-    // so no register bit or state digest can drift.
+    // formula bit-for-bit on every non-NaN input except `-0.5`, where IEEE
+    // produces `-0.0` while `-1.0 - (-1.0)` produced `+0.0`. Preserve `+0.0`
+    // for `-0.5` and route any NaN through `answer` so signaling NaNs are
+    // quieted identically on every host and target (baseline x86_64 Linux
+    // `round_ties_even` otherwise leaves them unquieted).
     if x == -0.5 {
         0.0
+    } else if x.is_nan() {
+        answer(x, x, x)
     } else {
         x.round_ties_even()
     }
@@ -1603,19 +1610,52 @@ mod tests {
             f64::from_bits(0x8000_0000_0000_0001),
             f64::INFINITY,
             f64::NEG_INFINITY,
-            f64::NAN,
-            INDEFINITE,
-            f64::from_bits(0x7ff0_0000_0000_0001),
-            f64::from_bits(0xfff0_0000_0000_0007),
         ];
 
         for x in cases {
+            let x = std::hint::black_box(x);
             assert_eq!(
                 super::round_half_to_even(x).to_bits(),
                 legacy(x).to_bits(),
                 "bit mismatch for {x:?} ({:#018x})",
                 x.to_bits()
             );
+        }
+
+        // NaNs follow x87's own rule (`answer`): quiet NaNs stay bit-exact and
+        // signaling NaNs have their quiet bit set with sign and payload kept,
+        // independent of host libm (`round`/`round_ties_even`/`floor`/`ceil`/`trunc`).
+        let nan_cases = [
+            (f64::NAN, f64::NAN.to_bits()),
+            (INDEFINITE, INDEFINITE.to_bits()),
+            (
+                f64::from_bits(0x7ff0_0000_0000_0001),
+                0x7ff8_0000_0000_0001u64,
+            ),
+            (
+                f64::from_bits(0xfff0_0000_0000_0007),
+                0xfff8_0000_0000_0007u64,
+            ),
+        ];
+
+        for (input, expected) in nan_cases {
+            let x = std::hint::black_box(input);
+            assert_eq!(
+                super::round_half_to_even(x).to_bits(),
+                expected,
+                "NaN bit mismatch in round_half_to_even for {:#018x}",
+                input.to_bits()
+            );
+            for rc in 0u16..4 {
+                let mut fpu = X87::new();
+                fpu.set_control((fpu.control() & !0x0c00) | (rc << 10));
+                assert_eq!(
+                    fpu.to_whole(x).to_bits(),
+                    expected,
+                    "NaN bit mismatch in to_whole(rc={rc}) for {:#018x}",
+                    input.to_bits()
+                );
+            }
         }
     }
 

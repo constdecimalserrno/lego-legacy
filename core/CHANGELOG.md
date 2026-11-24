@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+x87 whole-number rounding (`round_half_to_even` and `X87::to_whole`) now routes NaN inputs through `x87::answer` (#269), quieting signaling NaNs with their sign and payload preserved identically across `aarch64` and `x86_64` (macOS, Linux, and Windows) where baseline `x86_64` `f64::round_ties_even` on Linux and `f64::round` on Windows otherwise leave signaling NaNs unquieted; `round_half_to_even_matches_reference_bit_for_bit` pins exact quieted NaN bits directly and tests `X87::to_whole` across all four rounding modes, with zero drift on any committed route or digest.
+
 CPU interpreter flat32 execution is accelerated with static, direct-threaded `aarch64` and `x86_64` `#[unsafe(naked)]` + `naked_asm!` dispatch loops behind a co-located seam (`core/src/cpu/interp/{mod.rs, rust.rs, aarch64.rs, x86_64.rs}`, ADR-0009, #256), leaving every run's cursor, flips, declared milliseconds, and `state_digest()` unchanged:
 
 - `cpu::insn` and `cpu::exec` extend `FastOp` with flat32 8-bit and 16-bit `mov`/ALU, 32-bit `imul` (`Imul2`), `setcc`, `fwait` (`Nop`), and an `EndRun` sentinel appended after non-transfer runs (keeping `FastInsn` at 16 bytes `#[repr(C)]` and `Interp::cached()` unchanged). `Arena::raw_parts_mut` exposes the arena pointer, floor, length, and code-page bitmap to the crate-internal seam.
