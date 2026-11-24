@@ -1724,25 +1724,27 @@ pub struct RenderPass {
     pub parked: bool,
 }
 
-/// The lights on the visual a render pass is drawing: every light in its
-/// scene, less those enabled only for a frame this visual's is not under.
-/// Outside a render pass there are none.
-#[must_use]
-pub fn current_lights(state: &State) -> Vec<super::pipeline::Light> {
+/// Fill `out` with the lights on the visual a render pass is drawing: every
+/// light in its scene, less those enabled only for a frame this visual's is
+/// not under. Outside a render pass there are none.
+pub fn fill_current_lights(state: &State, out: &mut Vec<super::pipeline::Light>) {
+    out.clear();
     let Some(pass) = state.render.as_ref() else {
-        return Vec::new();
+        return;
     };
     let frame = pass.visits.get(pass.next).map_or(0, |v| v.frame);
-    lights_on(state, &pass.lights, frame)
+    fill_lights_on(state, &pass.lights, frame, out);
 }
 
-/// The lights on what hangs on a frame: every light in its scene, less those
-/// enabled only for a frame this one is not under.
-fn lights_on(
+/// Fill `out` with the lights on what hangs on a frame: every light in its
+/// scene, less those enabled only for a frame this one is not under.
+fn fill_lights_on(
     state: &State,
     lights: &[(u32, super::pipeline::Light)],
     frame: u32,
-) -> Vec<super::pipeline::Light> {
+    out: &mut Vec<super::pipeline::Light>,
+) {
+    out.clear();
     let under = |only: u32| {
         let mut at = frame;
         for _ in 0..=state.scene.frames.len() {
@@ -1756,11 +1758,12 @@ fn lights_on(
         }
         false
     };
-    lights
-        .iter()
-        .filter(|(only, _)| *only == 0 || under(*only))
-        .map(|(_, light)| *light)
-        .collect()
+    out.extend(
+        lights
+            .iter()
+            .filter(|(only, _)| *only == 0 || under(*only))
+            .map(|(_, light)| *light),
+    );
 }
 
 /// One user visual, on the frame it hangs from.
@@ -1789,7 +1792,10 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(ComState::Viewport { device, camera, .. }) = viewport_state(ctx, this) else {
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let (mut visits, mut meshes) = (Vec::new(), Vec::new());
+    let mut visits = Vec::new();
+    let mut scratch = std::mem::take(&mut ctx.state.scene.scratch);
+    scratch.meshes.clear();
+    scratch.lights.clear();
     let scene = ctx.state.identity(args[0]);
     // Whether a scene's fog is on is kept when a title sets it, and nothing
     // here draws fog, so a scene with it on is a wall.
@@ -1799,36 +1805,35 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         .root(scene)
         .and_then(|r| ctx.state.scene.frame(r));
     if root.is_some_and(|f| f.fog) {
+        ctx.state.scene.scratch = scratch;
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a scene with its fog on".to_owned(),
             caller: 0,
         });
     }
-    collect_visits(ctx, scene, &mut visits, &mut meshes, 0, None)?;
+    collect_visits(ctx, scene, &mut visits, &mut scratch.meshes, 0, None)?;
     // What retained mode draws itself and what it calls a title to draw are
     // drawn in the order of the tree; no title has hung both in one, so the
     // order between the two has not been needed.
-    if !visits.is_empty() && !meshes.is_empty() {
+    if !visits.is_empty() && !scratch.meshes.is_empty() {
+        ctx.state.scene.scratch = scratch;
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a scene of both meshes and user visuals"
                 .to_owned(),
             caller: 0,
         });
     }
-    let mut lights = Vec::new();
-    collect_lights(ctx, scene, &mut lights, 0)?;
+    collect_lights(ctx, scene, &mut scratch.lights, 0)?;
     let (Some(immediate), Some(under)) = (
         immediate_device(ctx, device)?,
         immediate_viewport(ctx, this)?,
     ) else {
+        ctx.state.scene.scratch = scratch;
         return Ok(D3DRMERR_BADOBJECT);
     };
-    let Some(camera_world) = ctx
-        .state
-        .scene
-        .world(ctx.state.identity(camera))
-        .and_then(|m| super::scene::invert(&m))
-    else {
+    let camera_world_raw = ctx.state.scene.world(ctx.state.identity(camera));
+    let Some(camera_world) = camera_world_raw.and_then(|m| super::scene::invert(&m)) else {
+        ctx.state.scene.scratch = scratch;
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a camera with no place in a scene".to_owned(),
             caller: 0,
@@ -1843,6 +1848,7 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         .cloned()
         .unwrap_or_default();
     if view.projection != 0 {
+        ctx.state.scene.scratch = scratch;
         return Err(Stop::NotWritten {
             what: format!(
                 "IDirect3DRMViewport2::Render: projection {}, which is not perspective",
@@ -1856,8 +1862,8 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let projection = view.perspective(rect.2, rect.3);
     super::d3d::set_device_transform(ctx.state, immediate, PROJECTION, &projection);
     super::d3d::set_device_viewport(ctx.state, immediate, under);
-    if !meshes.is_empty() {
-        let count = meshes.len();
+    if !scratch.meshes.is_empty() {
+        let count = scratch.meshes.len();
         ctx.log.at(crate::cli::Trace::Shims, || {
             format!("render {count} meshes")
         });
@@ -1865,24 +1871,21 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         // The camera looks down its own z axis, so the viewer is back along
         // it.
         let back = super::scene::direct(
-            &ctx.state
-                .scene
-                .world(ctx.state.identity(camera))
-                .unwrap_or(super::scene::IDENTITY),
+            &camera_world_raw.unwrap_or(super::scene::IDENTITY),
             [0.0, 0.0, -1.0],
         );
         let viewer = super::scene::normalise(back).unwrap_or([0.0, 0.0, -1.0]);
-        let pass = MeshPass {
+        let result = draw_mesh_pass(
+            ctx,
             device,
             immediate,
             rect,
             clip_from_world,
             viewer,
-            lights: &lights,
-        };
-        for (world, frame, mesh) in meshes {
-            draw_mesh(ctx, &pass, &world, frame, mesh)?;
-        }
+            &mut scratch,
+        );
+        ctx.state.scene.scratch = scratch;
+        result?;
         return Ok(S_OK);
     }
     let visuals = visits.len();
@@ -1890,8 +1893,11 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         format!("render {visuals} user visuals")
     });
     if visits.is_empty() {
+        ctx.state.scene.scratch = scratch;
         return Ok(S_OK);
     }
+    let lights = std::mem::take(&mut scratch.lights);
+    ctx.state.scene.scratch = scratch;
     ctx.state.render = Some(RenderPass {
         visits,
         next: 0,
@@ -2077,11 +2083,10 @@ fn collect_visits(
 
 /// What a viewport draws every mesh of a render with (#120).
 struct MeshPass<'a> {
-    /// The retained-mode device, whose quality is the most any group is
-    /// drawn with, and the immediate-mode device under it, which draws.
-    device: u32,
     immediate: u32,
-    rect: super::scene::Rect,
+    device_quality: u32,
+    linear: bool,
+    canvas: super::d3d::Canvas,
     clip_from_world: Matrix,
     /// The direction back towards the camera.
     viewer: [f32; 3],
@@ -2100,34 +2105,23 @@ const FILL_SOLID: u32 = 0x80;
 /// how this machine's rasteriser always draws one, and wrapping neither way.
 const MAP_PERSPCORRECT: u32 = 0x4;
 
-/// One mesh hung on a frame, group by group: its faces put in the world by
-/// the frame and on the viewport by the camera; lit, as its quality says, by
-/// the scene's lights falling on its colour and material, or left its colour;
-/// and textured from its texture's surface as that surface is now.
-///
-/// Every face is in front when its corners go round clockwise as the camera
-/// sees it, as they are in Direct3D, and a face turned away is not drawn.
-// ponytail: a translucent group's colour is blended over what is behind it,
-// in the order the groups are drawn. DirectX 5's retained mode stipples
-// translucency unless a title asks its device for blending, which LEGO
-// Island does not, and stippling is a pattern each card made its own way.
-fn draw_mesh(
+fn draw_mesh_pass(
     ctx: &mut Ctx<'_>,
-    pass: &MeshPass<'_>,
-    world: &Matrix,
-    frame: u32,
-    mesh: u32,
+    device: u32,
+    immediate: u32,
+    rect: super::scene::Rect,
+    clip_from_world: Matrix,
+    viewer: [f32; 3],
+    scratch: &mut super::scene::RenderScratch,
 ) -> Result<(), Stop> {
-    use super::pipeline::{self, Clipped};
-    use crate::raster::{Blend, Combine, Compare, States};
     const METHOD: &str = "IDirect3DRMViewport::Render";
     let unwritten = |what: String| Stop::NotWritten {
         what: format!("{METHOD}: {what}"),
         caller: 0,
     };
     let setting = |name: &'static str| {
-        let device = ctx.state.identity(pass.device);
-        ctx.state.set_values.get(&(device, name)).copied()
+        let id = ctx.state.identity(device);
+        ctx.state.set_values.get(&(id, name)).copied()
     };
     let device_quality = setting("quality")
         .ok_or_else(|| unwritten("a device whose quality was never set".to_owned()))?;
@@ -2144,27 +2138,79 @@ fn draw_mesh(
         pitch,
         format,
         ..
-    }) = device_surface(ctx, pass.device).and_then(|s| ctx.state.com(s).map(|o| o.state.clone()))
+    }) = device_surface(ctx, device).and_then(|s| ctx.state.com(s).map(|o| o.state.clone()))
     else {
         return Ok(());
     };
     if format.masks == [0; 4] {
         return Err(unwritten("into an indexed surface".to_owned()));
     }
-    let (x, y, w, h) = pass.rect;
-    let canvas = super::d3d::Canvas {
-        pixels,
-        width,
-        height,
-        pitch,
-        format,
-        place: pipeline::Viewport::whole(x, y, w, h),
+    let (x, y, w, h) = rect;
+    let pass = MeshPass {
+        immediate,
+        device_quality,
+        linear,
+        canvas: super::d3d::Canvas {
+            pixels,
+            width,
+            height,
+            pitch,
+            format,
+            place: super::pipeline::Viewport::whole(x, y, w, h),
+        },
+        clip_from_world,
+        viewer,
+        lights: &scratch.lights,
+    };
+    for &(world, frame, mesh) in &scratch.meshes {
+        draw_mesh(
+            ctx,
+            &pass,
+            &world,
+            frame,
+            mesh,
+            &mut scratch.mesh_lights,
+            &mut scratch.vertices,
+            &mut scratch.triangles,
+        )?;
+    }
+    Ok(())
+}
+
+/// One mesh hung on a frame, group by group: its faces put in the world by
+/// the frame and on the viewport by the camera; lit, as its quality says, by
+/// the scene's lights falling on its colour and material, or left its colour;
+/// and textured from its texture's surface as that surface is now.
+///
+/// Every face is in front when its corners go round clockwise as the camera
+/// sees it, as they are in Direct3D, and a face turned away is not drawn.
+// ponytail: a translucent group's colour is blended over what is behind it,
+// in the order the groups are drawn. DirectX 5's retained mode stipples
+// translucency unless a title asks its device for blending, which LEGO
+// Island does not, and stippling is a pattern each card made its own way.
+#[allow(clippy::too_many_arguments)]
+fn draw_mesh(
+    ctx: &mut Ctx<'_>,
+    pass: &MeshPass<'_>,
+    world: &Matrix,
+    frame: u32,
+    mesh: u32,
+    lights: &mut Vec<super::pipeline::Light>,
+    vertices: &mut Vec<Option<super::pipeline::Clipped>>,
+    triangles: &mut Vec<[super::pipeline::Clipped; 3]>,
+) -> Result<(), Stop> {
+    use super::pipeline::{self, Clipped};
+    use crate::raster::{Blend, Combine, Compare, States};
+    const METHOD: &str = "IDirect3DRMViewport::Render";
+    let unwritten = |what: String| Stop::NotWritten {
+        what: format!("{METHOD}: {what}"),
+        caller: 0,
     };
     let Some(groups) = ctx.state.scene.meshes.get(&mesh).map(|m| m.groups.len()) else {
         return Ok(());
     };
     let clip_from_model = super::scene::multiply(world, &pass.clip_from_world);
-    let lights = lights_on(ctx.state, pass.lights, frame);
+    fill_lights_on(ctx.state, pass.lights, frame, lights);
     for group in 0..groups {
         let scene = &ctx.state.scene;
         let g = &scene.meshes[&mesh].groups[group];
@@ -2172,7 +2218,7 @@ fn draw_mesh(
             .quality
             .ok_or_else(|| unwritten("a group whose quality was never set".to_owned()))?;
         // The device's quality is the most any group is drawn with.
-        let part = |mask: u32| (quality & mask).min(device_quality & mask);
+        let part = |mask: u32| (quality & mask).min(pass.device_quality & mask);
         if part(FILL_MASK) != FILL_SOLID {
             return Err(unwritten(format!(
                 "a group filled as {:#x}",
@@ -2219,35 +2265,32 @@ fn draw_mesh(
         };
         let highlights = surface.specular != [0.0; 4];
         // Every vertex once, lit where it is in the world.
-        let vertices: Vec<Option<Clipped>> = g
-            .vertices
-            .iter()
-            .map(|vertex| {
-                let vertex = (*vertex)?;
-                let v = |i: usize| value(vertex[i]);
-                let position = [v(0), v(1), v(2), 1.0];
-                let (diffuse, specular) = if lit {
-                    let at = pipeline::project(world, position);
-                    pipeline::lit(
-                        [at[0], at[1], at[2]],
-                        super::scene::direct(world, [v(3), v(4), v(5)]),
-                        &surface,
-                        [0.0; 3],
-                        &lights,
-                        highlights.then_some(pass.viewer),
-                    )
-                } else {
-                    (colour, [0.0; 3])
-                };
-                Some(Clipped {
-                    clip: pipeline::project(&clip_from_model, position),
-                    diffuse,
-                    specular,
-                    uv: [v(6), v(7)],
-                    fog: 1.0,
-                })
+        vertices.clear();
+        vertices.extend(g.vertices.iter().map(|vertex| {
+            let vertex = (*vertex)?;
+            let v = |i: usize| value(vertex[i]);
+            let position = [v(0), v(1), v(2), 1.0];
+            let (diffuse, specular) = if lit {
+                let at = pipeline::project(world, position);
+                pipeline::lit(
+                    [at[0], at[1], at[2]],
+                    super::scene::direct(world, [v(3), v(4), v(5)]),
+                    &surface,
+                    [0.0; 3],
+                    lights,
+                    highlights.then_some(pass.viewer),
+                )
+            } else {
+                (colour, [0.0; 3])
+            };
+            Some(Clipped {
+                clip: pipeline::project(&clip_from_model, position),
+                diffuse,
+                specular,
+                uv: [v(6), v(7)],
+                fog: 1.0,
             })
-            .collect();
+        }));
         let corner = |index: u32| {
             vertices
                 .get(index as usize)
@@ -2256,7 +2299,7 @@ fn draw_mesh(
                 .ok_or_else(|| unwritten(format!("a face's vertex {index}, never set")))
         };
         // Each face a fan of triangles from its first corner.
-        let mut triangles = Vec::new();
+        triangles.clear();
         for face in g.indices.chunks_exact(g.per_face as usize) {
             let first = corner(face[0])?;
             for pair in face[1..].windows(2) {
@@ -2269,7 +2312,7 @@ fn draw_mesh(
             flat: part(SHADE_MASK) == SHADE_FLAT,
             colour: Combine::Modulate,
             alpha: Combine::Modulate,
-            linear,
+            linear: pass.linear,
             colour_key: false,
             alpha_test: None,
             blend: (colour[3] < 1.0).then_some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
@@ -2281,8 +2324,8 @@ fn draw_mesh(
             ctx,
             METHOD,
             pass.immediate,
-            &canvas,
-            &triangles,
+            &pass.canvas,
+            triangles,
             true,
             3,
             (texture, [false; 2]),
@@ -3552,24 +3595,58 @@ fn nearest_face(
                 fog: 1.0,
             })
         };
+        let mut corner_buf = [Clipped::default(); pipeline::CLIP_BUFFER];
+        let mut clip_buf = [Clipped::default(); pipeline::CLIP_BUFFER];
+        let mut poly_buf = [crate::raster::Vertex::default(); pipeline::CLIP_BUFFER];
         let faces = group.indices.chunks_exact(group.per_face.max(1) as usize);
         for (f, face) in (0u32..).zip(faces) {
-            let Some(corners) = face.iter().map(corner).collect::<Option<Vec<_>>>() else {
-                continue;
+            let heap_poly: Vec<crate::raster::Vertex>;
+            let polygon: &[crate::raster::Vertex] = if face.len() <= pipeline::CLIP_BUFFER {
+                let mut ok = true;
+                for (dst, idx) in corner_buf.iter_mut().zip(face) {
+                    if let Some(c) = corner(idx) {
+                        *dst = c;
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let corners = &corner_buf[..face.len()];
+                if let Some(len) = pipeline::clip_into(corners, &mut clip_buf) {
+                    for (dst, src) in poly_buf.iter_mut().zip(&clip_buf[..len]) {
+                        *dst = place.place(src);
+                    }
+                    &poly_buf[..len]
+                } else {
+                    heap_poly = pipeline::clip(corners)
+                        .iter()
+                        .map(|v| place.place(v))
+                        .collect();
+                    &heap_poly
+                }
+            } else {
+                let Some(corners) = face.iter().map(corner).collect::<Option<Vec<_>>>() else {
+                    continue;
+                };
+                heap_poly = pipeline::clip(&corners)
+                    .iter()
+                    .map(|v| place.place(v))
+                    .collect();
+                &heap_poly
             };
-            let polygon: Vec<_> = pipeline::clip(&corners)
-                .iter()
-                .map(|v| place.place(v))
-                .collect();
             // Wound anticlockwise on the screen, it is turned away and not
             // drawn (`d3d::rasterise`'s D3DCULL_CCW).
-            let area: f32 = (0..polygon.len())
-                .map(|p| {
-                    let (u, v) = (polygon[p], polygon[(p + 1) % polygon.len()]);
-                    u.x * v.y - v.x * u.y
-                })
-                .sum();
-            if polygon.len() < 3 || area < 0.0 {
+            let mut area = 0.0f32;
+            let len = polygon.len();
+            for p in 0..len {
+                let u = polygon[p];
+                let v = polygon[if p + 1 < len { p + 1 } else { 0 }];
+                area += u.x * v.y - v.x * u.y;
+            }
+            if len < 3 || area < 0.0 {
                 continue;
             }
             let edge = |a: crate::raster::Vertex, b: crate::raster::Vertex| {

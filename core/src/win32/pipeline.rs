@@ -212,12 +212,18 @@ pub fn lit(
     let mut shine = [0.0f32; 3];
     // The highlight of a light towards `l` with this much of its strength
     // reaching the vertex, on a side the light falls on.
-    let mut highlight = |colour: [f32; 3], l: [f32; 3], reaching: f32| {
-        let Some(h) = viewer.and_then(|v| normalise(std::array::from_fn(|i| l[i] + v[i]))) else {
+    let mut highlight = |colour: [f32; 3], l: [f32; 3], ndotl: f32, reaching: f32| {
+        let Some(v) = viewer else {
+            return;
+        };
+        if ndotl <= 0.0 {
+            return;
+        }
+        let Some(h) = normalise(std::array::from_fn(|i| l[i] + v[i])) else {
             return;
         };
         let along = dot(normal, h);
-        if dot(normal, l) <= 0.0 || along <= 0.0 {
+        if along <= 0.0 {
             return;
         }
         // The engine's own powers, never the host's.
@@ -253,8 +259,9 @@ pub fn lit(
             Light::Directional { colour, direction } => {
                 if let Some(d) = normalise(direction) {
                     let towards = d.map(|c| -c);
-                    add(colour, dot(normal, towards).max(0.0));
-                    highlight(colour, towards, 1.0);
+                    let ndotl = dot(normal, towards);
+                    add(colour, ndotl.max(0.0));
+                    highlight(colour, towards, ndotl, 1.0);
                 }
             }
             Light::Point {
@@ -265,8 +272,10 @@ pub fn lit(
             } => {
                 let (Some(l), d) = toward(at) else { continue };
                 if d <= range {
-                    add(colour, dot(normal, l).max(0.0) * falloff(d, attenuation));
-                    highlight(colour, l, falloff(d, attenuation));
+                    let ndotl = dot(normal, l);
+                    let att = falloff(d, attenuation);
+                    add(colour, ndotl.max(0.0) * att);
+                    highlight(colour, l, ndotl, att);
                 }
             }
             Light::Spot {
@@ -293,11 +302,10 @@ pub fn lit(
                 } else {
                     (rho - outer) / (inner - outer).max(f32::MIN_POSITIVE)
                 };
-                add(
-                    colour,
-                    dot(normal, l).max(0.0) * falloff(d, attenuation) * cone,
-                );
-                highlight(colour, l, falloff(d, attenuation) * cone);
+                let ndotl = dot(normal, l);
+                let att = falloff(d, attenuation);
+                add(colour, ndotl.max(0.0) * att * cone);
+                highlight(colour, l, ndotl, att * cone);
             }
         }
     }
@@ -357,28 +365,97 @@ fn lerp(a: &Clipped, b: &Clipped, t: f32) -> Clipped {
     }
 }
 
-/// Cut a polygon to the view volume: `-w <= x, y <= w` and `0 <= z <= w`.
+/// Stack capacity for clipping a convex triangle (at most 9 vertices against 6
+/// frustum planes) or quad (at most 10) without heap allocation.
+pub const CLIP_BUFFER: usize = 12;
+
+/// Whether a clip-space vertex lies wholly inside the view volume:
+/// `-w <= x, y <= w` and `0 <= z <= w`.
 #[must_use]
-pub fn clip(polygon: &[Clipped]) -> Vec<Clipped> {
-    // Most of what a title draws is wholly inside, and cutting nothing is
-    // cheaper said than done.
-    if polygon.iter().all(|v| {
-        let [x, y, z, w] = v.clip;
-        -w <= x && x <= w && -w <= y && y <= w && 0.0 <= z && z <= w
-    }) {
+#[inline]
+pub fn inside_frustum(v: &Clipped) -> bool {
+    let [x, y, z, w] = v.clip;
+    -w <= x && x <= w && -w <= y && y <= w && 0.0 <= z && z <= w
+}
+
+/// Each plane of the view volume as the distance of a clip-space point inside it.
+const PLANES: [fn(&[f32; 4]) -> f32; 6] = [
+    |c| c[3] + c[0],
+    |c| c[3] - c[0],
+    |c| c[3] + c[1],
+    |c| c[3] - c[1],
+    |c| c[2],
+    |c| c[3] - c[2],
+];
+
+fn clip_plane(
+    input: &[Clipped],
+    inside: fn(&[f32; 4]) -> f32,
+    output: &mut [Clipped; CLIP_BUFFER],
+) -> Option<usize> {
+    let n = input.len();
+    let mut out_len = 0;
+    for (i, current) in input.iter().enumerate() {
+        let previous = &input[if i == 0 { n - 1 } else { i - 1 }];
+        let (dc, dp) = (inside(&current.clip), inside(&previous.clip));
+        if (dc >= 0.0) != (dp >= 0.0) {
+            if out_len == CLIP_BUFFER {
+                return None;
+            }
+            output[out_len] = lerp(previous, current, dp / (dp - dc));
+            out_len += 1;
+        }
+        if dc >= 0.0 {
+            if out_len == CLIP_BUFFER {
+                return None;
+            }
+            output[out_len] = *current;
+            out_len += 1;
+        }
+    }
+    Some(out_len)
+}
+
+/// Cut a polygon to the view volume into a caller-supplied stack buffer.
+/// Returns `None` if the input or an intermediate result exceeds
+/// [`CLIP_BUFFER`] (impossible for any finite convex triangle or quad, possible
+/// only for large polygons or pathological NaN inputs), in which case [`clip`]
+/// handles it on the heap.
+#[must_use]
+pub fn clip_into(polygon: &[Clipped], out: &mut [Clipped; CLIP_BUFFER]) -> Option<usize> {
+    if polygon.len() > CLIP_BUFFER {
+        return None;
+    }
+    if polygon.iter().all(inside_frustum) {
+        out[..polygon.len()].copy_from_slice(polygon);
+        return Some(polygon.len());
+    }
+    out[..polygon.len()].copy_from_slice(polygon);
+    let mut scratch = [Clipped::default(); CLIP_BUFFER];
+    let mut len = polygon.len();
+    // Six planes is even: planes 0, 2, 4 write into `scratch` and 1, 3, 5 back
+    // into `out`, so the final polygon lands in `out[..len]`.
+    for (plane, inside) in PLANES.into_iter().enumerate() {
+        if len == 0 {
+            return Some(0);
+        }
+        len = if plane % 2 == 0 {
+            clip_plane(&out[..len], inside, &mut scratch)?
+        } else {
+            clip_plane(&scratch[..len], inside, out)?
+        };
+    }
+    Some(len)
+}
+
+#[cold]
+#[inline(never)]
+fn clip_vec(polygon: &[Clipped]) -> Vec<Clipped> {
+    if polygon.iter().all(inside_frustum) {
         return polygon.to_vec();
     }
-    // Each plane as the distance of a clip-space point inside it.
-    let planes: [fn(&[f32; 4]) -> f32; 6] = [
-        |c| c[3] + c[0],
-        |c| c[3] - c[0],
-        |c| c[3] + c[1],
-        |c| c[3] - c[1],
-        |c| c[2],
-        |c| c[3] - c[2],
-    ];
     let mut out = polygon.to_vec();
-    for inside in planes {
+    for inside in PLANES {
         if out.is_empty() {
             break;
         }
@@ -395,6 +472,17 @@ pub fn clip(polygon: &[Clipped]) -> Vec<Clipped> {
         }
     }
     out
+}
+
+/// Cut a polygon to the view volume: `-w <= x, y <= w` and `0 <= z <= w`.
+#[must_use]
+pub fn clip(polygon: &[Clipped]) -> Vec<Clipped> {
+    let mut out = [Clipped::default(); CLIP_BUFFER];
+    if let Some(len) = clip_into(polygon, &mut out) {
+        out[..len].to_vec()
+    } else {
+        clip_vec(polygon)
+    }
 }
 
 /// Where the viewport puts clip space on the surface: its rectangle in pixels,
@@ -566,5 +654,85 @@ mod tests {
         assert_eq!((top_left.x, top_left.y), (16.0, 13.0));
         assert_eq!((bottom_right.x, bottom_right.y), (167.0, 164.0));
         assert_eq!(top_left.z, 0.5);
+        // Minus zero depth lands on positive zero.
+        let neg_zero = viewport.place(&Clipped {
+            clip: [0.0, 0.0, -0.0, 1.0],
+            ..Clipped::default()
+        });
+        assert_eq!(neg_zero.z.to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn clip_into_matches_heap_clip_bit_for_bit_including_multi_plane_and_overflow() {
+        let v = |clip: [f32; 4], u: f32, t: f32| Clipped {
+            clip,
+            diffuse: [u, t, 0.5, 1.0],
+            specular: [0.1, 0.2, 0.3],
+            uv: [u, t],
+            fog: 0.75,
+        };
+        let assert_same = |poly: &[Clipped], label: &str| {
+            let expected = super::clip_vec(poly);
+            let mut buf = [Clipped::default(); super::CLIP_BUFFER];
+            let len = super::clip_into(poly, &mut buf).expect(label);
+            assert_eq!(len, expected.len(), "{label}: vertex count");
+            for (got, want) in buf[..len].iter().zip(&expected) {
+                assert_eq!(
+                    got.clip.map(f32::to_bits),
+                    want.clip.map(f32::to_bits),
+                    "{label}: clip bits"
+                );
+                assert_eq!(
+                    got.diffuse.map(f32::to_bits),
+                    want.diffuse.map(f32::to_bits),
+                    "{label}: diffuse bits"
+                );
+                assert_eq!(
+                    got.specular.map(f32::to_bits),
+                    want.specular.map(f32::to_bits),
+                    "{label}: specular bits"
+                );
+                assert_eq!(
+                    got.uv.map(f32::to_bits),
+                    want.uv.map(f32::to_bits),
+                    "{label}: uv bits"
+                );
+                assert_eq!(got.fog.to_bits(), want.fog.to_bits(), "{label}: fog bits");
+            }
+        };
+        // Wholly inside.
+        assert_same(
+            &[
+                v([0.0, 0.0, 0.5, 1.0], 0.0, 0.0),
+                v([0.5, 0.0, 0.5, 1.0], 1.0, 0.0),
+                v([0.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+            ],
+            "inside",
+        );
+        // Wholly outside.
+        assert_same(
+            &[
+                v([2.0, 0.0, 0.5, 1.0], 0.0, 0.0),
+                v([3.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                v([2.0, 1.0, 0.5, 1.0], 0.0, 1.0),
+            ],
+            "outside",
+        );
+        // Large oblique triangle crossing all six frustum planes.
+        let six_planes = [
+            v([-3.0, -2.5, -1.5, 1.0], 0.0, 0.0),
+            v([3.5, -1.5, 2.5, 1.0], 1.0, 0.0),
+            v([0.2, 3.5, 0.5, 1.0], 0.5, 1.0),
+        ];
+        assert_same(&six_planes, "six planes");
+        assert!(clip(&six_planes).len() <= 9);
+
+        // Input larger than CLIP_BUFFER spills cleanly to the heap fallback.
+        let big: Vec<Clipped> = (0..14)
+            .map(|i| v([0.0, 0.0, i as f32 * 0.05, 1.0], i as f32, 0.0))
+            .collect();
+        let mut buf = [Clipped::default(); super::CLIP_BUFFER];
+        assert_eq!(super::clip_into(&big, &mut buf), None);
+        assert_eq!(clip(&big), super::clip_vec(&big));
     }
 }

@@ -5,6 +5,14 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Direct3D and Retained Mode drop per-triangle heap allocations, reuse draw scratch buffers, flat-index device state tables, and sink scene NaN scanning behind a cold path (#259):
+
+- `pipeline::clip_into` clips polygons into a fixed 12-vertex stack buffer (a convex triangle clipped against six frustum planes yields at most 9 vertices), with `#[cold]` heap fallback for oversized or pathological inputs; `d3d::rasterise` and `d3drm::nearest_face` clip and project on the stack without per-triangle `Vec` allocations, and wholly-inside or already-transformed triangles skip the clip buffers altogether.
+- `d3d::Immediate` and `scene::Scene` reuse scratch buffers (`indices`, `lights`, `prepared`, `triangles`, `raster`, and Retained Mode mesh-pass traversal buffers) across draw calls and frames, avoid `Vec` allocations in `set_device_transform`/`get_transform`, skip world/view/projection matrix multiplies for screen-space (`XYZRHW`) draws, and hoist per-pass quality and surface lookups out of `d3drm::draw_mesh`.
+- `d3d::Device` stores render states (`0..160`), texture stage states (`8 × 32`), transforms (`0..4`), textures (`0..8`), and light states (`0..8`) in flat arrays with set-bitmasks and `BTreeMap` overflow spill for out-of-range indices, eliminating per-draw `BTreeMap` lookups while keeping DirectX 5/6/7 default and unset-state semantics unchanged.
+- `scene::multiply` and `scene::settled` sink `x87::answer_single` operand scanning into `#[cold]` helpers when no output cell is NaN, preserving exact left-fold `-0.0` canonicalisation and cross-ISA NaN payloads.
+- Pure optimisation with bit-exact output: `lego-island` (`pizza-delivery.route`) and `lego-chess` (`checkmate.route`) end on the exact same cursor, flips, declared milliseconds, and `state_digest()`, so no released run moves.
+
 Per-call machine allocations are removed, guest arena scalar accesses and code-page invalidation
 checks are tightened, and flat forward `rep movs`/`rep stos` take bulk copy/fill paths (#252):
 - `Machine::stack_args` reads up to 16 arguments into a stack buffer (`StackArgs::Inline`) and

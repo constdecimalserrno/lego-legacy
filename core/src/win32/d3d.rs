@@ -8,7 +8,6 @@
 //! Every table is the interface's full width from its header; a slot nobody has
 //! called stops the run by name (#11).
 
-use super::scene::IDENTITY;
 use super::{ComState, Ctx, State};
 use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
@@ -34,16 +33,48 @@ pub struct Immediate {
     next_handle: u32,
     /// Viewports' own descriptions, as the guest last set them.
     viewports: BTreeMap<u32, Vec<u8>>,
+    scratch: DrawScratch,
 }
 
-/// One device's state: everything a title sets and may read back.
+/// Reusable per-draw buffers kept across immediate-mode and retained-mode
+/// draws so hot frames do not allocate on every draw call.
 #[derive(Default)]
+struct DrawScratch {
+    indices: Vec<u32>,
+    lights: Vec<super::pipeline::Light>,
+    prepared: Vec<super::pipeline::Clipped>,
+    triangles: Vec<[super::pipeline::Clipped; 3]>,
+    raster: Vec<[crate::raster::Vertex; 3]>,
+}
+
+/// Flat-table bounds for Direct3D 5/6/7 state indices; out-of-range states
+/// spill into `*_extra` maps so uncommon indices still round-trip.
+const RENDER_STATE_SLOTS: usize = 160;
+const STAGE_SLOTS: usize = 8;
+const STAGE_STATE_SLOTS: usize = 32;
+const TRANSFORM_SLOTS: usize = 4;
+const LIGHT_STATE_SLOTS: usize = 8;
+
+const IDENTITY_BITS: [u32; 16] = {
+    let one = 1.0f32.to_bits();
+    [one, 0, 0, 0, 0, one, 0, 0, 0, 0, one, 0, 0, 0, 0, one]
+};
+
+/// One device's state: everything a title sets and may read back.
 struct Device {
-    render: BTreeMap<u32, u32>,
-    light: BTreeMap<u32, u32>,
-    transforms: BTreeMap<u32, [u32; 16]>,
-    textures: BTreeMap<u32, u32>,
-    stages: BTreeMap<(u32, u32), u32>,
+    render: [u32; RENDER_STATE_SLOTS],
+    render_set: [u64; 3],
+    render_extra: BTreeMap<u32, u32>,
+    light: [u32; LIGHT_STATE_SLOTS],
+    light_set: u8,
+    light_extra: BTreeMap<u32, u32>,
+    transforms: [[u32; 16]; TRANSFORM_SLOTS],
+    transforms_extra: BTreeMap<u32, [u32; 16]>,
+    textures: [u32; STAGE_SLOTS],
+    textures_extra: BTreeMap<u32, u32>,
+    stages: [[u32; STAGE_STATE_SLOTS]; STAGE_SLOTS],
+    stages_set: [u32; STAGE_SLOTS],
+    stages_extra: BTreeMap<(u32, u32), u32>,
     current_viewport: u32,
     /// DirectX 7 keeps the viewport on the device rather than in an object of
     /// its own: where on the surface it draws, and the depth range it draws
@@ -55,6 +86,182 @@ struct Device {
     /// guest never locks it, so it is the machine's own rather than guest
     /// memory.
     depth: Vec<f32>,
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Self {
+            render: std::array::from_fn(|s| render_state_at_start(s as u32).unwrap_or(0)),
+            render_set: [0; 3],
+            render_extra: BTreeMap::new(),
+            light: std::array::from_fn(|s| light_state_at_start(s as u32).unwrap_or(0)),
+            light_set: 0,
+            light_extra: BTreeMap::new(),
+            transforms: [IDENTITY_BITS; TRANSFORM_SLOTS],
+            transforms_extra: BTreeMap::new(),
+            textures: [0; STAGE_SLOTS],
+            textures_extra: BTreeMap::new(),
+            stages: std::array::from_fn(|stage| {
+                std::array::from_fn(|state| {
+                    stage_state_at_start(state as u32, stage as u32).unwrap_or(0)
+                })
+            }),
+            stages_set: [0; STAGE_SLOTS],
+            stages_extra: BTreeMap::new(),
+            current_viewport: 0,
+            viewport7: [0; 6],
+            in_scene: false,
+            direct3d: 0,
+            depth: Vec::new(),
+        }
+    }
+}
+
+impl Device {
+    #[inline]
+    fn set_render(&mut self, state: u32, value: u32) {
+        let idx = state as usize;
+        if idx < RENDER_STATE_SLOTS {
+            self.render[idx] = value;
+            self.render_set[idx >> 6] |= 1u64 << (idx & 63);
+        } else {
+            self.render_extra.insert(state, value);
+        }
+    }
+
+    #[inline]
+    fn render_is_set(&self, state: u32) -> bool {
+        let idx = state as usize;
+        if idx < RENDER_STATE_SLOTS {
+            (self.render_set[idx >> 6] & (1u64 << (idx & 63))) != 0
+        } else {
+            self.render_extra.contains_key(&state)
+        }
+    }
+
+    #[inline]
+    fn get_render(&self, state: u32, dx7: bool) -> Option<u32> {
+        let idx = state as usize;
+        if idx < RENDER_STATE_SLOTS {
+            if (self.render_set[idx >> 6] & (1u64 << (idx & 63))) != 0 {
+                Some(self.render[idx])
+            } else {
+                render_state_at_start(state).filter(|_| !dx7 || state != rs::TEXTUREMAPBLEND)
+            }
+        } else {
+            self.render_extra.get(&state).copied()
+        }
+    }
+
+    #[inline]
+    fn render_value(&self, state: u32) -> u32 {
+        debug_assert!((state as usize) < RENDER_STATE_SLOTS);
+        debug_assert!(render_state_at_start(state).is_some());
+        self.render[state as usize]
+    }
+
+    #[inline]
+    fn set_light(&mut self, state: u32, value: u32) {
+        let idx = state as usize;
+        if idx < LIGHT_STATE_SLOTS {
+            self.light[idx] = value;
+            self.light_set |= 1u8 << idx;
+        } else {
+            self.light_extra.insert(state, value);
+        }
+    }
+
+    #[inline]
+    fn get_light(&self, state: u32) -> Option<u32> {
+        let idx = state as usize;
+        if idx < LIGHT_STATE_SLOTS {
+            if (self.light_set & (1u8 << idx)) != 0 {
+                Some(self.light[idx])
+            } else {
+                light_state_at_start(state)
+            }
+        } else {
+            self.light_extra.get(&state).copied()
+        }
+    }
+
+    #[inline]
+    fn set_transform(&mut self, which: u32, bits: [u32; 16]) {
+        let idx = which as usize;
+        if idx < TRANSFORM_SLOTS {
+            self.transforms[idx] = bits;
+        } else {
+            self.transforms_extra.insert(which, bits);
+        }
+    }
+
+    #[inline]
+    fn get_transform(&self, which: u32) -> [u32; 16] {
+        let idx = which as usize;
+        if idx < TRANSFORM_SLOTS {
+            self.transforms[idx]
+        } else {
+            self.transforms_extra
+                .get(&which)
+                .copied()
+                .unwrap_or(IDENTITY_BITS)
+        }
+    }
+
+    #[inline]
+    fn set_texture(&mut self, stage: u32, texture: u32) -> u32 {
+        let idx = stage as usize;
+        if idx < STAGE_SLOTS {
+            std::mem::replace(&mut self.textures[idx], texture)
+        } else {
+            self.textures_extra.insert(stage, texture).unwrap_or(0)
+        }
+    }
+
+    #[inline]
+    fn get_texture(&self, stage: u32) -> u32 {
+        let idx = stage as usize;
+        if idx < STAGE_SLOTS {
+            self.textures[idx]
+        } else {
+            self.textures_extra.get(&stage).copied().unwrap_or(0)
+        }
+    }
+
+    #[inline]
+    fn set_stage(&mut self, stage: u32, state: u32, value: u32) {
+        let (st, s) = (stage as usize, state as usize);
+        if st < STAGE_SLOTS && s < STAGE_STATE_SLOTS {
+            self.stages[st][s] = value;
+            self.stages_set[st] |= 1u32 << s;
+        } else {
+            self.stages_extra.insert((stage, state), value);
+        }
+    }
+
+    #[inline]
+    fn get_stage(&self, stage: u32, state: u32) -> Option<u32> {
+        let (st, s) = (stage as usize, state as usize);
+        if st < STAGE_SLOTS && s < STAGE_STATE_SLOTS {
+            if (self.stages_set[st] & (1u32 << s)) != 0 {
+                Some(self.stages[st][s])
+            } else {
+                stage_state_at_start(state, stage)
+            }
+        } else {
+            self.stages_extra
+                .get(&(stage, state))
+                .copied()
+                .or_else(|| stage_state_at_start(state, stage))
+        }
+    }
+
+    #[inline]
+    fn stage0_value(&self, state: u32) -> u32 {
+        debug_assert!((state as usize) < STAGE_STATE_SLOTS);
+        debug_assert!(stage_state_at_start(state, 0).is_some());
+        self.stages[0][state as usize]
+    }
 }
 
 /// `IDirect3DDevice2`: DirectX 5's face of the device underneath retained mode, which is what retained mode hands a title,
@@ -347,6 +554,31 @@ fn unlock_vertex_buffer(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result
     Ok(S_OK)
 }
 
+/// Where a draw call's vertex indices come from: either sequential `0..n`
+/// for non-indexed draws, or preloaded into `Immediate::scratch.indices`.
+#[derive(Clone, Copy)]
+enum DrawIndices {
+    Sequential(u32),
+    Scratch,
+}
+
+fn fill_u16_indices(ctx: &mut Ctx<'_>, addr: u32, count: u32) -> Result<(), Stop> {
+    let bytes = ctx
+        .mem
+        .slice(addr, count as usize * 2)
+        .map_err(Stop::Fault)?;
+    let indices = &mut ctx.state.immediate.scratch.indices;
+    indices.clear();
+    indices.extend(
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u32::from(u16::from_le_bytes(*c))),
+    );
+    Ok(())
+}
+
 /// Draw straight out of a buffer the title filled earlier.
 fn draw_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // DrawPrimitiveVB(type, buffer, first vertex, count, flags).
@@ -354,7 +586,6 @@ fn draw_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
         return Ok(DDERR_INVALIDPARAMS);
     };
     let at = store + args[2] * fvf_stride(fvf);
-    let indices: Vec<u32> = (0..args[3]).collect();
     draw(
         ctx,
         "IDirect3DDevice7::DrawPrimitiveVB",
@@ -363,7 +594,7 @@ fn draw_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
         fvf,
         at,
         args[3],
-        &indices,
+        DrawIndices::Sequential(args[3]),
         args[4],
     )
 }
@@ -375,17 +606,7 @@ fn draw_indexed_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Resu
         return Ok(DDERR_INVALIDPARAMS);
     };
     let at = store + args[2] * fvf_stride(fvf);
-    let bytes = ctx
-        .mem
-        .slice(args[4], args[5] as usize * 2)
-        .map_err(Stop::Fault)?
-        .to_vec();
-    let indices: Vec<u32> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u32::from(u16::from_le_bytes(*c)))
-        .collect();
+    fill_u16_indices(ctx, args[4], args[5])?;
     draw(
         ctx,
         "IDirect3DDevice7::DrawIndexedPrimitiveVB",
@@ -394,7 +615,7 @@ fn draw_indexed_primitive_vb(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Resu
         fvf,
         at,
         args[3],
-        &indices,
+        DrawIndices::Scratch,
         args[6],
     )
 }
@@ -812,7 +1033,7 @@ fn create_device2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     // A DirectX 5 device starts with specular highlights on, as Wine's
     // conformance test `test_lighting_interface_versions` finds Windows
     // starting one (#210).
-    device(ctx, object).render.insert(rs::SPECULARENABLE, 1);
+    device(ctx, object).set_render(rs::SPECULARENABLE, 1);
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3d2 device at {object:#010x} drawing into surface {surface:#010x}"
@@ -846,10 +1067,13 @@ fn device_of(state: &mut State, this: u32) -> &mut Device {
 /// Set one of a device's transforms, as `SetTransform` would: what retained
 /// mode does to the device underneath before a visual draws through it.
 pub fn set_device_transform(state: &mut State, device: u32, which: u32, m: &super::scene::Matrix) {
-    let cells: Vec<u32> = m.iter().flatten().map(|c| c.to_bits()).collect();
     let mut bits = [0u32; 16];
-    bits.copy_from_slice(&cells);
-    device_of(state, device).transforms.insert(which, bits);
+    for r in 0..4 {
+        for c in 0..4 {
+            bits[r * 4 + c] = m[r][c].to_bits();
+        }
+    }
+    device_of(state, device).set_transform(which, bits);
 }
 
 /// Make a viewport the one a device draws through, as `SetCurrentViewport`
@@ -1003,17 +1227,24 @@ fn render_state_at_start(state: u32) -> Option<u32> {
     })
 }
 
+fn light_state_at_start(state: u32) -> Option<u32> {
+    // D3DLIGHTSTATE_MATERIAL, AMBIENT and FOGMODE start at nothing and
+    // COLORMODEL at RGB. What the fog's floating-point states start at has
+    // not been measured.
+    match state {
+        3 => Some(2),
+        1 | 2 | 4 => Some(0),
+        _ => None,
+    }
+}
+
 fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let state = args[0];
     // DirectX 7 has no `TEXTUREMAPBLEND`: Wine's `d3d_device7_GetRenderState`
     // refuses it as invalid there. So a DirectX 7 device declares no start
     // for it.
     let dx7 = ctx.state.interface_of(this) == Some(DEVICE7.name);
-    let value =
-        device(ctx, this).render.get(&state).copied().or_else(|| {
-            render_state_at_start(state).filter(|_| !dx7 || state != rs::TEXTUREMAPBLEND)
-        });
-    let Some(value) = value else {
+    let Some(value) = device(ctx, this).get_render(state, dx7) else {
         ctx.log.line(&format!(
             "d3d render state {state} read before it was set, and what it starts as is not declared"
         ));
@@ -1029,21 +1260,13 @@ fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 fn set_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Kept, and read back. What each state does to a primitive is the
     // rasteriser's to honour when it draws one.
-    device(ctx, this).render.insert(args[0], args[1]);
+    device(ctx, this).set_render(args[0], args[1]);
     Ok(S_OK)
 }
 
 fn get_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let state = args[0];
-    // D3DLIGHTSTATE_MATERIAL, AMBIENT and FOGMODE start at nothing and
-    // COLORMODEL at RGB. What the fog's floating-point states start at has
-    // not been measured.
-    let at_start = match state {
-        3 => Some(2),
-        1 | 2 | 4 => Some(0),
-        _ => None,
-    };
-    let Some(value) = device(ctx, this).light.get(&state).copied().or(at_start) else {
+    let Some(value) = device(ctx, this).get_light(state) else {
         ctx.log.line(&format!(
             "d3d light state {state} read before it was set, and what it starts as is not declared"
         ));
@@ -1057,7 +1280,7 @@ fn get_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
 }
 
 fn set_light_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    device(ctx, this).light.insert(args[0], args[1]);
+    device(ctx, this).set_light(args[0], args[1]);
     Ok(S_OK)
 }
 
@@ -1070,17 +1293,13 @@ fn set_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
             .read_u32(args[1] + 4 * i as u32)
             .map_err(Stop::Fault)?;
     }
-    device(ctx, this).transforms.insert(args[0], m);
+    device(ctx, this).set_transform(args[0], m);
     Ok(S_OK)
 }
 
 fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Every transform starts as the identity.
-    let identity: Vec<u32> = IDENTITY.iter().flatten().map(|c| c.to_bits()).collect();
-    let m = device(ctx, this)
-        .transforms
-        .get(&args[0])
-        .map_or(identity, |m| m.to_vec());
+    let m = device(ctx, this).get_transform(args[0]);
     for (i, cell) in m.iter().enumerate() {
         ctx.mem
             .write_u32(args[1] + 4 * i as u32, *cell)
@@ -1090,11 +1309,7 @@ fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
 }
 
 fn get_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let texture = device(ctx, this)
-        .textures
-        .get(&args[0])
-        .copied()
-        .unwrap_or(0);
+    let texture = device(ctx, this).get_texture(args[0]);
     if texture != 0 {
         ctx.state.com_ref(texture, 1);
     }
@@ -1105,11 +1320,11 @@ fn get_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 fn set_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetTexture(stage, texture): the device holds a reference to what it
     // draws with, and lets go of what it drew with before.
-    let previous = device(ctx, this).textures.insert(args[0], args[1]);
+    let previous = device(ctx, this).set_texture(args[0], args[1]);
     if args[1] != 0 {
         ctx.state.com_ref(args[1], 1);
     }
-    if let Some(previous) = previous.filter(|p| *p != 0) {
+    if previous != 0 {
         ctx.state.com_ref(previous, -1);
     }
     Ok(S_OK)
@@ -1140,12 +1355,7 @@ fn stage_state_at_start(state: u32, stage: u32) -> Option<u32> {
 
 fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let (stage, state) = (args[0], args[1]);
-    let value = device(ctx, this)
-        .stages
-        .get(&(stage, state))
-        .copied()
-        .or_else(|| stage_state_at_start(state, stage));
-    let Some(value) = value else {
+    let Some(value) = device(ctx, this).get_stage(stage, state) else {
         ctx.log.line(&format!(
             "d3d texture stage {stage} state {state} read before it was set, \
              and what it starts as is not declared"
@@ -1160,7 +1370,7 @@ fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result
 }
 
 fn set_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    device(ctx, this).stages.insert((args[0], args[1]), args[2]);
+    device(ctx, this).set_stage(args[0], args[1], args[2]);
     Ok(S_OK)
 }
 
@@ -1630,7 +1840,6 @@ fn clear2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // DrawPrimitive(type, format, vertices, count, flags).
-    let indices: Vec<u32> = (0..args[3]).collect();
     draw(
         ctx,
         "IDirect3DDevice3::DrawPrimitive",
@@ -1639,7 +1848,7 @@ fn draw_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Sto
         args[1],
         args[2],
         args[3],
-        &indices,
+        DrawIndices::Sequential(args[3]),
         args[4],
     )
 }
@@ -1679,18 +1888,17 @@ fn draw_indexed(
     format: u32,
     args: &[u32],
 ) -> Result<u32, Stop> {
-    let bytes = ctx
-        .mem
-        .slice(args[4], args[5] as usize * 2)
-        .map_err(Stop::Fault)?;
-    let indices: Vec<u32> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|w| u32::from(u16::from_le_bytes(*w)))
-        .collect();
+    fill_u16_indices(ctx, args[4], args[5])?;
     draw(
-        ctx, method, this, args[0], format, args[2], args[3], &indices, args[6],
+        ctx,
+        method,
+        this,
+        args[0],
+        format,
+        args[2],
+        args[3],
+        DrawIndices::Scratch,
+        args[6],
     )
 }
 
@@ -1754,40 +1962,10 @@ fn unwritten(what: String) -> Stop {
     Stop::NotWritten { what, caller: 0 }
 }
 
-/// A render state's value, set or as it starts; one with no declared start
-/// value is a wall rather than a guess.
-fn render_state(device: &Device, method: &str, state: u32) -> Result<u32, Stop> {
-    device
-        .render
-        .get(&state)
-        .copied()
-        .or_else(|| render_state_at_start(state))
-        .ok_or_else(|| {
-            unwritten(format!(
-                "{method}: render state {state}, never set and not declared"
-            ))
-        })
-}
-
-/// The first texture stage's state, set or as it starts.
-fn stage_state(device: &Device, method: &str, state: u32) -> Result<u32, Stop> {
-    device
-        .stages
-        .get(&(0, state))
-        .copied()
-        .or_else(|| stage_state_at_start(state, 0))
-        .ok_or_else(|| {
-            unwritten(format!(
-                "{method}: texture stage state {state}, never set and not declared"
-            ))
-        })
-}
-
 /// A transform as a device keeps it, as a matrix.
 fn matrix_of(device: &Device, which: u32) -> super::scene::Matrix {
-    device.transforms.get(&which).map_or(IDENTITY, |bits| {
-        std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(bits[r * 4 + c])))
-    })
+    let bits = device.get_transform(which);
+    std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(bits[r * 4 + c])))
 }
 
 /// How a texture stage combines a texel and the vertex colour, for the
@@ -1870,7 +2048,7 @@ fn draw(
     format: u32,
     vertices_at: u32,
     count: u32,
-    indices: &[u32],
+    indices: DrawIndices,
     flags: u32,
 ) -> Result<u32, Stop> {
     use super::pipeline::{self, fvf, Clipped};
@@ -1897,22 +2075,19 @@ fn draw(
         return Err(unwritten(format!("{method}: into an indexed surface")));
     }
 
-    // The vertices as the title wrote them.
+    // Check and borrow the guest vertex bytes before reading device state so
+    // an invalid vertex pointer faults before any state wall.
     let bytes = ctx
         .mem
         .slice(vertices_at, count as usize * size)
         .map_err(Stop::Fault)?;
-    let inputs: Vec<pipeline::Input> = bytes
-        .chunks_exact(size)
-        .map(|v| pipeline::read_vertex(format, v))
-        .collect();
 
     // A DirectX 5 device has no texture stages: what it draws with is the
     // texture its handle names, and how a texel and the colour make a pixel
     // is one state, `D3DRENDERSTATE_TEXTUREMAPBLEND` (#210). On a later
     // device either is a wall, as it was.
     let dx5 = ctx.state.interface_of(this) == Some(DEVICE2.name);
-    let by_handle = render_state(device_of(ctx.state, this), method, rs::TEXTUREHANDLE)?;
+    let by_handle = device_of(ctx.state, this).render_value(rs::TEXTUREHANDLE);
     let named = match ctx.state.immediate.handles.get(&by_handle) {
         _ if !dx5 || by_handle == 0 => 0,
         Some(&t)
@@ -1933,39 +2108,41 @@ fn draw(
     // What the device draws them with. A state this pipeline does not honour
     // is a wall once a title turns it on, not a frame drawn as if it had not.
     let device = device_of(ctx.state, this);
-    let state = |s: u32| render_state(device, method, s);
-    let stage = |s: u32| stage_state(device, method, s);
+    let state = |s: u32| device.render_value(s);
+    let stage = |s: u32| device.stage0_value(s);
     for (what, on) in [
         ("a texture by handle", !dx5 && by_handle != 0),
         (
             "wrapping across texture edges",
-            state(rs::WRAPU)? != 0 || state(rs::WRAPV)? != 0 || state(rs::WRAP0)? != 0,
+            state(rs::WRAPU) != 0 || state(rs::WRAPV) != 0 || state(rs::WRAP0) != 0,
         ),
         (
             "a texture map blend",
-            !dx5 && device.render.contains_key(&rs::TEXTUREMAPBLEND),
+            !dx5 && device.render_is_set(rs::TEXTUREMAPBLEND),
         ),
-        ("a fill that is not solid", state(rs::FILLMODE)? != 3),
+        ("a fill that is not solid", state(rs::FILLMODE) != 3),
     ] {
         if on {
             return Err(unwritten(format!("{method}: {what}")));
         }
     }
-    let world = matrix_of(device, WORLD);
-    let clip_from_world =
-        super::scene::multiply(&matrix_of(device, VIEW), &matrix_of(device, PROJECTION));
-    let clip_from_model = super::scene::multiply(&world, &clip_from_world);
+    let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
+    let (world, clip_from_model) = if untransformed {
+        let world = matrix_of(device, WORLD);
+        let clip_from_world =
+            super::scene::multiply(&matrix_of(device, VIEW), &matrix_of(device, PROJECTION));
+        let clip_from_model = super::scene::multiply(&world, &clip_from_world);
+        (world, clip_from_model)
+    } else {
+        (super::scene::IDENTITY, super::scene::IDENTITY)
+    };
     let viewport = device.current_viewport;
     // DirectX 7 keeps the viewport on the device itself, so there is no object
     // to ask (#57).
     let viewport7 = device.viewport7;
-    let texture = if dx5 {
-        named
-    } else {
-        device.textures.get(&0).copied().unwrap_or(0)
-    };
-    let material_handle = device.light.get(&LIGHT_MATERIAL).copied().unwrap_or(0);
-    let ambient = pipeline::colour(device.light.get(&LIGHT_AMBIENT).copied().unwrap_or(0));
+    let texture = if dx5 { named } else { device.textures[0] };
+    let material_handle = device.light[LIGHT_MATERIAL as usize];
+    let ambient = pipeline::colour(device.light[LIGHT_AMBIENT as usize]);
     let compare = |value: u32| {
         Compare::from_d3d(value).ok_or_else(|| unwritten(format!("{method}: comparison {value}")))
     };
@@ -1975,43 +2152,43 @@ fn draw(
     // Fog. With neither mode a curve of its own, Direct3D takes each
     // vertex's factor from the alpha its title wrote in the specular colour,
     // which is how NetImmerse fogs Alpha Team's levels (#61).
-    let fog = if state(rs::FOGENABLE)? != 0 {
-        let (table, vertex) = (state(rs::FOGTABLEMODE)?, state(rs::FOGVERTEXMODE)?);
+    let fog = if state(rs::FOGENABLE) != 0 {
+        let (table, vertex) = (state(rs::FOGTABLEMODE), state(rs::FOGVERTEXMODE));
         if table != 0 || vertex != 0 || format & fvf::SPECULAR == 0 {
             return Err(unwritten(format!(
                 "{method}: fog, table mode {table}, vertex mode {vertex}, vertex format {format:#x}"
             )));
         }
-        let [r, g, b, _] = pipeline::colour(state(rs::FOGCOLOR)?);
+        let [r, g, b, _] = pipeline::colour(state(rs::FOGCOLOR));
         Some([r, g, b])
     } else {
         None
     };
-    let depth_on = state(rs::ZENABLE)? != 0;
+    let depth_on = state(rs::ZENABLE) != 0;
     // The magnification filter: the legacy render state when a title set it,
     // the stage's own otherwise. One filter serves for minification too.
     // ponytail: no mip maps and one filter both ways; a title that minifies a
     // detailed texture far away shimmers where the card would have blurred.
-    let linear = if device.render.contains_key(&rs::TEXTUREMAG) {
-        match state(rs::TEXTUREMAG)? {
+    let linear = if device.render_is_set(rs::TEXTUREMAG) {
+        match state(rs::TEXTUREMAG) {
             1 | 3 | 4 => false,
             2 | 5 | 6 => true,
             other => return Err(unwritten(format!("{method}: texture filter {other}"))),
         }
     } else {
-        match stage(tss::MAGFILTER)? {
+        match stage(tss::MAGFILTER) {
             1 => false,
             2 => true,
             other => return Err(unwritten(format!("{method}: magnification filter {other}"))),
         }
     };
     let address = |legacy: u32, own: u32| -> Result<bool, Stop> {
-        let value = if device.render.contains_key(&legacy) {
-            state(legacy)?
-        } else if device.render.contains_key(&rs::TEXTUREADDRESS) {
-            state(rs::TEXTUREADDRESS)?
+        let value = if device.render_is_set(legacy) {
+            state(legacy)
+        } else if device.render_is_set(rs::TEXTUREADDRESS) {
+            state(rs::TEXTUREADDRESS)
         } else {
-            stage(own)?
+            stage(own)
         };
         clamps(value).ok_or_else(|| unwritten(format!("{method}: texture address {value}")))
     };
@@ -2021,44 +2198,44 @@ fn draw(
     ];
     let mut states = States {
         depth_test: if depth_on {
-            Some(compare(state(rs::ZFUNC)?)?)
+            Some(compare(state(rs::ZFUNC))?)
         } else {
             None
         },
-        depth_write: depth_on && state(rs::ZWRITEENABLE)? != 0,
-        flat: state(rs::SHADEMODE)? == 1,
+        depth_write: depth_on && state(rs::ZWRITEENABLE) != 0,
+        flat: state(rs::SHADEMODE) == 1,
         colour: Combine::Modulate,
         alpha: Combine::Modulate,
         linear,
-        colour_key: state(rs::COLORKEYENABLE)? != 0,
-        alpha_test: if state(rs::ALPHATESTENABLE)? != 0 {
+        colour_key: state(rs::COLORKEYENABLE) != 0,
+        alpha_test: if state(rs::ALPHATESTENABLE) != 0 {
             Some((
-                compare(state(rs::ALPHAFUNC)?)?,
-                (state(rs::ALPHAREF)? & 0xff) as u8,
+                compare(state(rs::ALPHAFUNC))?,
+                (state(rs::ALPHAREF) & 0xff) as u8,
             ))
         } else {
             None
         },
-        blend: if state(rs::ALPHABLENDENABLE)? != 0 {
-            Some((blend(state(rs::SRCBLEND)?)?, blend(state(rs::DESTBLEND)?)?))
+        blend: if state(rs::ALPHABLENDENABLE) != 0 {
+            Some((blend(state(rs::SRCBLEND))?, blend(state(rs::DESTBLEND))?))
         } else {
             None
         },
-        specular: state(rs::SPECULARENABLE)? != 0,
+        specular: state(rs::SPECULARENABLE) != 0,
         fog,
     };
-    let cull = state(rs::CULLMODE)?;
+    let cull = state(rs::CULLMODE);
     let (op, a1, a2) = (
-        stage(tss::COLOROP)?,
-        stage(tss::COLORARG1)?,
-        stage(tss::COLORARG2)?,
+        stage(tss::COLOROP),
+        stage(tss::COLORARG1),
+        stage(tss::COLORARG2),
     );
     let (aop, aa1, aa2) = (
-        stage(tss::ALPHAOP)?,
-        stage(tss::ALPHAARG1)?,
-        stage(tss::ALPHAARG2)?,
+        stage(tss::ALPHAOP),
+        stage(tss::ALPHAARG1),
+        stage(tss::ALPHAARG2),
     );
-    let legacy = dx5.then(|| state(rs::TEXTUREMAPBLEND)).transpose()?;
+    let legacy = dx5.then(|| state(rs::TEXTUREMAPBLEND));
     let texture_alpha = match ctx.state.com(texture).map(|o| &o.state) {
         Some(ComState::Surface { format, .. }) => format.masks[3] != 0,
         _ => true,
@@ -2121,7 +2298,6 @@ fn draw(
     };
 
     // The material and the lights, when the vertices are to be lit.
-    let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
     let lighting = untransformed && format & fvf::NORMAL != 0 && flags & D3DDP_DONOTLIGHT == 0;
     if lighting && states.specular {
         return Err(unwritten(format!(
@@ -2146,68 +2322,77 @@ fn draw(
     } else {
         None
     };
-    let lights = super::d3drm::current_lights(ctx.state);
+    if !matches!(kind, 4..=6) {
+        return Err(unwritten(format!("{method}: primitive type {kind}")));
+    }
+
+    let mut lights = std::mem::take(&mut ctx.state.immediate.scratch.lights);
+    lights.clear();
+    if lighting {
+        super::d3drm::fill_current_lights(ctx.state, &mut lights);
+    }
 
     // Every vertex into clip space, coloured; a vertex already on the screen
     // stays where it is.
-    let prepared: Vec<Clipped> = inputs
-        .iter()
-        .map(|v| {
-            let diffuse = match (&material, v.normal) {
-                (Some(material), Some(normal)) => {
-                    let at = pipeline::project(&world, v.position);
-                    let [r, g, b, _] = ambient;
-                    pipeline::light(
-                        [at[0], at[1], at[2]],
-                        super::scene::direct(&world, normal),
-                        material,
-                        [r, g, b],
-                        &lights,
-                    )
-                }
-                _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
-            };
-            let [sr, sg, sb, sa] = v.specular.map_or([0.0; 4], pipeline::colour);
-            Clipped {
-                fog: if fog.is_some() { sa } else { 1.0 },
-                clip: if untransformed {
-                    pipeline::project(&clip_from_model, v.position)
-                } else {
-                    v.position
-                },
-                diffuse,
-                specular: [sr, sg, sb],
-                uv: v.uv,
+    let mut prepared = std::mem::take(&mut ctx.state.immediate.scratch.prepared);
+    prepared.clear();
+    prepared.extend(bytes.chunks_exact(size).map(|raw| {
+        let v = pipeline::read_vertex(format, raw);
+        let diffuse = match (&material, v.normal) {
+            (Some(material), Some(normal)) => {
+                let at = pipeline::project(&world, v.position);
+                let [r, g, b, _] = ambient;
+                pipeline::light(
+                    [at[0], at[1], at[2]],
+                    super::scene::direct(&world, normal),
+                    material,
+                    [r, g, b],
+                    &lights,
+                )
             }
-        })
-        .collect();
+            _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
+        };
+        let [sr, sg, sb, sa] = v.specular.map_or([0.0; 4], pipeline::colour);
+        Clipped {
+            fog: if fog.is_some() { sa } else { 1.0 },
+            clip: if untransformed {
+                pipeline::project(&clip_from_model, v.position)
+            } else {
+                v.position
+            },
+            diffuse,
+            specular: [sr, sg, sb],
+            uv: v.uv,
+        }
+    }));
 
     // The triangles, by the primitive's kind, wound as the title wound them.
-    let corner = |i: u32| {
-        indices
-            .get(i as usize)
-            .and_then(|&n| prepared.get(n as usize))
-            .copied()
-    };
-    let n = indices.len() as u32;
-    let triangles: Vec<[u32; 3]> = match kind {
-        4 => (0..n / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]).collect(),
-        5 => (0..n.saturating_sub(2))
-            .map(|t| {
-                if t % 2 == 0 {
-                    [t, t + 1, t + 2]
-                } else {
-                    [t + 1, t, t + 2]
-                }
-            })
-            .collect(),
-        6 => (1..n.saturating_sub(1)).map(|t| [0, t, t + 1]).collect(),
-        other => return Err(unwritten(format!("{method}: primitive type {other}"))),
-    };
-    let triangles: Vec<[Clipped; 3]> = triangles
-        .into_iter()
-        .filter_map(|[i, j, k]| Some([corner(i)?, corner(j)?, corner(k)?]))
-        .collect();
+    let mut triangles = std::mem::take(&mut ctx.state.immediate.scratch.triangles);
+    triangles.clear();
+    match indices {
+        DrawIndices::Sequential(n) => {
+            push_triangles(
+                kind,
+                n,
+                |i| prepared.get(i as usize).copied(),
+                &mut triangles,
+            );
+        }
+        DrawIndices::Scratch => {
+            let scratch_indices = &ctx.state.immediate.scratch.indices;
+            push_triangles(
+                kind,
+                scratch_indices.len() as u32,
+                |i| {
+                    scratch_indices
+                        .get(i as usize)
+                        .and_then(|&n| prepared.get(n as usize))
+                        .copied()
+                },
+                &mut triangles,
+            );
+        }
+    }
     let canvas = Canvas {
         pixels,
         width,
@@ -2216,7 +2401,7 @@ fn draw(
         format: pixel_format,
         place,
     };
-    rasterise(
+    let result = rasterise(
         ctx,
         method,
         this,
@@ -2226,7 +2411,11 @@ fn draw(
         cull,
         (texture, clamp),
         states,
-    )?;
+    );
+    ctx.state.immediate.scratch.lights = lights;
+    ctx.state.immediate.scratch.prepared = prepared;
+    ctx.state.immediate.scratch.triangles = triangles;
+    result?;
     Ok(S_OK)
 }
 
@@ -2355,7 +2544,8 @@ pub fn rasterise(
         ],
         first_row: 0,
     };
-    let mut list = Vec::new();
+    let mut list = std::mem::take(&mut ctx.state.immediate.scratch.raster);
+    list.clear();
     for &[a, mut b, mut c] in triangles {
         if states.flat {
             // A flat triangle is the first vertex's colour throughout, which
@@ -2365,36 +2555,119 @@ pub fn rasterise(
                 v.specular = a.specular;
             }
         }
-        let polygon: Vec<raster::Vertex> = if untransformed {
-            pipeline::clip(&[a, b, c])
-                .iter()
-                .map(|v| place.place(v))
-                .collect()
+        if !untransformed {
+            let poly = [a.on_screen(), b.on_screen(), c.on_screen()];
+            emit_polygon(&poly, cull, &mut list);
+        } else if pipeline::inside_frustum(&a)
+            && pipeline::inside_frustum(&b)
+            && pipeline::inside_frustum(&c)
+        {
+            let poly = [place.place(&a), place.place(&b), place.place(&c)];
+            emit_polygon(&poly, cull, &mut list);
         } else {
-            [a, b, c].iter().map(pipeline::Clipped::on_screen).collect()
-        };
-        if polygon.len() < 3 {
-            continue;
-        }
-        // Twice the polygon's area on the screen: positive when it is wound
-        // clockwise, with y running down.
-        let area: f32 = (0..polygon.len())
-            .map(|p| {
-                let (u, v) = (polygon[p], polygon[(p + 1) % polygon.len()]);
-                u.x * v.y - v.x * u.y
-            })
-            .sum();
-        // D3DCULL_CW and D3DCULL_CCW.
-        if (cull == 2 && area > 0.0) || (cull == 3 && area < 0.0) {
-            continue;
-        }
-        for p in 1..polygon.len() - 1 {
-            list.push([polygon[0], polygon[p], polygon[p + 1]]);
+            emit_clipped([a, b, c], &place, cull, &mut list);
         }
     }
     raster::triangles(&mut target, &list, texture.as_ref(), &states);
+    ctx.state.immediate.scratch.raster = list;
     device_of(ctx.state, this).depth = depth;
     Ok(())
+}
+
+#[inline]
+fn push_triangles(
+    kind: u32,
+    n: u32,
+    corner: impl Fn(u32) -> Option<super::pipeline::Clipped>,
+    triangles: &mut Vec<[super::pipeline::Clipped; 3]>,
+) {
+    let mut push = |i: u32, j: u32, k: u32| {
+        if let (Some(a), Some(b), Some(c)) = (corner(i), corner(j), corner(k)) {
+            triangles.push([a, b, c]);
+        }
+    };
+    match kind {
+        4 => {
+            for t in 0..n / 3 {
+                push(t * 3, t * 3 + 1, t * 3 + 2);
+            }
+        }
+        5 => {
+            for t in 0..n.saturating_sub(2) {
+                if t % 2 == 0 {
+                    push(t, t + 1, t + 2);
+                } else {
+                    push(t + 1, t, t + 2);
+                }
+            }
+        }
+        6 => {
+            for t in 1..n.saturating_sub(1) {
+                push(0, t, t + 1);
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[inline]
+fn emit_polygon(
+    polygon: &[crate::raster::Vertex],
+    cull: u32,
+    list: &mut Vec<[crate::raster::Vertex; 3]>,
+) {
+    let len = polygon.len();
+    if len < 3 {
+        return;
+    }
+    // Twice the polygon's area on the screen: positive when it is wound
+    // clockwise, with y running down. Left-fold from 0.0 matches Iterator::sum.
+    let mut area = 0.0f32;
+    for p in 0..len {
+        let u = polygon[p];
+        let v = polygon[if p + 1 < len { p + 1 } else { 0 }];
+        area += u.x * v.y - v.x * u.y;
+    }
+    // D3DCULL_CW and D3DCULL_CCW.
+    if (cull == 2 && area > 0.0) || (cull == 3 && area < 0.0) {
+        return;
+    }
+    for p in 1..len - 1 {
+        list.push([polygon[0], polygon[p], polygon[p + 1]]);
+    }
+}
+
+fn emit_clipped(
+    tri: [super::pipeline::Clipped; 3],
+    place: &super::pipeline::Viewport,
+    cull: u32,
+    list: &mut Vec<[crate::raster::Vertex; 3]>,
+) {
+    let mut clip_buf = [super::pipeline::Clipped::default(); super::pipeline::CLIP_BUFFER];
+    if let Some(len) = super::pipeline::clip_into(&tri, &mut clip_buf) {
+        let mut poly_buf = [crate::raster::Vertex::default(); super::pipeline::CLIP_BUFFER];
+        for (dst, src) in poly_buf.iter_mut().zip(&clip_buf[..len]) {
+            *dst = place.place(src);
+        }
+        emit_polygon(&poly_buf[..len], cull, list);
+    } else {
+        emit_clipped_overflow(&tri, place, cull, list);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn emit_clipped_overflow(
+    tri: &[super::pipeline::Clipped; 3],
+    place: &super::pipeline::Viewport,
+    cull: u32,
+    list: &mut Vec<[crate::raster::Vertex; 3]>,
+) {
+    let poly: Vec<crate::raster::Vertex> = super::pipeline::clip(tri)
+        .iter()
+        .map(|v| place.place(v))
+        .collect();
+    emit_polygon(&poly, cull, list);
 }
 
 /// Part of a device's depth buffer to as far as it goes: left, top, right and
@@ -2419,5 +2692,129 @@ fn take_depth(state: &mut State, device: u32, width: u32, height: u32) -> Vec<f3
         buffer
     } else {
         vec![1.0; len]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        render_state_at_start, rs, stage_state_at_start, tss, Device, IDENTITY_BITS,
+        LIGHT_STATE_SLOTS, RENDER_STATE_SLOTS, STAGE_SLOTS, STAGE_STATE_SLOTS, TRANSFORM_SLOTS,
+    };
+
+    #[test]
+    fn every_draw_render_and_stage_state_fits_flat_tables_with_declared_defaults() {
+        let render_states = [
+            rs::TEXTUREHANDLE,
+            rs::TEXTUREADDRESS,
+            rs::WRAPU,
+            rs::WRAPV,
+            rs::ZENABLE,
+            rs::FILLMODE,
+            rs::SHADEMODE,
+            rs::ZWRITEENABLE,
+            rs::ALPHATESTENABLE,
+            rs::TEXTUREMAG,
+            rs::SRCBLEND,
+            rs::DESTBLEND,
+            rs::TEXTUREMAPBLEND,
+            rs::CULLMODE,
+            rs::ZFUNC,
+            rs::ALPHAREF,
+            rs::ALPHAFUNC,
+            rs::ALPHABLENDENABLE,
+            rs::FOGENABLE,
+            rs::SPECULARENABLE,
+            rs::FOGCOLOR,
+            rs::FOGTABLEMODE,
+            rs::COLORKEYENABLE,
+            rs::TEXTUREADDRESSU,
+            rs::TEXTUREADDRESSV,
+            rs::WRAP0,
+            rs::FOGVERTEXMODE,
+        ];
+        let device = Device::default();
+        for s in render_states {
+            assert!((s as usize) < RENDER_STATE_SLOTS, "rs {s} out of bounds");
+            let want = render_state_at_start(s).expect("declared default");
+            assert_eq!(device.render_value(s), want, "rs {s} default");
+            assert!(!device.render_is_set(s), "rs {s} starts unset");
+        }
+        let stage_states = [
+            tss::COLOROP,
+            tss::COLORARG1,
+            tss::COLORARG2,
+            tss::ALPHAOP,
+            tss::ALPHAARG1,
+            tss::ALPHAARG2,
+            tss::ADDRESSU,
+            tss::ADDRESSV,
+            tss::MAGFILTER,
+        ];
+        for s in stage_states {
+            assert!((s as usize) < STAGE_STATE_SLOTS, "tss {s} out of bounds");
+            let want = stage_state_at_start(s, 0).expect("declared default");
+            assert_eq!(device.stage0_value(s), want, "tss {s} default");
+        }
+    }
+
+    #[test]
+    fn flat_device_tables_preserve_set_flags_dx7_rules_and_overflow_spill() {
+        let mut d = Device::default();
+        // DX7 refuses unset TEXTUREMAPBLEND, DX5/6 returns default 2; once set both read it.
+        assert_eq!(d.get_render(rs::TEXTUREMAPBLEND, false), Some(2));
+        assert_eq!(d.get_render(rs::TEXTUREMAPBLEND, true), None);
+        assert!(!d.render_is_set(rs::TEXTUREMAPBLEND));
+        d.set_render(rs::TEXTUREMAPBLEND, 2);
+        assert!(d.render_is_set(rs::TEXTUREMAPBLEND));
+        assert_eq!(d.get_render(rs::TEXTUREMAPBLEND, true), Some(2));
+
+        // Undeclared in-range and out-of-range render states stay None until set.
+        assert_eq!(d.get_render(100, false), None);
+        d.set_render(100, 77);
+        assert_eq!(d.get_render(100, false), Some(77));
+        let hi_rs = RENDER_STATE_SLOTS as u32 + 5;
+        assert_eq!(d.get_render(hi_rs, false), None);
+        assert!(!d.render_is_set(hi_rs));
+        d.set_render(hi_rs, 99);
+        assert!(d.render_is_set(hi_rs));
+        assert_eq!(d.get_render(hi_rs, false), Some(99));
+
+        // Texture stages: in-range defaults, set override, and out-of-range spill.
+        assert_eq!(d.get_stage(0, tss::COLOROP), Some(4));
+        assert_eq!(d.get_stage(1, tss::COLOROP), Some(1));
+        assert_eq!(d.get_stage(STAGE_SLOTS as u32 + 2, tss::COLOROP), Some(1));
+        assert_eq!(d.get_stage(0, 20), None);
+        d.set_stage(0, 20, 5);
+        assert_eq!(d.get_stage(0, 20), Some(5));
+        d.set_stage(STAGE_SLOTS as u32 + 2, STAGE_STATE_SLOTS as u32 + 3, 11);
+        assert_eq!(
+            d.get_stage(STAGE_SLOTS as u32 + 2, STAGE_STATE_SLOTS as u32 + 3),
+            Some(11)
+        );
+
+        // Light states, transforms, and textures: defaults and overflow spill.
+        assert_eq!(d.get_light(3), Some(2));
+        assert_eq!(d.get_light(5), None);
+        d.set_light(5, 42);
+        assert_eq!(d.get_light(5), Some(42));
+        let hi_light = LIGHT_STATE_SLOTS as u32 + 1;
+        assert_eq!(d.get_light(hi_light), None);
+        d.set_light(hi_light, 88);
+        assert_eq!(d.get_light(hi_light), Some(88));
+
+        let hi_xf = TRANSFORM_SLOTS as u32 + 12;
+        assert_eq!(d.get_transform(1), IDENTITY_BITS);
+        assert_eq!(d.get_transform(hi_xf), IDENTITY_BITS);
+        let custom = [7u32; 16];
+        d.set_transform(hi_xf, custom);
+        assert_eq!(d.get_transform(hi_xf), custom);
+
+        let hi_tex = STAGE_SLOTS as u32 + 3;
+        assert_eq!(d.get_texture(0), 0);
+        assert_eq!(d.set_texture(0, 0x1000), 0);
+        assert_eq!(d.set_texture(0, 0x2000), 0x1000);
+        assert_eq!(d.set_texture(hi_tex, 0x3000), 0);
+        assert_eq!(d.get_texture(hi_tex), 0x3000);
     }
 }

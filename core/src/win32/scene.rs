@@ -183,7 +183,7 @@ impl View {
             ],
             [0.0, 0.0, -n * q, 0.0],
         ]
-        .map(|row| settled(row, self.numbers()))
+        .map(|row| settled(row, || self.numbers()))
     }
 
     /// What the view is set up with, as operands.
@@ -201,7 +201,6 @@ impl View {
         let clip_from_world = multiply(&invert(camera)?, &self.perspective(rect.2, rect.3));
         let [cx, cy, cz, cw] =
             super::pipeline::project(&clip_from_world, [point[0], point[1], point[2], 1.0]);
-        let operands = self.numbers().chain(camera.iter().flatten().copied());
         Some(settled(
             [
                 (x + width / 2.0) * cw + cx * width / 2.0,
@@ -209,7 +208,11 @@ impl View {
                 cz,
                 cw,
             ],
-            operands.chain(point),
+            || {
+                self.numbers()
+                    .chain(camera.iter().flatten().copied())
+                    .chain(point)
+            },
         ))
     }
 
@@ -236,9 +239,23 @@ impl View {
             z * (up - p[2][1]) / p[1][1],
             z,
         ];
-        let operands = self.numbers().chain(camera.iter().flatten().copied());
-        Some(settled(transform(camera, eye), operands.chain(screen)))
+        Some(settled(transform(camera, eye), || {
+            self.numbers()
+                .chain(camera.iter().flatten().copied())
+                .chain(screen)
+        }))
     }
+}
+
+/// Reusable working buffers for retained-mode viewport renders so frame and
+/// mesh traversal do not reallocate every frame.
+#[derive(Default)]
+pub(crate) struct RenderScratch {
+    pub(crate) meshes: Vec<(Matrix, u32, u32)>,
+    pub(crate) lights: Vec<(u32, super::pipeline::Light)>,
+    pub(crate) mesh_lights: Vec<super::pipeline::Light>,
+    pub(crate) vertices: Vec<Option<super::pipeline::Clipped>>,
+    pub(crate) triangles: Vec<[super::pipeline::Clipped; 3]>,
 }
 
 /// Every frame the guest has made, by the pointer it holds; every light,
@@ -256,6 +273,7 @@ pub struct Scene {
     pub viewports: BTreeMap<u32, View>,
     /// Where `D3DRMVectorRandom`'s sequence has got to, once it has started.
     pub random: Option<u32>,
+    pub(crate) scratch: RenderScratch,
 }
 
 impl Scene {
@@ -329,14 +347,31 @@ impl Scene {
 pub fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
     let mut out = [[0.0; 4]; 4];
     for (i, row) in out.iter_mut().enumerate() {
+        let ai = a[i];
         for (j, cell) in row.iter_mut().enumerate() {
-            *cell = answer_single(
-                (0..4).map(|k| a[i][k] * b[k][j]).sum(),
-                (0..4).flat_map(|k| [a[i][k], b[k][j]]),
-            );
+            // Left-fold from 0.0 matches Iterator::sum and turns all-negative-zero
+            // products into +0.0.
+            let sum =
+                (((0.0 + ai[0] * b[0][j]) + ai[1] * b[1][j]) + ai[2] * b[2][j]) + ai[3] * b[3][j];
+            *cell = if sum.is_nan() {
+                settle_cell(sum, ai, [b[0][j], b[1][j], b[2][j], b[3][j]])
+            } else {
+                sum
+            };
         }
     }
     out
+}
+
+#[cold]
+#[inline(never)]
+fn settle_cell(cell: f32, a_row: [f32; 4], b_col: [f32; 4]) -> f32 {
+    answer_single(
+        cell,
+        [
+            a_row[0], b_col[0], a_row[1], b_col[1], a_row[2], b_col[2], a_row[3], b_col[3],
+        ],
+    )
 }
 
 /// A rotation by `theta` radians about an axis, as retained mode builds one.
@@ -372,7 +407,7 @@ pub fn rotation(axis: [f32; 3], theta: f32) -> Matrix {
         ],
         [0.0, 0.0, 0.0, 1.0],
     ]
-    .map(|row| settled(row, axis.into_iter().chain([theta])))
+    .map(|row| settled(row, || axis.into_iter().chain([theta])))
 }
 
 #[must_use]
@@ -383,7 +418,7 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0],
         ],
-        a.into_iter().chain(b),
+        || a.into_iter().chain(b),
     )
 }
 
@@ -391,7 +426,7 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 #[must_use]
 pub fn normalise(v: [f32; 3]) -> Option<[f32; 3]> {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    (length > 0.0).then(|| settled(v.map(|c| c / length), v))
+    (length > 0.0).then(|| settled(v.map(|c| c / length), || v))
 }
 
 /// A direction through a transform: turned and scaled, never moved.
@@ -403,7 +438,7 @@ pub fn direct(m: &Matrix, [x, y, z]: [f32; 3]) -> [f32; 3] {
             x * m[0][1] + y * m[1][1] + z * m[2][1],
             x * m[0][2] + y * m[1][2] + z * m[2][2],
         ],
-        [x, y, z].into_iter().chain(m.iter().flatten().copied()),
+        || [x, y, z].into_iter().chain(m.iter().flatten().copied()),
     )
 }
 
@@ -416,7 +451,7 @@ pub fn transform(m: &Matrix, [x, y, z]: [f32; 3]) -> [f32; 3] {
             x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1],
             x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2],
         ],
-        [x, y, z].into_iter().chain(m.iter().flatten().copied()),
+        || [x, y, z].into_iter().chain(m.iter().flatten().copied()),
     )
 }
 
@@ -452,7 +487,7 @@ pub fn invert(m: &Matrix) -> Option<Matrix> {
     }
     let t = transform(&out, [m[3][0], m[3][1], m[3][2]]);
     out[3] = [-t[0], -t[1], -t[2], 1.0];
-    Some(out.map(|row| settled(row, m.iter().flatten().copied())))
+    Some(out.map(|row| settled(row, || m.iter().flatten().copied())))
 }
 
 /// A result's parts as a real x86 machine gives them where one is not a
@@ -462,11 +497,24 @@ pub fn invert(m: &Matrix) -> Option<Matrix> {
 // ponytail: every operand counts for every part, so two parts made from two
 // different NaNs both come out the larger; x86 doing these same sums would
 // give each its own. Only a guest passing two NaNs to one call would see it.
-fn settled<const N: usize>(
-    parts: [f32; N],
-    operands: impl IntoIterator<Item = f32> + Clone,
-) -> [f32; N] {
-    parts.map(|p| answer_single(p, operands.clone()))
+#[inline]
+fn settled<const N: usize, I>(parts: [f32; N], operands: impl Fn() -> I) -> [f32; N]
+where
+    I: IntoIterator<Item = f32>,
+{
+    if parts.iter().all(|p| !p.is_nan()) {
+        return parts;
+    }
+    settle_nan(parts, operands)
+}
+
+#[cold]
+#[inline(never)]
+fn settle_nan<const N: usize, I>(parts: [f32; N], operands: impl Fn() -> I) -> [f32; N]
+where
+    I: IntoIterator<Item = f32>,
+{
+    parts.map(|p| answer_single(p, operands()))
 }
 
 #[cfg(test)]
@@ -599,5 +647,44 @@ mod tests {
                 assert!((cell - want).abs() < 1e-5, "[{i}][{j}] is {cell}");
             }
         }
+    }
+
+    #[test]
+    fn multiply_preserves_zero_sign_and_cold_nan_payloads() {
+        // All -0.0 products fold from +0.0 into +0.0, matching Iterator::sum.
+        let neg_zero = [[-0.0f32; 4]; 4];
+        let ones = [[1.0f32; 4]; 4];
+        let prod = multiply(&neg_zero, &ones);
+        for row in prod {
+            for cell in row {
+                assert_eq!(cell.to_bits(), 0.0f32.to_bits());
+            }
+        }
+        // Inf * 0.0 settles to x86 indeterminate NaN regardless of host ISA.
+        let mut inf = IDENTITY;
+        inf[0][0] = std::hint::black_box(f32::INFINITY);
+        let mut zero = IDENTITY;
+        zero[0][0] = std::hint::black_box(0.0);
+        let res = multiply(&inf, &zero);
+        assert_eq!(res[0][0].to_bits(), 0xffc0_0000);
+        // Guest signaling NaN payload propagates quieted; when two NaNs share a
+        // dot product, the larger significand wins.
+        let mut nans = IDENTITY;
+        nans[0][0] = std::hint::black_box(f32::from_bits(0x7f80_0001));
+        nans[1][0] = std::hint::black_box(f32::from_bits(0x7f80_0001));
+        nans[1][1] = std::hint::black_box(f32::from_bits(0xff80_0005));
+        let res = multiply(&nans, &IDENTITY);
+        assert_eq!(res[0][0].to_bits(), 0x7fc0_0001);
+        assert_eq!(res[1][0].to_bits(), 0xffc0_0005);
+        // Direct and cross also take the cold NaN path accurately.
+        let sig = std::hint::black_box(f32::from_bits(0x7f80_0003));
+        assert_eq!(
+            super::direct(&IDENTITY, [sig, 0.0, 0.0])[0].to_bits(),
+            0x7fc0_0003
+        );
+        assert_eq!(
+            super::cross([sig, 0.0, 0.0], [0.0, 1.0, 0.0])[2].to_bits(),
+            0x7fc0_0003
+        );
     }
 }
