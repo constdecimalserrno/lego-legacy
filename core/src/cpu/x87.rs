@@ -102,6 +102,7 @@ impl X87 {
     }
 
     #[must_use]
+    #[inline(always)]
     pub fn precision(&self) -> Precision {
         match (self.control >> 8) & 3 {
             0 => Precision::Single,
@@ -114,6 +115,7 @@ impl X87 {
     /// says: to nearest with ties to even, down, up, or toward zero. The C
     /// library's `_ftol` sets toward zero for every `(int)` cast it makes.
     #[must_use]
+    #[inline(always)]
     pub fn to_whole(&self, x: f64) -> f64 {
         match (self.control >> 10) & 3 {
             0 => round_half_to_even(x),
@@ -124,24 +126,29 @@ impl X87 {
     }
 
     /// Round a result to the precision the guest asked for.
+    #[inline(always)]
     fn round(&self, value: f64) -> f64 {
-        match self.precision() {
-            Precision::Single => f64::from(value as f32),
-            _ => value,
+        if (self.control >> 8) & 3 == 0 {
+            f64::from(value as f32)
+        } else {
+            value
         }
     }
 
+    #[inline(always)]
     fn physical(&self, i: usize) -> usize {
         (self.top + i) % DEPTH
     }
 
     /// Read `st(i)`.
     #[must_use]
+    #[inline(always)]
     pub fn st(&self, i: usize) -> f64 {
         self.regs[self.physical(i)]
     }
 
     /// Write `st(i)`.
+    #[inline(always)]
     pub fn set_st(&mut self, i: usize, value: f64) {
         let at = self.physical(i);
         self.regs[at] = self.round(value);
@@ -149,6 +156,7 @@ impl X87 {
     }
 
     /// Push a value, which becomes `st(0)`.
+    #[inline(always)]
     pub fn push(&mut self, value: f64) {
         self.top = (self.top + DEPTH - 1) % DEPTH;
         self.regs[self.top] = self.round(value);
@@ -156,6 +164,7 @@ impl X87 {
     }
 
     /// Take `st(0)` off the stack.
+    #[inline(always)]
     pub fn pop(&mut self) -> f64 {
         let value = self.regs[self.top];
         self.used[self.top] = false;
@@ -372,6 +381,7 @@ pub enum Format {
 ///
 /// # Errors
 /// When the address is outside the arena.
+#[inline(always)]
 pub fn read(mem: &Arena, addr: u32, format: Format) -> Result<f64, Stop> {
     Ok(match format {
         Format::Single => {
@@ -379,28 +389,23 @@ pub fn read(mem: &Arena, addr: u32, format: Format) -> Result<f64, Stop> {
             f64::from(f32::from_bits(bits))
         }
         Format::Double => {
-            let lo = mem.read_u32(addr).map_err(Stop::Fault)?;
-            let hi = mem.read_u32(addr + 4).map_err(Stop::Fault)?;
-            f64::from_bits((u64::from(hi) << 32) | u64::from(lo))
+            let bits = mem.read_u64(addr).map_err(Stop::Fault)?;
+            f64::from_bits(bits)
         }
     })
 }
 
-/// Write a floating-point value in one of the three memory formats.
+/// Write a floating-point value in one of the memory formats.
 ///
 /// # Errors
 /// When the address is outside the arena.
+#[inline(always)]
 pub fn write(mem: &mut Arena, addr: u32, format: Format, value: f64) -> Result<(), Stop> {
     match format {
         Format::Single => mem
             .write_u32(addr, (value as f32).to_bits())
             .map_err(Stop::Fault),
-        Format::Double => {
-            let bits = value.to_bits();
-            mem.write_u32(addr, bits as u32).map_err(Stop::Fault)?;
-            mem.write_u32(addr + 4, (bits >> 32) as u32)
-                .map_err(Stop::Fault)
-        }
+        Format::Double => mem.write_u64(addr, value.to_bits()).map_err(Stop::Fault),
     }
 }
 
@@ -409,12 +414,8 @@ pub fn write(mem: &mut Arena, addr: u32, format: Format, value: f64) -> Result<(
 /// # Errors
 /// When the address is outside the arena.
 pub fn read_extended(mem: &Arena, addr: u32) -> Result<f64, Stop> {
-    let significand = {
-        let lo = mem.read_u32(addr).map_err(Stop::Fault)?;
-        let hi = mem.read_u32(addr + 4).map_err(Stop::Fault)?;
-        (u64::from(hi) << 32) | u64::from(lo)
-    };
-    let tail = mem.read_u32(addr + 8).map_err(Stop::Fault)? as u16;
+    let significand = mem.read_u64(addr).map_err(Stop::Fault)?;
+    let tail = mem.read_u16(addr + 8).map_err(Stop::Fault)?;
     let sign = if tail & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exponent = i32::from(tail & 0x7fff);
     if exponent == 0 && significand == 0 {
@@ -438,10 +439,8 @@ pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Stop
     };
     let magnitude = value.abs();
     if magnitude == 0.0 {
-        mem.write_u32(addr, 0).map_err(Stop::Fault)?;
-        mem.write_u32(addr + 4, 0).map_err(Stop::Fault)?;
-        mem.write(addr + 8, &sign.to_le_bytes())
-            .map_err(Stop::Fault)?;
+        mem.write_u64(addr, 0).map_err(Stop::Fault)?;
+        mem.write_u16(addr + 8, sign).map_err(Stop::Fault)?;
         return Ok(());
     }
     // The exponent is already written down in the value's own bits, so it is
@@ -449,13 +448,9 @@ pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Stop
     let exponent = ((magnitude.to_bits() >> 52) & 0x7ff) as i32 - 1023;
     let mantissa = magnitude / exp2(exponent);
     let significand = (mantissa * (1u64 << 63) as f64) as u64;
-    mem.write_u32(addr, significand as u32)
-        .map_err(Stop::Fault)?;
-    mem.write_u32(addr + 4, (significand >> 32) as u32)
-        .map_err(Stop::Fault)?;
+    mem.write_u64(addr, significand).map_err(Stop::Fault)?;
     let tail = sign | u16::try_from(exponent + 16383).unwrap_or(0x7fff);
-    mem.write(addr + 8, &tail.to_le_bytes())
-        .map_err(Stop::Fault)?;
+    mem.write_u16(addr + 8, tail).map_err(Stop::Fault)?;
     Ok(())
 }
 
@@ -682,82 +677,380 @@ pub mod maths {
     }
 }
 
-/// Run one floating-point escape.
+/// One pre-decoded floating-point operation, stored directly in [`super::insn::Kind::X87`].
 ///
-/// The escape byte and the ModRM byte together say what the unit does. A form
-/// this unit has not been taught stops the run and names both, rather than
-/// leaving the stack in a state the guest will misread later.
+/// Keeping every payload at most one byte holds `size_of::<X87Op>()` to 2 bytes
+/// so `Kind` and `Insn` do not grow while `execute` dispatches straight to the
+/// operation with no per-execution `(escape, modrm)` decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum X87Op {
+    // Fixed register / stackless forms.
+    Fnop,
+    Fchs,
+    Fabs,
+    Ftst,
+    Fxam,
+    Fld1,
+    Fldl2t,
+    Fldl2e,
+    Fldpi,
+    Fldlg2,
+    Fldln2,
+    Fldz,
+    F2xm1,
+    Fyl2x,
+    Fptan,
+    Fpatan,
+    Fxtract,
+    Fprem1,
+    Fdecstp,
+    Fincstp,
+    Fprem,
+    Fyl2xp1,
+    Fsqrt,
+    Fsincos,
+    Frndint,
+    Fscale,
+    Fsin,
+    Fcos,
+    Fnclex,
+    Fninit,
+    Fcompp,
+    FnstswAx,
+
+    // Parameterized register forms (`st(0)` / `st(i)`).
+    FldSt(u8),
+    Fxch(u8),
+    Ffree(u8),
+    FstSt(u8),
+    FstpSt(u8),
+    FcomSt(u8),
+    FcompSt(u8),
+    Fcomi(u8),
+    Fcomip(u8),
+    FaddSt0(u8),
+    FmulSt0(u8),
+    FsubSt0(u8),
+    FsubrSt0(u8),
+    FdivSt0(u8),
+    FdivrSt0(u8),
+    FaddSti(u8),
+    FmulSti(u8),
+    FsubSti(u8),
+    FsubrSti(u8),
+    FdivSti(u8),
+    FdivrSti(u8),
+    Faddp(u8),
+    Fmulp(u8),
+    Fsubp(u8),
+    Fsubrp(u8),
+    Fdivp(u8),
+    Fdivrp(u8),
+
+    // Memory arithmetic and comparisons, specialized by source format.
+    FaddF32,
+    FmulF32,
+    FcomF32,
+    FcompF32,
+    FsubF32,
+    FsubrF32,
+    FdivF32,
+    FdivrF32,
+    FaddF64,
+    FmulF64,
+    FcomF64,
+    FcompF64,
+    FsubF64,
+    FsubrF64,
+    FdivF64,
+    FdivrF64,
+    FiaddI32,
+    FimulI32,
+    FicomI32,
+    FicompI32,
+    FisubI32,
+    FisubrI32,
+    FidivI32,
+    FidivrI32,
+    FiaddI16,
+    FimulI16,
+    FicomI16,
+    FicompI16,
+    FisubI16,
+    FisubrI16,
+    FidivI16,
+    FidivrI16,
+
+    // Memory loads, stores, and control/status/environment transfers.
+    FldF32,
+    FldF64,
+    FildI32,
+    FildI16,
+    FldF80,
+    FildI64,
+    FstF32,
+    FstpF32,
+    FstF64,
+    FstpF64,
+    FstpF80,
+    FistI32,
+    FistpI32,
+    FistI16,
+    FistpI16,
+    FistpI64,
+    Fldcw,
+    Fnstcw,
+    FnstswMem,
+    Fnstenv,
+    Fldenv,
+}
+
+/// Decode a register-form (`modrm >> 6 == 3`) floating-point escape once at
+/// instruction decode time.
 ///
 /// # Errors
-/// When the form is not implemented, or an address is outside the arena.
-pub fn execute(
-    cpu: &mut super::Cpu,
-    mem: &mut Arena,
-    escape: u8,
-    modrm: u8,
-    address: Option<u32>,
-) -> Result<(), Stop> {
-    let reg = (modrm >> 3) & 7;
-    let index = (modrm & 7) as usize;
-    let register_form = modrm >> 6 == 3;
-
-    let wall = |why: &'static str| {
-        Err(Stop::Undecoded {
-            eip: 0,
-            byte: escape,
-            group: Some(reg),
-            why,
-        })
+/// When the `(escape, modrm)` form is not implemented by this unit.
+pub fn decode_reg(escape: u8, modrm: u8) -> Result<X87Op, super::decode::Undecoded> {
+    let exact = match (escape, modrm) {
+        (0xd9, 0xd0) => Some(X87Op::Fnop),
+        (0xd9, 0xe0) => Some(X87Op::Fchs),
+        (0xd9, 0xe1) => Some(X87Op::Fabs),
+        (0xd9, 0xe4) => Some(X87Op::Ftst),
+        (0xd9, 0xe5) => Some(X87Op::Fxam),
+        (0xd9, 0xe8) => Some(X87Op::Fld1),
+        (0xd9, 0xe9) => Some(X87Op::Fldl2t),
+        (0xd9, 0xea) => Some(X87Op::Fldl2e),
+        (0xd9, 0xeb) => Some(X87Op::Fldpi),
+        (0xd9, 0xec) => Some(X87Op::Fldlg2),
+        (0xd9, 0xed) => Some(X87Op::Fldln2),
+        (0xd9, 0xee) => Some(X87Op::Fldz),
+        (0xd9, 0xf0) => Some(X87Op::F2xm1),
+        (0xd9, 0xf1) => Some(X87Op::Fyl2x),
+        (0xd9, 0xf2) => Some(X87Op::Fptan),
+        (0xd9, 0xf3) => Some(X87Op::Fpatan),
+        (0xd9, 0xf4) => Some(X87Op::Fxtract),
+        (0xd9, 0xf5) => Some(X87Op::Fprem1),
+        (0xd9, 0xf6) => Some(X87Op::Fdecstp),
+        (0xd9, 0xf7) => Some(X87Op::Fincstp),
+        (0xd9, 0xf8) => Some(X87Op::Fprem),
+        (0xd9, 0xf9) => Some(X87Op::Fyl2xp1),
+        (0xd9, 0xfa) => Some(X87Op::Fsqrt),
+        (0xd9, 0xfb) => Some(X87Op::Fsincos),
+        (0xd9, 0xfc) => Some(X87Op::Frndint),
+        (0xd9, 0xfd) => Some(X87Op::Fscale),
+        (0xd9, 0xfe) => Some(X87Op::Fsin),
+        (0xd9, 0xff) => Some(X87Op::Fcos),
+        (0xdb, 0xe2) => Some(X87Op::Fnclex),
+        (0xdb, 0xe3) => Some(X87Op::Fninit),
+        (0xde, 0xd9) | (0xda, 0xe9) => Some(X87Op::Fcompp),
+        (0xdf, 0xe0) => Some(X87Op::FnstswAx),
+        _ => None,
     };
-
-    if !register_form {
-        let Some(at) = address else {
-            return wall("a floating-point escape with no address");
-        };
-        return memory_form(cpu, mem, escape, reg, at);
+    if let Some(op) = exact {
+        return Ok(op);
     }
 
-    match (escape, modrm) {
-        // The constants, and the unit's own housekeeping.
-        (0xd9, 0xd0) => {}                                      // fnop
-        (0xd9, 0xe0) => cpu.fpu.set_st(0, -cpu.fpu.st(0)),      // fchs
-        (0xd9, 0xe1) => cpu.fpu.set_st(0, cpu.fpu.st(0).abs()), // fabs
-        (0xd9, 0xe4) => {
+    let reg = (modrm >> 3) & 7;
+    let i = modrm & 7;
+    match (escape, reg) {
+        (0xd9, 0) => Ok(X87Op::FldSt(i)),
+        (0xd9, 1) => Ok(X87Op::Fxch(i)),
+        (0xdd, 0) => Ok(X87Op::Ffree(i)),
+        (0xdd, 2) => Ok(X87Op::FstSt(i)),
+        (0xdd, 3) => Ok(X87Op::FstpSt(i)),
+        (0xdd, 4) | (0xd8, 2) => Ok(X87Op::FcomSt(i)),
+        (0xdd, 5) | (0xd8, 3) => Ok(X87Op::FcompSt(i)),
+        (0xda | 0xdb, 5 | 6) => Ok(X87Op::Fcomi(i)),
+        (0xdf, 5 | 6) => Ok(X87Op::Fcomip(i)),
+        (0xd8, 0) => Ok(X87Op::FaddSt0(i)),
+        (0xd8, 1) => Ok(X87Op::FmulSt0(i)),
+        (0xd8, 4) => Ok(X87Op::FsubSt0(i)),
+        (0xd8, 5) => Ok(X87Op::FsubrSt0(i)),
+        (0xd8, 6) => Ok(X87Op::FdivSt0(i)),
+        (0xd8, 7) => Ok(X87Op::FdivrSt0(i)),
+        (0xdc, 0) => Ok(X87Op::FaddSti(i)),
+        (0xdc, 1) => Ok(X87Op::FmulSti(i)),
+        (0xdc, 4) => Ok(X87Op::FsubSti(i)),
+        (0xdc, 5) => Ok(X87Op::FsubrSti(i)),
+        (0xdc, 6) => Ok(X87Op::FdivSti(i)),
+        (0xdc, 7) => Ok(X87Op::FdivrSti(i)),
+        (0xde, 0) => Ok(X87Op::Faddp(i)),
+        (0xde, 1) => Ok(X87Op::Fmulp(i)),
+        (0xde, 4) => Ok(X87Op::Fsubp(i)),
+        (0xde, 5) => Ok(X87Op::Fsubrp(i)),
+        (0xde, 6) => Ok(X87Op::Fdivp(i)),
+        (0xde, 7) => Ok(X87Op::Fdivrp(i)),
+        _ => Err(super::decode::Undecoded {
+            byte: escape,
+            group: Some(reg),
+            why: "a floating-point register form this unit does not have",
+        }),
+    }
+}
+
+/// Decode a memory-form (`modrm >> 6 != 3`) floating-point escape once at
+/// instruction decode time.
+///
+/// # Errors
+/// When the `(escape, reg)` form is not implemented by this unit.
+pub fn decode_mem(escape: u8, reg: u8) -> Result<X87Op, super::decode::Undecoded> {
+    match (escape, reg) {
+        (0xd8, 0) => Ok(X87Op::FaddF32),
+        (0xd8, 1) => Ok(X87Op::FmulF32),
+        (0xd8, 2) => Ok(X87Op::FcomF32),
+        (0xd8, 3) => Ok(X87Op::FcompF32),
+        (0xd8, 4) => Ok(X87Op::FsubF32),
+        (0xd8, 5) => Ok(X87Op::FsubrF32),
+        (0xd8, 6) => Ok(X87Op::FdivF32),
+        (0xd8, 7) => Ok(X87Op::FdivrF32),
+        (0xdc, 0) => Ok(X87Op::FaddF64),
+        (0xdc, 1) => Ok(X87Op::FmulF64),
+        (0xdc, 2) => Ok(X87Op::FcomF64),
+        (0xdc, 3) => Ok(X87Op::FcompF64),
+        (0xdc, 4) => Ok(X87Op::FsubF64),
+        (0xdc, 5) => Ok(X87Op::FsubrF64),
+        (0xdc, 6) => Ok(X87Op::FdivF64),
+        (0xdc, 7) => Ok(X87Op::FdivrF64),
+        (0xda, 0) => Ok(X87Op::FiaddI32),
+        (0xda, 1) => Ok(X87Op::FimulI32),
+        (0xda, 2) => Ok(X87Op::FicomI32),
+        (0xda, 3) => Ok(X87Op::FicompI32),
+        (0xda, 4) => Ok(X87Op::FisubI32),
+        (0xda, 5) => Ok(X87Op::FisubrI32),
+        (0xda, 6) => Ok(X87Op::FidivI32),
+        (0xda, 7) => Ok(X87Op::FidivrI32),
+        (0xde, 0) => Ok(X87Op::FiaddI16),
+        (0xde, 1) => Ok(X87Op::FimulI16),
+        (0xde, 2) => Ok(X87Op::FicomI16),
+        (0xde, 3) => Ok(X87Op::FicompI16),
+        (0xde, 4) => Ok(X87Op::FisubI16),
+        (0xde, 5) => Ok(X87Op::FisubrI16),
+        (0xde, 6) => Ok(X87Op::FidivI16),
+        (0xde, 7) => Ok(X87Op::FidivrI16),
+        (0xd9, 0) => Ok(X87Op::FldF32),
+        (0xd9, 2) => Ok(X87Op::FstF32),
+        (0xd9, 3) => Ok(X87Op::FstpF32),
+        (0xd9, 4) => Ok(X87Op::Fldenv),
+        (0xd9, 5) => Ok(X87Op::Fldcw),
+        (0xd9, 6) => Ok(X87Op::Fnstenv),
+        (0xd9, 7) => Ok(X87Op::Fnstcw),
+        (0xdd, 0) => Ok(X87Op::FldF64),
+        (0xdd, 2) => Ok(X87Op::FstF64),
+        (0xdd, 3) => Ok(X87Op::FstpF64),
+        (0xdd, 7) => Ok(X87Op::FnstswMem),
+        (0xdb, 0) => Ok(X87Op::FildI32),
+        (0xdb, 2) => Ok(X87Op::FistI32),
+        (0xdb, 3) => Ok(X87Op::FistpI32),
+        (0xdb, 5) => Ok(X87Op::FldF80),
+        (0xdb, 7) => Ok(X87Op::FstpF80),
+        (0xdf, 0) => Ok(X87Op::FildI16),
+        (0xdf, 2) => Ok(X87Op::FistI16),
+        (0xdf, 3) => Ok(X87Op::FistpI16),
+        (0xdf, 5) => Ok(X87Op::FildI64),
+        (0xdf, 7) => Ok(X87Op::FistpI64),
+        _ => Err(super::decode::Undecoded {
+            byte: escape,
+            group: Some(reg),
+            why: "a floating-point memory form this unit does not have",
+        }),
+    }
+}
+
+#[inline(always)]
+fn load_f32(mem: &Arena, at: u32) -> Result<f64, Stop> {
+    read(mem, at, Format::Single)
+}
+
+#[inline(always)]
+fn load_f64(mem: &Arena, at: u32) -> Result<f64, Stop> {
+    read(mem, at, Format::Double)
+}
+
+#[inline(always)]
+fn load_i32(mem: &Arena, at: u32) -> Result<f64, Stop> {
+    Ok(f64::from(mem.read_u32(at).map_err(Stop::Fault)? as i32))
+}
+
+#[inline(always)]
+fn load_i16(mem: &Arena, at: u32) -> Result<f64, Stop> {
+    Ok(f64::from(i32::from(
+        mem.read_u16(at).map_err(Stop::Fault)? as i16
+    )))
+}
+
+#[inline(always)]
+fn reg_binop(
+    fpu: &mut X87,
+    index: usize,
+    to_top: bool,
+    pop_after: bool,
+    op: impl FnOnce(f64, f64) -> f64,
+) {
+    let top = fpu.st(0);
+    let other = fpu.st(index);
+    let result = answer(op(top, other), top, other);
+    if to_top {
+        fpu.set_st(0, result);
+    } else {
+        fpu.set_st(index, result);
+    }
+    if pop_after {
+        fpu.pop();
+    }
+}
+
+#[inline(always)]
+fn mem_binop(fpu: &mut X87, value: f64, op: impl FnOnce(f64, f64) -> f64) {
+    let top = fpu.st(0);
+    fpu.set_st(0, answer(op(top, value), top, value));
+}
+
+/// Run one pre-decoded floating-point operation.
+///
+/// For memory forms `at` is the effective guest address; register forms ignore it.
+///
+/// # Errors
+/// When a memory operand's address is outside the arena.
+pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Result<(), Stop> {
+    match op {
+        // Constants and unit housekeeping.
+        X87Op::Fnop => {}
+        X87Op::Fchs => cpu.fpu.set_st(0, -cpu.fpu.st(0)),
+        X87Op::Fabs => cpu.fpu.set_st(0, cpu.fpu.st(0).abs()),
+        X87Op::Ftst => {
             let value = cpu.fpu.st(0);
             cpu.fpu.compare(value, 0.0);
         }
-        (0xd9, 0xe5) => cpu.fpu.examine(),
-        (0xd9, 0xe8) => cpu.fpu.push(1.0),
-        (0xd9, 0xe9) => cpu.fpu.push(std::f64::consts::LOG2_10),
-        (0xd9, 0xea) => cpu.fpu.push(std::f64::consts::LOG2_E),
-        (0xd9, 0xeb) => cpu.fpu.push(maths::PI),
-        (0xd9, 0xec) => cpu.fpu.push(std::f64::consts::LOG10_2),
-        (0xd9, 0xed) => cpu.fpu.push(maths::LN_2),
-        (0xd9, 0xee) => cpu.fpu.push(0.0),
-        // The transcendentals.
-        (0xd9, 0xf0) => {
+        X87Op::Fxam => cpu.fpu.examine(),
+        X87Op::Fld1 => cpu.fpu.push(1.0),
+        X87Op::Fldl2t => cpu.fpu.push(std::f64::consts::LOG2_10),
+        X87Op::Fldl2e => cpu.fpu.push(std::f64::consts::LOG2_E),
+        X87Op::Fldpi => cpu.fpu.push(maths::PI),
+        X87Op::Fldlg2 => cpu.fpu.push(std::f64::consts::LOG10_2),
+        X87Op::Fldln2 => cpu.fpu.push(maths::LN_2),
+        X87Op::Fldz => cpu.fpu.push(0.0),
+
+        // Transcendentals and stack maintenance.
+        X87Op::F2xm1 => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::pow2(x) - 1.0, x, x));
         }
-        (0xd9, 0xf1) => {
-            // y * log2(x), with x on top.
+        X87Op::Fyl2x => {
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(y * maths::log2(x), x, y));
         }
-        (0xd9, 0xf2) => {
-            // The tangent, and a one pushed after it.
+        X87Op::Fptan => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::tan(x), x, x));
             cpu.fpu.push(1.0);
         }
-        (0xd9, 0xf3) => {
+        X87Op::Fpatan => {
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::atan2(y, x), x, y));
         }
-        (0xd9, 0xf4) => {
-            // Split into exponent and significand.
+        X87Op::Fxtract => {
             let value = cpu.fpu.st(0);
             let exponent = if value == 0.0 {
                 0.0
@@ -772,321 +1065,293 @@ pub fn execute(
             cpu.fpu.set_st(0, exponent);
             cpu.fpu.push(significand);
         }
-        (0xd9, 0xf5) => cpu.fpu.remainder(true),
-        (0xd9, 0xf8) => cpu.fpu.remainder(false),
-        (0xd9, 0xf6) => cpu.fpu.decrement_top(),
-        (0xd9, 0xf7) => cpu.fpu.increment_top(),
-        (0xd9, 0xf9) => {
-            // y * log2(x + 1).
+        X87Op::Fprem1 => cpu.fpu.remainder(true),
+        X87Op::Fdecstp => cpu.fpu.decrement_top(),
+        X87Op::Fincstp => cpu.fpu.increment_top(),
+        X87Op::Fprem => cpu.fpu.remainder(false),
+        X87Op::Fyl2xp1 => {
             let x = cpu.fpu.pop();
             let y = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(y * maths::log2(x + 1.0), x, y));
         }
-        (0xd9, 0xfa) => {
+        X87Op::Fsqrt => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(x.sqrt(), x, x));
         }
-        (0xd9, 0xfb) => {
+        X87Op::Fsincos => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::sin(x), x, x));
             cpu.fpu.push(answer(maths::cos(x), x, x));
         }
-        (0xd9, 0xfc) => {
-            // Round to a whole number, the way the control word says.
+        X87Op::Frndint => {
             let x = cpu.fpu.st(0);
             let rounded = cpu.fpu.to_whole(x);
             cpu.fpu.set_st(0, rounded);
         }
-        (0xd9, 0xfd) => {
-            // Scale by two to the power in st(1).
+        X87Op::Fscale => {
             let scale = cpu.fpu.st(1).trunc();
             let value = cpu.fpu.st(0);
             cpu.fpu
                 .set_st(0, answer(value * exp2(scale as i32), value, scale));
         }
-        (0xd9, 0xfe) => {
+        X87Op::Fsin => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::sin(x), x, x));
         }
-        (0xd9, 0xff) => {
+        X87Op::Fcos => {
             let x = cpu.fpu.st(0);
             cpu.fpu.set_st(0, answer(maths::cos(x), x, x));
         }
-        (0xdb, 0xe2) => cpu.fpu.clear_exceptions(),
-        (0xdb, 0xe3) => cpu.fpu.init(),
-        (0xde, 0xd9) => {
-            // Compare and pop twice.
+        X87Op::Fnclex => cpu.fpu.clear_exceptions(),
+        X87Op::Fninit => cpu.fpu.init(),
+        X87Op::Fcompp => {
             let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(1));
             cpu.fpu.compare(a, b);
             cpu.fpu.pop();
             cpu.fpu.pop();
         }
-        (0xda, 0xe9) => {
-            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(1));
-            cpu.fpu.compare(a, b);
-            cpu.fpu.pop();
-            cpu.fpu.pop();
-        }
-        (0xdf, 0xe0) => {
-            // The status word goes to ax, which is how a guest reads a
-            // comparison it just made.
+        X87Op::FnstswAx => {
             let status = u32::from(cpu.fpu.status());
             cpu.r[super::EAX] = (cpu.r[super::EAX] & 0xffff_0000) | status;
         }
-        _ => return register_form_op(cpu, escape, reg, index),
-    }
-    Ok(())
-}
 
-/// The forms that name a register: `st(0)` against `st(i)`, either way round.
-fn register_form_op(cpu: &mut super::Cpu, escape: u8, reg: u8, index: usize) -> Result<(), Stop> {
-    // Whether the answer goes to st(0) or to st(i), and whether the stack is
-    // popped afterwards, is what separates the four arithmetic escapes.
-    let (to_top, pop_after) = match escape {
-        0xd8 => (true, false),
-        0xdc => (false, false),
-        0xde => (false, true),
-        _ => (true, false),
-    };
-
-    match (escape, reg) {
-        (0xd9, 0) => {
-            // fld st(i)
-            let value = cpu.fpu.st(index);
+        // Parameterized register forms.
+        X87Op::FldSt(i) => {
+            let value = cpu.fpu.st(usize::from(i));
             cpu.fpu.push(value);
         }
-        (0xd9, 1) => {
-            // fxch
+        X87Op::Fxch(i) => {
+            let idx = usize::from(i);
             let a = cpu.fpu.st(0);
-            let b = cpu.fpu.st(index);
+            let b = cpu.fpu.st(idx);
             cpu.fpu.set_st(0, b);
-            cpu.fpu.set_st(index, a);
+            cpu.fpu.set_st(idx, a);
         }
-        (0xdd, 0) => cpu.fpu.free(index),
-        (0xdd, 2 | 3) => {
+        X87Op::Ffree(i) => cpu.fpu.free(usize::from(i)),
+        X87Op::FstSt(i) => {
             let value = cpu.fpu.st(0);
-            cpu.fpu.set_st(index, value);
-            if reg == 3 {
-                cpu.fpu.pop();
-            }
+            cpu.fpu.set_st(usize::from(i), value);
         }
-        (0xdd, 4 | 5) | (0xda | 0xdb | 0xdf, 5 | 6) => {
-            // The unordered comparisons, and the ones that write the
-            // processor's own flags.
-            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(index));
-            if escape == 0xdd {
-                cpu.fpu.compare(a, b);
-                if reg == 5 {
-                    cpu.fpu.pop();
-                }
-            } else {
-                let (zero, parity, carry) = X87::compare_flags(a, b);
-                cpu.flags.zf = zero;
-                cpu.flags.pf = parity;
-                cpu.flags.cf = carry;
-                cpu.flags.of = false;
-                cpu.flags.sf = false;
-                if escape == 0xdf {
-                    cpu.fpu.pop();
-                }
-            }
+        X87Op::FstpSt(i) => {
+            let value = cpu.fpu.st(0);
+            cpu.fpu.set_st(usize::from(i), value);
+            cpu.fpu.pop();
         }
-        (0xd8 | 0xdc | 0xde, 0..=7) => {
+        X87Op::FcomSt(i) => {
+            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(usize::from(i)));
+            cpu.fpu.compare(a, b);
+        }
+        X87Op::FcompSt(i) => {
+            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(usize::from(i)));
+            cpu.fpu.compare(a, b);
+            cpu.fpu.pop();
+        }
+        X87Op::Fcomi(i) => {
+            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(usize::from(i)));
+            let (zero, parity, carry) = X87::compare_flags(a, b);
+            cpu.flags.zf = zero;
+            cpu.flags.pf = parity;
+            cpu.flags.cf = carry;
+            cpu.flags.of = false;
+            cpu.flags.sf = false;
+        }
+        X87Op::Fcomip(i) => {
+            let (a, b) = (cpu.fpu.st(0), cpu.fpu.st(usize::from(i)));
+            let (zero, parity, carry) = X87::compare_flags(a, b);
+            cpu.flags.zf = zero;
+            cpu.flags.pf = parity;
+            cpu.flags.cf = carry;
+            cpu.flags.of = false;
+            cpu.flags.sf = false;
+            cpu.fpu.pop();
+        }
+        X87Op::FaddSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| a + b),
+        X87Op::FmulSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| a * b),
+        X87Op::FsubSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| a - b),
+        X87Op::FsubrSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| b - a),
+        X87Op::FdivSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| a / b),
+        X87Op::FdivrSt0(i) => reg_binop(&mut cpu.fpu, usize::from(i), true, false, |a, b| b / a),
+        X87Op::FaddSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| a + b),
+        X87Op::FmulSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| a * b),
+        X87Op::FsubSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| a - b),
+        X87Op::FsubrSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| b - a),
+        X87Op::FdivSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| a / b),
+        X87Op::FdivrSti(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, false, |a, b| b / a),
+        X87Op::Faddp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| a + b),
+        X87Op::Fmulp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| a * b),
+        X87Op::Fsubp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| a - b),
+        X87Op::Fsubrp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| b - a),
+        X87Op::Fdivp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| a / b),
+        X87Op::Fdivrp(i) => reg_binop(&mut cpu.fpu, usize::from(i), false, true, |a, b| b / a),
+
+        // Memory arithmetic and comparisons.
+        X87Op::FaddF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| a + b),
+        X87Op::FmulF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| a * b),
+        X87Op::FcomF32 => {
+            let v = load_f32(mem, at)?;
             let top = cpu.fpu.st(0);
-            let other = cpu.fpu.st(index);
-            // The comparisons in this block do not write a result back.
-            if escape == 0xd8 && (reg == 2 || reg == 3) {
-                cpu.fpu.compare(top, other);
-                if reg == 3 {
-                    cpu.fpu.pop();
-                }
-                return Ok(());
-            }
-            // Where the answer goes differs by escape; the operation does not:
-            // Intel's tables read the same in st(0) and st(i) for all three,
-            // the reverse of what the mnemonics on dc and de suggest.
-            let result = match reg {
-                0 => top + other,
-                1 => top * other,
-                4 => top - other,
-                5 => other - top,
-                6 => top / other,
-                7 => other / top,
-                _ => {
-                    return Err(Stop::Undecoded {
-                        eip: 0,
-                        byte: escape,
-                        group: Some(reg),
-                        why: "a floating-point register form this unit does not have",
-                    })
-                }
-            };
-            let result = answer(result, top, other);
-            if to_top {
-                cpu.fpu.set_st(0, result);
-            } else {
-                cpu.fpu.set_st(index, result);
-            }
-            if pop_after {
-                cpu.fpu.pop();
-            }
+            cpu.fpu.compare(top, v);
         }
-        _ => {
-            return Err(Stop::Undecoded {
-                eip: 0,
-                byte: escape,
-                group: Some(reg),
-                why: "a floating-point register form this unit does not have",
-            })
-        }
-    }
-    Ok(())
-}
-
-/// The forms that name an address.
-fn memory_form(
-    cpu: &mut super::Cpu,
-    mem: &mut Arena,
-    escape: u8,
-    reg: u8,
-    at: u32,
-) -> Result<(), Stop> {
-    let integer = matches!(escape, 0xda | 0xde | 0xdb | 0xdf);
-
-    // What the escape reads or writes, once the format is known.
-    let load = |mem: &Arena| -> Result<f64, Stop> {
-        if integer {
-            let raw = match escape {
-                0xde | 0xdf => i32::from(mem.read_u32(at).map_err(Stop::Fault)? as u16 as i16),
-                _ => mem.read_u32(at).map_err(Stop::Fault)? as i32,
-            };
-            Ok(f64::from(raw))
-        } else if matches!(escape, 0xdc | 0xdd) {
-            read(mem, at, Format::Double)
-        } else {
-            read(mem, at, Format::Single)
-        }
-    };
-
-    match (escape, reg) {
-        // The arithmetic escapes, which all take one value from memory.
-        (0xd8 | 0xdc | 0xda | 0xde, 0..=7) => {
-            let value = load(mem)?;
+        X87Op::FcompF32 => {
+            let v = load_f32(mem, at)?;
             let top = cpu.fpu.st(0);
-            let result = match reg {
-                0 => top + value,
-                1 => top * value,
-                2 | 3 => {
-                    cpu.fpu.compare(top, value);
-                    if reg == 3 {
-                        cpu.fpu.pop();
-                    }
-                    return Ok(());
-                }
-                4 => top - value,
-                5 => value - top,
-                6 => top / value,
-                _ => value / top,
-            };
-            cpu.fpu.set_st(0, answer(result, top, value));
+            cpu.fpu.compare(top, v);
+            cpu.fpu.pop();
         }
-        // Load and store, in every format.
-        (0xd9, 0) => {
-            let value = load(mem)?;
+        X87Op::FsubF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| a - b),
+        X87Op::FsubrF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| b - a),
+        X87Op::FdivF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| a / b),
+        X87Op::FdivrF32 => mem_binop(&mut cpu.fpu, load_f32(mem, at)?, |a, b| b / a),
+
+        X87Op::FaddF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| a + b),
+        X87Op::FmulF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| a * b),
+        X87Op::FcomF64 => {
+            let v = load_f64(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+        }
+        X87Op::FcompF64 => {
+            let v = load_f64(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+            cpu.fpu.pop();
+        }
+        X87Op::FsubF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| a - b),
+        X87Op::FsubrF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| b - a),
+        X87Op::FdivF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| a / b),
+        X87Op::FdivrF64 => mem_binop(&mut cpu.fpu, load_f64(mem, at)?, |a, b| b / a),
+
+        X87Op::FiaddI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| a + b),
+        X87Op::FimulI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| a * b),
+        X87Op::FicomI32 => {
+            let v = load_i32(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+        }
+        X87Op::FicompI32 => {
+            let v = load_i32(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+            cpu.fpu.pop();
+        }
+        X87Op::FisubI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| a - b),
+        X87Op::FisubrI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| b - a),
+        X87Op::FidivI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| a / b),
+        X87Op::FidivrI32 => mem_binop(&mut cpu.fpu, load_i32(mem, at)?, |a, b| b / a),
+
+        X87Op::FiaddI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| a + b),
+        X87Op::FimulI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| a * b),
+        X87Op::FicomI16 => {
+            let v = load_i16(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+        }
+        X87Op::FicompI16 => {
+            let v = load_i16(mem, at)?;
+            let top = cpu.fpu.st(0);
+            cpu.fpu.compare(top, v);
+            cpu.fpu.pop();
+        }
+        X87Op::FisubI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| a - b),
+        X87Op::FisubrI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| b - a),
+        X87Op::FidivI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| a / b),
+        X87Op::FidivrI16 => mem_binop(&mut cpu.fpu, load_i16(mem, at)?, |a, b| b / a),
+
+        // Memory loads and stores.
+        X87Op::FldF32 => {
+            let value = load_f32(mem, at)?;
             cpu.fpu.push(value);
         }
-        (0xdd, 0) => {
-            let value = load(mem)?;
+        X87Op::FldF64 => {
+            let value = load_f64(mem, at)?;
             cpu.fpu.push(value);
         }
-        (0xdb, 0) | (0xdf, 0) => {
-            let value = load(mem)?;
+        X87Op::FildI32 => {
+            let value = load_i32(mem, at)?;
             cpu.fpu.push(value);
         }
-        (0xdb, 5) => {
+        X87Op::FildI16 => {
+            let value = load_i16(mem, at)?;
+            cpu.fpu.push(value);
+        }
+        X87Op::FldF80 => {
             let value = read_extended(mem, at)?;
             cpu.fpu.push(value);
         }
-        (0xdf, 5) => {
-            let lo = mem.read_u32(at).map_err(Stop::Fault)?;
-            let hi = mem.read_u32(at + 4).map_err(Stop::Fault)?;
-            let raw = ((u64::from(hi) << 32) | u64::from(lo)) as i64;
+        X87Op::FildI64 => {
+            let raw = mem.read_u64(at).map_err(Stop::Fault)? as i64;
             cpu.fpu.push(raw as f64);
         }
-        (0xd9, 2 | 3) => {
+        X87Op::FstF32 => {
             let value = cpu.fpu.st(0);
             write(mem, at, Format::Single, value)?;
-            if reg == 3 {
-                cpu.fpu.pop();
-            }
         }
-        (0xdd, 2 | 3) => {
+        X87Op::FstpF32 => {
+            let value = cpu.fpu.st(0);
+            write(mem, at, Format::Single, value)?;
+            cpu.fpu.pop();
+        }
+        X87Op::FstF64 => {
             let value = cpu.fpu.st(0);
             write(mem, at, Format::Double, value)?;
-            if reg == 3 {
-                cpu.fpu.pop();
-            }
         }
-        (0xdb, 7) => {
+        X87Op::FstpF64 => {
+            let value = cpu.fpu.st(0);
+            write(mem, at, Format::Double, value)?;
+            cpu.fpu.pop();
+        }
+        X87Op::FstpF80 => {
             let value = cpu.fpu.st(0);
             write_extended(mem, at, value)?;
             cpu.fpu.pop();
         }
-        // Store as an integer, rounding the way the control word says.
-        (0xdb | 0xdf, 2 | 3) => {
+        X87Op::FistI32 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0));
-            if escape == 0xdf {
-                let short = value as i32 as i16;
-                mem.write(at, &short.to_le_bytes()).map_err(Stop::Fault)?;
-            } else {
-                mem.write_u32(at, value as i32 as u32)
-                    .map_err(Stop::Fault)?;
-            }
-            if reg == 3 {
-                cpu.fpu.pop();
-            }
+            mem.write_u32(at, value as i32 as u32)
+                .map_err(Stop::Fault)?;
         }
-        (0xdf, 7) => {
-            let value = cpu.fpu.to_whole(cpu.fpu.st(0)) as i64;
-            mem.write_u32(at, value as u32).map_err(Stop::Fault)?;
-            mem.write_u32(at + 4, (value >> 32) as u32)
+        X87Op::FistpI32 => {
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0));
+            mem.write_u32(at, value as i32 as u32)
                 .map_err(Stop::Fault)?;
             cpu.fpu.pop();
         }
-        // The control and status words.
-        (0xd9, 5) => {
-            let word = mem.read_u32(at).map_err(Stop::Fault)? as u16;
+        X87Op::FistI16 => {
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0));
+            mem.write_u16(at, value as i32 as i16 as u16)
+                .map_err(Stop::Fault)?;
+        }
+        X87Op::FistpI16 => {
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0));
+            mem.write_u16(at, value as i32 as i16 as u16)
+                .map_err(Stop::Fault)?;
+            cpu.fpu.pop();
+        }
+        X87Op::FistpI64 => {
+            let value = cpu.fpu.to_whole(cpu.fpu.st(0)) as i64;
+            mem.write_u64(at, value as u64).map_err(Stop::Fault)?;
+            cpu.fpu.pop();
+        }
+
+        // Control, status, and environment words.
+        X87Op::Fldcw | X87Op::Fldenv => {
+            let word = mem.read_u16(at).map_err(Stop::Fault)?;
             cpu.fpu.set_control(word);
         }
-        (0xd9, 7) => {
+        X87Op::Fnstcw => {
             let word = cpu.fpu.control();
-            mem.write(at, &word.to_le_bytes()).map_err(Stop::Fault)?;
+            mem.write_u16(at, word).map_err(Stop::Fault)?;
         }
-        (0xdd, 7) => {
+        X87Op::FnstswMem => {
             let word = cpu.fpu.status();
-            mem.write(at, &word.to_le_bytes()).map_err(Stop::Fault)?;
+            mem.write_u16(at, word).map_err(Stop::Fault)?;
         }
-        // The environment, which this unit writes as its own two words and
-        // zeroes for the pointers it does not keep.
-        (0xd9, 6) => {
+        X87Op::Fnstenv => {
             let control = cpu.fpu.control();
             let status = cpu.fpu.status();
-            mem.write(at, &control.to_le_bytes()).map_err(Stop::Fault)?;
-            mem.write(at + 4, &status.to_le_bytes())
-                .map_err(Stop::Fault)?;
+            mem.write_u16(at, control).map_err(Stop::Fault)?;
+            mem.write_u16(at + 4, status).map_err(Stop::Fault)?;
             mem.write(at + 8, &[0u8; 20]).map_err(Stop::Fault)?;
-        }
-        (0xd9, 4) => {
-            let control = mem.read_u32(at).map_err(Stop::Fault)? as u16;
-            cpu.fpu.set_control(control);
-        }
-        _ => {
-            return Err(Stop::Undecoded {
-                eip: at,
-                byte: escape,
-                group: Some(reg),
-                why: "a floating-point memory form this unit does not have",
-            });
         }
     }
     Ok(())
@@ -1095,12 +1360,16 @@ fn memory_form(
 /// Round to a whole number, ties going to the even one: the control word's
 /// default rounding.
 #[must_use]
+#[inline(always)]
 pub fn round_half_to_even(x: f64) -> f64 {
-    let rounded = x.round();
-    if (x - x.trunc()).abs() == 0.5 && rounded % 2.0 != 0.0 {
-        rounded - x.signum()
+    // IEEE-754 `round_ties_even` matches the previous `round`/`trunc`/`% 2.0`
+    // formula bit-for-bit on every input except `-0.5`, where IEEE produces
+    // `-0.0` while `-1.0 - (-1.0)` produced `+0.0`. Preserve `+0.0` for `-0.5`
+    // so no register bit or state digest can drift.
+    if x == -0.5 {
+        0.0
     } else {
-        rounded
+        x.round_ties_even()
     }
 }
 
@@ -1273,5 +1542,183 @@ mod tests {
         assert!(near(maths::log2(1024.0), 10.0, 1e-14));
         assert!(near(maths::pow2(0.5), std::f64::consts::SQRT_2, 1e-14));
         assert!(near(maths::pow2(10.0), 1024.0, 1e-14));
+    }
+
+    #[test]
+    fn x87_op_and_kind_stay_compact() {
+        assert!(
+            std::mem::size_of::<super::X87Op>() <= 2,
+            "X87Op grew past 2 bytes: {}",
+            std::mem::size_of::<super::X87Op>()
+        );
+        assert!(
+            std::mem::size_of::<super::super::insn::Kind>() <= 3,
+            "Kind grew past 3 bytes: {}",
+            std::mem::size_of::<super::super::insn::Kind>()
+        );
+    }
+
+    #[test]
+    fn round_half_to_even_matches_reference_bit_for_bit() {
+        fn legacy(x: f64) -> f64 {
+            let rounded = x.round();
+            if (x - x.trunc()).abs() == 0.5 && rounded % 2.0 != 0.0 {
+                rounded - x.signum()
+            } else {
+                rounded
+            }
+        }
+
+        let cases = [
+            0.0_f64,
+            -0.0,
+            0.25,
+            -0.25,
+            0.49999999999999994,
+            -0.49999999999999994,
+            0.5,
+            -0.5,
+            0.5000000000000001,
+            -0.5000000000000001,
+            1.0,
+            -1.0,
+            1.5,
+            -1.5,
+            2.5,
+            -2.5,
+            3.5,
+            -3.5,
+            4.5,
+            -4.5,
+            (1u64 << 51) as f64 + 0.5,
+            -((1u64 << 51) as f64 + 0.5),
+            (1u64 << 51) as f64 + 1.5,
+            -((1u64 << 51) as f64 + 1.5),
+            (1u64 << 52) as f64,
+            -((1u64 << 52) as f64),
+            (1u64 << 52) as f64 + 1.0,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::from_bits(0x8000_0000_0000_0001),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            INDEFINITE,
+            f64::from_bits(0x7ff0_0000_0000_0001),
+            f64::from_bits(0xfff0_0000_0000_0007),
+        ];
+
+        for x in cases {
+            assert_eq!(
+                super::round_half_to_even(x).to_bits(),
+                legacy(x).to_bits(),
+                "bit mismatch for {x:?} ({:#018x})",
+                x.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn double_and_extended_io_use_exact_widths_and_fault_at_arena_end() {
+        use crate::guest::{Arena, Fault};
+        use crate::host::headless::Headless;
+
+        let len = 1 << 14;
+        let end = u32::try_from(len).unwrap();
+        let mut mem = Arena::new(&mut Headless::new(), len).unwrap();
+
+        // Unaligned double crossing a 4 KiB code page boundary.
+        let cross = 4093u32;
+        mem.mark_code(4096);
+        let val = -123_456.789_012_345_f64;
+        super::write(&mut mem, cross, super::Format::Double, val).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(
+            super::read(&mem, cross, super::Format::Double)
+                .unwrap()
+                .to_bits(),
+            val.to_bits()
+        );
+
+        // Single 8-byte bounds check faults with len 8 when only 4 bytes remain.
+        assert_eq!(
+            super::read(&mem, end - 4, super::Format::Double),
+            Err(super::Stop::Fault(Fault {
+                addr: end - 4,
+                len: 8,
+                write: false,
+            }))
+        );
+        assert_eq!(
+            super::write(&mut mem, end - 4, super::Format::Double, val),
+            Err(super::Stop::Fault(Fault {
+                addr: end - 4,
+                len: 8,
+                write: true,
+            }))
+        );
+
+        // Ten-byte extended round trip at the exact end of the arena.
+        super::write_extended(&mut mem, end - 10, 3.25).unwrap();
+        assert_eq!(super::read_extended(&mem, end - 10).unwrap(), 3.25);
+    }
+
+    #[test]
+    fn x87_predecode_covers_exact_register_and_memory_forms() {
+        // Exact precedence: (0xda, 0xe9) is fucompp, not fcomi(1).
+        assert_eq!(super::decode_reg(0xda, 0xe9), Ok(super::X87Op::Fcompp));
+        assert_eq!(super::decode_reg(0xda, 0xe8), Ok(super::X87Op::Fcomi(0)));
+        assert_eq!(super::decode_reg(0xde, 0xd9), Ok(super::X87Op::Fcompp));
+        assert!(super::decode_reg(0xde, 0xd8).is_err());
+        assert!(super::decode_reg(0xdb, 0xe4).is_err());
+        assert!(super::decode_mem(0xd9, 1).is_err());
+        assert_eq!(super::decode_mem(0xdd, 0), Ok(super::X87Op::FldF64));
+        assert_eq!(super::decode_mem(0xdd, 3), Ok(super::X87Op::FstpF64));
+
+        // Exhaustive check over all 8 * 256 (escape, modrm) pairs to verify
+        // pre-decoding accepts and rejects the exact same set as the legacy
+        // runtime decoder.
+        for escape in 0xd8u8..=0xdf {
+            for modrm in 0u8..=0xff {
+                let reg = (modrm >> 3) & 7;
+                if modrm >> 6 == 3 {
+                    let expected = matches!(
+                        (escape, modrm),
+                        (0xd9, 0xd0 | 0xe0 | 0xe1 | 0xe4 | 0xe5 | 0xe8..=0xee | 0xf0..=0xff)
+                            | (0xdb, 0xe2 | 0xe3)
+                            | (0xde, 0xd9)
+                            | (0xda, 0xe9)
+                            | (0xdf, 0xe0)
+                    ) || matches!(
+                        (escape, reg),
+                        (0xd9, 0 | 1)
+                            | (0xdd, 0 | 2 | 3 | 4 | 5)
+                            | (0xda | 0xdb | 0xdf, 5 | 6)
+                            | (0xd8, 0..=7)
+                            | (0xdc | 0xde, 0 | 1 | 4 | 5 | 6 | 7)
+                    );
+                    assert_eq!(
+                        super::decode_reg(escape, modrm).is_ok(),
+                        expected,
+                        "decode_reg({escape:#04x}, {modrm:#04x})"
+                    );
+                } else {
+                    let expected = matches!(
+                        (escape, reg),
+                        (0xd8 | 0xdc | 0xda | 0xde, 0..=7)
+                            | (0xd9, 0 | 2 | 3 | 4 | 5 | 6 | 7)
+                            | (0xdd, 0 | 2 | 3 | 7)
+                            | (0xdb, 0 | 2 | 3 | 5 | 7)
+                            | (0xdf, 0 | 2 | 3 | 5 | 7)
+                    );
+                    assert_eq!(
+                        super::decode_mem(escape, reg).is_ok(),
+                        expected,
+                        "decode_mem({escape:#04x}, /{reg})"
+                    );
+                }
+            }
+        }
     }
 }

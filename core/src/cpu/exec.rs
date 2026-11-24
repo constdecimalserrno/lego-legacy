@@ -388,51 +388,93 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
         }
         Kind::Add | Kind::Adc | Kind::Sub | Kind::Sbb | Kind::Cmp => {
             let dst = insn.dst.expect("arithmetic has a destination");
-            let a = read_op(cpu, mem, &dst, w)?;
-            let b = read_op(cpu, mem, &insn.src.expect("arithmetic has a source"), w)?;
-            let carry = cpu.flags.cf;
-            let r = match insn.kind {
-                Kind::Add => cpu.flags.add(a, b, false, w),
-                Kind::Adc => cpu.flags.add(a, b, carry, w),
-                Kind::Sub | Kind::Cmp => cpu.flags.sub(a, b, false, w),
-                _ => cpu.flags.sub(a, b, carry, w),
-            };
-            if !matches!(insn.kind, Kind::Cmp) {
-                write_op(cpu, mem, &dst, w, r)?;
+            let src = insn.src.expect("arithmetic has a source");
+            if w == Width::B32 {
+                let a = read_op(cpu, mem, &dst, Width::B32)?;
+                let b = read_op(cpu, mem, &src, Width::B32)?;
+                let carry = cpu.flags.cf;
+                let r = match insn.kind {
+                    Kind::Add => cpu.flags.add32(a, b),
+                    Kind::Adc => cpu.flags.adc32(a, b, carry),
+                    Kind::Sub | Kind::Cmp => cpu.flags.sub32(a, b),
+                    _ => cpu.flags.sbb32(a, b, carry),
+                };
+                if !matches!(insn.kind, Kind::Cmp) {
+                    write_op(cpu, mem, &dst, Width::B32, r)?;
+                }
+            } else {
+                let a = read_op(cpu, mem, &dst, w)?;
+                let b = read_op(cpu, mem, &src, w)?;
+                let carry = cpu.flags.cf;
+                let r = match insn.kind {
+                    Kind::Add => cpu.flags.add(a, b, false, w),
+                    Kind::Adc => cpu.flags.add(a, b, carry, w),
+                    Kind::Sub | Kind::Cmp => cpu.flags.sub(a, b, false, w),
+                    _ => cpu.flags.sub(a, b, carry, w),
+                };
+                if !matches!(insn.kind, Kind::Cmp) {
+                    write_op(cpu, mem, &dst, w, r)?;
+                }
             }
         }
         Kind::And | Kind::Or | Kind::Xor | Kind::Test => {
             let dst = insn.dst.expect("a logical operation has a destination");
-            let a = read_op(cpu, mem, &dst, w)?;
-            let b = read_op(
-                cpu,
-                mem,
-                &insn.src.expect("a logical operation has a source"),
-                w,
-            )?;
-            let r = match insn.kind {
-                Kind::And | Kind::Test => a & b,
-                Kind::Or => a | b,
-                _ => a ^ b,
-            };
-            cpu.flags.logic(r, w);
-            if !matches!(insn.kind, Kind::Test) {
-                write_op(cpu, mem, &dst, w, r & w.mask())?;
+            let src = insn.src.expect("a logical operation has a source");
+            if w == Width::B32 {
+                let a = read_op(cpu, mem, &dst, Width::B32)?;
+                let b = read_op(cpu, mem, &src, Width::B32)?;
+                let r = match insn.kind {
+                    Kind::And | Kind::Test => a & b,
+                    Kind::Or => a | b,
+                    _ => a ^ b,
+                };
+                cpu.flags.logic32(r);
+                if !matches!(insn.kind, Kind::Test) {
+                    write_op(cpu, mem, &dst, Width::B32, r)?;
+                }
+            } else {
+                let a = read_op(cpu, mem, &dst, w)?;
+                let b = read_op(cpu, mem, &src, w)?;
+                let r = match insn.kind {
+                    Kind::And | Kind::Test => a & b,
+                    Kind::Or => a | b,
+                    _ => a ^ b,
+                };
+                cpu.flags.logic(r, w);
+                if !matches!(insn.kind, Kind::Test) {
+                    write_op(cpu, mem, &dst, w, r & w.mask())?;
+                }
             }
         }
         Kind::Inc | Kind::Dec => {
             let dst = insn.dst.expect("inc and dec have a destination");
-            let before = read_op(cpu, mem, &dst, w)?;
-            let r = cpu.flags.inc_dec(before, matches!(insn.kind, Kind::Inc), w);
-            write_op(cpu, mem, &dst, w, r)?;
+            if w == Width::B32 {
+                let before = read_op(cpu, mem, &dst, Width::B32)?;
+                let r = if matches!(insn.kind, Kind::Inc) {
+                    cpu.flags.inc32(before)
+                } else {
+                    cpu.flags.dec32(before)
+                };
+                write_op(cpu, mem, &dst, Width::B32, r)?;
+            } else {
+                let before = read_op(cpu, mem, &dst, w)?;
+                let r = cpu.flags.inc_dec(before, matches!(insn.kind, Kind::Inc), w);
+                write_op(cpu, mem, &dst, w, r)?;
+            }
         }
         Kind::Neg => {
             let dst = insn.dst.expect("neg has a destination");
-            let a = read_op(cpu, mem, &dst, w)?;
-            let r = cpu.flags.sub(0, a, false, w);
-            // Negation borrows exactly when there was something to negate.
-            cpu.flags.cf = a & w.mask() != 0;
-            write_op(cpu, mem, &dst, w, r)?;
+            if w == Width::B32 {
+                let a = read_op(cpu, mem, &dst, Width::B32)?;
+                let r = cpu.flags.sub32(0, a);
+                write_op(cpu, mem, &dst, Width::B32, r)?;
+            } else {
+                let a = read_op(cpu, mem, &dst, w)?;
+                let r = cpu.flags.sub(0, a, false, w);
+                // Negation borrows exactly when there was something to negate.
+                cpu.flags.cf = a & w.mask() != 0;
+                write_op(cpu, mem, &dst, w, r)?;
+            }
         }
         Kind::Not => {
             let dst = insn.dst.expect("not has a destination");
@@ -522,32 +564,14 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
             }
         }
         Kind::Wait => {}
-        Kind::X87 { escape, modrm } => {
+        Kind::X87(op) => {
             // The unit reads its own operand: what the address means depends
-            // on the escape, and only the unit knows which format that is.
+            // on the pre-decoded op.
             let address = match insn.dst {
-                Some(Op::Mem(m)) => Some(effective(cpu, &m)),
-                _ => None,
+                Some(Op::Mem(m)) => effective(cpu, &m),
+                _ => 0,
             };
-            // The unit does not know where the instruction was; a form it
-            // refuses is named at the address the escape was decoded from.
-            let at = cpu.eip.wrapping_sub(u32::from(insn.len));
-            return super::x87::execute(cpu, mem, escape, modrm, address).map_err(
-                |stop| match stop {
-                    Stop::Undecoded {
-                        eip: 0,
-                        byte,
-                        group,
-                        why,
-                    } => Stop::Undecoded {
-                        eip: at,
-                        byte,
-                        group,
-                        why,
-                    },
-                    other => other,
-                },
-            );
+            return super::x87::execute(cpu, mem, op, address);
         }
         Kind::Shift(which) => {
             let dst = insn.dst.expect("a shift has a destination");
@@ -1090,7 +1114,11 @@ fn shift(flags: &mut super::flags::Flags, which: ShiftOp, a: u32, count: u32, w:
             } else {
                 (a >> (bits - count)) & 1 != 0
             };
-            flags.logic_keep_carry(r, w);
+            if w == Width::B32 {
+                flags.logic_keep_carry32(r);
+            } else {
+                flags.logic_keep_carry(r, w);
+            }
             flags.of = (r & msb != 0) != flags.cf;
             r
         }
@@ -1101,7 +1129,11 @@ fn shift(flags: &mut super::flags::Flags, which: ShiftOp, a: u32, count: u32, w:
             } else {
                 (a >> (count - 1)) & 1 != 0
             };
-            flags.logic_keep_carry(r, w);
+            if w == Width::B32 {
+                flags.logic_keep_carry32(r);
+            } else {
+                flags.logic_keep_carry(r, w);
+            }
             flags.of = a & msb != 0;
             r
         }
@@ -1111,7 +1143,11 @@ fn shift(flags: &mut super::flags::Flags, which: ShiftOp, a: u32, count: u32, w:
             let r = ((signed >> n) as u32) & w.mask();
             flags.cf = (signed >> (count.min(bits - 1))) & 1 != 0 && count >= bits
                 || (signed >> (count - 1)) & 1 != 0;
-            flags.logic_keep_carry(r, w);
+            if w == Width::B32 {
+                flags.logic_keep_carry32(r);
+            } else {
+                flags.logic_keep_carry(r, w);
+            }
             flags.of = false;
             r
         }
@@ -1330,14 +1366,22 @@ fn string_op(
             StringOp::Cmps => {
                 let a = read_mem(mem, from, w)?;
                 let b = read_mem(mem, to, w)?;
-                cpu.flags.sub(a, b, false, w);
+                if w == Width::B32 {
+                    cpu.flags.sub32(a, b);
+                } else {
+                    cpu.flags.sub(a, b, false, w);
+                }
                 advance(cpu, ESI, step, insn.addr32);
                 advance(cpu, EDI, step, insn.addr32);
             }
             StringOp::Scas => {
                 let a = read_reg(cpu, EAX as u8, w);
                 let b = read_mem(mem, to, w)?;
-                cpu.flags.sub(a, b, false, w);
+                if w == Width::B32 {
+                    cpu.flags.sub32(a, b);
+                } else {
+                    cpu.flags.sub(a, b, false, w);
+                }
                 advance(cpu, EDI, step, insn.addr32);
             }
         }

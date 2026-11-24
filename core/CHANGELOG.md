@@ -5,6 +5,14 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+32-bit CPU arithmetic flag updates are specialised and x87 instructions are pre-decoded at decode time with single 8-byte `Double` memory I/O (#258), leaving every run's cursor, flips, declared milliseconds, and `state_digest()` unchanged:
+
+- `cpu::flags::Flags` replaces `u8::count_ones()` parity with a branchless 16-bit nibble lookup (`0x9669u32 >> ((b ^ (b >> 4)) & 0xf)`) fast on both `aarch64` and baseline `x86_64` SSE2, and adds `#[inline(always)]` 32-bit flag helpers (`add32`, `adc32`, `sub32`, `sbb32`, `logic32`, `logic_keep_carry32`, `inc32`, `dec32`) using native `overflowing_add`/`overflowing_sub` without dynamic `Width` masks or `u64` widening. `cpu::exec` routes hot `Width::B32` arithmetic, logic, `inc`/`dec`, `neg`, shift, and string-compare paths through them.
+- `cpu::x87` defines a compact 2-byte `X87Op` enum (`Kind::X87(X87Op)`, preserving `Kind` and `Insn` sizes) and decodes `(escape, modrm)` once in `cpu::decode` via `x87::decode_reg`/`x87::decode_mem`, so `x87::execute` dispatches directly with no per-execution opcode decoding.
+- `x87::read`/`x87::write` (`Format::Double`), 64-bit integer loads/stores (`fild`/`fistp` qword), and 10-byte extended significands use single 8-byte `Arena::read_u64`/`write_u64` calls (and 16-bit FPU memory ops use `read_u16`/`write_u16`), and `round_half_to_even` uses `f64::round_ties_even()` (preserving `+0.0` for `-0.5` for exact bit-identity with the legacy formula). `x87::maths` and `synth.rs`'s SHA-256 table pins are untouched.
+- All 877+ SingleStepTests 80386 conformance vectors (1,513,954 vectors), unit tests (exhaustive 256-byte parity, differential 32-bit flag tests, exhaustive 2,048 `(escape, modrm)` pre-decode checks, 8-byte Double I/O fault/invalidation tests, `round_half_to_even` bit-identity tests), and `arch_determinism` pass.
+- Measured headless on the Mac mini against `fdf4b55`, all three benchmark routes end on the exact same `cursor`, `flips`, `declared_ms`, and `state_digest()`: `lego-chess` `checkmate.route` drops from 63.72 s to 56.78 s (-10.9%), `lego-alpha-team` `first-mission.route` from 166.89 s to 156.77 s (-6.1%), and `hotwheels-stunt-track-driver` `first-race.route` from 75.34 s to 72.77 s (-3.4%).
+
 The software rasteriser specialises its covered scanline spans behind a co-located interior-span
 seam (`core/src/raster/{mod.rs, span.rs}`, #254), leaving every frame and every run's digest
 unchanged:
