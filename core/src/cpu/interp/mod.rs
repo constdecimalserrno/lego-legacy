@@ -25,7 +25,6 @@ use x86_64 as native;
 
 use super::decode::{self, MAX_INSN};
 use super::insn::{FastInsn, FastOp, Insn, Kind, NO_REG};
-use super::x87::X87Op;
 use super::{exec, Cpu, CpuEngine, Mode, Stop, CS, FS};
 use crate::guest::{Arena, GuestMem};
 use crate::shim::Boundary;
@@ -112,8 +111,6 @@ pub struct Interp {
     cached_insns: usize,
     /// Cold full [`Insn`] records referenced only by [`FastOp::Slow`] entries.
     pub(crate) slow_insns: Vec<Insn>,
-    /// Compact 2-byte pre-decoded x87 ops referenced by `X87Reg`/`X87Mem`.
-    pub(crate) x87_ops: Vec<X87Op>,
     /// Metadata for each cached run.
     pub(crate) runs: Vec<Run>,
     /// 3-level page table mapping linear address -> `runs` index + 1.
@@ -143,7 +140,6 @@ impl Interp {
             fast_insns: Vec::new(),
             cached_insns: 0,
             slow_insns: Vec::new(),
-            x87_ops: Vec::new(),
             runs: Vec::new(),
             directory: Box::new([0; 1024]),
             regions: Vec::new(),
@@ -165,7 +161,6 @@ impl Interp {
         self.fast_insns.clear();
         self.cached_insns = 0;
         self.slow_insns.clear();
-        self.x87_ops.clear();
         self.runs.clear();
         self.pages.clear();
         self.page_ptrs.clear();
@@ -274,8 +269,7 @@ impl Interp {
                 Err(stop) if count == 0 => return Err(stop),
                 Err(_) => break,
             };
-            let fast =
-                exec::compile_fast(&insn, self.mode, &mut self.slow_insns, &mut self.x87_ops);
+            let fast = exec::compile_fast(&insn, self.mode, &mut self.slow_insns);
             self.fast_insns.push(fast);
             bytes += u16::from(insn.len);
             count += 1;
@@ -535,7 +529,7 @@ impl CpuEngine for Interp {
         let insn = &self.fast_insns[run.first as usize];
         let at = cpu.eip;
         cpu.eip = at.wrapping_add(u32::from(insn.len));
-        match exec::execute_one_fast(insn, cpu, mem, &self.slow_insns, &self.x87_ops, self.mode) {
+        match exec::execute_one_fast(insn, cpu, mem, &self.slow_insns, self.mode) {
             Ok(()) => Ok(()),
             Err(stop @ (Stop::Halted | Stop::Interrupt(_))) => Err(stop),
             Err(stop) => {

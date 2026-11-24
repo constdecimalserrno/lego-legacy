@@ -241,12 +241,7 @@ fn encode_mem(m: MemRef) -> Option<(u8, u8, u8, i32)> {
 /// `addr16`/`base_shift` operands spill into `slow_insns` and dispatch through
 /// [`execute`], keeping 80386 conformance exact (#253).
 #[must_use]
-pub fn compile_fast(
-    insn: &Insn,
-    mode: Mode,
-    slow_insns: &mut Vec<Insn>,
-    x87_ops: &mut Vec<X87Op>,
-) -> FastInsn {
+pub fn compile_fast(insn: &Insn, mode: Mode, slow_insns: &mut Vec<Insn>) -> FastInsn {
     let mut make_slow = || {
         let idx = u32::try_from(slow_insns.len()).unwrap_or(u32::MAX);
         slow_insns.push(*insn);
@@ -299,24 +294,19 @@ pub fn compile_fast(
     }
 
     if let Kind::X87(xop) = insn.kind {
+        let (tag, idx) = xop.to_fast();
         return match insn.dst {
-            None => {
-                let idx = u32::try_from(x87_ops.len()).unwrap_or(u32::MAX);
-                x87_ops.push(xop);
-                FastInsn {
-                    imm: idx,
-                    ..plain(FastOp::X87Reg)
-                }
-            }
+            None => FastInsn {
+                dst: idx,
+                aux: tag,
+                ..plain(FastOp::X87Reg)
+            },
             Some(Op::Mem(m)) => match encode_mem(m) {
-                Some(enc) => {
-                    let idx = u32::try_from(x87_ops.len()).unwrap_or(u32::MAX);
-                    x87_ops.push(xop);
-                    FastInsn {
-                        imm: idx,
-                        ..mem_insn(FastOp::X87Mem, enc)
-                    }
-                }
+                Some(enc) => FastInsn {
+                    dst: idx,
+                    aux: tag,
+                    ..mem_insn(FastOp::X87Mem, enc)
+                },
                 None => make_slow(),
             },
             _ => make_slow(),
@@ -872,10 +862,10 @@ fn shift32(flags: &mut super::flags::Flags, kind: u8, a: u32, count: u32) -> u32
 #[inline(always)]
 fn alu8(flags: &mut super::flags::Flags, aux: u8, a: u32, b: u32) -> Option<u32> {
     match aux {
-        ALU_ADD => Some(flags.add(a, b, false, Width::B8)),
-        ALU_SUB => Some(flags.sub(a, b, false, Width::B8)),
+        ALU_ADD => Some(u32::from(flags.add8(a as u8, b as u8))),
+        ALU_SUB => Some(u32::from(flags.sub8(a as u8, b as u8))),
         ALU_CMP => {
-            flags.sub(a, b, false, Width::B8);
+            flags.sub8(a as u8, b as u8);
             None
         }
         ALU_AND => {
@@ -903,10 +893,10 @@ fn alu8(flags: &mut super::flags::Flags, aux: u8, a: u32, b: u32) -> Option<u32>
 #[inline(always)]
 fn alu16(flags: &mut super::flags::Flags, aux: u8, a: u32, b: u32) -> Option<u32> {
     match aux {
-        ALU_ADD => Some(flags.add(a, b, false, Width::B16)),
-        ALU_SUB => Some(flags.sub(a, b, false, Width::B16)),
+        ALU_ADD => Some(u32::from(flags.add16(a as u16, b as u16))),
+        ALU_SUB => Some(u32::from(flags.sub16(a as u16, b as u16))),
         ALU_CMP => {
-            flags.sub(a, b, false, Width::B16);
+            flags.sub16(a as u16, b as u16);
             None
         }
         ALU_AND => {
@@ -993,7 +983,6 @@ pub fn execute_straight(
     cpu: &mut Cpu,
     mem: &mut Arena,
     slow_insns: &[Insn],
-    x87_ops: &[X87Op],
     mode: Mode,
     tsc: u64,
 ) -> Result<(), Stop> {
@@ -1263,10 +1252,12 @@ pub fn execute_straight(
             let r = shift32(&mut cpu.flags, insn.aux & 3, a, count);
             write32(mem, ea, r)
         }
-        FastOp::X87Reg => super::x87::execute(cpu, mem, x87_ops[insn.imm as usize], 0),
+        FastOp::X87Reg => super::x87::execute(cpu, mem, X87Op::from_fast(insn.aux, insn.dst), 0)
+            .map_err(Stop::Fault),
         FastOp::X87Mem => {
             let ea = effective_flat32(cpu, insn);
-            super::x87::execute(cpu, mem, x87_ops[insn.imm as usize], ea)
+            super::x87::execute(cpu, mem, X87Op::from_fast(insn.aux, insn.dst), ea)
+                .map_err(Stop::Fault)
         }
         FastOp::Mov8RegReg => {
             let v = read_reg(cpu, insn.src & 7, Width::B8);
@@ -1527,13 +1518,12 @@ pub fn execute_one_fast(
     cpu: &mut Cpu,
     mem: &mut Arena,
     slow_insns: &[Insn],
-    x87_ops: &[X87Op],
     mode: Mode,
 ) -> Result<(), Stop> {
     if insn.op.is_terminal() {
         execute_terminal(insn, cpu, mem, slow_insns, mode, cpu.tsc)
     } else {
-        execute_straight(insn, cpu, mem, slow_insns, x87_ops, mode, cpu.tsc)
+        execute_straight(insn, cpu, mem, slow_insns, mode, cpu.tsc)
     }
 }
 
@@ -1616,11 +1606,18 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 let a = read_op(cpu, mem, &dst, w)?;
                 let b = read_op(cpu, mem, &src, w)?;
                 let carry = cpu.flags.cf;
-                let r = match insn.kind {
-                    Kind::Add => cpu.flags.add(a, b, false, w),
-                    Kind::Adc => cpu.flags.add(a, b, carry, w),
-                    Kind::Sub | Kind::Cmp => cpu.flags.sub(a, b, false, w),
-                    _ => cpu.flags.sub(a, b, carry, w),
+                let r = match (insn.kind, w) {
+                    (Kind::Add, Width::B8) => u32::from(cpu.flags.add8(a as u8, b as u8)),
+                    (Kind::Add, Width::B16) => u32::from(cpu.flags.add16(a as u16, b as u16)),
+                    (Kind::Sub | Kind::Cmp, Width::B8) => {
+                        u32::from(cpu.flags.sub8(a as u8, b as u8))
+                    }
+                    (Kind::Sub | Kind::Cmp, Width::B16) => {
+                        u32::from(cpu.flags.sub16(a as u16, b as u16))
+                    }
+                    (Kind::Adc, _) => cpu.flags.add(a, b, carry, w),
+                    (Kind::Sbb, _) => cpu.flags.sub(a, b, carry, w),
+                    _ => unreachable!(),
                 };
                 if !matches!(insn.kind, Kind::Cmp) {
                     write_op(cpu, mem, &dst, w, r)?;
@@ -1680,9 +1677,11 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 write_op(cpu, mem, &dst, Width::B32, r)?;
             } else {
                 let a = read_op(cpu, mem, &dst, w)?;
-                let r = cpu.flags.sub(0, a, false, w);
-                // Negation borrows exactly when there was something to negate.
-                cpu.flags.cf = a & w.mask() != 0;
+                let r = match w {
+                    Width::B8 => u32::from(cpu.flags.sub8(0, a as u8)),
+                    Width::B16 => u32::from(cpu.flags.sub16(0, a as u16)),
+                    Width::B32 => unreachable!(),
+                };
                 write_op(cpu, mem, &dst, w, r)?;
             }
         }
@@ -1781,7 +1780,7 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Arena, insn: &Insn, mode: Mode) -> Resul
                 Some(Op::Mem(m)) => effective(cpu, &m),
                 _ => 0,
             };
-            return super::x87::execute(cpu, mem, op, address);
+            return super::x87::execute(cpu, mem, op, address).map_err(Stop::Fault);
         }
         Kind::Shift(which) => {
             let dst = insn.dst.expect("a shift has a destination");
@@ -2446,6 +2445,58 @@ fn bcd(cpu: &mut Cpu, which: BcdOp, insn: &Insn) -> Result<(), Stop> {
     Ok(())
 }
 
+/// Find the first occurrence of `needle` in `haystack`, scanning 8 bytes at a
+/// time with SWAR zero-byte detection.
+#[inline]
+fn find_byte(haystack: &[u8], needle: u8) -> Option<usize> {
+    let mask = u64::from_ne_bytes([needle; 8]);
+    let (chunks, tail) = haystack.as_chunks::<8>();
+    for (ci, chunk) in chunks.iter().enumerate() {
+        let v = u64::from_ne_bytes(*chunk) ^ mask;
+        if v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080 != 0 {
+            let off = ci * 8;
+            for (i, &b) in chunk.iter().enumerate() {
+                if b == needle {
+                    return Some(off + i);
+                }
+            }
+        }
+    }
+    let base = chunks.len() * 8;
+    for (i, &b) in tail.iter().enumerate() {
+        if b == needle {
+            return Some(base + i);
+        }
+    }
+    None
+}
+
+/// Find the first index where equal-length byte slices `lhs` and `rhs` differ,
+/// comparing 8 bytes at a time.
+#[inline]
+fn first_diff_byte(lhs: &[u8], rhs: &[u8]) -> Option<usize> {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    let (lc, lt) = lhs.as_chunks::<8>();
+    let (rc, rt) = rhs.as_chunks::<8>();
+    for (ci, (a, b)) in lc.iter().zip(rc).enumerate() {
+        if u64::from_ne_bytes(*a) != u64::from_ne_bytes(*b) {
+            let off = ci * 8;
+            for i in 0..8 {
+                if a[i] != b[i] {
+                    return Some(off + i);
+                }
+            }
+        }
+    }
+    let base = lc.len() * 8;
+    for (i, (&a, &b)) in lt.iter().zip(rt).enumerate() {
+        if a != b {
+            return Some(base + i);
+        }
+    }
+    None
+}
+
 /// One string instruction, however many times it repeats.
 ///
 /// A repeat is one instruction: it retires once however long it runs, because
@@ -2531,6 +2582,68 @@ fn string_op(
                         }
                     }
                 }
+                StringOp::Scas if w == Width::B8 && insn.rep == Some(Rep::WhileNotEqual) => {
+                    if (to as usize) < mem.len() {
+                        let scan = (count as usize).min(mem.len() - to as usize);
+                        if let Ok(scan_u32) = u32::try_from(scan) {
+                            if di.checked_add(scan_u32).is_some()
+                                && to.checked_add(scan_u32).is_some()
+                            {
+                                if let Ok(haystack) = mem.slice(to, scan) {
+                                    let needle = cpu.r[EAX] as u8;
+                                    if let Some(idx) = find_byte(haystack, needle) {
+                                        let done = idx as u32 + 1;
+                                        cpu.flags.sub8(needle, needle);
+                                        cpu.r[EDI] = di + done;
+                                        cpu.r[ECX] = count - done;
+                                        return Ok(());
+                                    } else if scan_u32 == count {
+                                        cpu.flags.sub8(needle, haystack[scan - 1]);
+                                        cpu.r[EDI] = di + count;
+                                        cpu.r[ECX] = 0;
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                StringOp::Cmps if w == Width::B8 && insn.rep == Some(Rep::WhileEqual) => {
+                    let si = cpu.r[ESI];
+                    let from = cpu.seg_base[src_seg].wrapping_add(si);
+                    if (from as usize) < mem.len() && (to as usize) < mem.len() {
+                        let scan = (count as usize)
+                            .min(mem.len() - from as usize)
+                            .min(mem.len() - to as usize);
+                        if let Ok(scan_u32) = u32::try_from(scan) {
+                            if si.checked_add(scan_u32).is_some()
+                                && di.checked_add(scan_u32).is_some()
+                                && from.checked_add(scan_u32).is_some()
+                                && to.checked_add(scan_u32).is_some()
+                            {
+                                if let (Ok(lhs), Ok(rhs)) =
+                                    (mem.slice(from, scan), mem.slice(to, scan))
+                                {
+                                    if let Some(idx) = first_diff_byte(lhs, rhs) {
+                                        let done = idx as u32 + 1;
+                                        cpu.flags.sub8(lhs[idx], rhs[idx]);
+                                        cpu.r[ESI] = si + done;
+                                        cpu.r[EDI] = di + done;
+                                        cpu.r[ECX] = count - done;
+                                        return Ok(());
+                                    } else if scan_u32 == count {
+                                        let last = lhs[scan - 1];
+                                        cpu.flags.sub8(last, last);
+                                        cpu.r[ESI] = si + count;
+                                        cpu.r[EDI] = di + count;
+                                        cpu.r[ECX] = 0;
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 StringOp::Lods | StringOp::Cmps | StringOp::Scas => {}
             }
         }
@@ -2576,10 +2689,16 @@ fn string_op(
             StringOp::Cmps => {
                 let a = read_mem(mem, from, w)?;
                 let b = read_mem(mem, to, w)?;
-                if w == Width::B32 {
-                    cpu.flags.sub32(a, b);
-                } else {
-                    cpu.flags.sub(a, b, false, w);
+                match w {
+                    Width::B8 => {
+                        cpu.flags.sub8(a as u8, b as u8);
+                    }
+                    Width::B16 => {
+                        cpu.flags.sub16(a as u16, b as u16);
+                    }
+                    Width::B32 => {
+                        cpu.flags.sub32(a, b);
+                    }
                 }
                 advance(cpu, ESI, step, insn.addr32);
                 advance(cpu, EDI, step, insn.addr32);
@@ -2587,10 +2706,16 @@ fn string_op(
             StringOp::Scas => {
                 let a = read_reg(cpu, EAX as u8, w);
                 let b = read_mem(mem, to, w)?;
-                if w == Width::B32 {
-                    cpu.flags.sub32(a, b);
-                } else {
-                    cpu.flags.sub(a, b, false, w);
+                match w {
+                    Width::B8 => {
+                        cpu.flags.sub8(a as u8, b as u8);
+                    }
+                    Width::B16 => {
+                        cpu.flags.sub16(a as u16, b as u16);
+                    }
+                    Width::B32 => {
+                        cpu.flags.sub32(a, b);
+                    }
                 }
                 advance(cpu, EDI, step, insn.addr32);
             }
@@ -3058,6 +3183,8 @@ mod tests {
             ("sar dword [ebx], cl", &[0xd3, 0x3b], FastOp::ShiftMem),
             ("fld dword [ebx]", &[0xd9, 0x03], FastOp::X87Mem),
             ("fld1", &[0xd9, 0xe8], FastOp::X87Reg),
+            ("fld st(2)", &[0xd9, 0xc2], FastOp::X87Reg),
+            ("faddp st(1)", &[0xde, 0xc1], FastOp::X87Reg),
             ("jmp rel8", &[0xeb, 0x10], FastOp::JmpRel),
             ("jz rel8", &[0x74, 0xfe], FastOp::JccRel),
             ("jnz rel8", &[0x75, 0x08], FastOp::JccRel),
@@ -3078,15 +3205,13 @@ mod tests {
         for &(label, bytes, expected_op) in cases {
             let insn = decode(bytes, Mode::FLAT).unwrap_or_else(|e| panic!("{label}: {e:?}"));
             let mut slow = Vec::new();
-            let mut x87 = Vec::new();
-            let fast = compile_fast(&insn, Mode::FLAT, &mut slow, &mut x87);
+            let fast = compile_fast(&insn, Mode::FLAT, &mut slow);
             assert_eq!(fast.op, expected_op, "{label}: unexpected FastOp");
 
             // Real mode always routes through FastOp::Slow.
             let mut real_slow = Vec::new();
-            let mut real_x87 = Vec::new();
             assert_eq!(
-                compile_fast(&insn, Mode::REAL, &mut real_slow, &mut real_x87).op,
+                compile_fast(&insn, Mode::REAL, &mut real_slow).op,
                 FastOp::Slow,
                 "{label}: Mode::REAL must stay on Slow"
             );
@@ -3118,12 +3243,15 @@ mod tests {
                 init.r[ESI] = 2;
                 init.r[EDI] = 0x2008;
                 init.seg_base[FS] = 0x3000;
+                init.fpu.push(1.25);
+                init.fpu.push(2.5);
+                init.fpu.push(3.75);
 
                 let mut cpu_ref = init;
                 let mut cpu_fast = init;
                 let res_ref = execute(&mut cpu_ref, &mut mem_ref, &insn, Mode::FLAT);
                 let res_fast =
-                    execute_one_fast(&fast, &mut cpu_fast, &mut mem_fast, &slow, &x87, Mode::FLAT);
+                    execute_one_fast(&fast, &mut cpu_fast, &mut mem_fast, &slow, Mode::FLAT);
 
                 assert_eq!(res_fast, res_ref, "{label} (ecx={ecx_val:#x}): result");
                 assert_eq!(cpu_fast.r, cpu_ref.r, "{label} (ecx={ecx_val:#x}): GPRs");
@@ -3148,5 +3276,326 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn repne_scasb_bulk_matches_elementwise_across_hits_misses_df_faults_and_watches() {
+        use super::super::flags::Flags;
+
+        let len = 1 << 16;
+        let end = u32::try_from(len).unwrap();
+        let floor = 0x0800u32;
+
+        // Oracle: run element-by-element by arming `mem.watch()` (which disables
+        // the bulk branch in `string_op` without affecting read-only scans).
+        let run_pair = |label: &str, bytes: &[u8], init_mem: &[(u32, &[u8])], init_cpu: Cpu| {
+            let mut m_fast = Arena::new(&mut Headless::new(), len)
+                .unwrap()
+                .with_floor(floor);
+            let mut m_ref = Arena::new(&mut Headless::new(), len)
+                .unwrap()
+                .with_floor(floor);
+            for &(addr, data) in init_mem {
+                m_fast.write(addr, data).unwrap();
+                m_ref.write(addr, data).unwrap();
+            }
+            m_fast.write(CODE, bytes).unwrap();
+            m_ref.write(CODE, bytes).unwrap();
+            m_ref.watch();
+
+            let mut c_fast = init_cpu;
+            let mut c_ref = init_cpu;
+            c_fast.eip = CODE;
+            c_ref.eip = CODE;
+            let r_fast = Interp::new(Mode::FLAT).run(&mut c_fast, &mut m_fast, 1, 0..0);
+            let r_ref = Interp::new(Mode::FLAT).run(&mut c_ref, &mut m_ref, 1, 0..0);
+
+            assert_eq!(r_fast, r_ref, "{label}: result");
+            assert_eq!(c_fast.r, c_ref.r, "{label}: GPRs");
+            assert_eq!(c_fast.eip, c_ref.eip, "{label}: EIP");
+            assert_eq!(
+                c_fast.flags.to_eflags(),
+                c_ref.flags.to_eflags(),
+                "{label}: EFLAGS"
+            );
+            assert!(m_ref.unchanged(), "{label}: watch must stay unchanged");
+        };
+
+        let base_flags = Flags::from_eflags(0x0024_0203);
+        let mut buf = [b'A'; 40];
+        for hit_pos in [0usize, 1, 6, 7, 8, 9, 15, 16, 17, 31, 32, 39] {
+            buf.fill(b'A');
+            buf[hit_pos] = 0;
+            for &ecx in &[0u32, 1, 5, 8, 16, 40, u32::MAX] {
+                let mut cpu = Cpu {
+                    flags: base_flags,
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = 0x1234_5600; // al = 0
+                cpu.r[EDI] = 0x2003; // unaligned start
+                cpu.r[ECX] = ecx;
+                run_pair(
+                    &format!("scasb_hit_{hit_pos}_ecx_{ecx:#x}"),
+                    &[0xf2, 0xae],
+                    &[(0x2003, &buf)],
+                    cpu,
+                );
+            }
+        }
+
+        // Non-zero needle and full-count miss with varying last byte (tests all flags).
+        for last_byte in [0x00u8, 0x41, 0x7f, 0x80, 0xfe, 0xff] {
+            let mut miss = [0x55u8; 25];
+            miss[24] = last_byte;
+            let mut cpu = Cpu {
+                flags: base_flags,
+                ..Cpu::default()
+            };
+            cpu.r[EAX] = 0x77; // never appears in miss
+            cpu.r[EDI] = 0x2101;
+            cpu.r[ECX] = 25;
+            run_pair(
+                &format!("scasb_miss_last_{last_byte:#04x}"),
+                &[0xf2, 0xae],
+                &[(0x2101, &miss)],
+                cpu,
+            );
+        }
+
+        // DF=1 backward scan.
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.flags.df = true;
+        cpu.r[EAX] = 0;
+        cpu.r[EDI] = 0x2010;
+        cpu.r[ECX] = 16;
+        run_pair("scasb_df1", &[0xf2, 0xae], &[(0x2005, b"\0ABCDEF")], cpu);
+
+        // addr16 (`67 f2 ae`).
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[EAX] = 0;
+        cpu.r[EDI] = 0x1234_2000;
+        cpu.r[ECX] = 0x5678_0010;
+        run_pair(
+            "scasb_addr16",
+            &[0x67, 0xf2, 0xae],
+            &[(0x2000, b"12345\0")],
+            cpu,
+        );
+
+        // Mid-way fault at arena end (ECX = u32::MAX, no null before end) and floor fault.
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[EAX] = 0;
+        cpu.r[EDI] = end - 11;
+        cpu.r[ECX] = u32::MAX;
+        run_pair(
+            "scasb_end_fault",
+            &[0xf2, 0xae],
+            &[(end - 11, &[b'X'; 11])],
+            cpu,
+        );
+
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[EAX] = 0;
+        cpu.r[EDI] = floor - 4;
+        cpu.r[ECX] = 10;
+        run_pair("scasb_floor_fault", &[0xf2, 0xae], &[], cpu);
+    }
+
+    #[test]
+    fn repe_cmpsb_bulk_matches_elementwise_across_overlaps_df_faults_and_watches() {
+        use super::super::flags::Flags;
+        use super::super::FS;
+
+        let len = 1 << 16;
+        let end = u32::try_from(len).unwrap();
+        let floor = 0x0800u32;
+
+        let run_pair = |label: &str, bytes: &[u8], init_mem: &[(u32, &[u8])], init_cpu: Cpu| {
+            let mut m_fast = Arena::new(&mut Headless::new(), len)
+                .unwrap()
+                .with_floor(floor);
+            let mut m_ref = Arena::new(&mut Headless::new(), len)
+                .unwrap()
+                .with_floor(floor);
+            for &(addr, data) in init_mem {
+                m_fast.write(addr, data).unwrap();
+                m_ref.write(addr, data).unwrap();
+            }
+            m_fast.write(CODE, bytes).unwrap();
+            m_ref.write(CODE, bytes).unwrap();
+            m_ref.watch();
+
+            let mut c_fast = init_cpu;
+            let mut c_ref = init_cpu;
+            c_fast.eip = CODE;
+            c_ref.eip = CODE;
+            let r_fast = Interp::new(Mode::FLAT).run(&mut c_fast, &mut m_fast, 1, 0..0);
+            let r_ref = Interp::new(Mode::FLAT).run(&mut c_ref, &mut m_ref, 1, 0..0);
+
+            assert_eq!(r_fast, r_ref, "{label}: result");
+            assert_eq!(c_fast.r, c_ref.r, "{label}: GPRs");
+            assert_eq!(c_fast.eip, c_ref.eip, "{label}: EIP");
+            assert_eq!(
+                c_fast.flags.to_eflags(),
+                c_ref.flags.to_eflags(),
+                "{label}: EFLAGS"
+            );
+            assert!(m_ref.unchanged(), "{label}: watch must stay unchanged");
+        };
+
+        let base_flags = Flags::from_eflags(0x0024_0203);
+
+        // Equal buffers of varying lengths (0..35) and mismatch at every position with both a<b and a>b.
+        for n in [0u32, 1, 2, 7, 8, 9, 15, 16, 17, 33] {
+            let data: Vec<u8> = (0..n as usize).map(|i| (i * 7 + 3) as u8).collect();
+            let mut cpu = Cpu {
+                flags: base_flags,
+                ..Cpu::default()
+            };
+            cpu.r[ESI] = 0x2001;
+            cpu.r[EDI] = 0x3005;
+            cpu.r[ECX] = n;
+            run_pair(
+                &format!("cmpsb_eq_{n}"),
+                &[0xf3, 0xa6],
+                &[(0x2001, &data), (0x3005, &data)],
+                cpu,
+            );
+        }
+
+        for diff_pos in [0usize, 1, 7, 8, 9, 15, 16, 24] {
+            for (a_val, b_val) in [(0x10u8, 0x20u8), (0x80, 0x7f), (0xff, 0x00), (0x00, 0xff)] {
+                let mut a = [0x42u8; 25];
+                let mut b = [0x42u8; 25];
+                a[diff_pos] = a_val;
+                b[diff_pos] = b_val;
+                let mut cpu = Cpu {
+                    flags: base_flags,
+                    ..Cpu::default()
+                };
+                cpu.r[ESI] = 0x2003;
+                cpu.r[EDI] = 0x3007;
+                cpu.r[ECX] = 25;
+                run_pair(
+                    &format!("cmpsb_diff_{diff_pos}_{a_val:#x}_{b_val:#x}"),
+                    &[0xf3, 0xa6],
+                    &[(0x2003, &a), (0x3007, &b)],
+                    cpu,
+                );
+            }
+        }
+
+        // Overlapping source and destination (equal, forward overlap, backward overlap).
+        let pattern = b"ABCDABCDABCDABCDXX";
+        for (name, si, di, ecx) in [
+            ("self_overlap", 0x2000u32, 0x2000u32, 18u32),
+            ("fwd_overlap_match_then_diff", 0x2000, 0x2004, 14),
+            ("bwd_overlap_match_then_diff", 0x2004, 0x2000, 14),
+        ] {
+            let mut cpu = Cpu {
+                flags: base_flags,
+                ..Cpu::default()
+            };
+            cpu.r[ESI] = si;
+            cpu.r[EDI] = di;
+            cpu.r[ECX] = ecx;
+            run_pair(name, &[0xf3, 0xa6], &[(0x2000, pattern)], cpu);
+        }
+
+        // FS: segment override (`64 f3 a6`).
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.seg_base[FS] = 0x4000;
+        cpu.r[ESI] = 0x0010;
+        cpu.r[EDI] = 0x3010;
+        cpu.r[ECX] = 12;
+        run_pair(
+            "cmpsb_fs_override",
+            &[0x64, 0xf3, 0xa6],
+            &[(0x4010, b"hello world!"), (0x3010, b"hello world?")],
+            cpu,
+        );
+
+        // DF=1 backward compare and addr16 (`67 f3 a6`).
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.flags.df = true;
+        cpu.r[ESI] = 0x200f;
+        cpu.r[EDI] = 0x300f;
+        cpu.r[ECX] = 16;
+        run_pair(
+            "cmpsb_df1",
+            &[0xf3, 0xa6],
+            &[(0x2000, b"0123456789abcdef"), (0x3000, b"01234X6789abcdef")],
+            cpu,
+        );
+
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = 0xaaaa_2000;
+        cpu.r[EDI] = 0xbbbb_3000;
+        cpu.r[ECX] = 0xcccc_000a;
+        run_pair(
+            "cmpsb_addr16",
+            &[0x67, 0xf3, 0xa6],
+            &[(0x2000, b"0123456789"), (0x3000, b"012345678X")],
+            cpu,
+        );
+
+        // Mid-way faults: `from` hits arena end first, `to` hits arena end first, and floor fault.
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = end - 10;
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 20;
+        run_pair(
+            "cmpsb_from_end_fault",
+            &[0xf3, 0xa6],
+            &[(end - 10, &[0x55; 10]), (0x3000, &[0x55; 20])],
+            cpu,
+        );
+
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = 0x2000;
+        cpu.r[EDI] = end - 10;
+        cpu.r[ECX] = 20;
+        run_pair(
+            "cmpsb_to_end_fault",
+            &[0xf3, 0xa6],
+            &[(0x2000, &[0x55; 20]), (end - 10, &[0x55; 10])],
+            cpu,
+        );
+
+        let mut cpu = Cpu {
+            flags: base_flags,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = floor - 2;
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 10;
+        run_pair("cmpsb_floor_fault", &[0xf3, 0xa6], &[], cpu);
     }
 }

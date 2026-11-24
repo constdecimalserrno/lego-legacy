@@ -147,6 +147,34 @@ impl Flags {
         result
     }
 
+    /// Flags after an 8-bit addition with no carry in (`add`).
+    #[inline(always)]
+    pub fn add8(&mut self, a: u8, b: u8) -> u8 {
+        let (result, cf) = a.overflowing_add(b);
+        let (_, of) = (a as i8).overflowing_add(b as i8);
+        self.pf = parity(result);
+        self.zf = result == 0;
+        self.sf = (result as i8) < 0;
+        self.cf = cf;
+        self.af = ((a ^ b ^ result) & 0x10) != 0;
+        self.of = of;
+        result
+    }
+
+    /// Flags after a 16-bit addition with no carry in (`add`).
+    #[inline(always)]
+    pub fn add16(&mut self, a: u16, b: u16) -> u16 {
+        let (result, cf) = a.overflowing_add(b);
+        let (_, of) = (a as i16).overflowing_add(b as i16);
+        self.pf = parity(result as u8);
+        self.zf = result == 0;
+        self.sf = (result as i16) < 0;
+        self.cf = cf;
+        self.af = ((a ^ b ^ result) & 0x10) != 0;
+        self.of = of;
+        result
+    }
+
     /// Flags after a 32-bit addition with no carry in (`add`).
     #[inline(always)]
     pub fn add32(&mut self, a: u32, b: u32) -> u32 {
@@ -185,6 +213,34 @@ impl Flags {
         self.af = ((a ^ b ^ result) & 0x10) != 0;
         let sign = w.sign_bit();
         self.of = ((a ^ b) & (a ^ result) & sign) != 0;
+        result
+    }
+
+    /// Flags after an 8-bit subtraction with no borrow in (`sub`, `cmp`, `scasb`, `cmpsb`).
+    #[inline(always)]
+    pub fn sub8(&mut self, a: u8, b: u8) -> u8 {
+        let (result, cf) = a.overflowing_sub(b);
+        let (_, of) = (a as i8).overflowing_sub(b as i8);
+        self.pf = parity(result);
+        self.zf = result == 0;
+        self.sf = (result as i8) < 0;
+        self.cf = cf;
+        self.af = ((a ^ b ^ result) & 0x10) != 0;
+        self.of = of;
+        result
+    }
+
+    /// Flags after a 16-bit subtraction with no borrow in (`sub`, `cmp`, `scasw`, `cmpsw`).
+    #[inline(always)]
+    pub fn sub16(&mut self, a: u16, b: u16) -> u16 {
+        let (result, cf) = a.overflowing_sub(b);
+        let (_, of) = (a as i16).overflowing_sub(b as i16);
+        self.pf = parity(result as u8);
+        self.zf = result == 0;
+        self.sf = (result as i16) < 0;
+        self.cf = cf;
+        self.af = ((a ^ b ^ result) & 0x10) != 0;
+        self.of = of;
         result
     }
 
@@ -401,6 +457,77 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn specialized_8bit_flag_ops_match_generic_width_b8_exhaustively() {
+        let init = Flags::from_eflags(0x0024_0602);
+        for a in 0u8..=255 {
+            for b in 0u8..=255 {
+                let mut gen_add = init;
+                let mut fast_add = init;
+                let r_gen = gen_add.add(u32::from(a), u32::from(b), false, Width::B8);
+                let r_fast = u32::from(fast_add.add8(a, b));
+                assert_eq!(
+                    (r_fast, fast_add.to_eflags()),
+                    (r_gen, gen_add.to_eflags()),
+                    "add8({a:#04x}, {b:#04x})"
+                );
+
+                let mut gen_sub = init;
+                let mut fast_sub = init;
+                let r_gen = gen_sub.sub(u32::from(a), u32::from(b), false, Width::B8);
+                let r_fast = u32::from(fast_sub.sub8(a, b));
+                assert_eq!(
+                    (r_fast, fast_sub.to_eflags()),
+                    (r_gen, gen_sub.to_eflags()),
+                    "sub8({a:#04x}, {b:#04x})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn specialized_16bit_flag_ops_match_generic_width_b16() {
+        const EDGE16: [u16; 18] = [
+            0x0000, 0x0001, 0x000f, 0x0010, 0x007f, 0x0080, 0x00ff, 0x0100, 0x7fef, 0x7ff0, 0x7fff,
+            0x8000, 0x8001, 0x80ff, 0xfff0, 0xfffe, 0xffff, 0x5a3c,
+        ];
+        let init = Flags::from_eflags(0x0024_0602);
+
+        let check = |a: u16, b: u16| {
+            let mut gen_add = init;
+            let mut fast_add = init;
+            let r_gen = gen_add.add(u32::from(a), u32::from(b), false, Width::B16);
+            let r_fast = u32::from(fast_add.add16(a, b));
+            assert_eq!(
+                (r_fast, fast_add.to_eflags()),
+                (r_gen, gen_add.to_eflags()),
+                "add16({a:#06x}, {b:#06x})"
+            );
+
+            let mut gen_sub = init;
+            let mut fast_sub = init;
+            let r_gen = gen_sub.sub(u32::from(a), u32::from(b), false, Width::B16);
+            let r_fast = u32::from(fast_sub.sub16(a, b));
+            assert_eq!(
+                (r_fast, fast_sub.to_eflags()),
+                (r_gen, gen_sub.to_eflags()),
+                "sub16({a:#06x}, {b:#06x})"
+            );
+        };
+
+        for &a in &EDGE16 {
+            for &b in &EDGE16 {
+                check(a, b);
+            }
+        }
+        // Deterministic sweep across 16-bit space.
+        let mut state = 0x1234_5678u32;
+        for _ in 0..4096 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            check(state as u16, (state >> 16) as u16);
         }
     }
 }

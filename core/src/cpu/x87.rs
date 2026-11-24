@@ -6,8 +6,7 @@
 //! give the same answer on every machine, and a library that is free to
 //! improve is a run that is free to change.
 
-use super::Stop;
-use crate::guest::{Arena, GuestMem};
+use crate::guest::{Arena, Fault, GuestMem};
 
 /// How many registers the stack has.
 pub const DEPTH: usize = 8;
@@ -30,15 +29,16 @@ pub enum Precision {
 // double, so the difference only shows in a long chain of arithmetic that never
 // touches memory. Upgrade path: a soft extended-precision float behind this
 // same interface, if a title is ever measured drifting because of it.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct X87 {
     /// The registers, indexed by their physical number rather than by their
     /// position in the stack.
     regs: [f64; DEPTH],
-    /// Which physical register `st(0)` is.
-    top: usize,
-    /// Which registers hold a value.
-    used: [bool; DEPTH],
+    /// Which physical register `st(0)` is (`0..8`).
+    top: u8,
+    /// Bitmask of which physical registers hold a value (bit `i` = physical `i`).
+    used: u8,
     /// The control word the guest wrote.
     control: u16,
     /// The condition codes the last comparison left.
@@ -57,7 +57,7 @@ impl X87 {
         Self {
             regs: [0.0; DEPTH],
             top: 0,
-            used: [false; DEPTH],
+            used: 0,
             // What `fninit` leaves behind: extended precision, round to
             // nearest, every exception masked.
             control: 0x037f,
@@ -98,7 +98,7 @@ impl X87 {
     /// expects to read it.
     #[must_use]
     pub fn status(&self) -> u16 {
-        (self.status & !0x3800) | ((self.top as u16 & 7) << 11)
+        (self.status & !0x3800) | ((u16::from(self.top) & 7) << 11)
     }
 
     #[must_use]
@@ -140,7 +140,7 @@ impl X87 {
 
     #[inline(always)]
     fn physical(&self, i: usize) -> usize {
-        (self.top + i) % DEPTH
+        usize::from(self.top).wrapping_add(i) & 7
     }
 
     /// Read `st(i)`.
@@ -155,46 +155,52 @@ impl X87 {
     pub fn set_st(&mut self, i: usize, value: f64) {
         let at = self.physical(i);
         self.regs[at] = self.round(value);
-        self.used[at] = true;
+        self.used |= 1u8 << at;
     }
 
     /// Push a value, which becomes `st(0)`.
     #[inline(always)]
     pub fn push(&mut self, value: f64) {
-        self.top = (self.top + DEPTH - 1) % DEPTH;
-        self.regs[self.top] = self.round(value);
-        self.used[self.top] = true;
+        let top = self.top.wrapping_sub(1) & 7;
+        self.top = top;
+        self.regs[usize::from(top)] = self.round(value);
+        self.used |= 1u8 << top;
     }
 
     /// Take `st(0)` off the stack.
     #[inline(always)]
     pub fn pop(&mut self) -> f64 {
-        let value = self.regs[self.top];
-        self.used[self.top] = false;
-        self.top = (self.top + 1) % DEPTH;
+        let top = self.top & 7;
+        let value = self.regs[usize::from(top)];
+        self.used &= !(1u8 << top);
+        self.top = top.wrapping_add(1) & 7;
         value
     }
 
     /// Whether `st(i)` holds anything.
     #[must_use]
+    #[inline(always)]
     pub fn occupied(&self, i: usize) -> bool {
-        self.used[self.physical(i)]
+        (self.used & (1u8 << self.physical(i))) != 0
     }
 
     /// Give up a register without reading it.
+    #[inline(always)]
     pub fn free(&mut self, i: usize) {
         let at = self.physical(i);
-        self.used[at] = false;
+        self.used &= !(1u8 << at);
     }
 
     /// Move the stack's top down one, as `fdecstp` does.
+    #[inline(always)]
     pub fn decrement_top(&mut self) {
-        self.top = (self.top + DEPTH - 1) % DEPTH;
+        self.top = self.top.wrapping_sub(1) & 7;
     }
 
     /// Move the stack's top up one, as `fincstp` does.
+    #[inline(always)]
     pub fn increment_top(&mut self) {
-        self.top = (self.top + 1) % DEPTH;
+        self.top = self.top.wrapping_add(1) & 7;
     }
 
     /// Clear the exception flags, as `fnclex` does.
@@ -206,6 +212,7 @@ impl X87 {
     ///
     /// C3, C2 and C0 spell the answer: equal sets C3, less sets C0, and
     /// unordered sets all three.
+    #[inline(always)]
     pub fn compare(&mut self, a: f64, b: f64) {
         let (c3, c2, c0) = if a.is_nan() || b.is_nan() {
             (true, true, true)
@@ -324,20 +331,9 @@ impl X87 {
 /// none: the real indefinite, negative and quiet.
 pub const INDEFINITE: f64 = f64::from_bits(0xfff8_0000_0000_0000);
 
-/// An operation's answer as the unit gives it, when the answer is not a
-/// number.
-///
-/// The host's own arithmetic makes a NaN of its own choosing, and hosts do
-/// not agree: an x86 host makes the unit's indefinite, an Arm host a positive
-/// NaN, so a guest that stored one ran differently on each (#108). The unit's
-/// rule is the same everywhere: a NaN operand comes through quieted, the one
-/// with the larger significand when both are, and an answer made from two
-/// numbers is the indefinite.
-#[must_use]
-pub fn answer(result: f64, a: f64, b: f64) -> f64 {
-    if !result.is_nan() {
-        return result;
-    }
+#[cold]
+#[inline(never)]
+fn answer_nan(a: f64, b: f64) -> f64 {
     const QUIET: u64 = 0x0008_0000_0000_0000;
     const SIGNIFICAND: u64 = 0x000f_ffff_ffff_ffff;
     // A quiet NaN's significand is always the larger, its top bit being the
@@ -349,6 +345,24 @@ pub fn answer(result: f64, a: f64, b: f64) -> f64 {
         (false, true) => b,
     };
     f64::from_bits(nan.to_bits() | QUIET)
+}
+
+/// An operation's answer as the unit gives it, when the answer is not a
+/// number.
+///
+/// The host's own arithmetic makes a NaN of its own choosing, and hosts do
+/// not agree: an x86 host makes the unit's indefinite, an Arm host a positive
+/// NaN, so a guest that stored one ran differently on each (#108). The unit's
+/// rule is the same everywhere: a NaN operand comes through quieted, the one
+/// with the larger significand when both are, and an answer made from two
+/// numbers is the indefinite.
+#[must_use]
+#[inline(always)]
+pub fn answer(result: f64, a: f64, b: f64) -> f64 {
+    if !result.is_nan() {
+        return result;
+    }
+    answer_nan(a, b)
 }
 
 /// [`answer`] for a single-precision result a shim's own arithmetic made
@@ -385,14 +399,14 @@ pub enum Format {
 /// # Errors
 /// When the address is outside the arena.
 #[inline(always)]
-pub fn read(mem: &Arena, addr: u32, format: Format) -> Result<f64, Stop> {
+pub fn read(mem: &Arena, addr: u32, format: Format) -> Result<f64, Fault> {
     Ok(match format {
         Format::Single => {
-            let bits = mem.read_u32(addr).map_err(Stop::Fault)?;
+            let bits = mem.read_u32(addr)?;
             f64::from(f32::from_bits(bits))
         }
         Format::Double => {
-            let bits = mem.read_u64(addr).map_err(Stop::Fault)?;
+            let bits = mem.read_u64(addr)?;
             f64::from_bits(bits)
         }
     })
@@ -403,12 +417,10 @@ pub fn read(mem: &Arena, addr: u32, format: Format) -> Result<f64, Stop> {
 /// # Errors
 /// When the address is outside the arena.
 #[inline(always)]
-pub fn write(mem: &mut Arena, addr: u32, format: Format, value: f64) -> Result<(), Stop> {
+pub fn write(mem: &mut Arena, addr: u32, format: Format, value: f64) -> Result<(), Fault> {
     match format {
-        Format::Single => mem
-            .write_u32(addr, (value as f32).to_bits())
-            .map_err(Stop::Fault),
-        Format::Double => mem.write_u64(addr, value.to_bits()).map_err(Stop::Fault),
+        Format::Single => mem.write_u32(addr, (value as f32).to_bits()),
+        Format::Double => mem.write_u64(addr, value.to_bits()),
     }
 }
 
@@ -416,9 +428,9 @@ pub fn write(mem: &mut Arena, addr: u32, format: Format, value: f64) -> Result<(
 ///
 /// # Errors
 /// When the address is outside the arena.
-pub fn read_extended(mem: &Arena, addr: u32) -> Result<f64, Stop> {
-    let significand = mem.read_u64(addr).map_err(Stop::Fault)?;
-    let tail = mem.read_u16(addr + 8).map_err(Stop::Fault)?;
+pub fn read_extended(mem: &Arena, addr: u32) -> Result<f64, Fault> {
+    let significand = mem.read_u64(addr)?;
+    let tail = mem.read_u16(addr + 8)?;
     let sign = if tail & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exponent = i32::from(tail & 0x7fff);
     if exponent == 0 && significand == 0 {
@@ -434,7 +446,7 @@ pub fn read_extended(mem: &Arena, addr: u32) -> Result<f64, Stop> {
 ///
 /// # Errors
 /// When the address is outside the arena.
-pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Stop> {
+pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Fault> {
     let sign = if value.is_sign_negative() {
         0x8000u16
     } else {
@@ -442,8 +454,8 @@ pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Stop
     };
     let magnitude = value.abs();
     if magnitude == 0.0 {
-        mem.write_u64(addr, 0).map_err(Stop::Fault)?;
-        mem.write_u16(addr + 8, sign).map_err(Stop::Fault)?;
+        mem.write_u64(addr, 0)?;
+        mem.write_u16(addr + 8, sign)?;
         return Ok(());
     }
     // The exponent is already written down in the value's own bits, so it is
@@ -451,15 +463,15 @@ pub fn write_extended(mem: &mut Arena, addr: u32, value: f64) -> Result<(), Stop
     let exponent = ((magnitude.to_bits() >> 52) & 0x7ff) as i32 - 1023;
     let mantissa = magnitude / exp2(exponent);
     let significand = (mantissa * (1u64 << 63) as f64) as u64;
-    mem.write_u64(addr, significand).map_err(Stop::Fault)?;
+    mem.write_u64(addr, significand)?;
     let tail = sign | u16::try_from(exponent + 16383).unwrap_or(0x7fff);
-    mem.write_u16(addr + 8, tail).map_err(Stop::Fault)?;
+    mem.write_u16(addr + 8, tail)?;
     Ok(())
 }
 
-/// Two to a whole power, without reaching for the host's maths library.
-#[must_use]
-pub fn exp2(mut power: i32) -> f64 {
+#[cold]
+#[inline(never)]
+fn exp2_slow(mut power: i32) -> f64 {
     let mut result = 1.0f64;
     let base = if power < 0 { 0.5f64 } else { 2.0f64 };
     power = power.abs();
@@ -472,6 +484,16 @@ pub fn exp2(mut power: i32) -> f64 {
         power >>= 1;
     }
     result
+}
+
+/// Two to a whole power, without reaching for the host's maths library.
+#[must_use]
+#[inline(always)]
+pub fn exp2(power: i32) -> f64 {
+    if (-1022..=1023).contains(&power) {
+        return f64::from_bits(((power + 1023) as u64) << 52);
+    }
+    exp2_slow(power)
 }
 
 /// The transcendentals, written here rather than taken from the host.
@@ -654,7 +676,11 @@ pub mod maths {
         let mut sum = z;
         for n in 1..30 {
             term *= z2;
-            sum += term / f64::from(2 * n + 1);
+            let next = sum + term / f64::from(2 * n + 1);
+            if next == sum {
+                break;
+            }
+            sum = next;
         }
         f64::from(exponent) + 2.0 * sum / LN_2
     }
@@ -673,139 +699,185 @@ pub mod maths {
         let mut sum = 1.0;
         for n in 1..20 {
             term *= t / f64::from(n);
-            sum += term;
+            let next = sum + term;
+            if next == sum {
+                break;
+            }
+            sum = next;
         }
         let clamped = whole.clamp(-1100.0, 1100.0) as i32;
         sum * exp2(clamped)
     }
 }
 
-/// One pre-decoded floating-point operation, stored directly in [`super::insn::Kind::X87`].
-///
-/// Keeping every payload at most one byte holds `size_of::<X87Op>()` to 2 bytes
-/// so `Kind` and `Insn` do not grow while `execute` dispatches straight to the
-/// operation with no per-execution `(escape, modrm)` decoding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum X87Op {
-    // Fixed register / stackless forms.
-    Fnop,
-    Fchs,
-    Fabs,
-    Ftst,
-    Fxam,
-    Fld1,
-    Fldl2t,
-    Fldl2e,
-    Fldpi,
-    Fldlg2,
-    Fldln2,
-    Fldz,
-    F2xm1,
-    Fyl2x,
-    Fptan,
-    Fpatan,
-    Fxtract,
-    Fprem1,
-    Fdecstp,
-    Fincstp,
-    Fprem,
-    Fyl2xp1,
-    Fsqrt,
-    Fsincos,
-    Frndint,
-    Fscale,
-    Fsin,
-    Fcos,
-    Fnclex,
-    Fninit,
-    Fcompp,
-    FnstswAx,
+macro_rules! define_x87_ops {
+    (
+        unit { $( $u_name:ident = $u_tag:literal ),* $(,)? }
+        reg { $( $r_name:ident = $r_tag:literal ),* $(,)? }
+    ) => {
+        /// One pre-decoded floating-point operation, stored directly in
+        /// [`super::insn::Kind::X87`] and packed into `(aux, dst)` of
+        /// [`super::insn::FastInsn`].
+        ///
+        /// Keeping every payload at most one byte holds `size_of::<X87Op>()` to
+        /// 2 bytes so `Kind`, `Insn`, and `FastInsn` do not grow while `execute`
+        /// dispatches straight to the operation with no per-execution
+        /// `(escape, modrm)` decoding.
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum X87Op {
+            $( $u_name = $u_tag, )*
+            $( $r_name(u8) = $r_tag, )*
+        }
 
-    // Parameterized register forms (`st(0)` / `st(i)`).
-    FldSt(u8),
-    Fxch(u8),
-    Ffree(u8),
-    FstSt(u8),
-    FstpSt(u8),
-    FcomSt(u8),
-    FcompSt(u8),
-    Fcomi(u8),
-    Fcomip(u8),
-    FaddSt0(u8),
-    FmulSt0(u8),
-    FsubSt0(u8),
-    FsubrSt0(u8),
-    FdivSt0(u8),
-    FdivrSt0(u8),
-    FaddSti(u8),
-    FmulSti(u8),
-    FsubSti(u8),
-    FsubrSti(u8),
-    FdivSti(u8),
-    FdivrSti(u8),
-    Faddp(u8),
-    Fmulp(u8),
-    Fsubp(u8),
-    Fsubrp(u8),
-    Fdivp(u8),
-    Fdivrp(u8),
+        impl X87Op {
+            /// Pack into `(tag, index)` for `FastInsn::{aux, dst}`.
+            #[must_use]
+            #[inline(always)]
+            pub const fn to_fast(self) -> (u8, u8) {
+                match self {
+                    $( Self::$u_name => ($u_tag, 0), )*
+                    $( Self::$r_name(i) => ($r_tag, i), )*
+                }
+            }
 
-    // Memory arithmetic and comparisons, specialized by source format.
-    FaddF32,
-    FmulF32,
-    FcomF32,
-    FcompF32,
-    FsubF32,
-    FsubrF32,
-    FdivF32,
-    FdivrF32,
-    FaddF64,
-    FmulF64,
-    FcomF64,
-    FcompF64,
-    FsubF64,
-    FsubrF64,
-    FdivF64,
-    FdivrF64,
-    FiaddI32,
-    FimulI32,
-    FicomI32,
-    FicompI32,
-    FisubI32,
-    FisubrI32,
-    FidivI32,
-    FidivrI32,
-    FiaddI16,
-    FimulI16,
-    FicomI16,
-    FicompI16,
-    FisubI16,
-    FisubrI16,
-    FidivI16,
-    FidivrI16,
+            /// Unpack `(tag, index)` from `FastInsn::{aux, dst}`.
+            #[must_use]
+            #[inline(always)]
+            pub const fn from_fast(tag: u8, idx: u8) -> Self {
+                match tag {
+                    $( $u_tag => Self::$u_name, )*
+                    $( $r_tag => Self::$r_name(idx), )*
+                    _ => Self::Fnop,
+                }
+            }
+        }
+    };
+}
 
-    // Memory loads, stores, and control/status/environment transfers.
-    FldF32,
-    FldF64,
-    FildI32,
-    FildI16,
-    FldF80,
-    FildI64,
-    FstF32,
-    FstpF32,
-    FstF64,
-    FstpF64,
-    FstpF80,
-    FistI32,
-    FistpI32,
-    FistI16,
-    FistpI16,
-    FistpI64,
-    Fldcw,
-    Fnstcw,
-    FnstswMem,
-    Fnstenv,
-    Fldenv,
+define_x87_ops! {
+    unit {
+        // Fixed register / stackless forms.
+        Fnop = 0,
+        Fchs = 1,
+        Fabs = 2,
+        Ftst = 3,
+        Fxam = 4,
+        Fld1 = 5,
+        Fldl2t = 6,
+        Fldl2e = 7,
+        Fldpi = 8,
+        Fldlg2 = 9,
+        Fldln2 = 10,
+        Fldz = 11,
+        F2xm1 = 12,
+        Fyl2x = 13,
+        Fptan = 14,
+        Fpatan = 15,
+        Fxtract = 16,
+        Fprem1 = 17,
+        Fdecstp = 18,
+        Fincstp = 19,
+        Fprem = 20,
+        Fyl2xp1 = 21,
+        Fsqrt = 22,
+        Fsincos = 23,
+        Frndint = 24,
+        Fscale = 25,
+        Fsin = 26,
+        Fcos = 27,
+        Fnclex = 28,
+        Fninit = 29,
+        Fcompp = 30,
+        FnstswAx = 31,
+
+        // Memory arithmetic and comparisons, specialized by source format.
+        FaddF32 = 59,
+        FmulF32 = 60,
+        FcomF32 = 61,
+        FcompF32 = 62,
+        FsubF32 = 63,
+        FsubrF32 = 64,
+        FdivF32 = 65,
+        FdivrF32 = 66,
+        FaddF64 = 67,
+        FmulF64 = 68,
+        FcomF64 = 69,
+        FcompF64 = 70,
+        FsubF64 = 71,
+        FsubrF64 = 72,
+        FdivF64 = 73,
+        FdivrF64 = 74,
+        FiaddI32 = 75,
+        FimulI32 = 76,
+        FicomI32 = 77,
+        FicompI32 = 78,
+        FisubI32 = 79,
+        FisubrI32 = 80,
+        FidivI32 = 81,
+        FidivrI32 = 82,
+        FiaddI16 = 83,
+        FimulI16 = 84,
+        FicomI16 = 85,
+        FicompI16 = 86,
+        FisubI16 = 87,
+        FisubrI16 = 88,
+        FidivI16 = 89,
+        FidivrI16 = 90,
+
+        // Memory loads, stores, and control/status/environment transfers.
+        FldF32 = 91,
+        FldF64 = 92,
+        FildI32 = 93,
+        FildI16 = 94,
+        FldF80 = 95,
+        FildI64 = 96,
+        FstF32 = 97,
+        FstpF32 = 98,
+        FstF64 = 99,
+        FstpF64 = 100,
+        FstpF80 = 101,
+        FistI32 = 102,
+        FistpI32 = 103,
+        FistI16 = 104,
+        FistpI16 = 105,
+        FistpI64 = 106,
+        Fldcw = 107,
+        Fnstcw = 108,
+        FnstswMem = 109,
+        Fnstenv = 110,
+        Fldenv = 111,
+    }
+    reg {
+        // Parameterized register forms (`st(0)` / `st(i)`).
+        FldSt = 32,
+        Fxch = 33,
+        Ffree = 34,
+        FstSt = 35,
+        FstpSt = 36,
+        FcomSt = 37,
+        FcompSt = 38,
+        Fcomi = 39,
+        Fcomip = 40,
+        FaddSt0 = 41,
+        FmulSt0 = 42,
+        FsubSt0 = 43,
+        FsubrSt0 = 44,
+        FdivSt0 = 45,
+        FdivrSt0 = 46,
+        FaddSti = 47,
+        FmulSti = 48,
+        FsubSti = 49,
+        FsubrSti = 50,
+        FdivSti = 51,
+        FdivrSti = 52,
+        Faddp = 53,
+        Fmulp = 54,
+        Fsubp = 55,
+        Fsubrp = 56,
+        Fdivp = 57,
+        Fdivrp = 58,
+    }
 }
 
 /// Decode a register-form (`modrm >> 6 == 3`) floating-point escape once at
@@ -960,25 +1032,23 @@ pub fn decode_mem(escape: u8, reg: u8) -> Result<X87Op, super::decode::Undecoded
 }
 
 #[inline(always)]
-fn load_f32(mem: &Arena, at: u32) -> Result<f64, Stop> {
+fn load_f32(mem: &Arena, at: u32) -> Result<f64, Fault> {
     read(mem, at, Format::Single)
 }
 
 #[inline(always)]
-fn load_f64(mem: &Arena, at: u32) -> Result<f64, Stop> {
+fn load_f64(mem: &Arena, at: u32) -> Result<f64, Fault> {
     read(mem, at, Format::Double)
 }
 
 #[inline(always)]
-fn load_i32(mem: &Arena, at: u32) -> Result<f64, Stop> {
-    Ok(f64::from(mem.read_u32(at).map_err(Stop::Fault)? as i32))
+fn load_i32(mem: &Arena, at: u32) -> Result<f64, Fault> {
+    Ok(f64::from(mem.read_u32(at)? as i32))
 }
 
 #[inline(always)]
-fn load_i16(mem: &Arena, at: u32) -> Result<f64, Stop> {
-    Ok(f64::from(i32::from(
-        mem.read_u16(at).map_err(Stop::Fault)? as i16
-    )))
+fn load_i16(mem: &Arena, at: u32) -> Result<f64, Fault> {
+    Ok(f64::from(i32::from(mem.read_u16(at)? as i16)))
 }
 
 #[inline(always)]
@@ -1014,7 +1084,7 @@ fn mem_binop(fpu: &mut X87, value: f64, op: impl FnOnce(f64, f64) -> f64) {
 ///
 /// # Errors
 /// When a memory operand's address is outside the arena.
-pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Result<(), Stop> {
+pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Result<(), Fault> {
     match op {
         // Constants and unit housekeeping.
         X87Op::Fnop => {}
@@ -1282,7 +1352,7 @@ pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Res
             cpu.fpu.push(value);
         }
         X87Op::FildI64 => {
-            let raw = mem.read_u64(at).map_err(Stop::Fault)? as i64;
+            let raw = mem.read_u64(at)? as i64;
             cpu.fpu.push(raw as f64);
         }
         X87Op::FstF32 => {
@@ -1310,51 +1380,47 @@ pub fn execute(cpu: &mut super::Cpu, mem: &mut Arena, op: X87Op, at: u32) -> Res
         }
         X87Op::FistI32 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0));
-            mem.write_u32(at, value as i32 as u32)
-                .map_err(Stop::Fault)?;
+            mem.write_u32(at, value as i32 as u32)?;
         }
         X87Op::FistpI32 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0));
-            mem.write_u32(at, value as i32 as u32)
-                .map_err(Stop::Fault)?;
+            mem.write_u32(at, value as i32 as u32)?;
             cpu.fpu.pop();
         }
         X87Op::FistI16 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0));
-            mem.write_u16(at, value as i32 as i16 as u16)
-                .map_err(Stop::Fault)?;
+            mem.write_u16(at, value as i32 as i16 as u16)?;
         }
         X87Op::FistpI16 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0));
-            mem.write_u16(at, value as i32 as i16 as u16)
-                .map_err(Stop::Fault)?;
+            mem.write_u16(at, value as i32 as i16 as u16)?;
             cpu.fpu.pop();
         }
         X87Op::FistpI64 => {
             let value = cpu.fpu.to_whole(cpu.fpu.st(0)) as i64;
-            mem.write_u64(at, value as u64).map_err(Stop::Fault)?;
+            mem.write_u64(at, value as u64)?;
             cpu.fpu.pop();
         }
 
         // Control, status, and environment words.
         X87Op::Fldcw | X87Op::Fldenv => {
-            let word = mem.read_u16(at).map_err(Stop::Fault)?;
+            let word = mem.read_u16(at)?;
             cpu.fpu.set_control(word);
         }
         X87Op::Fnstcw => {
             let word = cpu.fpu.control();
-            mem.write_u16(at, word).map_err(Stop::Fault)?;
+            mem.write_u16(at, word)?;
         }
         X87Op::FnstswMem => {
             let word = cpu.fpu.status();
-            mem.write_u16(at, word).map_err(Stop::Fault)?;
+            mem.write_u16(at, word)?;
         }
         X87Op::Fnstenv => {
             let control = cpu.fpu.control();
             let status = cpu.fpu.status();
-            mem.write_u16(at, control).map_err(Stop::Fault)?;
-            mem.write_u16(at + 4, status).map_err(Stop::Fault)?;
-            mem.write(at + 8, &[0u8; 20]).map_err(Stop::Fault)?;
+            mem.write_u16(at, control)?;
+            mem.write_u16(at + 4, status)?;
+            mem.write(at + 8, &[0u8; 20])?;
         }
     }
     Ok(())
@@ -1684,24 +1750,262 @@ mod tests {
         // Single 8-byte bounds check faults with len 8 when only 4 bytes remain.
         assert_eq!(
             super::read(&mem, end - 4, super::Format::Double),
-            Err(super::Stop::Fault(Fault {
+            Err(Fault {
                 addr: end - 4,
                 len: 8,
                 write: false,
-            }))
+            })
         );
         assert_eq!(
             super::write(&mut mem, end - 4, super::Format::Double, val),
-            Err(super::Stop::Fault(Fault {
+            Err(Fault {
                 addr: end - 4,
                 len: 8,
                 write: true,
-            }))
+            })
         );
 
         // Ten-byte extended round trip at the exact end of the arena.
         super::write_extended(&mut mem, end - 10, 3.25).unwrap();
         assert_eq!(super::read_extended(&mem, end - 10).unwrap(), 3.25);
+    }
+
+    #[test]
+    fn x87_repr_c_layout_matches_wave_c_offsets() {
+        use core::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<X87>(), 72);
+        assert_eq!(align_of::<X87>(), 8);
+        assert_eq!(offset_of!(X87, regs), 0);
+        assert_eq!(offset_of!(X87, top), 64);
+        assert_eq!(offset_of!(X87, used), 65);
+        assert_eq!(offset_of!(X87, control), 66);
+        assert_eq!(offset_of!(X87, status), 68);
+    }
+
+    #[test]
+    fn x87_used_bitmask_tracks_all_8_slots_across_wrap_and_free() {
+        let mut fpu = X87::new();
+        for i in 0..8 {
+            assert!(!fpu.occupied(i));
+        }
+        for i in 0..8usize {
+            fpu.push(f64::from((i + 1) as u8));
+        }
+        for i in 0..8usize {
+            assert!(fpu.occupied(i));
+            assert_eq!(fpu.st(i), f64::from((8 - i) as u8));
+        }
+        fpu.free(3);
+        assert!(!fpu.occupied(3));
+        assert!(fpu.occupied(2) && fpu.occupied(4));
+        fpu.increment_top();
+        assert!(!fpu.occupied(2));
+        fpu.decrement_top();
+        assert!(!fpu.occupied(3));
+        assert_eq!(fpu.pop(), 8.0);
+        assert!(!fpu.occupied(7));
+        assert!(fpu.occupied(0));
+    }
+
+    #[test]
+    fn x87_op_fast_roundtrip_is_exact_for_every_decoded_form() {
+        for escape in 0xd8u8..=0xdf {
+            for modrm in 0u8..=0xff {
+                if modrm >> 6 == 3 {
+                    if let Ok(op) = super::decode_reg(escape, modrm) {
+                        let (tag, idx) = op.to_fast();
+                        assert_eq!(
+                            super::X87Op::from_fast(tag, idx),
+                            op,
+                            "reg roundtrip failed for ({escape:#04x}, {modrm:#04x}) -> {op:?}"
+                        );
+                    }
+                } else {
+                    let reg = (modrm >> 3) & 7;
+                    if let Ok(op) = super::decode_mem(escape, reg) {
+                        let (tag, idx) = op.to_fast();
+                        assert_eq!(idx, 0);
+                        assert_eq!(
+                            super::X87Op::from_fast(tag, idx),
+                            op,
+                            "mem roundtrip failed for ({escape:#04x}, /{reg}) -> {op:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exp2_bit_construct_matches_legacy_across_full_range() {
+        fn legacy_exp2(mut power: i32) -> f64 {
+            let mut result = 1.0f64;
+            let base = if power < 0 { 0.5f64 } else { 2.0f64 };
+            power = power.abs();
+            let mut factor = base;
+            while power > 0 {
+                if power & 1 == 1 {
+                    result *= factor;
+                }
+                factor *= factor;
+                power >>= 1;
+            }
+            result
+        }
+
+        for power in -1200..=1200 {
+            assert_eq!(
+                super::exp2(power).to_bits(),
+                legacy_exp2(power).to_bits(),
+                "exp2({power}) mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn log2_and_pow2_early_exit_match_full_series_bit_for_bit() {
+        fn legacy_log2(x: f64) -> f64 {
+            if x.is_nan() || x < 0.0 {
+                return f64::NAN;
+            }
+            if x == 0.0 {
+                return f64::NEG_INFINITY;
+            }
+            if x.is_infinite() {
+                return x;
+            }
+            let bits = x.to_bits();
+            let mut exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+            let mut mantissa =
+                f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+            if mantissa > 1.5 {
+                mantissa /= 2.0;
+                exponent += 1;
+            }
+            let z = (mantissa - 1.0) / (mantissa + 1.0);
+            let z2 = z * z;
+            let mut term = z;
+            let mut sum = z;
+            for n in 1..30 {
+                term *= z2;
+                sum += term / f64::from(2 * n + 1);
+            }
+            f64::from(exponent) + 2.0 * sum / maths::LN_2
+        }
+
+        fn legacy_pow2(x: f64) -> f64 {
+            if x.is_nan() {
+                return x;
+            }
+            let whole = x.floor();
+            let fraction = x - whole;
+            let t = fraction * maths::LN_2;
+            let mut term = 1.0;
+            let mut sum = 1.0;
+            for n in 1..20 {
+                term *= t / f64::from(n);
+                sum += term;
+            }
+            let clamped = whole.clamp(-1100.0, 1100.0) as i32;
+            sum * super::exp2(clamped)
+        }
+
+        let log_edges = [
+            f64::NAN,
+            INDEFINITE,
+            f64::NEG_INFINITY,
+            -1.0,
+            -0.0,
+            0.0,
+            f64::from_bits(1),
+            f64::from_bits((1u64 << 52) - 1),
+            f64::MIN_POSITIVE,
+            0.5,
+            0.75,
+            f64::from_bits(1.5_f64.to_bits() - 1),
+            1.5,
+            f64::from_bits(1.5_f64.to_bits() + 1),
+            1.0,
+            f64::from_bits(1.0_f64.to_bits() + 1),
+            f64::from_bits(2.0_f64.to_bits() - 1),
+            2.0,
+            1024.0,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        for x in log_edges {
+            assert_eq!(
+                maths::log2(x).to_bits(),
+                legacy_log2(x).to_bits(),
+                "log2({x:?}) mismatch"
+            );
+        }
+        // Dense sweep across mantissas in [1.0, 2.0) and exponents.
+        for i in 0..=4096u64 {
+            let mant = 0x3ff0_0000_0000_0000u64 | (i << 40);
+            let x = f64::from_bits(mant);
+            assert_eq!(
+                maths::log2(x).to_bits(),
+                legacy_log2(x).to_bits(),
+                "log2(mant={mant:#018x}) mismatch"
+            );
+            let x_scaled = x * super::exp2((i as i32 % 200) - 100);
+            assert_eq!(
+                maths::log2(x_scaled).to_bits(),
+                legacy_log2(x_scaled).to_bits(),
+                "log2({x_scaled:?}) mismatch"
+            );
+        }
+
+        let pow_edges = [
+            f64::NAN,
+            INDEFINITE,
+            f64::NEG_INFINITY,
+            -1200.0,
+            -1100.0,
+            -1075.0,
+            -1074.0,
+            -1022.5,
+            -1022.0,
+            -1.5,
+            -1.0,
+            -1e-17,
+            -0.0,
+            0.0,
+            1e-17,
+            f64::from_bits(1),
+            0.25,
+            0.5,
+            0.999_999_999_999_999_9,
+            1.0,
+            10.0,
+            1023.0,
+            1023.5,
+            1100.0,
+            1200.0,
+            f64::INFINITY,
+        ];
+        for x in pow_edges {
+            assert_eq!(
+                maths::pow2(x).to_bits(),
+                legacy_pow2(x).to_bits(),
+                "pow2({x:?}) mismatch"
+            );
+        }
+        for i in -2048..=2048 {
+            let x = f64::from(i) * (1.0 / 256.0);
+            assert_eq!(
+                maths::pow2(x).to_bits(),
+                legacy_pow2(x).to_bits(),
+                "pow2({x:?}) mismatch"
+            );
+            let y = f64::from(i) * 0.531_25 + 1e-9;
+            assert_eq!(
+                maths::pow2(y).to_bits(),
+                legacy_pow2(y).to_bits(),
+                "pow2({y:?}) mismatch"
+            );
+        }
     }
 
     #[test]

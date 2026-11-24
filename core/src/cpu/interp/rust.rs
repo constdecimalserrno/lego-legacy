@@ -13,7 +13,8 @@ use crate::guest::Arena;
 ///
 /// Used by the native `naked_asm!` seam to finish a run after a mid-run
 /// fallback (`Slow`, `X87`, fault, code-page hit) without duplicating cached runs.
-#[inline(always)]
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_run_from(
     interp: &Interp,
@@ -40,7 +41,6 @@ pub(crate) fn finish_run_from(
                 cpu,
                 mem,
                 &interp.slow_insns,
-                &interp.x87_ops,
                 interp.mode,
                 base_tsc + i as u64,
             ) {
@@ -184,7 +184,6 @@ pub(crate) fn run(
                 cpu,
                 mem,
                 &interp.slow_insns,
-                &interp.x87_ops,
                 interp.mode,
                 base_tsc + i as u64,
             ) {

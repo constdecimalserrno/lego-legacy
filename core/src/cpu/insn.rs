@@ -384,7 +384,7 @@ pub enum FastOp {
     ShiftRegCl = 44,
     ShiftMem = 45,
 
-    // Pre-decoded x87 dispatch (`imm` indexes the compact `x87_ops` table).
+    // Pre-decoded x87 dispatch (`aux` = `X87Op` tag, `dst` = `st(i)` index).
     X87Reg = 46,
     X87Mem = 47,
 
