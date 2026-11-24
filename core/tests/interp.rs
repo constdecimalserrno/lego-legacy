@@ -483,6 +483,91 @@ fn self_modifying_code_invalidates_cached_fast_runs() {
 }
 
 #[test]
+fn smc_replaces_chained_jump_and_jcc_targets_with_different_instruction_lengths() {
+    use lego_legacy_core::cpu::{ECX, ESP};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let target = 0x0040_2000u32;
+
+    // Target initially: `add eax, 1; ret` (4 bytes)
+    mem.write(target, &[0x83, 0xc0, 0x01, 0xc3]).unwrap();
+
+    // Caller loops 4 times (ecx = 4..1): calls `target`, on ecx == 2 rewrites
+    // `target` to a 6-byte `mov eax, 0x100; ret` (changing both length & bytes).
+    let mut prog = Vec::new();
+    let rel_call = target.wrapping_sub(code + 5).to_le_bytes();
+    prog.push(0xe8);
+    prog.extend_from_slice(&rel_call); // call target
+    prog.extend_from_slice(&[0x83, 0xf9, 0x02]); // cmp ecx, 2
+    prog.extend_from_slice(&[0x75, 20]); // jnz skip (2 x 10-byte mov dword [imm32], imm32)
+    prog.extend_from_slice(&[0xc7, 0x05]);
+    prog.extend_from_slice(&target.to_le_bytes());
+    prog.extend_from_slice(&[0xb8, 0x00, 0x01, 0x00]);
+    prog.extend_from_slice(&[0xc7, 0x05]);
+    prog.extend_from_slice(&(target + 4).to_le_bytes());
+    prog.extend_from_slice(&[0x00, 0xc3, 0x90, 0x90]);
+    // skip: dec ecx; jnz loop_top; hlt
+    prog.push(0x49);
+    let back = -(prog.len() as i8 + 2);
+    prog.extend_from_slice(&[0x75, back as u8]);
+    prog.push(0xf4);
+    mem.write(code, &prog).unwrap();
+
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ECX] = 4;
+    regs.r[ESP] = 0x0050_0000;
+    let mut engine = Interp::new(Mode::FLAT);
+    let (_, res) = engine.run(&mut regs, &mut mem, 1_000, 0..0);
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(
+        regs.r[EAX], 0x100,
+        "chained target was re-decoded to the new longer instruction sequence"
+    );
+}
+
+#[test]
+fn custom_outside_range_clamps_both_before_and_after_block_chaining() {
+    use lego_legacy_core::cpu::ESP;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let target = 0x0041_0000u32;
+
+    // `call target; hlt` -> target: `inc eax; inc eax; inc eax; ret`
+    let mut prog = vec![0xe8];
+    prog.extend_from_slice(&target.wrapping_sub(code + 5).to_le_bytes());
+    prog.push(0xf4);
+    mem.write(code, &prog).unwrap();
+    mem.write(target, &[0x40, 0x40, 0x40, 0xc3]).unwrap();
+
+    let mut engine = Interp::new(Mode::FLAT);
+    // Warm up with empty `outside` so `code -> target` chains directly.
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ESP] = 0x0050_0000;
+    let (retired, res) = engine.run(&mut regs, &mut mem, 100, 0..0);
+    assert_eq!((retired, res, regs.r[EAX]), (5, Err(Stop::Halted), 3));
+
+    // Re-run with custom `outside` mid-block inside `target` (after 2nd `inc eax`).
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ESP] = 0x0050_0000;
+    let (retired, res) = engine.run(&mut regs, &mut mem, 100, (target + 2)..(target + 3));
+    assert_eq!(
+        (retired, res, regs.eip, regs.r[EAX]),
+        (3, Ok(()), target + 2, 2)
+    );
+}
+
+#[test]
 #[ignore]
 fn bench_flat32_tight_loop() {
     use lego_legacy_core::cpu::{EBX, ECX, ESI, ESP};

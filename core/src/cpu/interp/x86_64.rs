@@ -96,23 +96,105 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "lea r12, [rip + 900f]",           // r12 = dispatch offset table base
 
         // =====================================================================
-        // next_block (label 10): look up cached Run at [rsp + 8] (eip)
+        // next_block (label 10): indirect transfer / entry via L1 block cache.
         // =====================================================================
         "10:",
         "test r14, r14",
         "jz 950f",                         // remaining == 0 -> STATUS_DONE
-
         "mov eax, dword ptr [rsp + 8]",    // eax = eip
-        "mov ecx, dword ptr [rbp + 128]",  // ecx = outside_len
-        "test ecx, ecx",
-        "jz 11f",
         "mov edx, eax",
-        "sub edx, dword ptr [rbp + 120]",  // eip - outside_start
-        "cmp edx, ecx",
-        "jb 950f",                         // eip in outside -> STATUS_DONE
+        "sub edx, dword ptr [rbp + 160]",  // edx = eip.wrapping_sub(outside_danger_start) (zero-ext rdx)
+        "cmp rdx, qword ptr [rbp + 152]",  // rdx < outside_danger_len?
+        "jb 18f",                          // cold exact outside check
 
-        // 3-level page-table lookup: directory -> region_ptrs -> page_ptrs -> runs
+        // Direct-mapped L1 block cache probe (4096 x 16B = 64 KiB)
+        "mov ecx, eax",
+        "shr ecx, 12",
+        "xor ecx, eax",
+        "and ecx, 0xfff",
+        "shl rcx, 4",
+        "add rcx, qword ptr [rbp + 144]",  // rcx = &l1[slot]
+        "cmp dword ptr [rcx], eax",        // slot.eip == eip?
+        "jne 11f",                         // L1 miss (no chain slot)
+        "mov rdx, qword ptr [rcx + 8]",    // rdx = slot.run
+        "mov rsi, rdx",
+        "shr rsi, 48",
+        "and esi, 0xff",                   // rsi = run.len
+        "test esi, esi",
+        "jz 11f",                          // empty slot (guards eip == 0)
+
+        // =====================================================================
+        // dispatch (label 20): enter Run in rdx with rsi = run.len.
+        // =====================================================================
+        "20:",
+        "cmp r14, rsi",
+        "jb 952f",                         // remaining < run.len -> STATUS_BUDGET_SHORT
+        "mov rdi, rdx",
+        "shr rdi, 32",
+        "and edi, 0xffff",                 // edi = run.bytes
+        "mov dword ptr [rsp + 12], edi",   // run_bytes
+        "mov qword ptr [rsp + 16], rsi",   // run_len
+        "mov edx, edx",                    // zero-extend run.first into rdx
+        "shl rdx, 4",
+        "add rdx, qword ptr [rbp + 48]",   // &fast_insns[run.first]
+        "mov qword ptr [rsp + 24], rdx",   // run_first_pc
+        "mov r13, rdx",                    // r13 = pc
+        "movzx eax, byte ptr [r13]",
+        "movsxd rax, dword ptr [r12 + rax*4]",
+        "add rax, r12",
+        "jmp rax",
+
+        // =====================================================================
+        // chain_dispatch (label 12): static transfer with eax = eip, rdi = &chain_slot.
+        // =====================================================================
+        "12:",
+        "test r14, r14",
+        "jz 950f",                         // remaining == 0 -> STATUS_DONE
+        "mov edx, eax",
+        "sub edx, dword ptr [rbp + 160]",
+        "cmp rdx, qword ptr [rbp + 152]",
+        "jb 18f",                          // cold exact outside check
+        "mov ecx, dword ptr [rdi]",        // ecx = cached run_idx + 1 (0 = unchained)
+        "test ecx, ecx",
+        "jz 13f",                          // unchained -> L1 / 3-level lookup & patch [rdi]
+        "dec ecx",
+        "mov rsi, qword ptr [rbp + 56]",   // runs
+        "mov rdx, qword ptr [rsi + rcx*8]",// Run { first: u32, bytes: u16, len: u8, ends: u8 }
+        "mov rsi, rdx",
+        "shr rsi, 48",
+        "and esi, 0xff",                   // rsi = run.len
+        "test esi, esi",
+        "jz 13f",                          // invalidated by forget_page() -> re-resolve & re-patch
+        "jmp 20b",                         // direct chain hit!
+
+        // =====================================================================
+        // chain_resolve (label 13): probe L1 & patch [rdi] on hit, else 3-level walk.
+        // =====================================================================
+        "13:",
+        "mov ecx, eax",
+        "shr ecx, 12",
+        "xor ecx, eax",
+        "and ecx, 0xfff",
+        "shl rcx, 4",
+        "add rcx, qword ptr [rbp + 144]",  // rcx = &l1[slot]
+        "cmp dword ptr [rcx], eax",
+        "jne 16f",                         // L1 miss (keep rdi)
+        "mov rdx, qword ptr [rcx + 8]",
+        "mov rsi, rdx",
+        "shr rsi, 48",
+        "and esi, 0xff",
+        "test esi, esi",
+        "jz 16f",                          // empty slot
+        "mov eax, dword ptr [rcx + 4]",    // eax = slot.run_idx (run_idx + 1)
+        "mov dword ptr [rdi], eax",        // patch chain slot in place
+        "jmp 20b",
+
+        // =====================================================================
+        // l1_miss (labels 11 / 16): cold 3-level walk, fill [rcx], optional patch [rdi].
+        // =====================================================================
         "11:",
+        "xor edi, edi",                    // indirect transfer: no chain slot to patch
+        "16:",
         "mov edx, eax",
         "shr edx, 22",
         "mov rsi, qword ptr [rbp + 64]",   // directory
@@ -133,47 +215,103 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "mov rsi, qword ptr [rsi + rdx*8]",
         "mov edx, eax",
         "and edx, 0xfff",
-        "mov edx, dword ptr [rsi + rdx*4]",
+        "mov edx, dword ptr [rsi + rdx*4]",// edx = run_idx + 1
         "test edx, edx",
         "jz 951f",                         // STATUS_MISS
-        "dec edx",
+        "mov eax, edx",                    // eax = run_idx + 1
+        "dec edx",                         // rdx = run_idx (zero-extended)
         "mov rsi, qword ptr [rbp + 56]",   // runs
-        "mov rdx, qword ptr [rsi + rdx*8]",// Run { first: u32, bytes: u16, len: u8, ends: u8 }
+        "mov rdx, qword ptr [rsi + rdx*8]",// rdx = Run
         "mov rsi, rdx",
         "shr rsi, 48",
         "and esi, 0xff",                   // rsi = run.len
         "test esi, esi",
         "jz 951f",                         // invalidated -> STATUS_MISS
+        "mov dword ptr [rcx + 4], eax",    // slot.run_idx = run_idx + 1
+        "mov qword ptr [rcx + 8], rdx",    // slot.run = Run
+        "test rdi, rdi",
+        "jz 17f",
+        "mov dword ptr [rdi], eax",        // patch chain slot in place
+        "17:",
+        "mov eax, dword ptr [rsp + 8]",    // reload eip
+        "mov dword ptr [rcx], eax",        // slot.eip = eip
+        "jmp 20b",
+
+        // =====================================================================
+        // cold_outside (labels 18 / 19 / 21): exact `outside` containment & overlap.
+        // =====================================================================
+        "18:",
+        "mov ecx, dword ptr [rbp + 128]",  // outside_len
+        "mov edx, eax",
+        "sub edx, dword ptr [rbp + 120]",  // eip - outside_start
+        "cmp edx, ecx",
+        "jb 950f",                         // eip in outside -> STATUS_DONE
+
+        "mov ecx, eax",
+        "shr ecx, 12",
+        "xor ecx, eax",
+        "and ecx, 0xfff",
+        "shl rcx, 4",
+        "add rcx, qword ptr [rbp + 144]",  // rcx = &l1[slot]
+        "cmp dword ptr [rcx], eax",
+        "jne 19f",
+        "mov rdx, qword ptr [rcx + 8]",
+        "mov rsi, rdx",
+        "shr rsi, 48",
+        "and esi, 0xff",
+        "test esi, esi",
+        "jnz 21f",
+
+        "19:",
+        "mov edx, eax",
+        "shr edx, 22",
+        "mov rsi, qword ptr [rbp + 64]",
+        "mov edx, dword ptr [rsi + rdx*4]",
+        "test edx, edx",
+        "jz 951f",
+        "dec edx",
+        "mov rsi, qword ptr [rbp + 72]",
+        "mov rsi, qword ptr [rsi + rdx*8]",
+        "mov edx, eax",
+        "shr edx, 12",
+        "and edx, 0x3ff",
+        "mov edx, dword ptr [rsi + rdx*4]",
+        "test edx, edx",
+        "jz 951f",
+        "dec edx",
+        "mov rsi, qword ptr [rbp + 80]",
+        "mov rsi, qword ptr [rsi + rdx*8]",
+        "mov edx, eax",
+        "and edx, 0xfff",
+        "mov edx, dword ptr [rsi + rdx*4]",
+        "test edx, edx",
+        "jz 951f",
+        "mov eax, edx",
+        "dec edx",
+        "mov rsi, qword ptr [rbp + 56]",
+        "mov rdx, qword ptr [rsi + rdx*8]",
+        "mov rsi, rdx",
+        "shr rsi, 48",
+        "and esi, 0xff",
+        "test esi, esi",
+        "jz 951f",
+        "mov dword ptr [rcx + 4], eax",
+        "mov qword ptr [rcx + 8], rdx",
+        "mov eax, dword ptr [rsp + 8]",    // reload eip
+        "mov dword ptr [rcx], eax",        // populate L1 slot
+
+        "21:",
         "mov rdi, rdx",
         "shr rdi, 32",
         "and edi, 0xffff",                 // edi = run.bytes
-
-        // Check outside overlap with [eip, eip + run.bytes) when outside_len != 0
-        "test ecx, ecx",
-        "jz 12f",
         "mov ecx, eax",
         "add ecx, edi",                    // CF set on u32 wrap
         "jc 953f",
         "cmp ecx, dword ptr [rbp + 120]",  // end <= outside_start?
-        "jbe 12f",
+        "jbe 20b",
         "cmp eax, dword ptr [rbp + 124]",  // eip < outside_end?
         "jb 953f",
-
-        "12:",
-        "cmp r14, rsi",
-        "jb 952f",                         // remaining < run.len -> STATUS_BUDGET_SHORT
-
-        "mov dword ptr [rsp + 12], edi",   // run_bytes
-        "mov qword ptr [rsp + 16], rsi",   // run_len
-        "mov edx, edx",                    // zero-extend run.first into rdx
-        "shl rdx, 4",
-        "add rdx, qword ptr [rbp + 48]",   // &fast_insns[run.first]
-        "mov qword ptr [rsp + 24], rdx",   // run_first_pc
-        "mov r13, rdx",                    // r13 = pc
-        "movzx eax, byte ptr [r13]",
-        "movsxd rax, dword ptr [r12 + rax*4]",
-        "add rax, r12",
-        "jmp rax",
+        "jmp 20b",
 
         // =====================================================================
         // Op 0 (Slow), 46 (X87Reg), 47 (X87Mem) -> STATUS_FALLBACK (954)
@@ -1689,10 +1827,11 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "mov rcx, qword ptr [rsp + 16]",
         "sub r14, rcx",
         "add qword ptr [rsp + 0], rcx",
-        "jmp 10b",
+        "lea rdi, [r13 + 12]",             // &chain_slot (&pc->imm)
+        "jmp 12b",
 
         // =====================================================================
-        // Terminal Op 49: JccRel (branchless 16x u16 LUT + cmovc)
+        // Terminal Op 49: JccRel (branchless 16x u16 LUT + cmovc + dual chain)
         // =====================================================================
         "149:",
         "movzx eax, byte ptr [r13 + 2]",   // cc (0..15)
@@ -1716,13 +1855,16 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "add eax, dword ptr [rsp + 12]",   // fallthrough
         "mov esi, dword ptr [r13 + 8]",
         "add esi, eax",                    // taken target
-        "bt edx, ecx",                     // CF = taken (immediately before cmovc!)
+        "bt edx, ecx",                     // CF = taken (lea/cmovc leave CF intact!)
+        "lea rdi, [r13 + 4]",              // &fallthrough_chain (&pc->base)
+        "lea rcx, [r13 + 12]",             // &taken_chain (&pc->imm)
         "cmovc eax, esi",
+        "cmovc rdi, rcx",
         "mov dword ptr [rsp + 8], eax",
         "mov rcx, qword ptr [rsp + 16]",
         "sub r14, rcx",
         "add qword ptr [rsp + 0], rcx",
-        "jmp 10b",
+        "jmp 12b",
 
         "210:", // JP (0xa) / JNP (0xb)
         "mov ecx, r15d",
@@ -1732,13 +1874,16 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "add eax, dword ptr [rsp + 12]",
         "mov esi, dword ptr [r13 + 8]",
         "add esi, eax",
-        "bt ecx, 0",
+        "bt ecx, 0",                       // CF = taken
+        "lea rdi, [r13 + 4]",              // &fallthrough_chain
+        "lea rcx, [r13 + 12]",             // &taken_chain
         "cmovc eax, esi",
+        "cmovc rdi, rcx",
         "mov dword ptr [rsp + 8], eax",
         "mov rcx, qword ptr [rsp + 16]",
         "sub r14, rcx",
         "add qword ptr [rsp + 0], rcx",
-        "jmp 10b",
+        "jmp 12b",
 
         // =====================================================================
         // Terminal Op 50: CallRel
@@ -1768,10 +1913,12 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "mov dword ptr [rbx + 16], esi",
         "mov dword ptr [r8 + rsi], eax",
         "mov dword ptr [rsp + 8], edx",
+        "mov eax, edx",                    // eax = target eip for 12b
         "mov rcx, qword ptr [rsp + 16]",
         "sub r14, rcx",
         "add qword ptr [rsp + 0], rcx",
-        "jmp 10b",
+        "lea rdi, [r13 + 12]",             // &chain_slot (&pc->imm)
+        "jmp 12b",
 
         // =====================================================================
         // Terminal Op 51: Ret
@@ -2956,7 +3103,8 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "mov rcx, qword ptr [rsp + 16]",
         "sub r14, rcx",
         "add qword ptr [rsp + 0], rcx",
-        "jmp 10b",
+        "lea rdi, [r13 + 12]",             // &chain_slot (&pc->imm)
+        "jmp 12b",
 
         // =====================================================================
         // Exit trampolines

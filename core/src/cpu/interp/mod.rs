@@ -58,6 +58,47 @@ pub(crate) struct Run {
     pub(crate) ends_with_transfer: u8,
 }
 
+/// Number of entries in the direct-mapped L1 block cache (`4096 × 16 B = 64 KiB`, #279).
+pub(crate) const L1_BITS: u32 = 12;
+pub(crate) const L1_SIZE: usize = 1 << L1_BITS;
+pub(crate) const L1_MASK: u32 = (L1_SIZE as u32) - 1;
+
+/// One 16-byte direct-mapped L1 block-cache entry (#279).
+///
+/// Fixed `#[repr(C, align(16))]` layout lets `aarch64` load the whole entry in
+/// one `ldp x0, x2, [slot]` and lets `x86_64` probe `eip` and load `run` from
+/// one 16-byte aligned slot. `run.len == 0` marks an empty slot (so even
+/// `eip == 0` never false-hits).
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct L1Slot {
+    /// Cached flat32 linear `eip`.
+    pub(crate) eip: u32,
+    /// `Interp::runs` index + 1 (`0` = empty), reused to patch static chains on L1 hit.
+    pub(crate) run_idx: u32,
+    /// Copy of the cached [`Run`] metadata.
+    pub(crate) run: Run,
+}
+
+impl L1Slot {
+    const EMPTY: Self = Self {
+        eip: 0,
+        run_idx: 0,
+        run: Run {
+            first: 0,
+            bytes: 0,
+            len: 0,
+            ends_with_transfer: 0,
+        },
+    };
+}
+
+/// Direct-mapped L1 slot index for a flat32 linear address (`(eip ^ (eip >> 12)) & 0xfff`).
+#[inline(always)]
+fn l1_slot_index(lin: u32) -> usize {
+    ((lin ^ (lin >> 12)) & L1_MASK) as usize
+}
+
 /// Single-pointer integer-only context passed to `run_fast_block` (ADR-0009).
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[repr(C)]
@@ -68,7 +109,7 @@ pub(crate) struct FastCtx {
     pub arena_limit4: u64,
     pub remaining: u64,
     pub retired: u64,
-    pub fast_insns: *const FastInsn,
+    pub fast_insns: *mut FastInsn,
     pub runs: *const Run,
     pub directory: *const u32,
     pub region_ptrs: *const *const u32,
@@ -85,6 +126,10 @@ pub(crate) struct FastCtx {
     pub run_start_eip: u32,
     pub run_bytes: u32,
     pub run_len: u32,
+    pub l1_cache: *mut L1Slot,
+    pub outside_danger_len: u64,
+    pub outside_danger_start: u32,
+    pub _pad: u32,
 }
 
 /// Sentinel [`FastInsn`] appended after non-transfer runs for `naked_asm!`.
@@ -122,12 +167,18 @@ pub struct Interp {
     /// Which runs were decoded out of each of `pages`, so that a write over
     /// one page kills those runs and leaves every other run standing (#65).
     page_runs: Vec<Vec<u32>>,
+    /// Direct-mapped L1 block cache (`4096 × 16 B = 64 KiB`, #279), populated
+    /// on flat32 decode and L1 misses and cleared on `forget()` / `forget_page()`.
+    l1: Box<[L1Slot; L1_SIZE]>,
 }
 
 const PAGE: usize = 1 << 12;
 
 /// The most instructions one run is decoded to.
 const MOST_IN_A_RUN: u8 = 64;
+
+/// Maximum possible byte span of any decoded run (`64 × 15 = 960` bytes).
+const MAX_RUN_BYTES: u32 = (MOST_IN_A_RUN as u32) * (MAX_INSN as u32);
 
 /// The most decoded instructions kept before the cache is thrown away whole.
 const MOST_KEPT: usize = 1 << 20;
@@ -147,6 +198,7 @@ impl Interp {
             pages: Vec::new(),
             page_ptrs: Vec::new(),
             page_runs: Vec::new(),
+            l1: Box::new([L1Slot::EMPTY; L1_SIZE]),
         }
     }
 
@@ -168,6 +220,7 @@ impl Interp {
         self.regions.clear();
         self.region_ptrs.clear();
         self.directory.fill(0);
+        self.l1.fill(L1Slot::EMPTY);
     }
 
     /// Forget only what was decoded out of one page (#65).
@@ -185,11 +238,16 @@ impl Interp {
         else {
             return;
         };
-        for run in std::mem::take(&mut self.page_runs[p as usize - 1]) {
+        let runs_on_page = std::mem::take(&mut self.page_runs[p as usize - 1]);
+        if runs_on_page.is_empty() {
+            return;
+        }
+        for run in runs_on_page {
             if let Some(entry) = self.runs.get_mut(run as usize) {
                 entry.len = 0;
             }
         }
+        self.l1.fill(L1Slot::EMPTY);
     }
 
     /// Flush any pending self-modifying code page invalidations.
@@ -252,6 +310,13 @@ impl Interp {
         if hit != 0 {
             let run = self.runs[hit as usize - 1];
             if run.len != 0 {
+                if !self.mode.real {
+                    self.l1[l1_slot_index(lin)] = L1Slot {
+                        eip: lin,
+                        run_idx: hit,
+                        run,
+                    };
+                }
                 return Ok(run);
             }
         }
@@ -269,7 +334,14 @@ impl Interp {
                 Err(stop) if count == 0 => return Err(stop),
                 Err(_) => break,
             };
-            let fast = exec::compile_fast(&insn, self.mode, &mut self.slow_insns);
+            let mut fast = exec::compile_fast(&insn, self.mode, &mut self.slow_insns);
+            if fast.op == FastOp::JccRel {
+                // Zero bytes 4..8 (`base..=aux`) to initialize the fallthrough chain slot to 0.
+                fast.base = 0;
+                fast.index = 0;
+                fast.scale = 0;
+                fast.aux = 0;
+            }
             self.fast_insns.push(fast);
             bytes += u16::from(insn.len);
             count += 1;
@@ -282,6 +354,7 @@ impl Interp {
                 break;
             }
         }
+        debug_assert!(u32::from(bytes) <= MAX_RUN_BYTES);
         if !ends_with_transfer {
             self.fast_insns.push(END_RUN);
         }
@@ -296,6 +369,13 @@ impl Interp {
         let index = u32::try_from(self.runs.len() - 1).unwrap_or(u32::MAX);
         let here = self.table_for(lin);
         self.pages[here][slot] = index + 1;
+        if !self.mode.real {
+            self.l1[l1_slot_index(lin)] = L1Slot {
+                eip: lin,
+                run_idx: index + 1,
+                run,
+            };
+        }
         let mut watched = lin;
         loop {
             mem.mark_code(watched);
@@ -323,6 +403,14 @@ impl Interp {
         } else {
             outside.end - outside.start
         };
+        let (outside_danger_start, outside_danger_len) = if outside.is_empty() {
+            (0u32, 0u64)
+        } else {
+            (
+                outside.start.wrapping_sub(MAX_RUN_BYTES),
+                u64::from(outside_len) + u64::from(MAX_RUN_BYTES),
+            )
+        };
 
         let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
         if arena_len < arena_floor as usize + 4 {
@@ -336,7 +424,7 @@ impl Interp {
             arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
             remaining: count,
             retired: 0,
-            fast_insns: self.fast_insns.as_ptr(),
+            fast_insns: self.fast_insns.as_mut_ptr(),
             runs: self.runs.as_ptr(),
             directory: self.directory.as_ptr(),
             region_ptrs: self.region_ptrs.as_ptr(),
@@ -353,31 +441,31 @@ impl Interp {
             run_start_eip: 0,
             run_bytes: 0,
             run_len: 0,
+            l1_cache: self.l1.as_mut_ptr(),
+            outside_danger_len,
+            outside_danger_start,
+            _pad: 0,
         };
 
         while retired < count && !outside.contains(&cpu.eip) {
             if mem.code_written {
                 self.flush_code_written(mem);
-                ctx.fast_insns = self.fast_insns.as_ptr();
-                ctx.runs = self.runs.as_ptr();
-                ctx.region_ptrs = self.region_ptrs.as_ptr();
-                ctx.page_ptrs = self.page_ptrs.as_ptr();
             }
             if mem.is_watching() {
                 match rust::run_one_block(self, cpu, mem, count, &outside, &mut retired) {
-                    Ok(true) => {
-                        ctx.fast_insns = self.fast_insns.as_ptr();
-                        ctx.runs = self.runs.as_ptr();
-                        ctx.region_ptrs = self.region_ptrs.as_ptr();
-                        ctx.page_ptrs = self.page_ptrs.as_ptr();
-                        continue;
-                    }
+                    Ok(true) => continue,
                     Ok(false) => break,
                     Err(stop) => return (retired, Err(stop)),
                 }
             }
 
             ctx.regs = cpu.r.as_mut_ptr();
+            ctx.fast_insns = self.fast_insns.as_mut_ptr();
+            ctx.runs = self.runs.as_ptr();
+            ctx.directory = self.directory.as_ptr();
+            ctx.region_ptrs = self.region_ptrs.as_ptr();
+            ctx.page_ptrs = self.page_ptrs.as_ptr();
+            ctx.l1_cache = self.l1.as_mut_ptr();
             ctx.eip = cpu.eip;
             ctx.flags = native::pack_flags(&cpu.flags);
             ctx.fs_base = cpu.seg_base[FS];
@@ -399,19 +487,10 @@ impl Interp {
                     if let Err(stop) = self.run_at(cpu.eip, mem) {
                         return (retired, Err(stop));
                     }
-                    ctx.fast_insns = self.fast_insns.as_ptr();
-                    ctx.runs = self.runs.as_ptr();
-                    ctx.region_ptrs = self.region_ptrs.as_ptr();
-                    ctx.page_ptrs = self.page_ptrs.as_ptr();
                 }
                 STATUS_BUDGET_SHORT | STATUS_OUTSIDE_OVERLAP => {
                     match rust::run_one_block(self, cpu, mem, count, &outside, &mut retired) {
-                        Ok(true) => {
-                            ctx.fast_insns = self.fast_insns.as_ptr();
-                            ctx.runs = self.runs.as_ptr();
-                            ctx.region_ptrs = self.region_ptrs.as_ptr();
-                            ctx.page_ptrs = self.page_ptrs.as_ptr();
-                        }
+                        Ok(true) => {}
                         Ok(false) => break,
                         Err(stop) => return (retired, Err(stop)),
                     }
@@ -590,9 +669,15 @@ mod tests {
         assert_eq!(offset_of!(Run, len), 6);
         assert_eq!(offset_of!(Run, ends_with_transfer), 7);
 
+        assert_eq!(size_of::<L1Slot>(), 16);
+        assert_eq!(align_of::<L1Slot>(), 16);
+        assert_eq!(offset_of!(L1Slot, eip), 0);
+        assert_eq!(offset_of!(L1Slot, run_idx), 4);
+        assert_eq!(offset_of!(L1Slot, run), 8);
+
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
-            assert_eq!(size_of::<FastCtx>(), 144);
+            assert_eq!(size_of::<FastCtx>(), 168);
             assert_eq!(align_of::<FastCtx>(), 8);
             assert_eq!(offset_of!(FastCtx, regs), 0);
             assert_eq!(offset_of!(FastCtx, arena_base), 8);
@@ -617,6 +702,9 @@ mod tests {
             assert_eq!(offset_of!(FastCtx, run_start_eip), 132);
             assert_eq!(offset_of!(FastCtx, run_bytes), 136);
             assert_eq!(offset_of!(FastCtx, run_len), 140);
+            assert_eq!(offset_of!(FastCtx, l1_cache), 144);
+            assert_eq!(offset_of!(FastCtx, outside_danger_len), 152);
+            assert_eq!(offset_of!(FastCtx, outside_danger_start), 160);
         }
     }
 
@@ -1346,5 +1434,282 @@ mod tests {
         let (ret, res) = interp.run_native(&mut cpu, &mut mem, 20, 0..0);
         assert_eq!((ret, res), (2, Err(Stop::Halted)));
         assert!(mem.unchanged(), "native path must honor Arena::watch()");
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn differential_smc_chained_targets_l1_collisions_and_custom_outside_ranges() {
+        let stack = 0x0030_0000u32;
+
+        // 1. SMC over chained JmpRel, JccRel (both taken & fallthrough), CallRel, and EndRun.
+        // Place the dispatcher on page 0x0018_0000 and four mutable targets on separate pages
+        // so patching one target page invalidates only its runs while keeping callers' chains live.
+        let code_at = 0x0018_0000u32;
+        let call_tgt = 0x0018_2000u32;
+        let jmp_tgt = 0x0018_3000u32;
+        let jcc_taken_tgt = 0x0018_4000u32;
+        let endrun_page = 0x0018_5000u32;
+        let endrun_cont = endrun_page + 64; // 64 x `inc eax` hits EndRun right at +64!
+
+        let emit_rel32 = |buf: &mut Vec<u8>, opcode: &[u8], base: u32, target: u32| {
+            buf.extend_from_slice(opcode);
+            let next = base + buf.len() as u32 + 4;
+            buf.extend_from_slice(&target.wrapping_sub(next).to_le_bytes());
+        };
+
+        // Main loop (runs 4 iterations, ecx = 4 -> 0):
+        // - Iter 4, 3: warm & hit direct chains (CallRel, JccRel taken & fallthrough, JmpRel, EndRun)
+        // - Iter 2: rewrite call_tgt, jmp_tgt, jcc_taken_tgt, and endrun_cont in guest memory!
+        // - Iter 1: re-execute every chained static transfer -> must trap cbz run.len and run new code!
+        let mut main = Vec::new();
+        // Loop top:
+        let loop_top = code_at;
+        // CallRel -> call_tgt (adds 1 initially, then 100 after SMC)
+        emit_rel32(&mut main, &[0xe8], code_at, call_tgt);
+        // JccRel: test cl, 1; jnz jcc_taken_tgt (alternates taken/fallthrough every iter!)
+        main.extend_from_slice(&[0xf6, 0xc1, 0x01]); // test cl, 1
+        emit_rel32(&mut main, &[0x0f, 0x85], code_at, jcc_taken_tgt);
+        // Fallthrough of JccRel: add eax, 2; jmp jmp_tgt
+        main.extend_from_slice(&[0x83, 0xc0, 0x02]);
+        emit_rel32(&mut main, &[0xe9], code_at, jmp_tgt);
+        let after_jcc = code_at + main.len() as u32;
+        // Call endrun_page (64 x inc eax -> EndRun -> endrun_cont: add eax, 3; ret)
+        emit_rel32(&mut main, &[0xe8], code_at, endrun_page);
+        // If ecx == 3, patch all four targets!
+        main.extend_from_slice(&[0x83, 0xf9, 0x03]); // cmp ecx, 3
+        let jnz_skip_pos = main.len();
+        main.extend_from_slice(&[0x75, 0x00]); // jnz skip_smc
+                                               // Rewrite call_tgt+2 imm8: 1 -> 100
+        main.extend_from_slice(&[0xc6, 0x05]);
+        main.extend_from_slice(&(call_tgt + 2).to_le_bytes());
+        main.push(100);
+        // Rewrite jmp_tgt+2 imm8: 5 -> 50
+        main.extend_from_slice(&[0xc6, 0x05]);
+        main.extend_from_slice(&(jmp_tgt + 2).to_le_bytes());
+        main.push(50);
+        // Rewrite jcc_taken_tgt+2 imm8: 7 -> 70
+        main.extend_from_slice(&[0xc6, 0x05]);
+        main.extend_from_slice(&(jcc_taken_tgt + 2).to_le_bytes());
+        main.push(70);
+        // Rewrite endrun_cont+2 imm8: 3 -> 30
+        main.extend_from_slice(&[0xc6, 0x05]);
+        main.extend_from_slice(&(endrun_cont + 2).to_le_bytes());
+        main.push(30);
+        let skip_smc_off = main.len() - (jnz_skip_pos + 2);
+        main[jnz_skip_pos + 1] = skip_smc_off as u8;
+        // dec ecx; jnz loop_top; hlt
+        main.push(0x49); // dec ecx
+        emit_rel32(&mut main, &[0x0f, 0x85], code_at, loop_top);
+        main.push(0xf4); // hlt
+
+        // Targets:
+        let call_code = [0x83, 0xc0, 0x01, 0xc3]; // add eax, 1; ret
+        let mut jmp_code = vec![0x83, 0xc0, 0x05]; // add eax, 5
+        emit_rel32(&mut jmp_code, &[0xe9], jmp_tgt, after_jcc); // jmp after_jcc
+        let mut jcc_taken_code = vec![0x83, 0xc0, 0x07]; // add eax, 7
+        emit_rel32(&mut jcc_taken_code, &[0xe9], jcc_taken_tgt, after_jcc);
+        let mut endrun_code = vec![0x40u8; 64]; // 64 x `inc eax` -> EndRun!
+        endrun_code.extend_from_slice(&[0x83, 0xc0, 0x03, 0xc3]); // add eax, 3; ret
+
+        let mut cpu = Cpu {
+            eip: code_at,
+            ..Cpu::default()
+        };
+        cpu.r[ECX] = 5;
+        cpu.r[ESP] = stack;
+        assert_native_matches_rust(
+            "smc_chained_static_transfers",
+            &main,
+            cpu,
+            &[
+                (call_tgt, &call_code),
+                (jmp_tgt, &jmp_code),
+                (jcc_taken_tgt, &jcc_taken_code),
+                (endrun_page, &endrun_code),
+            ],
+            &[
+                (call_tgt, 4),
+                (jmp_tgt, 8),
+                (jcc_taken_tgt, 8),
+                (endrun_cont, 4),
+            ],
+            10_000,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        // Also assert directly that native execution actually patches static chain slots
+        // and re-chains them cleanly after SMC invalidation.
+        {
+            let mut h = Headless::new();
+            let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+            mem.write(code_at, &main).unwrap();
+            mem.write(call_tgt, &call_code).unwrap();
+            mem.write(jmp_tgt, &jmp_code).unwrap();
+            mem.write(jcc_taken_tgt, &jcc_taken_code).unwrap();
+            mem.write(endrun_page, &endrun_code).unwrap();
+            let mut c = cpu;
+            let mut interp = Interp::new(Mode::FLAT);
+            let (_, res) = interp.run_native(&mut c, &mut mem, 10_000, 0..0);
+            assert_eq!(res, Err(Stop::Halted));
+            let chained_static = interp
+                .fast_insns
+                .iter()
+                .filter(|ins| {
+                    matches!(
+                        ins.op,
+                        FastOp::JmpRel | FastOp::JccRel | FastOp::CallRel | FastOp::EndRun
+                    ) && ins.imm != 0
+                })
+                .count();
+            assert!(
+                chained_static >= 4,
+                "expected JmpRel/JccRel/CallRel/EndRun chain slots to be patched, got {chained_static}"
+            );
+            let jcc_fallthrough_patched = interp.fast_insns.iter().any(|ins| {
+                ins.op == FastOp::JccRel
+                    && u32::from_le_bytes([ins.base, ins.index, ins.scale, ins.aux]) != 0
+            });
+            assert!(
+                jcc_fallthrough_patched,
+                "expected JccRel fallthrough chain slot to be patched"
+            );
+        }
+
+        // 2. L1 block-cache collision / eviction ping-pong via indirect transfers.
+        // Pick pairs of addresses that hash to the exact same L1 slot (including slot 0!).
+        let slot0_a = 0x0018_0180u32; // (0x180 ^ 0x180) & 0xfff == 0
+        let slot0_b = 0x0018_1181u32; // (0x181 ^ 0x181) & 0xfff == 0
+        let slotx_a = 0x0018_2001u32; // (0x001 ^ 0x182) & 0xfff == 0x183
+        let slotx_b = 0x0018_3000u32; // (0x000 ^ 0x183) & 0xfff == 0x183
+        assert_eq!(l1_slot_index(slot0_a), 0);
+        assert_eq!(l1_slot_index(slot0_b), 0);
+        assert_eq!(l1_slot_index(slotx_a), l1_slot_index(slotx_b));
+
+        // Caller calls slot0_a, slot0_b, slotx_a, slotx_b indirectly (CallReg / JmpReg / Ret) 20 times!
+        let caller = 0x0018_6000u32;
+        let data = 0x0020_0000u32;
+        let mut coll_prog = Vec::new();
+        // Loop: call eax (slot0_a); call ebx (slot0_b); call [esi] (slotx_a); call [esi+4] (slotx_b); dec ecx; jnz loop; hlt
+        coll_prog.extend_from_slice(&[0xff, 0xd0]); // call eax
+        coll_prog.extend_from_slice(&[0xff, 0xd3]); // call ebx
+        coll_prog.extend_from_slice(&[0xff, 0x16]); // call dword [esi]
+        coll_prog.extend_from_slice(&[0xff, 0x56, 0x04]); // call dword [esi+4]
+        coll_prog.push(0x49); // dec ecx
+        let back = -(coll_prog.len() as i8 + 2);
+        coll_prog.extend_from_slice(&[0x75, back as u8]); // jnz loop
+        coll_prog.push(0xf4); // hlt
+
+        let mut ptrs = [0u8; 8];
+        ptrs[0..4].copy_from_slice(&slotx_a.to_le_bytes());
+        ptrs[4..8].copy_from_slice(&slotx_b.to_le_bytes());
+        let mut cpu = Cpu {
+            eip: caller,
+            ..Cpu::default()
+        };
+        cpu.r[EAX] = slot0_a;
+        cpu.r[EBX] = slot0_b;
+        cpu.r[ECX] = 20;
+        cpu.r[ESI] = data;
+        cpu.r[ESP] = stack;
+        assert_native_matches_rust(
+            "l1_slot_collision_eviction",
+            &coll_prog,
+            cpu,
+            &[
+                (slot0_a, &[0x83, 0xc2, 0x01, 0xc3]), // add edx, 1; ret
+                (slot0_b, &[0x83, 0xc2, 0x03, 0xc3]), // add edx, 3; ret
+                (slotx_a, &[0x83, 0xc2, 0x07, 0xc3]), // add edx, 7; ret
+                (slotx_b, &[0x83, 0xc2, 0x0b, 0xc3]), // add edx, 11; ret
+                (data, &ptrs),
+            ],
+            &[(stack - 16, 20)],
+            5_000,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        // 3. Custom `outside` ranges (below & above outside, near-outside non-overlapping,
+        // wrapping `outside_danger_start`, huge `outside`, and `outside` hitting an already-chained target).
+        let below = 0x0018_8000u32;
+        let above = 0x0024_0000u32;
+        let mut split_prog = Vec::new();
+        // `inc eax; call above; inc eax; hlt`
+        split_prog.push(0x40);
+        emit_rel32(&mut split_prog, &[0xe8], below, above);
+        split_prog.extend_from_slice(&[0x40, 0xf4]);
+        let above_code = [0x40, 0x40, 0x40, 0xc3]; // 3 x inc eax; ret
+
+        for (name, outside) in [
+            (
+                "outside_between_below_and_above",
+                0x0020_0000u32..0x0021_0000,
+            ),
+            ("outside_near_below_no_overlap", (below + 64)..(below + 128)),
+            ("outside_mid_above_overlap", (above + 1)..(above + 2)),
+            ("outside_entry_of_above", above..(above + 1)),
+            ("outside_wraps_danger_start", 0..1),
+            ("outside_huge_gt_u32_max_danger", 0..u32::MAX),
+            ("outside_boundary_range", Boundary::RANGE),
+        ] {
+            let mut c = Cpu {
+                eip: below,
+                ..Cpu::default()
+            };
+            c.r[ESP] = stack;
+            assert_native_matches_rust(
+                name,
+                &split_prog,
+                c,
+                &[(above, &above_code)],
+                &[],
+                500,
+                outside,
+                DOS_MEMORY,
+            );
+        }
+
+        // Verify an ALREADY-CHAINED `Interp` still stops/clamps when re-invoked with a new `outside`!
+        let mut h_r = Headless::new();
+        let mut h_n = Headless::new();
+        let mut m_r = Arena::new(&mut h_r, 1 << 22)
+            .unwrap()
+            .with_floor(DOS_MEMORY);
+        let mut m_n = Arena::new(&mut h_n, 1 << 22)
+            .unwrap()
+            .with_floor(DOS_MEMORY);
+        m_r.write(below, &split_prog).unwrap();
+        m_n.write(below, &split_prog).unwrap();
+        m_r.write(above, &above_code).unwrap();
+        m_n.write(above, &above_code).unwrap();
+        let mut i_r = Interp::new(Mode::FLAT);
+        let mut i_n = Interp::new(Mode::FLAT);
+
+        // Pass 1: run with empty `outside` so `below -> above` gets direct-chained!
+        let mut warm_r = Cpu {
+            eip: below,
+            ..Cpu::default()
+        };
+        warm_r.r[ESP] = stack;
+        let mut warm_n = warm_r;
+        let _ = rust::run(&mut i_r, &mut warm_r, &mut m_r, 500, 0..0);
+        let _ = i_n.run_native(&mut warm_n, &mut m_n, 500, 0..0);
+        assert_eq!(warm_n.r, warm_r.r);
+
+        // Pass 2: re-run on the SAME chained `Interp` with `outside` at entry & mid-block of `above`!
+        for outside in [above..(above + 1), (above + 2)..(above + 3)] {
+            let mut cr = Cpu {
+                eip: below,
+                ..Cpu::default()
+            };
+            cr.r[ESP] = stack;
+            let mut cn = cr;
+            let (rr, sr) = rust::run(&mut i_r, &mut cr, &mut m_r, 500, outside.clone());
+            let (rn, sn) = i_n.run_native(&mut cn, &mut m_n, 500, outside.clone());
+            assert_eq!(
+                (rn, sn, cn.eip, cn.r, cn.tsc),
+                (rr, sr, cr.eip, cr.r, cr.tsc)
+            );
+        }
     }
 }

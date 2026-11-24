@@ -76,11 +76,12 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "ldr x23, [x29, #24]",      // x23 = arena_limit4 (= span - 4)
         "ldr x26, [x29, #32]",      // x26 = remaining
         "mov x27, #0",              // x27 = retired in this call
-        "ldr x10, [x29, #48]",      // x10 = fast_insns
-        "ldr x11, [x29, #56]",      // x11 = runs
-        "ldr x9,  [x29, #64]",      // x9  = directory
-        "ldr x8,  [x29, #72]",      // x8  = region_ptrs
-        "ldr x7,  [x29, #80]",      // x7  = page_ptrs
+        "ldr x10, [x29, #48]",      // x10 = fast_insns (*mut FastInsn)
+        "ldr x11, [x29, #56]",      // runs (*const Run)
+        "sub x11, x11, #8",         // x11 = runs - 8 (indexed by 1-based run_idx!)
+        "ldr x9,  [x29, #144]",     // x9  = l1_cache (*mut L1Slot, 4096 x 16B)
+        "ldr x7,  [x29, #152]",     // x7  = outside_danger_len (u64)
+        "ldr w8,  [x29, #160]",     // w8  = outside_danger_start (u32)
         "ldr w14, [x29, #104]",     // w14 = eip
         "ldr w28, [x29, #108]",     // w28 = flags (NZCV + PF + AF + valid bit 0)
         "ldr w6,  [x29, #112]",     // w6  = fs_base
@@ -90,57 +91,46 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "adr x24, 900f",            // x24 = dispatch offset table base
 
         // =====================================================================
-        // next_block (label 10): look up cached Run at w14 (eip) and dispatch.
+        // next_block (label 10): indirect transfer / entry via L1 block cache.
         // =====================================================================
         "10:",
         "cbz x26, 950f",            // remaining == 0 -> STATUS_DONE
+        // Zero-load fast `outside` check (covers Boundary::RANGE, empty, & custom ranges)
+        "sub w1, w14, w8",          // w1 = eip.wrapping_sub(outside_danger_start) (zero-ext x1)
+        "cmp x1, x7",               // x1 < outside_danger_len?
+        "b.lo 18f",                 // cold exact outside check
 
-        // Check `outside.contains(&eip)`: if outside_len != 0 && (eip - start) < len
-        "ldr w1, [x29, #128]",      // w1 = outside_len
-        "cbz w1, 11f",
-        "ldr w0, [x29, #120]",      // w0 = outside_start
-        "sub w2, w14, w0",          // w2 = eip.wrapping_sub(outside_start)
-        "cmp w2, w1",
-        "b.lo 950f",                // eip in outside -> STATUS_DONE
-
-        // 3-level page-table lookup: directory -> region_ptrs -> page_ptrs -> runs
-        "11:",
-        "lsr w0, w14, #22",
-        "ldr w0, [x9, x0, lsl #2]",
-        "cbz w0, 951f",             // STATUS_MISS
-        "sub w0, w0, #1",
-        "ldr x2, [x8, x0, lsl #3]", // region_ptr
-        "ubfx w3, w14, #12, #10",
-        "ldr w0, [x2, x3, lsl #2]",
-        "cbz w0, 951f",             // STATUS_MISS
-        "sub w0, w0, #1",
-        "ldr x2, [x7, x0, lsl #3]", // page_ptr
-        "and w3, w14, #0xfff",
-        "ldr w0, [x2, x3, lsl #2]",
-        "cbz w0, 951f",             // STATUS_MISS
-        "sub w0, w0, #1",
-        "ldr x2, [x11, x0, lsl #3]",// Run { first: u32, bytes: u16, len: u8, ends: u8 }
+        // Direct-mapped L1 block cache probe (4096 x 16B = 64 KiB, pinned in x9)
+        "eor w0, w14, w14, lsr #12",
+        "and w0, w0, #0xfff",
+        "add x3, x9, x0, lsl #4",   // x3 = &l1[slot]
+        "ldp x0, x2, [x3]",         // x0 = (run_idx+1 << 32) | eip; x2 = Run
+        "cmp w0, w14",              // slot.eip == eip?
+        "b.ne 11f",                 // L1 miss (no chain slot)
         "ubfx x16, x2, #48, #8",    // x16 = run.len
-        "cbz x16, 951f",            // invalidated run -> STATUS_MISS
-        "ubfx x15, x2, #32, #16",   // x15 = run.bytes
+        "cbz x16, 11f",             // empty slot (guards eip == 0)
+        "b 20f",                    // L1 hit -> dispatch!
 
-        // Check outside overlap with [eip, eip + run.bytes) when outside_len != 0
-        "cbz w1, 12f",
-        "adds w3, w14, w15",        // w3 = eip + run.bytes, C set on u32 wrap
-        "b.cs 953f",                // wraps u32 -> STATUS_OUTSIDE_OVERLAP
-        "ldr w0, [x29, #120]",      // outside_start
-        "cmp w3, w0",
-        "b.ls 12f",                 // end <= outside_start -> safe
-        "ldr w0, [x29, #124]",      // outside_end
-        "cmp w14, w0",
-        "b.lo 953f",                // eip < outside_end && end > outside_start -> overlap
-
+        // =====================================================================
+        // chain_dispatch (label 12): static transfer with w14 = eip, w0 = run_idx+1, x5 = &slot.
+        // =====================================================================
         "12:",
-        // Ensure budget covers the entire run so inner loop needs no budget checks.
+        "cbz x26, 950f",            // remaining == 0 -> STATUS_DONE
+        "sub w1, w14, w8",
+        "cmp x1, x7",
+        "b.lo 18f",                 // cold exact outside check
+        "cbz w0, 13f",              // unchained -> L1 / 3-level lookup & patch [x5]
+        "ldr x2, [x11, x0, lsl #3]",// Run (1-based index into x11 = runs - 8)
+        "ubfx x16, x2, #48, #8",    // x16 = run.len
+        "cbz x16, 13f",             // invalidated by forget_page() -> re-resolve & re-patch
+
+        // =====================================================================
+        // dispatch (label 20): enter Run in x2 with x16 = run.len (chain-hit fallthrough!).
+        // =====================================================================
+        "20:",
         "cmp x26, x16",
         "b.lo 952f",                // remaining < run.len -> STATUS_BUDGET_SHORT
-
-        // Enter run: x25 = x17 = &fast_insns[run.first], dispatch first op!
+        "ubfx x15, x2, #32, #16",   // x15 = run.bytes
         "mov w0, w2",               // zero-extend run.first into x0
         "add x17, x10, x0, lsl #4", // x17 = run_first_pc
         "mov x25, x17",             // x25 = pc
@@ -148,6 +138,107 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "ldrsw x1, [x24, x0, lsl #2]",
         "add x1, x24, x1",
         "br x1",
+
+        // =====================================================================
+        // chain_resolve (label 13): probe L1 & patch [x5] on hit, else 3-level walk.
+        // =====================================================================
+        "13:",
+        "eor w0, w14, w14, lsr #12",
+        "and w0, w0, #0xfff",
+        "add x3, x9, x0, lsl #4",   // x3 = &l1[slot]
+        "ldp x0, x2, [x3]",
+        "cmp w0, w14",
+        "b.ne 16f",                 // L1 miss (keep x5)
+        "ubfx x16, x2, #48, #8",
+        "cbz x16, 16f",             // empty slot
+        "lsr x0, x0, #32",          // w0 = run_idx + 1
+        "str w0, [x5]",             // patch chain slot in place
+        "b 20b",
+
+        // =====================================================================
+        // l1_miss (labels 11 / 16): cold 3-level walk, fill [x3], optional patch [x5].
+        // =====================================================================
+        "11:",
+        "mov x5, #0",               // indirect transfer: no chain slot to patch
+        "16:",
+        "ldr x4, [x29, #64]",       // directory (miss-only)
+        "lsr w0, w14, #22",
+        "ldr w0, [x4, x0, lsl #2]",
+        "cbz w0, 951f",             // STATUS_MISS
+        "sub w0, w0, #1",
+        "ldr x4, [x29, #72]",       // region_ptrs (miss-only)
+        "ldr x4, [x4, x0, lsl #3]", // region_ptr
+        "ubfx w1, w14, #12, #10",
+        "ldr w0, [x4, x1, lsl #2]",
+        "cbz w0, 951f",             // STATUS_MISS
+        "sub w0, w0, #1",
+        "ldr x4, [x29, #80]",       // page_ptrs (miss-only)
+        "ldr x4, [x4, x0, lsl #3]", // page_ptr
+        "and w1, w14, #0xfff",
+        "ldr w0, [x4, x1, lsl #2]", // w0 = run_idx + 1 (zero-ext x0)
+        "cbz w0, 951f",             // STATUS_MISS
+        "ldr x2, [x11, x0, lsl #3]",// Run (1-based index into runs - 8)
+        "ubfx x16, x2, #48, #8",    // x16 = run.len
+        "cbz x16, 951f",            // invalidated run -> STATUS_MISS
+        "orr x1, x14, x0, lsl #32", // { eip: w14, run_idx: w0 }
+        "stp x1, x2, [x3]",         // populate L1 slot in place
+        "cbz x5, 20b",
+        "str w0, [x5]",             // patch chain slot in place
+        "b 20b",
+
+        // =====================================================================
+        // cold_outside (labels 18 / 19 / 21): exact `outside` containment & overlap.
+        // =====================================================================
+        "18:",
+        "ldr w0, [x29, #120]",      // outside_start
+        "ldr w1, [x29, #128]",      // outside_len
+        "sub w2, w14, w0",          // eip.wrapping_sub(outside_start)
+        "cmp w2, w1",
+        "b.lo 950f",                // eip in outside -> STATUS_DONE
+
+        "eor w0, w14, w14, lsr #12",
+        "and w0, w0, #0xfff",
+        "add x3, x9, x0, lsl #4",
+        "ldp x0, x2, [x3]",
+        "cmp w0, w14",
+        "b.ne 19f",
+        "ubfx x16, x2, #48, #8",
+        "cbnz x16, 21f",
+
+        "19:",
+        "ldr x4, [x29, #64]",
+        "lsr w0, w14, #22",
+        "ldr w0, [x4, x0, lsl #2]",
+        "cbz w0, 951f",
+        "sub w0, w0, #1",
+        "ldr x4, [x29, #72]",
+        "ldr x4, [x4, x0, lsl #3]",
+        "ubfx w1, w14, #12, #10",
+        "ldr w0, [x4, x1, lsl #2]",
+        "cbz w0, 951f",
+        "sub w0, w0, #1",
+        "ldr x4, [x29, #80]",
+        "ldr x4, [x4, x0, lsl #3]",
+        "and w1, w14, #0xfff",
+        "ldr w0, [x4, x1, lsl #2]",
+        "cbz w0, 951f",
+        "ldr x2, [x11, x0, lsl #3]",
+        "ubfx x16, x2, #48, #8",
+        "cbz x16, 951f",
+        "orr x1, x14, x0, lsl #32",
+        "stp x1, x2, [x3]",
+
+        "21:",
+        "ubfx x15, x2, #32, #16",   // x15 = run.bytes
+        "adds w3, w14, w15",        // w3 = eip + run.bytes, C set on u32 wrap
+        "b.cs 953f",                // wraps u32 -> STATUS_OUTSIDE_OVERLAP
+        "ldr w0, [x29, #120]",      // outside_start
+        "cmp w3, w0",
+        "b.ls 20b",                 // end <= outside_start -> safe
+        "ldr w0, [x29, #124]",      // outside_end
+        "cmp w14, w0",
+        "b.lo 953f",                // eip < outside_end && end > outside_start -> overlap
+        "b 20b",
 
         // =====================================================================
         // Op 0 (Slow), 46 (X87Reg), 47 (X87Mem) -> STATUS_FALLBACK (label 954)
@@ -1490,15 +1581,16 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         // Terminal Op 48: JmpRel
         // =====================================================================
         "148:",
-        "ldr w0, [x25, #8]",        // disp
+        "ldp w3, w0, [x25, #8]",    // w3 = disp, w0 = cached run_idx + 1 (zero-ext x0)
         "add w14, w14, w15",        // fallthrough = start_eip + run_bytes
-        "add w14, w14, w0",         // target
+        "add w14, w14, w3",         // target
+        "add x5, x25, #12",         // &chain_slot (&pc->imm)
         "sub x26, x26, x16",        // remaining -= run_len
         "add x27, x27, x16",        // retired += run_len
-        "b 10b",
+        "b 12b",
 
         // =====================================================================
-        // Terminal Op 49: JccRel (branchless 16x u16 NZCV LUT + csel)
+        // Terminal Op 49: JccRel (branchless 16x u16 NZCV LUT + csel + dual chain)
         // =====================================================================
         "149:",
         "ldrb w0, [x25, #2]",       // cc (0..15)
@@ -1509,14 +1601,19 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "ldrh w1, [x1, x0, lsl #1]",
         "lsr w2, w28, #28",         // nzcv = 0..15
         "lsr w1, w1, w2",
-        "tst w1, #1",
+        "ldp w3, w4, [x25, #8]",    // w3 = disp, w4 = taken_chain (imm)
+        "ldr w5, [x25, #4]",        // w5 = fallthrough_chain (base..=aux)
         "add w2, w14, w15",         // fallthrough
-        "ldr w3, [x25, #8]",        // disp
         "add w3, w2, w3",           // taken target
-        "csel w14, w3, w2, ne",
+        "tst w1, #1",
+        "csel w14, w3, w2, ne",     // w14 = target eip
+        "csel w0, w4, w5, ne",      // w0 = selected chain (zero-ext x0)
+        "add x4, x25, #12",         // &taken_chain (&pc->imm)
+        "add x5, x25, #4",          // &fallthrough_chain (&pc->base)
+        "csel x5, x4, x5, ne",
         "sub x26, x26, x16",
         "add x27, x27, x16",
-        "b 10b",
+        "b 12b",
 
         "210:", // JP (0xa) / JNP (0xb)
         "tbnz w28, #0, 1f",
@@ -1529,14 +1626,19 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "lsr w1, w28, #2",
         "2:",
         "eor w1, w1, w0",           // bit 0: PF ^ (cc & 1) == 1 iff taken
-        "tst w1, #1",
+        "ldp w3, w4, [x25, #8]",
+        "ldr w5, [x25, #4]",
         "add w2, w14, w15",
-        "ldr w3, [x25, #8]",
         "add w3, w2, w3",
+        "tst w1, #1",
         "csel w14, w3, w2, ne",
+        "csel w0, w4, w5, ne",
+        "add x4, x25, #12",
+        "add x5, x25, #4",
+        "csel x5, x4, x5, ne",
         "sub x26, x26, x16",
         "add x27, x27, x16",
-        "b 10b",
+        "b 12b",
 
         // =====================================================================
         // Terminal Op 50: CallRel
@@ -1556,13 +1658,14 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "lsr x1, x1, x0",
         "tbnz x1, #0, 954f",
         "add w2, w14, w15",         // ret_addr = start_eip + run_bytes
-        "ldr w3, [x25, #8]",        // disp
+        "ldp w3, w0, [x25, #8]",    // w3 = disp, w0 = cached run_idx + 1 (zero-ext x0)
         "str w4, [x19, #16]",
         "str w2, [x20, x4]",
         "add w14, w2, w3",          // target = ret_addr + disp
+        "add x5, x25, #12",         // &chain_slot (&pc->imm)
         "sub x26, x26, x16",
         "add x27, x27, x16",
-        "b 10b",
+        "b 12b",
 
         // =====================================================================
         // Terminal Op 51: Ret (pop eip; esp += 4 + imm)
@@ -2666,10 +2769,12 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         // Op 79: EndRun (sentinel after non-transfer straight-line run)
         // =====================================================================
         "179:",
+        "ldr w0, [x25, #12]",       // w0 = cached run_idx + 1 (zero-ext x0)
         "add w14, w14, w15",
+        "add x5, x25, #12",         // &chain_slot (&pc->imm)
         "sub x26, x26, x16",
         "add x27, x27, x16",
-        "b 10b",
+        "b 12b",
 
         // =====================================================================
         // Exit trampolines: materialize lazy PF/AF, write back FastCtx, return.

@@ -442,6 +442,14 @@ impl FastOp {
 ///
 /// Four instructions share one 64-byte cache line, and the fixed `#[repr(C)]`
 /// field offsets let Wave 2 `naked_asm!` (#256) consume the stream directly.
+///
+/// Static transfer ops (`JmpRel`, `JccRel`, `CallRel`, `EndRun`) reuse unused
+/// 4-byte-aligned fields as direct-chaining slots storing `target_run_idx + 1`
+/// (`0` = unchained, #279):
+/// - `imm` (offset 12): target chain slot for `JmpRel`, `CallRel`, `EndRun`,
+///   and the taken branch of `JccRel`.
+/// - `base..=aux` (offset 4, 4-byte aligned): fallthrough chain slot for
+///   `JccRel` (zeroed when decoded into `Interp::fast_insns`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FastInsn {
