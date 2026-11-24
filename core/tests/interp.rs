@@ -481,3 +481,60 @@ fn self_modifying_code_invalidates_cached_fast_runs() {
         "rewritten target page was invalidated and re-decoded"
     );
 }
+
+#[test]
+#[ignore]
+fn bench_flat32_tight_loop() {
+    use lego_legacy_core::cpu::{EBX, ECX, ESI, ESP};
+    use std::time::Instant;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let data = 0x0050_0000u32;
+    // Tight flat32 loop (8 insns per iteration):
+    //   mov edx, [esi]          ; 8b 16
+    //   add eax, edx            ; 01 d0
+    //   xor ebx, eax            ; 31 c3
+    //   add edx, 1              ; 83 c2 01
+    //   mov [esi], edx          ; 89 16
+    //   inc eax                 ; 40
+    //   dec ecx                 ; 49
+    //   jne -13 (back to start) ; 75 f3
+    //   hlt                     ; f4
+    let prog: &[u8] = &[
+        0x8b, 0x16, 0x01, 0xd0, 0x31, 0xc3, 0x83, 0xc2, 0x01, 0x89, 0x16, 0x40, 0x49, 0x75, 0xf1,
+        0xf4,
+    ];
+    mem.write(code, prog).unwrap();
+    let mut engine = Interp::new(Mode::FLAT);
+    // Warm up decode cache
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ECX] = 100;
+    regs.r[ESI] = data;
+    regs.r[ESP] = 0x0060_0000;
+    let _ = engine.run(&mut regs, &mut mem, 1_000_000, 0..0);
+
+    // Timed run: 25M iterations = 200M guest instructions
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ECX] = 25_000_000;
+    regs.r[ESI] = data;
+    regs.r[ESP] = 0x0060_0000;
+    let t0 = Instant::now();
+    let (retired, res) = engine.run(&mut regs, &mut mem, 300_000_000, 0..0);
+    let dt = t0.elapsed().as_secs_f64();
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(retired, 200_000_000);
+    eprintln!(
+        "tier={:?} retired={retired} wall={dt:.4}s mips={:.1} eax={:#x} ebx={:#x}",
+        lego_legacy_core::arch::Tier::active(),
+        retired as f64 / dt / 1e6,
+        regs.r[EAX],
+        regs.r[EBX],
+    );
+}

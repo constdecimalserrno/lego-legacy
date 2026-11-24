@@ -397,6 +397,35 @@ pub enum FastOp {
     JmpMem = 53,
     CallReg = 54,
     CallMem = 55,
+
+    // Flat32 8-bit and 16-bit data movement, 8/16-bit ALU/test/cmp, imul2, setcc (#256).
+    Mov8RegReg = 56,
+    Mov8RegImm = 57,
+    Mov8RegMem = 58,
+    Mov8MemReg = 59,
+    Mov8MemImm = 60,
+    Mov16RegReg = 61,
+    Mov16RegImm = 62,
+    Mov16RegMem = 63,
+    Mov16MemReg = 64,
+    Mov16MemImm = 65,
+    Alu8RegImm = 66,
+    Alu8RegReg = 67,
+    Alu8RegMem = 68,
+    Alu8MemImm = 69,
+    Alu8MemReg = 70,
+    Alu16RegImm = 71,
+    Alu16RegReg = 72,
+    Alu16RegMem = 73,
+    Alu16MemImm = 74,
+    Alu16MemReg = 75,
+    Imul2Reg = 76,
+    Imul2Mem = 77,
+    SetccReg = 78,
+
+    /// Sentinel appended after a non-transfer run so direct-threaded
+    /// `naked_asm!` dispatch needs no per-instruction loop counter (#256).
+    EndRun = 79,
 }
 
 impl FastOp {
@@ -404,7 +433,8 @@ impl FastOp {
     #[must_use]
     #[inline(always)]
     pub fn is_terminal(self) -> bool {
-        (self as u8) >= Self::JmpRel as u8
+        let tag = self as u8;
+        tag >= Self::JmpRel as u8 && tag <= Self::CallMem as u8
     }
 }
 

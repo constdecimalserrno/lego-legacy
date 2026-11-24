@@ -140,6 +140,18 @@ impl Arena {
         self.mapping.is_empty()
     }
 
+    /// Raw arena base pointer, floor, total byte length, and code-page bitmap
+    /// pointer for the flat32 `naked_asm!` CPU interpreter (ADR-0009, #256).
+    #[inline(always)]
+    pub(crate) fn raw_parts_mut(&mut self) -> (*mut u8, u32, usize, *const u64) {
+        (
+            self.mapping.as_ptr(),
+            self.floor,
+            self.mapping.len(),
+            self.code.as_ptr(),
+        )
+    }
+
     /// One subtraction ahead of the one compare this always was: an address
     /// under the floor wraps round to far past the end (#132). No bytes at
     /// all touch nothing there, which is what the rasteriser borrows at a

@@ -283,8 +283,19 @@ pub fn compile_fast(
         imm: 0,
     };
 
-    if let Kind::Nop = insn.kind {
+    if matches!(insn.kind, Kind::Nop | Kind::Wait) {
         return plain(FastOp::Nop);
+    }
+
+    if let Kind::Setcc(cc) = insn.kind {
+        return match insn.dst {
+            Some(Op::Reg(d)) => FastInsn {
+                dst: d,
+                aux: cc,
+                ..plain(FastOp::SetccReg)
+            },
+            _ => make_slow(),
+        };
     }
 
     if let Kind::X87(xop) = insn.kind {
@@ -308,6 +319,188 @@ pub fn compile_fast(
                 }
                 None => make_slow(),
             },
+            _ => make_slow(),
+        };
+    }
+
+    if insn.width == Width::B8 {
+        return match (insn.kind, insn.dst, insn.src) {
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Reg(s))) => FastInsn {
+                dst: d,
+                src: s,
+                ..plain(FastOp::Mov8RegReg)
+            },
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Imm(imm))) => FastInsn {
+                dst: d,
+                imm: imm & 0xff,
+                ..plain(FastOp::Mov8RegImm)
+            },
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Mem(m))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    dst: d,
+                    ..mem_insn(FastOp::Mov8RegMem, enc)
+                },
+                None => make_slow(),
+            },
+            (Kind::Mov, Some(Op::Mem(m)), Some(Op::Reg(s))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    src: s,
+                    ..mem_insn(FastOp::Mov8MemReg, enc)
+                },
+                None => make_slow(),
+            },
+            (Kind::Mov, Some(Op::Mem(m)), Some(Op::Imm(imm))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    imm: imm & 0xff,
+                    ..mem_insn(FastOp::Mov8MemImm, enc)
+                },
+                None => make_slow(),
+            },
+            (
+                Kind::Add | Kind::Sub | Kind::Cmp | Kind::And | Kind::Or | Kind::Xor | Kind::Test,
+                Some(dst),
+                Some(src),
+            ) => {
+                let alu = match insn.kind {
+                    Kind::Add => ALU_ADD,
+                    Kind::Sub => ALU_SUB,
+                    Kind::Cmp => ALU_CMP,
+                    Kind::And => ALU_AND,
+                    Kind::Or => ALU_OR,
+                    Kind::Xor => ALU_XOR,
+                    _ => ALU_TEST,
+                };
+                match (dst, src) {
+                    (Op::Reg(d), Op::Imm(imm)) => FastInsn {
+                        dst: d,
+                        aux: alu,
+                        imm: imm & 0xff,
+                        ..plain(FastOp::Alu8RegImm)
+                    },
+                    (Op::Reg(d), Op::Reg(s)) => FastInsn {
+                        dst: d,
+                        src: s,
+                        aux: alu,
+                        ..plain(FastOp::Alu8RegReg)
+                    },
+                    (Op::Reg(d), Op::Mem(m)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            dst: d,
+                            aux: alu,
+                            ..mem_insn(FastOp::Alu8RegMem, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    (Op::Mem(m), Op::Imm(imm)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            aux: alu,
+                            imm: imm & 0xff,
+                            ..mem_insn(FastOp::Alu8MemImm, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    (Op::Mem(m), Op::Reg(s)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            src: s,
+                            aux: alu,
+                            ..mem_insn(FastOp::Alu8MemReg, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    _ => make_slow(),
+                }
+            }
+            _ => make_slow(),
+        };
+    }
+
+    if insn.width == Width::B16 {
+        return match (insn.kind, insn.dst, insn.src) {
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Reg(s))) => FastInsn {
+                dst: d,
+                src: s,
+                ..plain(FastOp::Mov16RegReg)
+            },
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Imm(imm))) => FastInsn {
+                dst: d,
+                imm: imm & 0xffff,
+                ..plain(FastOp::Mov16RegImm)
+            },
+            (Kind::Mov, Some(Op::Reg(d)), Some(Op::Mem(m))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    dst: d,
+                    ..mem_insn(FastOp::Mov16RegMem, enc)
+                },
+                None => make_slow(),
+            },
+            (Kind::Mov, Some(Op::Mem(m)), Some(Op::Reg(s))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    src: s,
+                    ..mem_insn(FastOp::Mov16MemReg, enc)
+                },
+                None => make_slow(),
+            },
+            (Kind::Mov, Some(Op::Mem(m)), Some(Op::Imm(imm))) => match encode_mem(m) {
+                Some(enc) => FastInsn {
+                    imm: imm & 0xffff,
+                    ..mem_insn(FastOp::Mov16MemImm, enc)
+                },
+                None => make_slow(),
+            },
+            (
+                Kind::Add | Kind::Sub | Kind::Cmp | Kind::And | Kind::Or | Kind::Xor | Kind::Test,
+                Some(dst),
+                Some(src),
+            ) => {
+                let alu = match insn.kind {
+                    Kind::Add => ALU_ADD,
+                    Kind::Sub => ALU_SUB,
+                    Kind::Cmp => ALU_CMP,
+                    Kind::And => ALU_AND,
+                    Kind::Or => ALU_OR,
+                    Kind::Xor => ALU_XOR,
+                    _ => ALU_TEST,
+                };
+                match (dst, src) {
+                    (Op::Reg(d), Op::Imm(imm)) => FastInsn {
+                        dst: d,
+                        aux: alu,
+                        imm: imm & 0xffff,
+                        ..plain(FastOp::Alu16RegImm)
+                    },
+                    (Op::Reg(d), Op::Reg(s)) => FastInsn {
+                        dst: d,
+                        src: s,
+                        aux: alu,
+                        ..plain(FastOp::Alu16RegReg)
+                    },
+                    (Op::Reg(d), Op::Mem(m)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            dst: d,
+                            aux: alu,
+                            ..mem_insn(FastOp::Alu16RegMem, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    (Op::Mem(m), Op::Imm(imm)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            aux: alu,
+                            imm: imm & 0xffff,
+                            ..mem_insn(FastOp::Alu16MemImm, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    (Op::Mem(m), Op::Reg(s)) => match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            src: s,
+                            aux: alu,
+                            ..mem_insn(FastOp::Alu16MemReg, enc)
+                        },
+                        None => make_slow(),
+                    },
+                    _ => make_slow(),
+                }
+            }
             _ => make_slow(),
         };
     }
@@ -591,6 +784,32 @@ pub fn compile_fast(
             imm: n,
             ..plain(FastOp::Ret)
         },
+        (Kind::Imul2, Some(Op::Reg(d)), Some(src)) => {
+            let (has_imm, imm) = match insn.third {
+                Some(Op::Imm(v)) => (1u8, v),
+                None => (0u8, 0),
+                _ => return make_slow(),
+            };
+            match src {
+                Op::Reg(s) => FastInsn {
+                    dst: d,
+                    src: s,
+                    aux: has_imm,
+                    imm,
+                    ..plain(FastOp::Imul2Reg)
+                },
+                Op::Mem(m) => match encode_mem(m) {
+                    Some(enc) => FastInsn {
+                        dst: d,
+                        aux: has_imm,
+                        imm,
+                        ..mem_insn(FastOp::Imul2Mem, enc)
+                    },
+                    None => make_slow(),
+                },
+                _ => make_slow(),
+            }
+        }
         _ => make_slow(),
     }
 }
@@ -646,6 +865,68 @@ fn shift32(flags: &mut super::flags::Flags, kind: u8, a: u32, count: u32) -> u32
             flags.logic_keep_carry32(r);
             flags.of = false;
             r
+        }
+    }
+}
+
+#[inline(always)]
+fn alu8(flags: &mut super::flags::Flags, aux: u8, a: u32, b: u32) -> Option<u32> {
+    match aux {
+        ALU_ADD => Some(flags.add(a, b, false, Width::B8)),
+        ALU_SUB => Some(flags.sub(a, b, false, Width::B8)),
+        ALU_CMP => {
+            flags.sub(a, b, false, Width::B8);
+            None
+        }
+        ALU_AND => {
+            let r = (a & b) & 0xff;
+            flags.logic(r, Width::B8);
+            Some(r)
+        }
+        ALU_OR => {
+            let r = (a | b) & 0xff;
+            flags.logic(r, Width::B8);
+            Some(r)
+        }
+        ALU_XOR => {
+            let r = (a ^ b) & 0xff;
+            flags.logic(r, Width::B8);
+            Some(r)
+        }
+        _ => {
+            flags.logic((a & b) & 0xff, Width::B8);
+            None
+        }
+    }
+}
+
+#[inline(always)]
+fn alu16(flags: &mut super::flags::Flags, aux: u8, a: u32, b: u32) -> Option<u32> {
+    match aux {
+        ALU_ADD => Some(flags.add(a, b, false, Width::B16)),
+        ALU_SUB => Some(flags.sub(a, b, false, Width::B16)),
+        ALU_CMP => {
+            flags.sub(a, b, false, Width::B16);
+            None
+        }
+        ALU_AND => {
+            let r = (a & b) & 0xffff;
+            flags.logic(r, Width::B16);
+            Some(r)
+        }
+        ALU_OR => {
+            let r = (a | b) & 0xffff;
+            flags.logic(r, Width::B16);
+            Some(r)
+        }
+        ALU_XOR => {
+            let r = (a ^ b) & 0xffff;
+            flags.logic(r, Width::B16);
+            Some(r)
+        }
+        _ => {
+            flags.logic((a & b) & 0xffff, Width::B16);
+            None
         }
     }
 }
@@ -987,6 +1268,171 @@ pub fn execute_straight(
             let ea = effective_flat32(cpu, insn);
             super::x87::execute(cpu, mem, x87_ops[insn.imm as usize], ea)
         }
+        FastOp::Mov8RegReg => {
+            let v = read_reg(cpu, insn.src & 7, Width::B8);
+            write_reg(cpu, insn.dst & 7, Width::B8, v);
+            Ok(())
+        }
+        FastOp::Mov8RegImm => {
+            write_reg(cpu, insn.dst & 7, Width::B8, insn.imm);
+            Ok(())
+        }
+        FastOp::Mov8RegMem => {
+            let ea = effective_flat32(cpu, insn);
+            let v = u32::from(mem.read_u8(ea).map_err(Stop::Fault)?);
+            write_reg(cpu, insn.dst & 7, Width::B8, v);
+            Ok(())
+        }
+        FastOp::Mov8MemReg => {
+            let ea = effective_flat32(cpu, insn);
+            let v = read_reg(cpu, insn.src & 7, Width::B8) as u8;
+            mem.write_u8(ea, v).map_err(Stop::Fault)
+        }
+        FastOp::Mov8MemImm => {
+            let ea = effective_flat32(cpu, insn);
+            mem.write_u8(ea, insn.imm as u8).map_err(Stop::Fault)
+        }
+        FastOp::Mov16RegReg => {
+            let v = read_reg(cpu, insn.src & 7, Width::B16);
+            write_reg(cpu, insn.dst & 7, Width::B16, v);
+            Ok(())
+        }
+        FastOp::Mov16RegImm => {
+            write_reg(cpu, insn.dst & 7, Width::B16, insn.imm);
+            Ok(())
+        }
+        FastOp::Mov16RegMem => {
+            let ea = effective_flat32(cpu, insn);
+            let v = u32::from(mem.read_u16(ea).map_err(Stop::Fault)?);
+            write_reg(cpu, insn.dst & 7, Width::B16, v);
+            Ok(())
+        }
+        FastOp::Mov16MemReg => {
+            let ea = effective_flat32(cpu, insn);
+            let v = read_reg(cpu, insn.src & 7, Width::B16) as u16;
+            mem.write_u16(ea, v).map_err(Stop::Fault)
+        }
+        FastOp::Mov16MemImm => {
+            let ea = effective_flat32(cpu, insn);
+            mem.write_u16(ea, insn.imm as u16).map_err(Stop::Fault)
+        }
+        FastOp::Alu8RegImm => {
+            let d = insn.dst & 7;
+            let a = read_reg(cpu, d, Width::B8);
+            if let Some(r) = alu8(&mut cpu.flags, insn.aux, a, insn.imm & 0xff) {
+                write_reg(cpu, d, Width::B8, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu8RegReg => {
+            let d = insn.dst & 7;
+            let a = read_reg(cpu, d, Width::B8);
+            let b = read_reg(cpu, insn.src & 7, Width::B8);
+            if let Some(r) = alu8(&mut cpu.flags, insn.aux, a, b) {
+                write_reg(cpu, d, Width::B8, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu8RegMem => {
+            let d = insn.dst & 7;
+            let ea = effective_flat32(cpu, insn);
+            let b = u32::from(mem.read_u8(ea).map_err(Stop::Fault)?);
+            let a = read_reg(cpu, d, Width::B8);
+            if let Some(r) = alu8(&mut cpu.flags, insn.aux, a, b) {
+                write_reg(cpu, d, Width::B8, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu8MemImm => {
+            let ea = effective_flat32(cpu, insn);
+            let a = u32::from(mem.read_u8(ea).map_err(Stop::Fault)?);
+            if let Some(r) = alu8(&mut cpu.flags, insn.aux, a, insn.imm & 0xff) {
+                mem.write_u8(ea, r as u8).map_err(Stop::Fault)?;
+            }
+            Ok(())
+        }
+        FastOp::Alu8MemReg => {
+            let ea = effective_flat32(cpu, insn);
+            let a = u32::from(mem.read_u8(ea).map_err(Stop::Fault)?);
+            let b = read_reg(cpu, insn.src & 7, Width::B8);
+            if let Some(r) = alu8(&mut cpu.flags, insn.aux, a, b) {
+                mem.write_u8(ea, r as u8).map_err(Stop::Fault)?;
+            }
+            Ok(())
+        }
+        FastOp::Alu16RegImm => {
+            let d = insn.dst & 7;
+            let a = read_reg(cpu, d, Width::B16);
+            if let Some(r) = alu16(&mut cpu.flags, insn.aux, a, insn.imm & 0xffff) {
+                write_reg(cpu, d, Width::B16, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu16RegReg => {
+            let d = insn.dst & 7;
+            let a = read_reg(cpu, d, Width::B16);
+            let b = read_reg(cpu, insn.src & 7, Width::B16);
+            if let Some(r) = alu16(&mut cpu.flags, insn.aux, a, b) {
+                write_reg(cpu, d, Width::B16, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu16RegMem => {
+            let d = insn.dst & 7;
+            let ea = effective_flat32(cpu, insn);
+            let b = u32::from(mem.read_u16(ea).map_err(Stop::Fault)?);
+            let a = read_reg(cpu, d, Width::B16);
+            if let Some(r) = alu16(&mut cpu.flags, insn.aux, a, b) {
+                write_reg(cpu, d, Width::B16, r);
+            }
+            Ok(())
+        }
+        FastOp::Alu16MemImm => {
+            let ea = effective_flat32(cpu, insn);
+            let a = u32::from(mem.read_u16(ea).map_err(Stop::Fault)?);
+            if let Some(r) = alu16(&mut cpu.flags, insn.aux, a, insn.imm & 0xffff) {
+                mem.write_u16(ea, r as u16).map_err(Stop::Fault)?;
+            }
+            Ok(())
+        }
+        FastOp::Alu16MemReg => {
+            let ea = effective_flat32(cpu, insn);
+            let a = u32::from(mem.read_u16(ea).map_err(Stop::Fault)?);
+            let b = read_reg(cpu, insn.src & 7, Width::B16);
+            if let Some(r) = alu16(&mut cpu.flags, insn.aux, a, b) {
+                mem.write_u16(ea, r as u16).map_err(Stop::Fault)?;
+            }
+            Ok(())
+        }
+        FastOp::Imul2Reg => {
+            let d = (insn.dst & 7) as usize;
+            let a = cpu.r[(insn.src & 7) as usize];
+            let b = if insn.aux != 0 { insn.imm } else { cpu.r[d] };
+            let full = i64::from(a as i32).wrapping_mul(i64::from(b as i32));
+            let low = full as u32;
+            let overflowed = i64::from(low as i32) != full;
+            cpu.flags.cf = overflowed;
+            cpu.flags.of = overflowed;
+            cpu.r[d] = low;
+            Ok(())
+        }
+        FastOp::Imul2Mem => {
+            let d = (insn.dst & 7) as usize;
+            let a = read32(mem, effective_flat32(cpu, insn))?;
+            let b = if insn.aux != 0 { insn.imm } else { cpu.r[d] };
+            let full = i64::from(a as i32).wrapping_mul(i64::from(b as i32));
+            let low = full as u32;
+            let overflowed = i64::from(low as i32) != full;
+            cpu.flags.cf = overflowed;
+            cpu.flags.of = overflowed;
+            cpu.r[d] = low;
+            Ok(())
+        }
+        FastOp::SetccReg => {
+            let v = u32::from(condition(insn.aux, cpu));
+            write_reg(cpu, insn.dst & 7, Width::B8, v);
+            Ok(())
+        }
         FastOp::JmpRel
         | FastOp::JccRel
         | FastOp::CallRel
@@ -994,7 +1440,8 @@ pub fn execute_straight(
         | FastOp::JmpReg
         | FastOp::JmpMem
         | FastOp::CallReg
-        | FastOp::CallMem => {
+        | FastOp::CallMem
+        | FastOp::EndRun => {
             debug_assert!(false, "terminal op reached execute_straight");
             Ok(())
         }
