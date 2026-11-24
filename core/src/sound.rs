@@ -232,6 +232,20 @@ impl Pcm {
         u32::from(self.channels) * u32::from(self.bits / 8)
     }
 
+    /// Both sides of one of its frames, read out of a pre-borrowed slice of
+    /// the buffer's bytes.
+    #[inline(always)]
+    fn frame_from(&self, buf: &[u8], n: u64) -> [i16; 2] {
+        let align = self.align() as usize;
+        let off = n as usize * align;
+        let bytes = &buf[off..off + align];
+        let sample = |i: usize| match self.bits {
+            16 => i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]),
+            _ => (i16::from(bytes[i]) - 128) << 8,
+        };
+        [sample(0), sample(usize::from(self.channels > 1))]
+    }
+
     /// Both sides of one of its frames, as guest memory holds it now.
     fn frame(&self, mem: &dyn GuestMem, n: u64) -> Option<[i16; 2]> {
         let align = self.align();
@@ -287,6 +301,7 @@ impl Voice {
 
     /// Where a frame of the mix falls in the sound: its own frame, and the
     /// part of a frame past it, in the mix's frames.
+    #[inline(always)]
     fn along(&self, frame: u64) -> (u64, u64) {
         let along = self.first + frame.saturating_sub(self.start) * self.rate();
         (along / u64::from(RATE), along % u64::from(RATE))
@@ -326,6 +341,92 @@ impl Voice {
         }
     }
 
+    /// Mix `start_frame..start_frame + accum.len()` of this voice into `accum`,
+    /// borrowing a guest PCM slice once for the whole chunk when in bounds and
+    /// skipping the unused `next` read whenever `part == 0`.
+    fn mix_into(&self, start_frame: u64, accum: &mut [[i32; 2]], mem: &dyn GuestMem) {
+        let end_frame = start_frame + accum.len() as u64;
+        let v_start = start_frame.max(self.start);
+        let v_end = self.end.map_or(end_frame, |end| end_frame.min(end));
+        if v_start >= v_end {
+            return;
+        }
+        // Never zero: a voice with nothing to play is never added.
+        let frames = self.frames();
+        let offset = (v_start - start_frame) as usize;
+        let count = (v_end - v_start) as usize;
+        match &self.source {
+            Source::Decoded(samples) => {
+                for (i, dst) in accum[offset..offset + count].iter_mut().enumerate() {
+                    let frame = v_start + i as u64;
+                    let (whole, _) = self.along(frame);
+                    let this = if self.looping {
+                        whole % frames
+                    } else if whole < frames {
+                        whole
+                    } else {
+                        break;
+                    };
+                    let idx = this as usize * 2;
+                    dst[0] += i32::from(samples[idx]);
+                    dst[1] += i32::from(samples[idx + 1]);
+                }
+            }
+            Source::Guest(pcm) => {
+                let valid_bytes = frames as usize * pcm.align() as usize;
+                if let Ok(bytes) = mem.slice(pcm.store, valid_bytes) {
+                    let unit_weight = pcm.left == 1.0 && pcm.right == 1.0;
+                    for (i, dst) in accum[offset..offset + count].iter_mut().enumerate() {
+                        let frame = v_start + i as u64;
+                        let (whole, part) = self.along(frame);
+                        let this = if self.looping {
+                            whole % frames
+                        } else if whole < frames {
+                            whole
+                        } else {
+                            break;
+                        };
+                        let a = pcm.frame_from(bytes, this);
+                        let [l, r] = if part == 0 {
+                            if unit_weight {
+                                a
+                            } else {
+                                let side = |s: i16, weight: f64| {
+                                    (f64::from(s) * weight).round().clamp(-32768.0, 32767.0) as i16
+                                };
+                                [side(a[0], pcm.left), side(a[1], pcm.right)]
+                            }
+                        } else {
+                            let next = if self.looping {
+                                (this + 1) % frames
+                            } else {
+                                (this + 1).min(frames - 1)
+                            };
+                            let b = pcm.frame_from(bytes, next);
+                            let part = part as f64 / f64::from(RATE);
+                            let inv = 1.0 - part;
+                            let side = |c: usize, weight: f64| {
+                                ((f64::from(a[c]) * inv + f64::from(b[c]) * part) * weight)
+                                    .round()
+                                    .clamp(-32768.0, 32767.0) as i16
+                            };
+                            [side(0, pcm.left), side(1, pcm.right)]
+                        };
+                        dst[0] += i32::from(l);
+                        dst[1] += i32::from(r);
+                    }
+                } else {
+                    for (i, dst) in accum[offset..offset + count].iter_mut().enumerate() {
+                        if let Some(s) = self.at(v_start + i as u64, mem) {
+                            dst[0] += i32::from(s[0]);
+                            dst[1] += i32::from(s[1]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether nothing from this frame of the mix on hears it.
     fn over(&self, frame: u64) -> bool {
         self.end.is_some_and(|end| frame >= end)
@@ -346,9 +447,25 @@ pub struct Mixer {
     ready: Vec<Vec<i16>>,
 }
 
+/// Reduced fraction `RATE / 1_000_000_000 = 22_050 / 1_000_000_000 = 441 / 20_000_000`.
+const FRAME_NUM: u64 = 441;
+const FRAME_DEN: u64 = 20_000_000;
+const _: () = assert!(FRAME_NUM * 50 == RATE as u64 && FRAME_DEN * 50 == 1_000_000_000);
+
 /// The mix frame a declared time falls in.
+#[inline]
 #[must_use]
 pub fn frame_at(nanos: u64) -> u64 {
+    if let Some(prod) = nanos.checked_mul(FRAME_NUM) {
+        prod / FRAME_DEN
+    } else {
+        frame_at_wide(nanos)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn frame_at_wide(nanos: u64) -> u64 {
     u64::try_from(u128::from(nanos) * u128::from(RATE) / 1_000_000_000).unwrap_or(u64::MAX)
 }
 
@@ -449,10 +566,64 @@ impl Mixer {
         }
     }
 
+    /// The mix frame index that will be mixed next.
+    #[inline(always)]
+    #[must_use]
+    pub fn next_frame(&self) -> u64 {
+        self.blocks * BLOCK_FRAMES as u64 + (self.block.len() / 2) as u64
+    }
+
     /// Every block whose last frame the declared clock has passed.
     pub fn due(&mut self, nanos: u64, mem: &dyn GuestMem) -> Vec<Vec<i16>> {
         self.catch_up(nanos, mem);
         std::mem::take(&mut self.ready)
+    }
+
+    /// Bulk zero-fill `remaining` frames when neither voices nor a synth can
+    /// contribute to the mix.
+    fn fill_silence(&mut self, mut remaining: u64) {
+        let block = BLOCK_FRAMES as u64;
+        let in_block = (self.block.len() / 2) as u64;
+        let space = block - in_block;
+        if remaining < space {
+            self.block
+                .resize(self.block.len() + remaining as usize * 2, 0);
+            return;
+        }
+        self.block.resize(BLOCK_FRAMES * 2, 0);
+        let whole = std::mem::replace(&mut self.block, Vec::with_capacity(BLOCK_FRAMES * 2));
+        self.ready.push(whole);
+        self.blocks += 1;
+        remaining -= space;
+
+        let full_blocks = remaining / block;
+        for _ in 0..full_blocks {
+            self.ready.push(vec![0i16; BLOCK_FRAMES * 2]);
+        }
+        self.blocks += full_blocks;
+        remaining %= block;
+
+        if remaining > 0 {
+            self.block.resize(remaining as usize * 2, 0);
+        }
+    }
+
+    fn mix_chunk(&mut self, start_frame: u64, accum: &mut [[i32; 2]], mem: &dyn GuestMem) {
+        for voice in &self.voices {
+            voice.mix_into(start_frame, accum, mem);
+        }
+        if let Some(synth) = &mut self.synth {
+            for (i, dst) in accum.iter_mut().enumerate() {
+                let [left, right] = synth.frame(start_frame + i as u64);
+                dst[0] = dst[0].saturating_add(left);
+                dst[1] = dst[1].saturating_add(right);
+            }
+        }
+        self.block.reserve(accum.len() * 2);
+        for &[l, r] in accum.iter() {
+            self.block.push(l.clamp(-32768, 32767) as i16);
+            self.block.push(r.clamp(-32768, 32767) as i16);
+        }
     }
 
     /// Mix every frame the declared clock has passed. A title about to write
@@ -463,21 +634,32 @@ impl Mixer {
         let now = frame_at(nanos);
         let block = BLOCK_FRAMES as u64;
         loop {
-            let frame = self.blocks * block + (self.block.len() / 2) as u64;
+            let frame = self.next_frame();
             if frame >= now {
                 break;
             }
-            let mut pair = [0i32; 2];
-            for s in self.voices.iter().filter_map(|v| v.at(frame, mem)) {
-                pair[0] += i32::from(s[0]);
-                pair[1] += i32::from(s[1]);
+            if self.voices.is_empty() && self.synth.is_none() {
+                self.fill_silence(now - frame);
+                break;
             }
-            if let Some(synth) = &mut self.synth {
-                let [left, right] = synth.frame(frame);
-                pair = [pair[0].saturating_add(left), pair[1].saturating_add(right)];
+            let target = now.min((self.blocks + 1) * block);
+            let count = (target - frame) as usize;
+            if self.voices.is_empty() {
+                if let Some(synth) = &mut self.synth {
+                    self.block.reserve(count * 2);
+                    for f in frame..target {
+                        let [left, right] = synth.frame(f);
+                        self.block.push(left.clamp(-32768, 32767) as i16);
+                        self.block.push(right.clamp(-32768, 32767) as i16);
+                    }
+                }
+            } else if count <= 64 {
+                let mut accum = [[0i32; 2]; 64];
+                self.mix_chunk(frame, &mut accum[..count], mem);
+            } else {
+                let mut accum = [[0i32; 2]; BLOCK_FRAMES];
+                self.mix_chunk(frame, &mut accum[..count], mem);
             }
-            self.block
-                .extend(pair.map(|s| s.clamp(-32768, 32767) as i16));
             if self.block.len() == BLOCK_FRAMES * 2 {
                 let whole =
                     std::mem::replace(&mut self.block, Vec::with_capacity(BLOCK_FRAMES * 2));
@@ -712,5 +894,160 @@ mod tests {
             .iter()
             .flatten()
             .all(|s| *s == 0));
+    }
+
+    fn ref_frame_at(nanos: u64) -> u64 {
+        u64::try_from(u128::from(nanos) * u128::from(RATE) / 1_000_000_000).unwrap_or(u64::MAX)
+    }
+
+    #[test]
+    fn frame_at_matches_u128_reference_across_sweeps_and_overflow() {
+        let mut samples: Vec<u64> = (0..=256).collect();
+        let mut ns = 1u64;
+        while ns <= 100_000_000_000_000 {
+            samples.push(ns.saturating_sub(1));
+            samples.push(ns);
+            samples.push(ns.saturating_add(1));
+            ns = ns.saturating_mul(7).saturating_add(19);
+        }
+        for frame in [1u64, 2, 10, 441, 1024, 22_050, 1_000_000, 13_348_000] {
+            let boundary = (frame * 20_000_000).div_ceil(441);
+            samples.push(boundary - 1);
+            samples.push(boundary);
+            samples.push(boundary + 1);
+        }
+        let mul_edge = u64::MAX / super::FRAME_NUM;
+        for delta in -5i64..=5 {
+            samples.push(mul_edge.saturating_add_signed(delta));
+        }
+        for edge in [u64::MAX - 5, u64::MAX - 1, u64::MAX] {
+            samples.push(edge);
+        }
+        for nanos in samples {
+            assert_eq!(frame_at(nanos), ref_frame_at(nanos), "nanos={nanos}");
+        }
+    }
+
+    #[test]
+    fn catch_up_silence_bulk_fill_matches_frame_by_frame() {
+        let mem = guest(&[]);
+        let mut mixer = Mixer::default();
+        // Partial block, then finish that block plus 2 full blocks plus a tail.
+        let t1 = BLOCK_NANOS / 3;
+        assert!(mixer.due(t1, &mem).is_empty());
+        assert_eq!(mixer.next_frame(), frame_at(t1));
+
+        let t2 = 3 * BLOCK_NANOS + BLOCK_NANOS / 2;
+        let blocks = mixer.due(t2, &mem);
+        let expected_blocks = (frame_at(t2) / BLOCK_FRAMES as u64) as usize;
+        assert_eq!(blocks.len(), expected_blocks);
+        for b in &blocks {
+            assert_eq!(b.len(), BLOCK_FRAMES * 2);
+            assert!(b.iter().all(|&s| s == 0));
+        }
+        assert_eq!(mixer.next_frame(), frame_at(t2));
+
+        // Transition from an active voice ending mid-catch_up into silence.
+        let mut mixed = Mixer::default();
+        mixed.play(1, vec![42; BLOCK_FRAMES], 0);
+        let all = mixed.due(4 * BLOCK_NANOS, &mem);
+        assert_eq!(
+            all.len(),
+            (frame_at(4 * BLOCK_NANOS) / BLOCK_FRAMES as u64) as usize
+        );
+        assert!(all[0][..BLOCK_FRAMES].iter().all(|&s| s == 42));
+        assert!(all[0][BLOCK_FRAMES..].iter().all(|&s| s == 0));
+        for b in &all[1..] {
+            assert!(b.iter().all(|&s| s == 0));
+        }
+    }
+
+    #[test]
+    fn catch_up_guest_pcm_matches_voice_at_reference_across_formats_and_fault_fallback() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 20).expect("an arena");
+        // 16-bit stereo ramp at 0x1000.
+        let stereo16: Vec<u8> = (0..256i16)
+            .flat_map(|i| [i * 100, -i * 80])
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        mem.write(0x1000, &stereo16).expect("stereo16");
+        // 8-bit mono ramp at 0x4000.
+        let mono8: Vec<u8> = (0..128u8).collect();
+        mem.write(0x4000, &mono8).expect("mono8");
+        // Out-of-bounds tail at arena end for fallback test.
+        let end = mem.len() as u32;
+        let tail_base = end - 16;
+        let tail_samples: Vec<u8> = [100i16, -100, 200, -200, 300, -300, 400, -400]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        mem.write(tail_base, &tail_samples).expect("tail");
+
+        let fmt8_mono = Format {
+            tag: 1,
+            channels: 1,
+            rate: RATE,
+            block_align: 1,
+            bits: 8,
+            coefficients: Vec::new(),
+        };
+        let mut mixer = Mixer::default();
+        // Voice 1: 16-bit stereo at RATE (part == 0, unit weight), looping.
+        mixer.play_buffer(
+            1,
+            Pcm::new(0x1000, stereo16.len() as u32, &pcm(2), RATE, (1.0, 1.0)).expect("pcm"),
+            3,
+            0,
+            true,
+        );
+        // Voice 2: 16-bit stereo at RATE/3 (fractional part + non-unit weights), non-looping.
+        mixer.play_buffer(
+            2,
+            Pcm::new(
+                0x1000,
+                stereo16.len() as u32,
+                &pcm(2),
+                RATE / 3,
+                (0.75, 0.25),
+            )
+            .expect("pcm"),
+            0,
+            BLOCK_NANOS / 10,
+            false,
+        );
+        // Voice 3: 8-bit mono at RATE (part == 0, non-unit weights).
+        mixer.play_buffer(
+            3,
+            Pcm::new(0x4000, mono8.len() as u32, &fmt8_mono, RATE, (0.5, 1.0)).expect("pcm"),
+            0,
+            0,
+            true,
+        );
+        // Voice 4: buffer whose declared byte length extends past arena end (exercises fallback).
+        mixer.play_buffer(
+            4,
+            Pcm::new(tail_base, 64, &pcm(2), RATE, (1.0, 1.0)).expect("pcm"),
+            0,
+            0,
+            false,
+        );
+
+        let end_nanos = 2 * BLOCK_NANOS + 1_000_000;
+        let target = frame_at(end_nanos);
+        let mut expected = Vec::with_capacity(target as usize * 2);
+        for frame in 0..target {
+            let mut pair = [0i32; 2];
+            for s in mixer.voices.iter().filter_map(|v| v.at(frame, &mem)) {
+                pair[0] += i32::from(s[0]);
+                pair[1] += i32::from(s[1]);
+            }
+            expected.push(pair[0].clamp(-32768, 32767) as i16);
+            expected.push(pair[1].clamp(-32768, 32767) as i16);
+        }
+
+        let actual: Vec<i16> = mixer.due(end_nanos, &mem).into_iter().flatten().collect();
+        let whole_samples = (target as usize / BLOCK_FRAMES) * BLOCK_FRAMES * 2;
+        assert_eq!(actual, expected[..whole_samples]);
+        assert_eq!(mixer.block, expected[whole_samples..]);
     }
 }

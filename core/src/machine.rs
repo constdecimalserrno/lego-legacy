@@ -150,10 +150,9 @@ pub struct Machine {
     /// Which parked calls answer for themselves, by their depth (#60).
     pass_through: Vec<usize>,
     /// What each boundary slot was found to stand for the first time it was
-    /// called, by the slot, and whether it is an input poll (#215): looking a
-    /// shim or a method up by its name on every call is most of what a call
-    /// costs.
-    bound: Vec<Option<(Bound, bool)>>,
+    /// called, by the slot, with precomputed flags and COM `(interface, slot)`
+    /// embedded so hot crossings avoid secondary boundary and table lookups.
+    bound: Vec<Bound>,
     /// Which parked calls are a render pass's turns, by their depth, with
     /// where the stack stood before the pass's first call: the title's
     /// callbacks leave their arguments for the caller to take.
@@ -182,6 +181,11 @@ pub struct Machine {
     ask_at: u64,
     /// How many of the route's events have been delivered (#215).
     delivered: usize,
+    /// Point `(flip, poll)` of the next undelivered route event, `(0, 0)`
+    /// before initial seeding, or `(u64::MAX, u64::MAX)` once none remain.
+    next_route_at: (u64, u64),
+    /// Earliest declared cycle at which the audio mixer has another frame due.
+    next_mix_cycle: u64,
     /// The guest's recent clock reads, from which a clock spin is passed (#217).
     spins: crate::spin::Spins,
 }
@@ -246,6 +250,8 @@ impl Machine {
             polls: 0,
             ask_at: 0,
             delivered: 0,
+            next_route_at: (0, 0),
+            next_mix_cycle: 0,
             spins: crate::spin::Spins::default(),
         })
     }
@@ -368,12 +374,22 @@ impl Machine {
     // ponytail: from the first flip on. A poll before it is neither counted
     // nor handed anything, so a title that waited on a key before its first
     // frame would wait for ever; none of the five with a crate does.
+    #[inline(always)]
     fn poll(&mut self, host: &mut dyn Host, log: &mut RunLog) {
         let Some(flip) = self.flips.checked_sub(1) else {
             return;
         };
         self.polls += 1;
         let at = (flip, self.polls);
+        if self.clock.cycles() < self.ask_at && at < self.next_route_at {
+            return;
+        }
+        self.poll_slow(at, host, log);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn poll_slow(&mut self, at: (u64, u64), host: &mut dyn Host, log: &mut RunLog) {
         let ask = self.clock.cycles() >= self.ask_at;
         if ask {
             self.ask_again();
@@ -394,6 +410,18 @@ impl Machine {
         }
         let events = self.input_at(at, ask, host);
         self.deliver(at, events, log);
+    }
+
+    /// Point of the next undelivered route event, or `(u64::MAX, u64::MAX)` if
+    /// no route event remains.
+    fn peek_next_route_at(&self) -> (u64, u64) {
+        match &self.route {
+            Some(route) if self.delivered < route.len() => route
+                .due(self.delivered, (u64::MAX, u64::MAX))
+                .first()
+                .map_or((u64::MAX, u64::MAX), |(at, _)| *at),
+            _ => (u64::MAX, u64::MAX),
+        }
     }
 
     /// The host is next asked between flips once the frame has stood
@@ -424,6 +452,7 @@ impl Machine {
         } else {
             Vec::new()
         };
+        let prev_delivered = self.delivered;
         let mut events = match &self.route {
             Some(route) if self.delivered < route.len() => {
                 let due = route.due(self.delivered, at);
@@ -432,6 +461,9 @@ impl Machine {
             }
             _ => heard,
         };
+        if self.delivered != prev_delivered || self.next_route_at == (0, 0) {
+            self.next_route_at = self.peek_next_route_at();
+        }
         // The person's close is theirs whether or not a route is replaying,
         // and is delivered once, when the host is asked, as everything a
         // person does is, so a route that records it closes where they did
@@ -514,56 +546,66 @@ impl Machine {
         if self.stopped(host) {
             return Some(Outcome::Closed);
         }
+        if self.boundary.holds(self.cpu.eip) {
+            return self.cross_outcome(host, log);
+        }
+        self.trace_insn(log);
+        self.tick_guest(host, log)
+    }
+
+    /// Execute one boundary crossing and map its stop reason to an optional
+    /// run outcome.
+    #[inline(always)]
+    fn cross_outcome(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
         // A call that lands on the boundary is a call into something Microsoft
         // wrote. Either it is implemented here, or the run stops and names
         // what was asked for, who asked, and where.
-        //
-        // A crossing costs about thirty nanoseconds of machinery (#74). At
-        // Alpha Team's menu the guest crosses 3,951 times a flip for 6.9 ms in
-        // all, and 6.6 ms of that is one method rasterising,
-        // `IDirect3DDevice7::DrawIndexedPrimitiveVB`. The menu's 3,182
-        // `EnterCriticalSection` and `LeaveCriticalSection` calls a flip come
-        // to 0.10 ms against a 36 ms frame. The crossing is not where a flip's
-        // time goes.
-        if self.boundary.holds(self.cpu.eip) {
-            return match self.cross(host, log) {
-                Ok(()) => None,
-                Err(Stop::Exited { code }) => Some(Outcome::Exited { code }),
-                // A thread ending is not the run ending: the machine leaves it
-                // where it is and runs somebody else (ADR-0005).
-                Err(Stop::ThreadEnded) => {
-                    self.switch_thread(log);
-                    None
-                }
-                // A time-critical thread waits only at its own turn. Inside
-                // a callback the machine runs on it, the title's threads
-                // would run in the middle of the callback, and the calls the
-                // machine has parked are one stack for every thread (#154).
-                // ponytail: a wall; a title whose MIDI callback waits wants
-                // each thread's parked calls kept apart.
-                Err(Stop::Blocked)
-                    if self.state.threads[self.state.thread].time_critical
-                        && self.boundary.at(self.cpu.eip)
-                            != Some(&crate::shim::Entry::MidiPlayer) =>
-                {
-                    Some(Outcome::Wall {
-                        what: "a callback WINMM's MIDI player made waits for another thread"
-                            .to_owned(),
-                    })
-                }
-                // Waiting for another thread: the machine leaves the call
-                // where it is, and this thread makes it again when it comes
-                // back round (ADR-0005).
-                Err(Stop::Blocked) => {
-                    self.switch_thread(log);
-                    None
-                }
-                Err(stop) => Some(Outcome::Wall {
-                    what: stop.to_string(),
-                }),
-            };
+        match self.cross(host, log) {
+            Ok(()) => None,
+            Err(stop) => self.cross_err(stop, log),
         }
-        self.trace_insn(log);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn cross_err(&mut self, stop: Stop, log: &mut RunLog) -> Option<Outcome> {
+        match stop {
+            Stop::Exited { code } => Some(Outcome::Exited { code }),
+            // A thread ending is not the run ending: the machine leaves it
+            // where it is and runs somebody else (ADR-0005).
+            Stop::ThreadEnded => {
+                self.switch_thread(log);
+                None
+            }
+            // A time-critical thread waits only at its own turn. Inside
+            // a callback the machine runs on it, the title's threads
+            // would run in the middle of the callback, and the calls the
+            // machine has parked are one stack for every thread (#154).
+            // ponytail: a wall; a title whose MIDI callback waits wants
+            // each thread's parked calls kept apart.
+            Stop::Blocked
+                if self.state.threads[self.state.thread].time_critical
+                    && self.boundary.at(self.cpu.eip) != Some(&crate::shim::Entry::MidiPlayer) =>
+            {
+                Some(Outcome::Wall {
+                    what: "a callback WINMM's MIDI player made waits for another thread".to_owned(),
+                })
+            }
+            // Waiting for another thread: the machine leaves the call
+            // where it is, and this thread makes it again when it comes
+            // back round (ADR-0005).
+            Stop::Blocked => {
+                self.switch_thread(log);
+                None
+            }
+            other => Some(Outcome::Wall {
+                what: other.to_string(),
+            }),
+        }
+    }
+
+    /// Present any pending guest frame and retire one guest instruction.
+    fn tick_guest(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Option<Outcome> {
         // A frame the guest finished is presented before the next instruction
         // runs, so what the host shows is what the guest had when it flipped.
         if let Some(frame) = self.state.present.take() {
@@ -678,7 +720,7 @@ impl Machine {
                 break outcome;
             }
         };
-        self.mix(host);
+        self.mix_slow(host);
         let finish = self.finish(outcome);
         log.line(&format!(
             "regs {}",
@@ -721,15 +763,25 @@ impl Machine {
         budget: u64,
         one: bool,
     ) -> Option<Outcome> {
-        self.spins.allow(budget, !one && log.trace() < Trace::Shims);
+        let trace = log.trace();
+        self.spins.allow(budget, !one && trace < Trace::Shims);
+        if self.next_route_at == (0, 0) && self.flips > 0 {
+            self.next_route_at = self.peek_next_route_at();
+        }
+        let fast = !one && trace < Trace::Insns && !self.stub;
         let mut moved = false;
         loop {
+            if fast && matches!(self.turn, Turn::Top) {
+                return Some(self.step_fast(host, log, budget));
+            }
             match self.turn {
                 Turn::Top => {
                     if self.clock.cursor() >= budget {
                         return Some(Outcome::BudgetExhausted);
                     }
-                    self.snapshot_if_due(log);
+                    if self.next_snapshot.is_some() {
+                        self.snapshot_if_due(log);
+                    }
                     // A thread that gave its turn away runs none of the rest
                     // of it: the switch after this is where the next one takes
                     // over (#115). A frame the guest finished is presented
@@ -755,7 +807,7 @@ impl Machine {
                     if one && moved {
                         return None;
                     }
-                    let count = if one || log.trace() >= Trace::Insns {
+                    let count = if one || trace >= Trace::Insns {
                         1
                     } else {
                         end - self.clock.cursor()
@@ -766,12 +818,14 @@ impl Machine {
                     moved = true;
                 }
                 Turn::Burst(_) => {
-                    if let Some(what) = self.deadlocked() {
-                        return Some(Outcome::Wall { what });
+                    if self.state.threads.len() >= 2 {
+                        if let Some(what) = self.deadlocked() {
+                            return Some(Outcome::Wall { what });
+                        }
+                        // A burst is the declared quantum: whoever ran it hands
+                        // over to whoever is next (ADR-0005).
+                        self.switch_thread(log);
                     }
-                    // A burst is the declared quantum: whoever ran it hands
-                    // over to whoever is next (ADR-0005).
-                    self.switch_thread(log);
                     // The mix reaches the host between flips as well as at
                     // them: a title that goes a long way without flipping —
                     // loading a level, or thinking hard about one — would
@@ -793,6 +847,86 @@ impl Machine {
                     }
                     moved = true;
                 }
+            }
+        }
+    }
+
+    /// Fused burst→crossing loop for normal (non-stepped, non-insn-traced,
+    /// non-stub) execution: keeps the exact same schedule, thread switches,
+    /// mixing, and `self.turn` exit state while dropping per-turn state
+    /// dispatch, redundant `stopped(host)` checks, and `trace_insn` checks.
+    fn step_fast(&mut self, host: &mut dyn Host, log: &mut RunLog, budget: u64) -> Outcome {
+        loop {
+            let now = self.clock.cursor();
+            if now >= budget {
+                self.turn = Turn::Top;
+                return Outcome::BudgetExhausted;
+            }
+            if self.next_snapshot.is_some() {
+                self.snapshot_if_due(log);
+            }
+            let skip = std::mem::take(&mut self.state.yielded) || self.state.present.is_some();
+            let end = if skip { now } else { budget.min(now + BURST) };
+            while self.clock.cursor() < end && !Boundary::in_range(self.cpu.eip) {
+                let count = end - self.clock.cursor();
+                self.cpu.tsc = self.clock.cycles();
+                let (retired, result) =
+                    self.engine
+                        .run(&mut self.cpu, &mut self.arena, count, Boundary::RANGE);
+                self.clock.retire_many(retired);
+                match result {
+                    Ok(()) => {
+                        self.spins
+                            .pass(&mut self.cpu, &mut self.clock, &self.arena, &self.state);
+                    }
+                    Err(Stop::Interrupt(n)) => {
+                        self.turn = Turn::Burst(end);
+                        return Outcome::Wall {
+                            what: format!("int {n:#04x}"),
+                        };
+                    }
+                    Err(Stop::Fault(fault)) if fault.addr < DOS_MEMORY => {
+                        if let Some(outcome) = self.access_violation(fault, log) {
+                            self.turn = Turn::Burst(end);
+                            return outcome;
+                        }
+                    }
+                    Err(stop) => {
+                        self.turn = Turn::Burst(end);
+                        return Outcome::Wall {
+                            what: stop.to_string(),
+                        };
+                    }
+                }
+            }
+            if self.stopped(host) {
+                self.turn = Turn::Burst(end);
+                return Outcome::Closed;
+            }
+            if self.state.threads.len() >= 2 {
+                if let Some(what) = self.deadlocked() {
+                    self.turn = Turn::Burst(end);
+                    return Outcome::Wall { what };
+                }
+                self.switch_thread(log);
+                if self.close_by.is_some_and(|by| self.clock.millis() >= by) {
+                    self.turn = Turn::Switched;
+                    return Outcome::Closed;
+                }
+            }
+            self.mix(host);
+            if self.clock.cursor() >= budget {
+                self.turn = Turn::Switched;
+                return Outcome::BudgetExhausted;
+            }
+            self.turn = Turn::Top;
+            let outcome = if self.boundary.holds(self.cpu.eip) {
+                self.cross_outcome(host, log)
+            } else {
+                self.tick_guest(host, log)
+            };
+            if let Some(outcome) = outcome {
+                return outcome;
             }
         }
     }
@@ -843,12 +977,29 @@ pub(crate) fn runnable_at(thread: &crate::win32::GuestThread, now: u64) -> bool 
     !thread.ended && !thread.suspended && thread.wake_at <= now
 }
 
+/// Boundary slot flag: this call reads user input (#215).
+const BOUND_POLL: u8 = 1 << 0;
+/// Boundary slot flag: this shim reads the declared clock (`spin::CLOCK_READS`).
+const BOUND_CLOCK_READ: u8 = 1 << 1;
+
 /// What a boundary slot stands for, once it has been called: the shim or the
-/// COM method behind it, or nothing written.
+/// COM method behind it, a special machine entry, or nothing resolved yet.
 #[derive(Clone, Copy)]
 enum Bound {
-    Shim(Option<&'static win32::Shim>),
-    Method(Option<&'static crate::com::Method>),
+    Unresolved,
+    Return,
+    ThreadEnd,
+    MidiPlayer,
+    Shim {
+        shim: Option<&'static win32::Shim>,
+        flags: u8,
+    },
+    Method {
+        interface: &'static str,
+        slot: usize,
+        method: Option<&'static crate::com::Method>,
+        flags: u8,
+    },
 }
 
 /// The calls that read what a person did: the keyboard, the mouse or the
@@ -871,13 +1022,13 @@ const POLLS: &[&str] = &[
     "GetDeviceData",
 ];
 
-/// Whether what a slot stands for is an input poll (#215).
-fn is_poll(bound: Bound) -> bool {
-    match bound {
-        Bound::Shim(Some(shim)) => POLLS.contains(&shim.name),
-        Bound::Method(Some(method)) => POLLS.contains(&method.name),
-        _ => false,
-    }
+/// Whether a shim is one of the clock reads tracked by `crate::spin::Spins`.
+fn is_clock_read(shim: &win32::Shim) -> bool {
+    matches!(
+        (shim.dll, shim.name),
+        ("KERNEL32", "QueryPerformanceCounter" | "GetTickCount")
+            | ("WINMM", "timeGetTime" | "timeGetSystemTime")
+    )
 }
 
 /// Where the guest's stack lives, and how much of it there is.
@@ -1071,28 +1222,9 @@ fn listed(args: &[u32]) -> String {
 /// Covers every Win32 and COM call on the roster (the widest is 14).
 const INLINE_STACK_ARGS: usize = 16;
 
-/// Arguments read off the guest stack for one boundary crossing.
-enum StackArgs {
-    Inline {
-        buf: [u32; INLINE_STACK_ARGS],
-        len: usize,
-    },
-    Heap(Vec<u32>),
-}
-
-impl std::ops::Deref for StackArgs {
-    type Target = [u32];
-
-    fn deref(&self) -> &[u32] {
-        match self {
-            Self::Inline { buf, len } => &buf[..*len],
-            Self::Heap(v) => v,
-        }
-    }
-}
-
 impl Machine {
     /// What a shim or a method is handed: the machine, for the one call.
+    #[inline(always)]
     fn ctx<'a>(&'a mut self, log: &'a mut RunLog) -> Ctx<'a> {
         Ctx {
             cpu: &mut self.cpu,
@@ -1110,29 +1242,165 @@ impl Machine {
         }
     }
 
-    /// A call's four-byte arguments, from where on the stack they start.
-    fn stack_args(&self, from: u32, count: u32) -> Result<StackArgs, Stop> {
+    /// A call's four-byte arguments, read into caller-owned `buf` via a single
+    /// bulk `arena.slice` check (falling back per-slot on fault to preserve the
+    /// exact faulting address and order), or into `heap` when `count > 16`.
+    #[inline(always)]
+    fn stack_args<'a>(
+        &self,
+        from: u32,
+        count: u32,
+        buf: &'a mut [u32; INLINE_STACK_ARGS],
+        heap: &'a mut Vec<u32>,
+    ) -> Result<&'a [u32], Stop> {
         let len = count as usize;
-        if len <= INLINE_STACK_ARGS {
-            let mut buf = [0u32; INLINE_STACK_ARGS];
-            for (i, slot) in buf[..len].iter_mut().enumerate() {
-                *slot = self
-                    .arena
-                    .read_u32(from.wrapping_add((i as u32) * 4))
-                    .map_err(Stop::Fault)?;
-            }
-            Ok(StackArgs::Inline { buf, len })
-        } else {
-            let mut args = Vec::with_capacity(len);
-            for i in 0..count {
-                args.push(
-                    self.arena
-                        .read_u32(from.wrapping_add(i.wrapping_mul(4)))
-                        .map_err(Stop::Fault)?,
-                );
-            }
-            Ok(StackArgs::Heap(args))
+        if len == 0 {
+            return Ok(&[]);
         }
+        if len <= INLINE_STACK_ARGS {
+            if let Ok(bytes) = self.arena.slice(from, len * 4) {
+                for (slot, chunk) in buf[..len].iter_mut().zip(bytes.as_chunks::<4>().0) {
+                    *slot = u32::from_le_bytes(*chunk);
+                }
+                return Ok(&buf[..len]);
+            }
+            return self.stack_args_slow(from, len, buf);
+        }
+        self.stack_args_heap(from, count, heap)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn stack_args_slow<'a>(
+        &self,
+        from: u32,
+        len: usize,
+        buf: &'a mut [u32; INLINE_STACK_ARGS],
+    ) -> Result<&'a [u32], Stop> {
+        for (i, slot) in buf[..len].iter_mut().enumerate() {
+            *slot = self
+                .arena
+                .read_u32(from.wrapping_add((i as u32) * 4))
+                .map_err(Stop::Fault)?;
+        }
+        Ok(&buf[..len])
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn stack_args_heap<'a>(
+        &self,
+        from: u32,
+        count: u32,
+        heap: &'a mut Vec<u32>,
+    ) -> Result<&'a [u32], Stop> {
+        heap.clear();
+        heap.reserve(count as usize);
+        for i in 0..count {
+            heap.push(
+                self.arena
+                    .read_u32(from.wrapping_add(i.wrapping_mul(4)))
+                    .map_err(Stop::Fault)?,
+            );
+        }
+        Ok(heap.as_slice())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_bound(&mut self, addr: u32, index: usize) -> Result<Bound, Stop> {
+        use crate::shim::Entry;
+        let bound = match self.boundary.at(addr) {
+            Some(Entry::Return) => Bound::Return,
+            Some(Entry::ThreadEnd) => Bound::ThreadEnd,
+            Some(Entry::MidiPlayer) => Bound::MidiPlayer,
+            // The exception walk ran out of handlers (#54).
+            Some(Entry::Unhandled { what }) => {
+                return Err(Stop::NotWritten {
+                    what: format!("{what}: nothing on the guest's own handler chain took it"),
+                    caller: self.cpu.eip,
+                })
+            }
+            // The loader's own program jumped here, which a module
+            // only makes it do by refusing to attach (#55).
+            Some(Entry::Attach { module }) => {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "{module} did not attach: its DllMain answered zero, and a \
+                         module that says it is not there is not called into"
+                    ),
+                    caller: self.cpu.eip,
+                })
+            }
+            Some(Entry::Method { interface, slot }) => {
+                let method = win32::com_method(interface, *slot);
+                let flags = if method.is_some_and(|m| POLLS.contains(&m.name)) {
+                    BOUND_POLL
+                } else {
+                    0
+                };
+                Bound::Method {
+                    interface,
+                    slot: *slot,
+                    method,
+                    flags,
+                }
+            }
+            Some(Entry::Import(import)) => {
+                let shim = win32::find(&import.dll, &import.name);
+                let mut flags = 0;
+                if let Some(s) = shim {
+                    if POLLS.contains(&s.name) {
+                        flags |= BOUND_POLL;
+                    }
+                    if is_clock_read(s) {
+                        flags |= BOUND_CLOCK_READ;
+                    }
+                }
+                Bound::Shim { shim, flags }
+            }
+            None => {
+                return Err(Stop::Undecoded {
+                    eip: addr,
+                    byte: 0,
+                    group: None,
+                    why: "an address inside the boundary that no import was bound to",
+                })
+            }
+        };
+        if self.bound.len() <= index {
+            self.bound.resize(index + 1, Bound::Unresolved);
+        }
+        self.bound[index] = bound;
+        Ok(bound)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trace_shim_call(&self, addr: u32, caller: u32, args: &[u32], log: &mut RunLog) {
+        let what = match self.boundary.at(addr) {
+            Some(crate::shim::Entry::Import(import)) => format!("{}!{}", import.dll, import.name),
+            _ => String::new(),
+        };
+        log.line(&format!(
+            "call {what}({}) from {caller:#010x} cursor {}",
+            listed(args),
+            self.clock.cursor()
+        ));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn missing_shim(&self, addr: u32, caller: u32, log: &mut RunLog) -> Stop {
+        let what = match self.boundary.at(addr) {
+            Some(crate::shim::Entry::Import(import)) => format!("{}!{}", import.dll, import.name),
+            _ => String::new(),
+        };
+        let cursor = self.clock.cursor();
+        log.at(Trace::Shims, || {
+            format!("wall {what} from {caller:#010x} cursor {cursor}")
+        });
+        Stop::NotWritten { what, caller }
     }
 
     /// Answer a call the guest made across the boundary.
@@ -1141,113 +1409,61 @@ impl Machine {
     /// answer goes back in `eax`, and the stack is left as the real library
     /// would have left it.
     fn cross(&mut self, host: &mut dyn Host, log: &mut RunLog) -> Result<(), Stop> {
-        use crate::shim::{Entry, THUNK_BASE, THUNK_STRIDE};
+        use crate::shim::{THUNK_BASE, THUNK_STRIDE};
         self.spins.crossed(&mut self.arena);
         let addr = self.cpu.eip;
         let index = (addr.wrapping_sub(THUNK_BASE) / THUNK_STRIDE) as usize;
-        let (bound, poll) = match self.bound.get(index).copied().flatten() {
+        let bound = match self.bound.get(index).copied() {
+            Some(Bound::Unresolved) | None => self.resolve_bound(addr, index)?,
             Some(bound) => bound,
-            None => {
-                let bound = match self.boundary.at(addr) {
-                    Some(Entry::Return) => return self.guest_returned(log),
-                    // A thread's own function returned (ADR-0005). Its exit
-                    // code is what it answered with.
-                    Some(Entry::ThreadEnd) => {
-                        win32::kernel32::end_thread(&mut self.state, self.cpu.r[EAX]);
-                        return Err(Stop::ThreadEnded);
-                    }
-                    Some(Entry::MidiPlayer) => return self.midi_player(log),
-                    // The exception walk ran out of handlers (#54).
-                    Some(Entry::Unhandled { what }) => {
-                        return Err(Stop::NotWritten {
-                            what: format!(
-                                "{what}: nothing on the guest's own handler chain took it"
-                            ),
-                            caller: self.cpu.eip,
-                        })
-                    }
-                    // The loader's own program jumped here, which a module
-                    // only makes it do by refusing to attach (#55).
-                    Some(Entry::Attach { module }) => {
-                        return Err(Stop::NotWritten {
-                            what: format!(
-                                "{module} did not attach: its DllMain answered zero, and a \
-                                 module that says it is not there is not called into"
-                            ),
-                            caller: self.cpu.eip,
-                        })
-                    }
-                    Some(Entry::Method { interface, slot }) => {
-                        Bound::Method(win32::com_method(interface, *slot))
-                    }
-                    Some(Entry::Import(import)) => {
-                        Bound::Shim(win32::find(&import.dll, &import.name))
-                    }
-                    None => {
-                        return Err(Stop::Undecoded {
-                            eip: addr,
-                            byte: 0,
-                            group: None,
-                            why: "an address inside the boundary that no import was bound to",
-                        })
-                    }
-                };
-                let bound = (bound, is_poll(bound));
-                if self.bound.len() <= index {
-                    self.bound.resize(index + 1, None);
-                }
-                self.bound[index] = Some(bound);
-                bound
+        };
+        let (found, flags) = match bound {
+            Bound::Return => return self.guest_returned(log),
+            // A thread's own function returned (ADR-0005). Its exit code is
+            // what it answered with.
+            Bound::ThreadEnd => {
+                win32::kernel32::end_thread(&mut self.state, self.cpu.r[EAX]);
+                return Err(Stop::ThreadEnded);
             }
+            Bound::MidiPlayer => return self.midi_player(log),
+            Bound::Method {
+                interface,
+                slot,
+                method,
+                flags,
+            } => {
+                if flags & BOUND_POLL != 0 {
+                    self.poll(host, log);
+                }
+                return self.cross_com(interface, slot, method, log);
+            }
+            Bound::Shim { shim, flags } => (shim, flags),
+            Bound::Unresolved => unreachable!("resolve_bound never returns Unresolved"),
         };
         // What a person did since the flip reaches a title as it asks (#215).
-        if poll {
+        if flags & BOUND_POLL != 0 {
             self.poll(host, log);
         }
-        let found = match bound {
-            Bound::Method(method) => {
-                let Some(Entry::Method { interface, slot }) = self.boundary.at(addr) else {
-                    unreachable!("a slot bound to a method is one");
-                };
-                return self.cross_com(interface, *slot, method, log);
-            }
-            Bound::Shim(shim) => shim,
-        };
-        if let Some(shim) = found {
-            self.spins
-                .crossing(shim, &self.cpu, &self.clock, &mut self.arena);
-        }
-        let boundary = &self.boundary;
-        let what = || match boundary.at(addr) {
-            Some(Entry::Import(import)) => format!("{}!{}", import.dll, import.name),
-            _ => String::new(),
-        };
         let esp = self.cpu.r[crate::cpu::ESP];
         let caller = self.arena.read_u32(esp).map_err(Stop::Fault)?;
 
         let Some(shim) = found else {
-            let cursor = self.clock.cursor();
-            log.at(Trace::Shims, || {
-                format!("wall {} from {caller:#010x} cursor {cursor}", what())
-            });
-            return Err(Stop::NotWritten {
-                what: what(),
-                caller,
-            });
+            return Err(self.missing_shim(addr, caller, log));
         };
+        if flags & BOUND_CLOCK_READ != 0 {
+            self.spins
+                .crossing(shim, &self.cpu, &self.clock, &mut self.arena);
+        }
 
-        let args = self.stack_args(esp + 4, shim.args)?;
-        let cursor = self.clock.cursor();
-        log.at(Trace::Shims, || {
-            format!(
-                "call {}({}) from {caller:#010x} cursor {cursor}",
-                what(),
-                listed(&args),
-            )
-        });
+        let mut buf = [0u32; INLINE_STACK_ARGS];
+        let mut heap = Vec::new();
+        let args = self.stack_args(esp + 4, shim.args, &mut buf, &mut heap)?;
+        if log.trace() >= Trace::Shims {
+            self.trace_shim_call(addr, caller, args, log);
+        }
 
         let mut ctx = self.ctx(log);
-        let answered = (shim.run)(&mut ctx, &args);
+        let answered = (shim.run)(&mut ctx, args);
         // A wall the declared tree met in the call, whatever it did next: an
         // archive member that would not come out (#169), or a name the disc
         // answers only by its primary tree's 8.3 name (#144), each of which
@@ -1531,6 +1747,8 @@ impl Machine {
         if reader.short {
             return Err(SnapError::Truncated("state").into());
         }
+        self.next_mix_cycle = 0;
+        self.next_route_at = (0, 0);
         // Nothing decoded before the resume describes the memory that is here
         // now.
         self.forget_decoded();
@@ -1548,6 +1766,24 @@ impl Machine {
 }
 
 impl Machine {
+    #[cold]
+    #[inline(never)]
+    fn trace_com_call(
+        &self,
+        interface: &'static str,
+        method: &'static str,
+        this: u32,
+        caller: u32,
+        args: &[u32],
+        log: &mut RunLog,
+    ) {
+        log.line(&format!(
+            "call {interface}::{method}({}) on {this:#010x} from {caller:#010x} cursor {}",
+            listed(args),
+            self.clock.cursor()
+        ));
+    }
+
     /// Answer a call the guest made through a COM object's own table.
     fn cross_com(
         &mut self,
@@ -1568,18 +1804,15 @@ impl Machine {
             });
         };
 
-        let args = self.stack_args(esp + 8, method.args)?;
-        let cursor = self.clock.cursor();
-        log.at(Trace::Shims, || {
-            format!(
-                "call {interface}::{}({}) on {this:#010x} from {caller:#010x} cursor {cursor}",
-                method.name,
-                listed(&args),
-            )
-        });
+        let mut buf = [0u32; INLINE_STACK_ARGS];
+        let mut heap = Vec::new();
+        let args = self.stack_args(esp + 8, method.args, &mut buf, &mut heap)?;
+        if log.trace() >= Trace::Shims {
+            self.trace_com_call(interface, method.name, this, caller, args, log);
+        }
 
         let mut ctx = self.ctx(log);
-        let answered = (method.run)(&mut ctx, this, &args);
+        let answered = (method.run)(&mut ctx, this, args);
         if let Some(what) = ctx.tree.wall() {
             return Err(Stop::NotWritten { what, caller });
         }
@@ -1770,7 +2003,6 @@ impl Machine {
             return;
         }
         let running = self.state.thread;
-        self.state.threads[running].cpu = self.cpu;
         let count = self.state.threads.len();
         // A thread that asked to be woken later is not run until then, and if
         // every thread is asleep the clock goes to the earliest of their hours
@@ -1812,16 +2044,17 @@ impl Machine {
         if next == running {
             return;
         }
+        self.state.threads[running].cpu = self.cpu;
         self.state.thread = next;
         self.cpu = self.state.threads[next].cpu;
-        log.at(Trace::Shims, || {
-            format!(
+        if log.trace() >= Trace::Shims {
+            log.line(&format!(
                 "thread {} takes over at {:#010x} cursor {}",
                 self.state.threads[next].id,
                 self.cpu.eip,
                 self.clock.cursor()
-            )
-        });
+            ));
+        }
     }
 
     /// Whether every thread left is waiting for another with no hour to be
@@ -1881,11 +2114,24 @@ impl Machine {
     }
 
     /// Hand the host every block of the mix the declared clock has passed.
-    /// Mixing runs whether or not a device takes the samples.
+    /// Mixing runs whether or not a device takes the samples, gated to actual
+    /// audio-frame horizons so bursts within a frame skip `Mixer::due`.
+    #[inline(always)]
     fn mix(&mut self, host: &mut dyn Host) {
+        if self.clock.cycles() >= self.next_mix_cycle {
+            self.mix_slow(host);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mix_slow(&mut self, host: &mut dyn Host) {
         for block in self.state.mixer.due(self.clock.nanos(), &self.arena) {
             host.audio(&block);
         }
+        self.next_mix_cycle = self
+            .clock
+            .first_cycle_of_audio_frame(self.state.mixer.next_frame().saturating_add(1));
     }
 
     /// What a call spent waiting becomes declared time.
@@ -2234,9 +2480,9 @@ mod tests {
 
     #[test]
     fn stack_args_handles_zero_inline_and_overflow_fallback() {
-        use super::{Machine, StackArgs, INLINE_STACK_ARGS};
+        use super::{Machine, INLINE_STACK_ARGS};
         use crate::cpu::Stop;
-        use crate::guest::{Fault, GuestMem};
+        use crate::guest::{Fault, GuestMem, DOS_MEMORY};
         use crate::host::headless::Headless;
         use crate::Title;
 
@@ -2250,26 +2496,31 @@ mod tests {
                 .expect("in arena");
         }
 
-        let empty = machine.stack_args(base, 0).expect("zero args");
-        assert!(matches!(empty, StackArgs::Inline { len: 0, .. }));
-        assert_eq!(&*empty, &[]);
+        let mut buf = [0u32; INLINE_STACK_ARGS];
+        let mut heap = Vec::new();
+        let empty = machine
+            .stack_args(base, 0, &mut buf, &mut heap)
+            .expect("zero args");
+        assert_eq!(empty, &[]);
+        assert!(heap.is_empty());
 
         let inline = machine
-            .stack_args(base, INLINE_STACK_ARGS as u32)
+            .stack_args(base, INLINE_STACK_ARGS as u32, &mut buf, &mut heap)
             .expect("inline args");
-        assert!(matches!(inline, StackArgs::Inline { len: 16, .. }));
         let expected_inline: Vec<u32> = (0..16).map(|i| 0x1000 + i).collect();
-        assert_eq!(&*inline, expected_inline.as_slice());
+        assert_eq!(inline, expected_inline.as_slice());
+        assert!(heap.is_empty());
 
-        let overflow = machine.stack_args(base, 20).expect("overflow args");
-        assert!(matches!(overflow, StackArgs::Heap(_)));
+        let overflow = machine
+            .stack_args(base, 20, &mut buf, &mut heap)
+            .expect("overflow args");
         let expected_overflow: Vec<u32> = (0..20).map(|i| 0x1000 + i).collect();
-        assert_eq!(&*overflow, expected_overflow.as_slice());
+        assert_eq!(overflow, expected_overflow.as_slice());
 
         // Faults report the exact faulting stack slot in both paths.
         let end = u32::try_from(machine.arena.len()).unwrap();
         assert_eq!(
-            machine.stack_args(end - 8, 4).err(),
+            machine.stack_args(end - 8, 4, &mut buf, &mut heap).err(),
             Some(Stop::Fault(Fault {
                 addr: end,
                 len: 4,
@@ -2277,13 +2528,181 @@ mod tests {
             }))
         );
         assert_eq!(
-            machine.stack_args(end - 4 * 17, 20).err(),
+            machine
+                .stack_args(end - 4 * 17, 20, &mut buf, &mut heap)
+                .err(),
             Some(Stop::Fault(Fault {
                 addr: end,
                 len: 4,
                 write: false,
             }))
         );
+        // Floor fault on the first slot reports the exact below-floor address.
+        assert_eq!(
+            machine
+                .stack_args(DOS_MEMORY - 4, 4, &mut buf, &mut heap)
+                .err(),
+            Some(Stop::Fault(Fault {
+                addr: DOS_MEMORY - 4,
+                len: 4,
+                write: false,
+            }))
+        );
+        // Wrapping around u32::MAX reports the exact first faulting slot.
+        assert_eq!(
+            machine
+                .stack_args(u32::MAX - 3, 2, &mut buf, &mut heap)
+                .err(),
+            Some(Stop::Fault(Fault {
+                addr: u32::MAX - 3,
+                len: 4,
+                write: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn next_mix_cycle_gate_matches_unconditional_mix() {
+        use super::Machine;
+        use crate::host::headless::Headless;
+        use crate::sound::{Mixer, BLOCK_FRAMES};
+        use crate::Title;
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("a machine");
+        let mut reference = Mixer::default();
+        let samples: Vec<i16> = (0..(BLOCK_FRAMES * 6) as i16).collect();
+        machine.state.mixer.play(1, samples.clone(), 0);
+        reference.play(1, samples, 0);
+
+        let mut ref_blocks = Vec::new();
+        // Step across >2 audio blocks in small increments so most bursts fall between frames.
+        for _ in 0..10_000 {
+            machine.clock.retire_many(5_000);
+            machine.mix(&mut host);
+            ref_blocks.extend(reference.due(machine.clock.nanos(), &machine.arena));
+        }
+        assert!(ref_blocks.len() >= 2);
+        assert_eq!(machine.state.mixer.next_frame(), reference.next_frame());
+        assert_eq!(host.audio_blocks, ref_blocks);
+    }
+
+    #[test]
+    fn poll_next_route_at_fast_path_delivers_exact_route_events() {
+        use super::Machine;
+        use crate::cli::Trace;
+        use crate::host::headless::Headless;
+        use crate::host::{Button, Input};
+        use crate::route::Route;
+        use crate::runlog::RunLog;
+        use crate::Title;
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("a machine");
+        let mut route = Route::new();
+        route.push((0, 0), Input::Down(Button::Left));
+        route.push((0, 3), Input::Up(Button::Left));
+        route.push((2, 2), Input::Move { x: 10, y: 20 });
+        machine.route = Some(route);
+
+        let mut log = RunLog::create("poll-fast-path", Trace::Off).expect("log");
+        let dir = log.dir().to_path_buf();
+
+        // Flip 0 delivers (0, 0) and arms next_route_at = (0, 3).
+        machine.deliver_input(&mut host, &mut log);
+        machine.flips += 1;
+        assert_eq!(machine.next_route_at, (0, 3));
+        assert_eq!(machine.input, vec![((0, 0), Input::Down(Button::Left))]);
+
+        // Polls 1 and 2 hit the fast return; poll 3 delivers (0, 3) and advances to (2, 2).
+        for _ in 0..2 {
+            machine.poll(&mut host, &mut log);
+        }
+        assert_eq!(machine.input.len(), 1);
+        machine.poll(&mut host, &mut log);
+        assert_eq!(machine.input.len(), 2);
+        assert_eq!(machine.input[1], ((0, 3), Input::Up(Button::Left)));
+        assert_eq!(machine.next_route_at, (2, 2));
+
+        // Flip 1 and its polls deliver nothing.
+        machine.deliver_input(&mut host, &mut log);
+        machine.flips += 1;
+        for _ in 0..5 {
+            machine.poll(&mut host, &mut log);
+        }
+        assert_eq!(machine.input.len(), 2);
+
+        // Flip 2, poll 2 delivers the last event and saturates next_route_at.
+        machine.deliver_input(&mut host, &mut log);
+        machine.flips += 1;
+        machine.poll(&mut host, &mut log);
+        assert_eq!(machine.input.len(), 2);
+        machine.poll(&mut host, &mut log);
+        assert_eq!(machine.input.len(), 3);
+        assert_eq!(machine.input[2], ((2, 2), Input::Move { x: 10, y: 20 }));
+        assert_eq!(machine.next_route_at, (u64::MAX, u64::MAX));
+
+        drop(log);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn switch_thread_skips_cpu_copy_when_same_thread_continues() {
+        use super::Machine;
+        use crate::cli::Trace;
+        use crate::cpu::Cpu;
+        use crate::host::headless::Headless;
+        use crate::runlog::RunLog;
+        use crate::win32::GuestThread;
+        use crate::Title;
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("a machine");
+        let sentinel = 0xdead_beefu32;
+        machine.state.threads = vec![
+            GuestThread {
+                cpu: Cpu {
+                    eip: sentinel,
+                    ..Cpu::default()
+                },
+                handle: 1,
+                id: 1,
+                suspended: false,
+                ended: false,
+                code: 0,
+                tls: Vec::new(),
+                wake_at: 0,
+                gives_up_at: 0,
+                waiting_on: Vec::new(),
+                time_critical: false,
+            },
+            GuestThread {
+                cpu: Cpu::default(),
+                handle: 2,
+                id: 2,
+                suspended: false,
+                ended: false,
+                code: 0,
+                tls: Vec::new(),
+                wake_at: u64::MAX,
+                gives_up_at: 0,
+                waiting_on: vec![0x10],
+                time_critical: false,
+            },
+        ];
+        machine.state.thread = 0;
+        machine.cpu.eip = 0x1234_5678;
+
+        let mut log = RunLog::create("switch-skip", Trace::Off).expect("log");
+        let dir = log.dir().to_path_buf();
+        machine.switch_thread(&mut log);
+        assert_eq!(machine.state.thread, 0);
+        assert_eq!(machine.cpu.eip, 0x1234_5678);
+        // Because next == running, threads[0].cpu was never overwritten.
+        assert_eq!(machine.state.threads[0].cpu.eip, sentinel);
+
+        drop(log);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

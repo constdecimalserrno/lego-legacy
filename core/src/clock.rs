@@ -26,6 +26,17 @@ pub enum FlipCost {
     Refresh(u64),
 }
 
+/// Greatest common divisor, used to reduce `1_000_000_000 / hz` to lowest
+/// terms once when a [`Clock`] is built.
+const fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 /// Instructions retired, and the declared time that implies.
 ///
 /// The cursor is the count of guest instructions the machine has retired. It
@@ -39,6 +50,15 @@ pub struct Clock {
     charged_cycles: u64,
     /// The declared processor this clock runs at, in cycles a second.
     hz: u64,
+    /// `1_000_000_000 / gcd(1_000_000_000, hz)`.
+    nanos_num: u64,
+    /// `hz / gcd(1_000_000_000, hz)`.
+    nanos_den: u64,
+    /// Cached [`Clock::millis`], kept current whenever `cycles` reaches
+    /// `next_millis_cycle`.
+    cached_millis: u64,
+    /// First declared cycle at which [`Clock::millis`] exceeds `cached_millis`.
+    next_millis_cycle: u64,
 }
 
 impl Default for Clock {
@@ -51,14 +71,23 @@ impl Clock {
     /// A clock on a declared processor of this frequency.
     #[must_use]
     pub fn at(hz: u64) -> Self {
-        Self {
+        let hz = hz.max(1);
+        let g = gcd(1_000_000_000, hz);
+        let mut clock = Self {
             cursor: 0,
             charged_cycles: 0,
-            hz: hz.max(1),
-        }
+            hz,
+            nanos_num: 1_000_000_000 / g,
+            nanos_den: hz / g,
+            cached_millis: 0,
+            next_millis_cycle: 0,
+        };
+        clock.refresh_millis();
+        clock
     }
 
     /// What the declared processor runs at.
+    #[inline(always)]
     #[must_use]
     pub fn hz(self) -> u64 {
         self.hz
@@ -74,27 +103,44 @@ impl Clock {
     /// snapshot was written.
     #[must_use]
     pub fn resumed(cursor: u64, cycles: u64, hz: u64) -> Self {
-        Self {
+        let hz = hz.max(1);
+        let g = gcd(1_000_000_000, hz);
+        let mut clock = Self {
             cursor,
             charged_cycles: cycles.saturating_sub(cursor),
-            hz: hz.max(1),
-        }
+            hz,
+            nanos_num: 1_000_000_000 / g,
+            nanos_den: hz / g,
+            cached_millis: 0,
+            next_millis_cycle: 0,
+        };
+        clock.refresh_millis();
+        clock
     }
 
     /// Instructions retired so far.
+    #[inline(always)]
     #[must_use]
     pub fn cursor(self) -> u64 {
         self.cursor
     }
 
     /// Charge one retired instruction.
+    #[inline(always)]
     pub fn retire(&mut self) {
         self.cursor += 1;
+        if self.cycles() >= self.next_millis_cycle {
+            self.refresh_millis();
+        }
     }
 
     /// Charge instructions an engine retired in one run.
+    #[inline(always)]
     pub fn retire_many(&mut self, count: u64) {
         self.cursor += count;
+        if self.cycles() >= self.next_millis_cycle {
+            self.refresh_millis();
+        }
     }
 
     /// Charge a presented frame at the title's declared flip cost.
@@ -105,6 +151,9 @@ impl Clock {
             FlipCost::Refresh(hz) => {
                 let period = self.hz / hz.max(1);
                 self.charged_cycles += period - self.cycles() % period;
+                if self.cycles() >= self.next_millis_cycle {
+                    self.refresh_millis();
+                }
             }
         }
     }
@@ -113,27 +162,57 @@ impl Clock {
     /// wait for something due later on the declared clock.
     pub fn wait(&mut self, millis: u64) {
         self.charged_cycles += millis * self.hz / 1000;
+        if self.cycles() >= self.next_millis_cycle {
+            self.refresh_millis();
+        }
     }
 
     /// Declared cycles spent: one per retired instruction, plus what drawing
     /// and waiting were charged for.
+    #[inline(always)]
     #[must_use]
     pub fn cycles(self) -> u64 {
         self.cursor + self.charged_cycles
     }
 
-    /// Declared nanoseconds elapsed. Computed in `u128` so a long run does not
-    /// drift: the division happens once, at the end, not per instruction.
+    /// Declared nanoseconds elapsed. Computed with GCD-reduced 64-bit
+    /// arithmetic and a `u128` overflow fallback so a long run does not drift
+    /// and matches `u128` bit-for-bit.
+    #[inline]
     #[must_use]
     pub fn nanos(self) -> u64 {
-        let n = u128::from(self.cycles()) * 1_000_000_000 / u128::from(self.hz);
+        let cycles = self.cycles();
+        if let Some(prod) = cycles.checked_mul(self.nanos_num) {
+            prod / self.nanos_den
+        } else {
+            self.nanos_wide(cycles)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn nanos_wide(self, cycles: u64) -> u64 {
+        let n = u128::from(cycles) * 1_000_000_000 / u128::from(self.hz);
         u64::try_from(n).unwrap_or(u64::MAX)
     }
 
     /// Declared milliseconds elapsed. What a guest's `timeGetTime` will read.
+    #[inline(always)]
     #[must_use]
     pub fn millis(self) -> u64 {
-        self.nanos() / 1_000_000
+        self.cached_millis
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn refresh_millis(&mut self) {
+        let millis = self.nanos() / 1_000_000;
+        self.cached_millis = millis;
+        self.next_millis_cycle = if millis >= u64::MAX / 1_000_000 {
+            u64::MAX
+        } else {
+            self.first_cycle_of(millis + 1)
+        };
     }
 
     /// The first declared cycle that [`Clock::millis`] reads as `millis`:
@@ -142,8 +221,36 @@ impl Clock {
     /// passed to (#217).
     #[must_use]
     pub fn first_cycle_of(self, millis: u64) -> u64 {
+        if let Some(prod) = millis.checked_mul(self.hz) {
+            return prod.div_ceil(1000);
+        }
         let first = (u128::from(millis) * u128::from(self.hz)).div_ceil(1000);
         u64::try_from(first).unwrap_or(u64::MAX)
+    }
+
+    /// The first declared cycle whose `sound::frame_at(self.nanos())` is at
+    /// least `frame`, used to gate `Machine::mix` between audio frames.
+    #[must_use]
+    pub fn first_cycle_of_audio_frame(self, frame: u64) -> u64 {
+        const FRAME_NUM: u64 = 441;
+        const FRAME_DEN: u64 = 20_000_000;
+        if let Some(need_nanos) = frame
+            .checked_mul(FRAME_DEN)
+            .map(|prod| prod.div_ceil(FRAME_NUM))
+        {
+            if let Some(prod) = need_nanos.checked_mul(self.nanos_den) {
+                return prod.div_ceil(self.nanos_num);
+            }
+        }
+        let need_nanos =
+            (u128::from(frame) * u128::from(FRAME_DEN)).div_ceil(u128::from(FRAME_NUM));
+        if need_nanos > u128::from(u64::MAX) {
+            return u64::MAX;
+        }
+        let Some(prod) = need_nanos.checked_mul(u128::from(self.hz)) else {
+            return u64::MAX;
+        };
+        u64::try_from(prod.div_ceil(1_000_000_000)).unwrap_or(u64::MAX)
     }
 }
 
@@ -210,5 +317,130 @@ mod tests {
         // A second flip straight after waits for the refresh after that.
         clock.present(FlipCost::Refresh(60));
         assert_eq!(clock.cycles(), 2 * DECLARED_HZ / 60);
+    }
+
+    fn ref_nanos(cycles: u64, hz: u64) -> u64 {
+        let n = u128::from(cycles) * 1_000_000_000 / u128::from(hz.max(1));
+        u64::try_from(n).unwrap_or(u64::MAX)
+    }
+
+    fn ref_millis(cycles: u64, hz: u64) -> u64 {
+        ref_nanos(cycles, hz) / 1_000_000
+    }
+
+    #[test]
+    fn nanos_and_millis_match_u128_reference_across_sweeps_and_overflow() {
+        let rates = [
+            1,
+            500,
+            1_000,
+            166_000_000,
+            166_666_667,
+            DECLARED_HZ,
+            1_000_000_000,
+            3_000_000_000,
+            u64::MAX,
+        ];
+        for hz in rates {
+            let base = Clock::at(hz);
+            let mut samples: Vec<u64> = (0..=64).collect();
+            let mut c = 1u64;
+            while c <= 100_000_000_000_000 {
+                samples.push(c.saturating_sub(1));
+                samples.push(c);
+                samples.push(c.saturating_add(1));
+                c = c.saturating_mul(7).saturating_add(13);
+            }
+            for m in [1, 2, 3, 17, 999, 1_000, 120_966, 605_367, 1_000_000] {
+                let first = base.first_cycle_of(m);
+                samples.push(first.saturating_sub(1));
+                samples.push(first);
+                samples.push(first.saturating_add(1));
+            }
+            let mul_edge = u64::MAX / base.nanos_num;
+            for delta in -3i64..=3 {
+                samples.push(mul_edge.saturating_add_signed(delta));
+            }
+            let sat_edge = u64::try_from(u128::from(u64::MAX) * u128::from(hz) / 1_000_000_000)
+                .unwrap_or(u64::MAX);
+            for delta in -3i64..=3 {
+                samples.push(sat_edge.saturating_add_signed(delta));
+            }
+            for edge in [u64::MAX - 2, u64::MAX - 1, u64::MAX] {
+                samples.push(edge);
+            }
+
+            for cycles in samples {
+                let clock = Clock::resumed(cycles, cycles, hz);
+                assert_eq!(
+                    clock.nanos(),
+                    ref_nanos(cycles, hz),
+                    "nanos mismatch at hz={hz} cycles={cycles}"
+                );
+                assert_eq!(
+                    clock.millis(),
+                    ref_millis(cycles, hz),
+                    "millis mismatch at hz={hz} cycles={cycles}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn millis_cache_stays_exact_across_retire_wait_and_present() {
+        for hz in [1, 500, 166_000_000, 166_666_667, DECLARED_HZ] {
+            let mut clock = Clock::at(hz);
+            // Step across millisecond boundaries with retire, retire_many, wait, and present.
+            for _ in 0..20 {
+                let target = clock.first_cycle_of(clock.millis() + 1);
+                if target > clock.cycles() + 2 {
+                    clock.retire_many(target - clock.cycles() - 2);
+                    assert_eq!(clock.millis(), ref_millis(clock.cycles(), hz));
+                }
+                for _ in 0..4 {
+                    clock.retire();
+                    assert_eq!(clock.millis(), ref_millis(clock.cycles(), hz));
+                }
+                clock.wait(3);
+                assert_eq!(clock.millis(), ref_millis(clock.cycles(), hz));
+                if hz >= 60 {
+                    clock.present(FlipCost::Refresh(60));
+                    assert_eq!(clock.millis(), ref_millis(clock.cycles(), hz));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_cycle_of_audio_frame_matches_sound_frame_at_boundary() {
+        use crate::sound::frame_at;
+        for hz in [1, 166_000_000, 166_666_667, DECLARED_HZ] {
+            let base = Clock::at(hz);
+            assert_eq!(base.first_cycle_of_audio_frame(0), 0);
+            for frame in [
+                1,
+                2,
+                3,
+                10,
+                1024,
+                22_050,
+                1_000_000,
+                13_348_000,
+                100_000_000,
+            ] {
+                let first = base.first_cycle_of_audio_frame(frame);
+                assert!(
+                    frame_at(Clock::resumed(first, first, hz).nanos()) >= frame,
+                    "hz={hz} frame={frame} first={first}"
+                );
+                assert!(
+                    frame_at(Clock::resumed(first - 1, first - 1, hz).nanos()) < frame,
+                    "hz={hz} frame={frame} first-1={}",
+                    first - 1
+                );
+            }
+            let max_frame = frame_at(u64::MAX);
+            assert_eq!(base.first_cycle_of_audio_frame(max_frame + 1), u64::MAX);
+        }
     }
 }
