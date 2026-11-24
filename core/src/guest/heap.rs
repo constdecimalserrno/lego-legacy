@@ -5,7 +5,36 @@
 //! purpose, so a pointer the guest hands to a shim is an address the shim can
 //! read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// Deterministic fast hasher for 32-bit guest heap addresses.
+///
+/// Heap pointers are multiples of eight; a 64-bit Fibonacci multiply followed
+/// by a high-to-low xor spreads both the low bucket bits (`h1`) and top tag
+/// bits (`h2`) without reading any host entropy.
+#[derive(Default)]
+struct AddrHasher(u64);
+
+impl Hasher for AddrHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.wrapping_mul(0x517c_c1b7_2722_0a95) ^ u64::from(b);
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        let x = u64::from(i).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = x ^ (x >> 32);
+    }
+}
 
 /// Where allocations come from, and how much there is.
 ///
@@ -40,11 +69,12 @@ pub const HEAP_BYTES: u32 = 0x2000_0000;
 pub struct Heap {
     next: u32,
     end: u32,
-    /// What is live, by address, with its size.
-    live: BTreeMap<u32, u32>,
+    /// What is live, by address, with its size. Never iterated in order
+    /// (digests and snapshots cover `HEAP_BASE..next` directly).
+    live: HashMap<u32, u32, BuildHasherDefault<AddrHasher>>,
     /// What has been handed back, by size: for each size, the addresses of
-    /// the blocks of it that are free.
-    free: BTreeMap<u32, Vec<u32>>,
+    /// the blocks of it that are free, kept in FIFO order.
+    free: BTreeMap<u32, VecDeque<u32>>,
 }
 
 impl Default for Heap {
@@ -59,7 +89,7 @@ impl Heap {
         Self {
             next: HEAP_BASE,
             end: HEAP_BASE + HEAP_BYTES,
-            live: BTreeMap::new(),
+            live: HashMap::default(),
             free: BTreeMap::new(),
         }
     }
@@ -84,13 +114,19 @@ impl Heap {
         };
         // The smallest free block that is big enough and starts where the
         // caller needs it to. Every address this hands out is a multiple of
-        // eight, so anything asking for no more than that takes the first
-        // candidate; a wider alignment is rare and looks past the ones that do
-        // not suit it.
+        // eight, so anything asking for no more than that takes the front
+        // candidate in O(1) FIFO order; a wider alignment is rare and looks
+        // past the ones that do not suit it while preserving FIFO order.
         let mut found = None;
         for (whole, addrs) in self.free.range_mut(size..) {
-            if let Some(i) = addrs.iter().position(|addr| addr % align == 0) {
-                found = Some((*whole, addrs.remove(i), addrs.is_empty()));
+            if addrs.front().is_some_and(|&addr| addr % align == 0) {
+                let addr = addrs.pop_front().expect("checked non-empty");
+                found = Some((*whole, addr, addrs.is_empty()));
+                break;
+            }
+            if let Some(i) = addrs.iter().position(|&addr| addr % align == 0) {
+                let addr = addrs.remove(i).expect("index from position");
+                found = Some((*whole, addr, addrs.is_empty()));
                 break;
             }
         }
@@ -127,7 +163,7 @@ impl Heap {
     pub fn free(&mut self, addr: u32) -> bool {
         match self.live.remove(&addr) {
             Some(size) => {
-                self.free.entry(size).or_default().push(addr);
+                self.free.entry(size).or_default().push_back(addr);
                 true
             }
             None => false,
@@ -189,5 +225,53 @@ mod tests {
         let mut h = Heap::new();
         assert_eq!(h.alloc(u32::MAX), 0);
         assert_eq!(h.live_bytes(), 0);
+    }
+
+    #[test]
+    fn freed_blocks_are_reused_in_strict_fifo_order() {
+        let mut h = Heap::new();
+        let a = h.alloc(64);
+        let b = h.alloc(64);
+        let c = h.alloc(64);
+        let d = h.alloc(64);
+        // Free in a deliberate non-monotonic order: c, a, d, b.
+        assert!(h.free(c));
+        assert!(h.free(a));
+        assert!(h.free(d));
+        assert!(h.free(b));
+        assert_eq!(h.live_bytes(), 0);
+        assert_eq!(h.size_of(a), None);
+
+        // Must come back in exact FIFO order: c, a, d, b.
+        assert_eq!(h.alloc(64), c);
+        assert_eq!(h.alloc(64), a);
+        assert_eq!(h.alloc(64), d);
+        assert_eq!(h.alloc(64), b);
+        assert_eq!(h.live_bytes(), 256);
+
+        // Wider alignment skipping unaligned front entries must still preserve
+        // FIFO order among the remaining entries.
+        let mut h2 = Heap::new();
+        let _pad = h2.alloc(8); // HEAP_BASE (aligned to 64)
+        let u1 = h2.alloc(64); // +8  (not 64-byte aligned)
+        let u2 = h2.alloc(64); // +72 (not 64-byte aligned)
+        let al = h2.alloc_aligned(64, 64); // 64-byte aligned
+        let u3 = h2.alloc(64); // +64 (64-byte aligned)
+        let u4 = h2.alloc(8);
+        let u5 = h2.alloc(64); // not 64-byte aligned
+        let _ = u4;
+        assert!(h2.free(u1));
+        assert!(h2.free(u2));
+        assert!(h2.free(al));
+        assert!(h2.free(u5));
+        assert!(h2.free(u3));
+
+        // Aligned allocation pulls `al` out of the middle, leaving [u1, u2, u5, u3].
+        assert_eq!(h2.alloc_aligned(64, 64), al);
+        // Subsequent 8-byte-aligned allocations drain the remaining queue in FIFO order.
+        assert_eq!(h2.alloc(64), u1);
+        assert_eq!(h2.alloc(64), u2);
+        assert_eq!(h2.alloc(64), u5);
+        assert_eq!(h2.alloc(64), u3);
     }
 }

@@ -695,7 +695,19 @@ pub(crate) mod ddscaps {
     pub const NONLOCALVIDMEM: u32 = 0x2000_0000;
 }
 
-fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool, u32)> {
+#[derive(Clone, Copy)]
+struct SurfaceInfo {
+    pixels: u32,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    format: PixelFormat,
+    primary: bool,
+    caps: u32,
+    back: u32,
+}
+
+fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<SurfaceInfo> {
     match ctx.state.com(this).map(|o| &o.state) {
         Some(ComState::Surface {
             pixels,
@@ -704,17 +716,19 @@ fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<(u32, u32, u32, u32, u32, bool
             pitch,
             format,
             primary,
+            caps,
             back,
             ..
-        }) => Some((
-            *pixels,
-            *width,
-            *height,
-            *pitch,
-            format.bits,
-            *primary,
-            *back,
-        )),
+        }) => Some(SurfaceInfo {
+            pixels: *pixels,
+            width: *width,
+            height: *height,
+            pitch: *pitch,
+            format: *format,
+            primary: *primary,
+            caps: *caps,
+            back: *back,
+        }),
         _ => None,
     }
 }
@@ -735,6 +749,9 @@ const DDERR_SURFACEBUSY: u32 = 0x8876_01ae;
 /// is let go of, as Microsoft's GetDC page says: what a DC draws, DrawDib
 /// (#151), draws on the surface's own pixels.
 fn dc_out(ctx: &Ctx<'_>, surface: u32) -> bool {
+    if ctx.state.surface_dcs.is_empty() {
+        return false;
+    }
     let surface = ctx.state.identity(surface);
     ctx.state.surface_dcs.values().any(|s| *s == surface)
 }
@@ -742,6 +759,9 @@ fn dc_out(ctx: &Ctx<'_>, surface: u32) -> bool {
 /// A blit or a flip touching a surface whose DC is out: what DirectDraw
 /// answers for one is not documented, so it is a wall.
 fn busy(ctx: &Ctx<'_>, this: u32, call: &str, surfaces: &[u32]) -> Result<(), Stop> {
+    if ctx.state.surface_dcs.is_empty() {
+        return Ok(());
+    }
     match surfaces.iter().find(|s| **s != 0 && dc_out(ctx, **s)) {
         None => Ok(()),
         Some(s) => Err(Stop::NotWritten {
@@ -803,50 +823,38 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     ctx.state.surface_dcs.remove(&dc);
-    if let Some((pixels, width, height, pitch, depth, true, 0)) = surface_of(ctx, this) {
+    if let Some(s) = surface_of(ctx, this).filter(|s| s.primary && s.back == 0) {
         ctx.state.present = Some(super::Present {
-            pixels,
-            width,
-            height,
-            pitch,
-            depth,
+            pixels: s.pixels,
+            width: s.width,
+            height: s.height,
+            pitch: s.pitch,
+            depth: s.format.bits,
         });
     }
     Ok(S_OK)
 }
 
-/// A surface's pixel format.
-fn format_of(ctx: &Ctx<'_>, this: u32) -> PixelFormat {
-    match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::Surface { format, .. }) => *format,
-        _ => screen_format(16),
-    }
-}
-
-/// A surface's `DDSCAPS_*`.
-fn caps_of(ctx: &Ctx<'_>, this: u32) -> u32 {
-    match ctx.state.com(this).map(|o| &o.state) {
-        Some(ComState::Surface { caps, .. }) => *caps,
-        _ => 0,
-    }
-}
-
 fn surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some((pixels, width, height, pitch, ..)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    let format = format_of(ctx, this);
-    write_surface_desc(ctx, args[0], (width, height, pitch), format, pixels)?;
+    write_surface_desc(
+        ctx,
+        args[0],
+        (s.width, s.height, s.pitch),
+        s.format,
+        s.pixels,
+    )?;
     // The caps `dwFlags` says are there, at 0x68 (#210).
-    let caps = caps_of(ctx, this);
     ctx.mem
-        .write_u32(args[0] + 0x68, caps)
+        .write_u32(args[0] + 0x68, s.caps)
         .map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn surface_caps(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let primary = surface_of(ctx, this).is_some_and(|s| s.5);
+    let primary = surface_of(ctx, this).is_some_and(|s| s.primary);
     if args[0] != 0 {
         // DDSCAPS_PRIMARYSURFACE or DDSCAPS_OFFSCREENPLAIN, where
         // `GetSurfaceDesc` answers the surface's own caps: #227's.
@@ -858,7 +866,7 @@ fn surface_caps(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 }
 
 fn pixel_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let format = format_of(ctx, this);
+    let format = surface_of(ctx, this).map_or_else(|| screen_format(16), |s| s.format);
     write_pixel_format(ctx, args[0], format)?;
     Ok(S_OK)
 }
@@ -868,14 +876,19 @@ fn lock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // its own pixels: the surface is guest memory and always was. One whose DC
     // is out is already locked, which Wine's ddraw conformance test
     // `test_getdc`, which passes on Windows, finds answered DDERR_SURFACEBUSY.
-    let Some((pixels, width, height, pitch, ..)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     if dc_out(ctx, this) {
         return Ok(DDERR_SURFACEBUSY);
     }
-    let format = format_of(ctx, this);
-    write_surface_desc(ctx, args[1], (width, height, pitch), format, pixels)?;
+    write_surface_desc(
+        ctx,
+        args[1],
+        (s.width, s.height, s.pitch),
+        s.format,
+        s.pixels,
+    )?;
     Ok(S_OK)
 }
 
@@ -886,7 +899,7 @@ fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // exists: there is nothing else for it to become. Letting go of a corner
     // is not: a title that draws its frame in pieces has not finished one.
     let given = args.first().copied().unwrap_or(0);
-    let Some((pixels, width, height, pitch, depth, true, 0)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this).filter(|s| s.primary && s.back == 0) else {
         return Ok(S_OK);
     };
     // What this argument is depends on which interface the title holds.
@@ -894,16 +907,16 @@ fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // `Lock` handed back; only `IDirectDrawSurface7` takes a rectangle. So the
     // surface's own address is the whole surface, as null is, and anything
     // else is a rectangle inside it (#41).
-    let whole = given == 0 || given == pixels;
+    let whole = given == 0 || given == s.pixels;
     if !whole {
         return Ok(S_OK);
     }
     ctx.state.present = Some(super::Present {
-        pixels,
-        width,
-        height,
-        pitch,
-        depth,
+        pixels: s.pixels,
+        width: s.width,
+        height: s.height,
+        pitch: s.pitch,
+        depth: s.format.bits,
     });
     Ok(S_OK)
 }
@@ -911,7 +924,7 @@ fn unlock(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // What a title asks for right after making a flipping chain: the buffer
     // behind the one on screen.
-    let back = surface_of(ctx, this).map_or(0, |s| s.6);
+    let back = surface_of(ctx, this).map_or(0, |s| s.back);
     ctx.mem.write_u32(args[1], back).map_err(Stop::Fault)?;
     if back == 0 {
         return Ok(DDERR_NOTFOUND);
@@ -922,25 +935,31 @@ fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
 fn flip(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     // The back buffer becomes the screen. This is the moment a frame exists,
     // and it is what the machine presents.
-    let Some((pixels, width, height, pitch, depth, _, back)) = surface_of(ctx, this) else {
+    let Some(front) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    busy(ctx, this, "Flip", &[this, back])?;
-    let source = surface_of(ctx, back).map_or(pixels, |s| s.0);
-    if source != pixels {
-        let bytes = ctx
-            .mem
-            .slice(source, (pitch * height) as usize)
-            .map_err(Stop::Fault)?
-            .to_vec();
-        ctx.mem.write(pixels, &bytes).map_err(Stop::Fault)?;
+    busy(ctx, this, "Flip", &[this, front.back])?;
+    let source = surface_of(ctx, front.back).map_or(front.pixels, |s| s.pixels);
+    if source != front.pixels {
+        let len = (front.pitch * front.height) as usize;
+        let (s, d) = (u64::from(source), u64::from(front.pixels));
+        if s + len as u64 <= d || d + len as u64 <= s {
+            let (src, dst) = ctx
+                .mem
+                .read_and_write((source, len), (front.pixels, len))
+                .map_err(Stop::Fault)?;
+            dst.copy_from_slice(src);
+        } else {
+            let bytes = ctx.mem.slice(source, len).map_err(Stop::Fault)?.to_vec();
+            ctx.mem.write(front.pixels, &bytes).map_err(Stop::Fault)?;
+        }
     }
     ctx.state.present = Some(super::Present {
-        pixels,
-        width,
-        height,
-        pitch,
-        depth,
+        pixels: front.pixels,
+        width: front.width,
+        height: front.height,
+        pitch: front.pitch,
+        depth: front.format.bits,
     });
     Ok(S_OK)
 }
@@ -977,15 +996,16 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             });
         }
     }
-    let Some((pixels, width, height, pitch, depth, primary, _)) = surface_of(ctx, this) else {
+    let Some(dst) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    let to = rect(ctx, args[0], width, height)?;
+    let to = rect(ctx, args[0], dst.width, dst.height)?;
     // A blit reaching past its destination's edge is clipped when a clipper
     // is attached, and refused when none is, as DirectDraw does; one the
     // wrong way round is refused either way.
     let ordered = to.0 <= to.2 && to.1 <= to.3;
-    if !ordered || (!ctx.state.clipped.contains(&pixels) && !within(to, width, height)) {
+    if !ordered || (!ctx.state.clipped.contains(&dst.pixels) && !within(to, dst.width, dst.height))
+    {
         return Ok(DDERR_INVALIDRECT);
     }
     // DDBLT_COLORFILL: the fill value is the effects block's dwFillColor,
@@ -998,49 +1018,49 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         };
         let clip = |v: i64, edge: u32| v.clamp(0, i64::from(edge)) as u32;
         let area = (
-            clip(to.0, width),
-            clip(to.1, height),
-            clip(to.2, width),
-            clip(to.3, height),
+            clip(to.0, dst.width),
+            clip(to.1, dst.height),
+            clip(to.2, dst.width),
+            clip(to.3, dst.height),
         );
         if area.0 < area.2 && area.1 < area.3 {
-            super::fill(ctx, (pixels, pitch, depth), area, colour)?;
+            super::fill(ctx, (dst.pixels, dst.pitch, dst.format.bits), area, colour)?;
         }
         return Ok(S_OK);
     }
-    let Some((source, source_w, source_h, source_pitch, source_depth, _, _)) =
-        surface_of(ctx, args[1])
-    else {
+    let Some(src) = surface_of(ctx, args[1]) else {
         return Ok(S_OK);
     };
-    let (from_format, to_format) = (format_of(ctx, args[1]), format_of(ctx, this));
-    if from_format != to_format {
+    if src.format != dst.format {
         return Err(Stop::NotWritten {
             what: format!(
-                "IDirectDrawSurface::Blt: from {source_depth} bits {:x?} to {depth} bits {:x?}",
-                from_format.masks, to_format.masks
+                "IDirectDrawSurface::Blt: from {} bits {:x?} to {} bits {:x?}",
+                src.format.bits, src.format.masks, dst.format.bits, dst.format.masks
             ),
             caller: 0,
         });
     }
-    let from = rect(ctx, args[2], source_w, source_h)?;
+    let from = rect(ctx, args[2], src.width, src.height)?;
     // Only the destination is clipped: a source rectangle is the guest's to
     // keep inside its surface.
-    if !within(from, source_w, source_h) {
+    if !within(from, src.width, src.height) {
         return Ok(DDERR_INVALIDRECT);
     }
-    let key = source_key(ctx, source, flags & DDBLT_KEYSRC != 0);
+    let key = source_key(ctx, src.pixels, flags & DDBLT_KEYSRC != 0);
     transfer(
         ctx.mem,
         Pixels {
-            at: source,
-            pitch: source_pitch,
+            at: src.pixels,
+            pitch: src.pitch,
         },
         from,
-        Pixels { at: pixels, pitch },
+        Pixels {
+            at: dst.pixels,
+            pitch: dst.pitch,
+        },
         to,
-        (width, height),
-        depth,
+        (dst.width, dst.height),
+        dst.format.bits,
         key,
     )?;
     // A copy that covers the whole of the screen is the moment a frame
@@ -1050,13 +1070,13 @@ fn blit(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // each decoded frame onto the front buffer of its flipping chain and
     // never flips, so without this its intro is a hundred and nine seconds of
     // black (#63). A fill is not a frame: that is how a title *starts* one.
-    if primary && to == (0, 0, i64::from(width), i64::from(height)) {
+    if dst.primary && to == (0, 0, i64::from(dst.width), i64::from(dst.height)) {
         ctx.state.present = Some(super::Present {
-            pixels,
-            width,
-            height,
-            pitch,
-            depth,
+            pixels: dst.pixels,
+            width: dst.width,
+            height: dst.height,
+            pitch: dst.pitch,
+            depth: dst.format.bits,
         });
     }
     Ok(S_OK)
@@ -1087,22 +1107,23 @@ fn set_clipper(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     // surface to its clip list; none, and a blit past its edge is refused.
     // What is written is a clip list of the whole surface, which clips to the
     // surface's own edges; anything less stops here.
-    let Some((pixels, width, height, ..)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
     if args[0] == 0 {
-        ctx.state.clipped.remove(&pixels);
+        ctx.state.clipped.remove(&s.pixels);
         return Ok(S_OK);
     }
-    let whole = (0, 0, width as i32, height as i32);
+    let whole = (0, 0, s.width as i32, s.height as i32);
     match ctx.state.clip_lists.get(&ctx.state.identity(args[0])) {
         Some(list) if *list == whole => {
-            ctx.state.clipped.insert(pixels);
+            ctx.state.clipped.insert(s.pixels);
             Ok(S_OK)
         }
         list => Err(Stop::NotWritten {
             what: format!(
-                "IDirectDrawSurface::SetClipper: a clipper clipping to {list:?} on a {width}x{height} surface"
+                "IDirectDrawSurface::SetClipper: a clipper clipping to {list:?} on a {}x{} surface",
+                s.width, s.height
             ),
             caller: 0,
         }),
@@ -1164,45 +1185,47 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let Some((pixels, width, height, pitch, depth, _, _)) = surface_of(ctx, this) else {
+    let Some(dst) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
-    let Some((source, source_w, source_h, source_pitch, _, _, _)) = surface_of(ctx, args[2]) else {
+    let Some(src) = surface_of(ctx, args[2]) else {
         return Ok(S_OK);
     };
-    let (from_format, to_format) = (format_of(ctx, args[2]), format_of(ctx, this));
-    if from_format != to_format {
+    if src.format != dst.format {
         return Err(Stop::NotWritten {
             what: format!(
                 "IDirectDrawSurface::BltFast: from {} bits {:x?} to {} bits {:x?}",
-                from_format.bits, from_format.masks, to_format.bits, to_format.masks
+                src.format.bits, src.format.masks, dst.format.bits, dst.format.masks
             ),
             caller: 0,
         });
     }
     // BltFast neither clips nor lets a clipper clip for it: a destination
     // with a clipper, or a blit that does not fit, is refused.
-    if ctx.state.clipped.contains(&pixels) {
+    if ctx.state.clipped.contains(&dst.pixels) {
         return Ok(DDERR_BLTFASTCANTCLIP);
     }
-    let from = rect(ctx, args[3], source_w, source_h)?;
+    let from = rect(ctx, args[3], src.width, src.height)?;
     let (x, y) = (i64::from(args[0] as i32), i64::from(args[1] as i32));
     let to = (x, y, x + from.2 - from.0, y + from.3 - from.1);
-    if !within(from, source_w, source_h) || !within(to, width, height) {
+    if !within(from, src.width, src.height) || !within(to, dst.width, dst.height) {
         return Ok(DDERR_INVALIDRECT);
     }
-    let key = source_key(ctx, source, flags & DDBLTFAST_SRCCOLORKEY != 0);
+    let key = source_key(ctx, src.pixels, flags & DDBLTFAST_SRCCOLORKEY != 0);
     transfer(
         ctx.mem,
         Pixels {
-            at: source,
-            pitch: source_pitch,
+            at: src.pixels,
+            pitch: src.pitch,
         },
         from,
-        Pixels { at: pixels, pitch },
+        Pixels {
+            at: dst.pixels,
+            pitch: dst.pitch,
+        },
         to,
-        (width, height),
-        depth,
+        (dst.width, dst.height),
+        dst.format.bits,
         key,
     )?;
     Ok(S_OK)
@@ -1211,9 +1234,10 @@ fn blit_fast(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 fn set_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetColorKey(flags, key). The source key is what a keyed blit leaves
     // out; it belongs to the pixels, which every face of a surface shares.
-    let Some((pixels, ..)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this) else {
         return Ok(S_OK);
     };
+    let pixels = s.pixels;
     if args[0] & !DDCKEY_SRCBLT != 0 {
         return Err(Stop::NotWritten {
             what: format!("IDirectDrawSurface::SetColorKey: flags {:#x}", args[0]),
@@ -1246,9 +1270,10 @@ fn get_color_key(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     // `test_texture_load_ckey` finds Windows answering. LEGO Chess's DirectX
     // plugin hands what it reads on to each texture it loads (#210).
     const DDERR_NOCOLORKEY: u32 = 0x8876_00d7;
-    let Some((pixels, ..)) = surface_of(ctx, this) else {
+    let Some(s) = surface_of(ctx, this) else {
         return Ok(DDERR_INVALIDPARAMS);
     };
+    let pixels = s.pixels;
     if args[1] == 0 {
         return Ok(DDERR_INVALIDPARAMS);
     }
@@ -1287,7 +1312,7 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     if at == 0 || args[1] != 0 {
         return Ok(DDERR_INVALIDPARAMS);
     }
-    let caps = caps_of(ctx, this);
+    let caps = surface_of(ctx, this).map_or(0, |s| s.caps);
     if caps & ddscaps::SYSTEMMEMORY == 0 || caps & ddscaps::PRIMARYSURFACE != 0 {
         return Ok(DDERR_INVALIDSURFACETYPE);
     }
@@ -2341,5 +2366,82 @@ mod tests {
         assert_eq!(super::entries(&[0, 250, 10, 0]), (250, 6));
         assert_eq!(super::entries(&[0, 300, 5, 0]), (256, 0));
         assert_eq!(super::entries(&[0, 0, 256, 0]), (0, 256));
+    }
+
+    #[test]
+    fn flip_disjoint_zero_alloc_overlap_fallback_and_dc_out() {
+        use super::{dc_out, flip, screen_format, DIRECT_DRAW_SURFACE};
+        use crate::com::S_OK;
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::{ComState, State};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let (width, height, pitch) = (16u32, 8u32, 32u32);
+            let len = (pitch * height) as usize;
+            let format = screen_format(16);
+
+            // Disjoint front (0x2000) and back (0x4000) surfaces -> zero-alloc read_and_write path.
+            let back = State::make_com(
+                ctx,
+                &DIRECT_DRAW_SURFACE,
+                ComState::Surface {
+                    pixels: 0x4000,
+                    width,
+                    height,
+                    pitch,
+                    format,
+                    primary: false,
+                    caps: 0,
+                    back: 0,
+                    palette: 0,
+                },
+            )
+            .unwrap();
+            let front = State::make_com(
+                ctx,
+                &DIRECT_DRAW_SURFACE,
+                ComState::Surface {
+                    pixels: 0x2000,
+                    width,
+                    height,
+                    pitch,
+                    format,
+                    primary: true,
+                    caps: 0,
+                    back,
+                    palette: 0,
+                },
+            )
+            .unwrap();
+
+            let expected = pattern(len, 0x3b);
+            ctx.mem.write(0x4000, &expected).unwrap();
+            ctx.mem.mark_code(0x2000);
+            assert!(!dc_out(ctx, front));
+            assert_eq!(flip(ctx, front, &[0, 0]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.slice(0x2000, len).unwrap(), expected.as_slice());
+            assert!(ctx.mem.code_written);
+            assert!(ctx.mem.written_code.contains(&2));
+            assert!(ctx.state.present.is_some());
+
+            // Overlapping back (0x2040) and front (0x2000) -> fallback copy preserves exact bytes.
+            if let Some(ComState::Surface { pixels, .. }) =
+                ctx.state.com_mut(back).map(|o| &mut o.state)
+            {
+                *pixels = 0x2040;
+            }
+            let overlap_src = ctx.mem.slice(0x2040, len).unwrap().to_vec();
+            assert_eq!(flip(ctx, front, &[0, 0]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.slice(0x2000, len).unwrap(), overlap_src.as_slice());
+
+            // Active surface DC makes dc_out true and Flip stop at a wall.
+            ctx.state.surface_dcs.insert(0x40000, back);
+            assert!(dc_out(ctx, back));
+            assert!(!dc_out(ctx, front));
+            assert!(matches!(
+                flip(ctx, front, &[0, 0]),
+                Err(Stop::NotWritten { .. })
+            ));
+        });
     }
 }

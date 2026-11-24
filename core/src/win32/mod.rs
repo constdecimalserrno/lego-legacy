@@ -231,9 +231,10 @@ pub struct State {
     /// the run ends: a save that never reached the profile is lost.
     pub saves_refused: u64,
     pub heap: Heap,
-    /// Handles the guest has been given.
-    handles: BTreeMap<u32, Object>,
-    next_handle: u32,
+    /// Handles the guest has been given, indexed by `(handle - HANDLE_BASE) >> 2`
+    /// in ascending creation order. Closed handles leave `None` so handles are
+    /// never reused.
+    handles: Vec<Option<Object>>,
     /// The command line the guest reads, once it has asked for it.
     pub command_line: Option<u32>,
     /// What the guest will read from `GetLastError`.
@@ -250,8 +251,13 @@ pub struct State {
     /// they are is the thread's own business.
     pub tls_slots: usize,
     /// Which thread holds each critical section the guest has entered, and how
-    /// many times over (ADR-0005). A section nobody holds is not in here.
-    pub sections: BTreeMap<u32, (u32, u32)>,
+    /// many times over (ADR-0005), as `(section, owner, depth)`. A section
+    /// nobody holds is not in here.
+    pub sections: Vec<(u32, u32, u32)>,
+    /// How many guest threads are currently parked waiting on a critical
+    /// section. When zero, `LeaveCriticalSection` skips waking waiters and
+    /// `EnterCriticalSection` skips unparking.
+    pub section_waiters: u32,
     /// Address ranges the guest has claimed by naming an address to
     /// `VirtualAlloc`, outside the heap. A second claim that overlaps one is
     /// refused, which is what tells a guest's own DLL loader to relocate the
@@ -445,11 +451,7 @@ impl State {
             foreign_frees: 0,
             saves_refused: 0,
             heap: Heap::new(),
-            handles: BTreeMap::new(),
-            // Handles are small multiples of four, as Windows' are, and below
-            // anything the machine hands out as memory, so one is never
-            // mistaken for an address the guest was given.
-            next_handle: 0x0000_0100,
+            handles: Vec::new(),
             command_line: None,
             last_error: 0,
             error_mode: 0,
@@ -475,7 +477,8 @@ impl State {
             reserved: BTreeMap::new(),
             committed: BTreeMap::new(),
             next_mapping: MAPPING_BASE,
-            sections: BTreeMap::new(),
+            sections: Vec::new(),
+            section_waiters: 0,
             tls_slots: 0,
             current_directory: String::new(),
             volume_label: String::new(),
@@ -550,25 +553,45 @@ impl State {
     }
 
     /// Give the guest a handle to something.
+    ///
+    /// Handles are small multiples of four starting at [`HANDLE_BASE`], as
+    /// Windows' are, and below anything the machine hands out as memory, so
+    /// one is never mistaken for an address the guest was given.
     pub fn give(&mut self, object: Object) -> u32 {
-        let handle = self.next_handle;
-        self.next_handle += 4;
-        self.handles.insert(handle, object);
+        let handle = HANDLE_BASE + (self.handles.len() as u32) * 4;
+        self.handles.push(Some(object));
         handle
+    }
+
+    #[inline(always)]
+    fn handle_index(handle: u32) -> Option<usize> {
+        let offset = handle.checked_sub(HANDLE_BASE)?;
+        if offset & 3 != 0 {
+            return None;
+        }
+        Some((offset >> 2) as usize)
     }
 
     #[must_use]
     pub fn object(&self, handle: u32) -> Option<&Object> {
-        self.handles.get(&handle)
+        self.handles.get(Self::handle_index(handle)?)?.as_ref()
     }
 
     pub fn object_mut(&mut self, handle: u32) -> Option<&mut Object> {
-        self.handles.get_mut(&handle)
+        self.handles.get_mut(Self::handle_index(handle)?)?.as_mut()
     }
 
     /// Take a handle back.
     pub fn close(&mut self, handle: u32) -> bool {
-        self.handles.remove(&handle).is_some()
+        Self::handle_index(handle)
+            .and_then(|i| self.handles.get_mut(i))
+            .and_then(Option::take)
+            .is_some()
+    }
+
+    /// Every currently open object, in ascending handle order.
+    pub(super) fn objects(&self) -> impl Iterator<Item = &Object> {
+        self.handles.iter().filter_map(Option::as_ref)
     }
 
     /// What the guest reads out of the keyboard device: one byte per key, the
@@ -713,11 +736,26 @@ impl State {
     /// the pointer is.
     #[must_use]
     pub fn com(&self, at: u32) -> Option<&ComObject> {
-        self.com.get(&self.identity(at))
+        let object = self.com.get(&at)?;
+        if object.identity == at {
+            Some(object)
+        } else {
+            self.com.get(&object.identity)
+        }
     }
 
     pub fn com_mut(&mut self, at: u32) -> Option<&mut ComObject> {
-        let identity = self.identity(at);
+        let identity = {
+            let object = self.com.get_mut(&at)?;
+            if object.identity == at {
+                // Safety: `object` is a unique mutable borrow from `self.com`;
+                // we return immediately without touching `self.com` again and
+                // tie the returned lifetime to `&mut self`.
+                let ptr: *mut ComObject = object;
+                return Some(unsafe { &mut *ptr });
+            }
+            object.identity
+        };
         self.com.get_mut(&identity)
     }
 
@@ -797,12 +835,17 @@ impl State {
     /// The handle a module already has, if it has one.
     #[must_use]
     pub fn module(&self, name: &str) -> Option<u32> {
-        self.handles.iter().find_map(|(h, o)| match o {
-            Object::Module { name: n, .. } if n.eq_ignore_ascii_case(name) => Some(*h),
+        self.handles.iter().enumerate().find_map(|(i, o)| match o {
+            Some(Object::Module { name: n, .. }) if n.eq_ignore_ascii_case(name) => {
+                Some(HANDLE_BASE + (i as u32) * 4)
+            }
             _ => None,
         })
     }
 }
+
+/// First handle value handed to the guest.
+const HANDLE_BASE: u32 = 0x0000_0100;
 
 /// A registry path or value name, folded the way Windows compares them.
 ///
@@ -1236,6 +1279,51 @@ pub fn pixel(colour: u32, depth: u32) -> u32 {
     }
 }
 
+/// Fill one contiguous slice of `bytes`-wide pixels with `value` in little-endian.
+fn fill_row(dst: &mut [u8], bytes: usize, value: u32) {
+    match bytes {
+        1 => dst.fill(value as u8),
+        2 => {
+            let p = (value as u16).to_le_bytes();
+            if p[0] == p[1] {
+                dst.fill(p[0]);
+            } else {
+                for chunk in dst.as_chunks_mut::<2>().0 {
+                    *chunk = p;
+                }
+            }
+        }
+        3 => {
+            let [b0, b1, b2, _] = value.to_le_bytes();
+            if b0 == b1 && b1 == b2 {
+                dst.fill(b0);
+            } else {
+                for chunk in dst.as_chunks_mut::<3>().0 {
+                    *chunk = [b0, b1, b2];
+                }
+            }
+        }
+        4 => {
+            let p = value.to_le_bytes();
+            if p[0] == p[1] && p[1] == p[2] && p[2] == p[3] {
+                dst.fill(p[0]);
+            } else {
+                for chunk in dst.as_chunks_mut::<4>().0 {
+                    *chunk = p;
+                }
+            }
+        }
+        0 => {}
+        _ => {
+            let one = value.to_le_bytes();
+            let take = bytes.min(one.len());
+            for chunk in dst.chunks_exact_mut(bytes) {
+                chunk[..take].copy_from_slice(&one[..take]);
+            }
+        }
+    }
+}
+
 /// Fill a rectangle of a surface, `(pixels, pitch, depth)`, with one pixel
 /// already in the surface's own format.
 ///
@@ -1247,37 +1335,79 @@ pub fn fill(
     (x0, y0, x1, y1): (u32, u32, u32, u32),
     value: u32,
 ) -> Result<(), Stop> {
-    let bytes = depth.div_ceil(8);
-    let one = value.to_le_bytes();
-    let row: Vec<u8> = (x0..x1.max(x0))
-        .flat_map(|_| one.iter().copied().take(bytes as usize))
-        .collect();
-    for y in y0..y1 {
-        ctx.mem
-            .write(pixels + y * pitch + x0 * bytes, &row)
-            .map_err(Stop::Fault)?;
+    let rows = y1.saturating_sub(y0) as usize;
+    if rows == 0 {
+        return Ok(());
+    }
+    let bytes = depth.div_ceil(8) as usize;
+    let cols = x1.saturating_sub(x0) as usize;
+    let row_bytes = cols * bytes;
+    if row_bytes == 0 {
+        for y in y0..y1 {
+            ctx.mem
+                .slice_mut(pixels + y * pitch + x0 * bytes as u32, 0)
+                .map_err(Stop::Fault)?;
+        }
+        return Ok(());
+    }
+    let pitch_usize = pitch as usize;
+    let start =
+        u64::from(pixels) + u64::from(y0) * pitch_usize as u64 + u64::from(x0) * bytes as u64;
+    let span = (rows - 1) * pitch_usize + row_bytes;
+    let start_addr = u32::try_from(start).map_err(|_| {
+        Stop::Fault(Fault {
+            addr: u32::MAX,
+            len: span,
+            write: true,
+        })
+    })?;
+    let buf = ctx.mem.slice_mut(start_addr, span).map_err(Stop::Fault)?;
+    if pitch_usize == row_bytes {
+        fill_row(buf, bytes, value);
+    } else {
+        fill_row(&mut buf[..row_bytes], bytes, value);
+        for row in 1..rows {
+            let d = row * pitch_usize;
+            if pitch_usize >= row_bytes {
+                buf.copy_within(..row_bytes, d);
+            } else {
+                fill_row(&mut buf[d..d + row_bytes], bytes, value);
+            }
+        }
     }
     Ok(())
 }
+
+/// Every COM interface slice declared across the Win32 modules.
+const INTERFACE_SETS: &[&[&crate::com::Interface]] = &[
+    dinput::INTERFACES,
+    dsound::INTERFACES,
+    ddraw::INTERFACES,
+    d3drm::INTERFACES,
+    d3d::INTERFACES,
+    amstream::INTERFACES,
+    avifile::INTERFACES,
+];
 
 /// The interfaces this machine can hand the guest.
 #[must_use]
 pub fn interfaces() -> Vec<&'static crate::com::Interface> {
     let mut all = Vec::new();
-    all.extend_from_slice(dinput::INTERFACES);
-    all.extend_from_slice(dsound::INTERFACES);
-    all.extend_from_slice(ddraw::INTERFACES);
-    all.extend_from_slice(d3drm::INTERFACES);
-    all.extend_from_slice(d3d::INTERFACES);
-    all.extend_from_slice(amstream::INTERFACES);
-    all.extend_from_slice(avifile::INTERFACES);
+    for set in INTERFACE_SETS {
+        all.extend_from_slice(set);
+    }
     all
 }
 
 /// One interface, by the name it is declared under.
 #[must_use]
 pub fn interface_named(name: &str) -> Option<&'static crate::com::Interface> {
-    interfaces().into_iter().find(|i| i.name == name)
+    INTERFACE_SETS
+        .iter()
+        .copied()
+        .flatten()
+        .copied()
+        .find(|i| i.name == name)
 }
 
 /// One method of one interface, if it is declared.
@@ -1335,8 +1465,48 @@ fn written(dll: &str) -> impl Iterator<Item = &'static Shim> + '_ {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::State;
+pub(crate) mod tests {
+    use super::{fill, interface_named, interfaces, ComState, Ctx, Object, State, HANDLE_BASE};
+    use crate::cli::Trace;
+    use crate::cpu::{Cpu, Stop};
+    use crate::guest::{Arena, Fault, GuestMem};
+    use crate::host::headless::Headless;
+    use crate::install::Tree;
+    use crate::loader::Modules;
+    use crate::runlog::RunLog;
+    use crate::shim::Boundary;
+    use crate::Title;
+
+    pub(crate) fn with_test_ctx<R>(arena_len: usize, f: impl FnOnce(&mut Ctx<'_>) -> R) -> R {
+        let mut cpu = Cpu::default();
+        let mut mem = Arena::new(&mut Headless::new(), arena_len).expect("an arena");
+        let mut state = State::new();
+        let mut log = RunLog::create("unit-test", Trace::Off).expect("a run log");
+        let dir = log.dir().to_path_buf();
+        let mut tree = Tree::default();
+        let mut modules = Modules::default();
+        let mut boundary = Boundary::new();
+        let out = {
+            let mut ctx = Ctx {
+                cpu: &mut cpu,
+                mem: &mut mem,
+                state: &mut state,
+                title: &Title::STUB,
+                log: &mut log,
+                tree: &mut tree,
+                modules: &mut modules,
+                clock_millis: 0,
+                boundary: &mut boundary,
+                call_guest: None,
+                float_answer: None,
+                answer_is_the_call_s: false,
+            };
+            f(&mut ctx)
+        };
+        drop(log);
+        let _ = std::fs::remove_dir_all(dir);
+        out
+    }
 
     #[test]
     fn a_declared_registry_row_is_found_however_a_title_spells_it() {
@@ -1362,5 +1532,161 @@ mod tests {
                 "CdDataDir"
             )
             .is_none());
+    }
+
+    #[test]
+    fn state_handles_lookup_close_misaligned_and_ascending_iteration() {
+        let mut state = State::new();
+        let h0 = state.give(Object::Module {
+            name: "first.dll".to_owned(),
+            base: 0x1000,
+        });
+        let h1 = state.give(Object::Std(1));
+        let h2 = state.give(Object::Module {
+            name: "first.dll".to_owned(),
+            base: 0x2000,
+        });
+        let h3 = state.give(Object::Std(3));
+        assert_eq!([h0, h1, h2, h3], [HANDLE_BASE, 0x104, 0x108, 0x10c]);
+
+        // Under-base, misaligned, and past-end handles all resolve to None.
+        for bad in [
+            0,
+            4,
+            HANDLE_BASE - 4,
+            HANDLE_BASE + 1,
+            HANDLE_BASE + 2,
+            HANDLE_BASE + 3,
+            0x110,
+            u32::MAX,
+        ] {
+            assert_eq!(state.object(bad), None, "bad handle {bad:#x}");
+            assert_eq!(state.object_mut(bad), None, "bad mut handle {bad:#x}");
+            assert!(!state.close(bad), "close bad handle {bad:#x}");
+        }
+
+        // Ascending order: module() returns the lowest live matching handle.
+        assert_eq!(state.module("FIRST.DLL"), Some(h0));
+
+        // Closing leaves a tombstoned slot; handles are never reused, and
+        // module()/objects() continue in exact ascending order.
+        assert!(state.close(h0));
+        assert!(!state.close(h0));
+        assert_eq!(state.object(h0), None);
+        assert_eq!(state.module("first.dll"), Some(h2));
+
+        let h4 = state.give(Object::Std(4));
+        assert_eq!(h4, 0x110);
+        let live: Vec<_> = state.objects().cloned().collect();
+        assert_eq!(
+            live,
+            vec![
+                Object::Std(1),
+                Object::Module {
+                    name: "first.dll".to_owned(),
+                    base: 0x2000,
+                },
+                Object::Std(3),
+                Object::Std(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn state_com_fast_path_and_secondary_face_lookup() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let dd = State::make_com(
+                ctx,
+                &super::ddraw::DIRECT_DRAW,
+                ComState::Device { keyboard: true },
+            )
+            .expect("make_com");
+            let dd4 = State::face(ctx, dd, &super::ddraw::DIRECT_DRAW4).expect("face");
+            assert_ne!(dd, dd4);
+            assert_eq!(ctx.state.com(dd).map(|o| o.identity), Some(dd));
+            assert_eq!(ctx.state.com(dd4).map(|o| o.identity), Some(dd));
+            assert_eq!(
+                ctx.state.com(dd4).map(|o| &o.state),
+                Some(&ComState::Device { keyboard: true })
+            );
+            // Mutate through secondary face and observe via primary (and vice versa).
+            ctx.state.com_mut(dd4).expect("face").app_data = 0x1234;
+            assert_eq!(ctx.state.com(dd).expect("primary").app_data, 0x1234);
+            ctx.state.com_mut(dd).expect("primary").app_data = 0x5678;
+            assert_eq!(ctx.state.com(dd4).expect("face").app_data, 0x5678);
+            assert!(ctx.state.com(0xdead_beef).is_none());
+            assert!(ctx.state.com_mut(0xdead_beef).is_none());
+        });
+    }
+
+    #[test]
+    fn interface_named_matches_all_declared_interfaces() {
+        for iface in interfaces() {
+            let found = interface_named(iface.name).expect("declared interface");
+            assert_eq!(found.name, iface.name);
+        }
+        assert!(interface_named("IDoesNotExist").is_none());
+    }
+
+    #[test]
+    fn fill_matches_reference_across_depths_pitches_empty_faults_and_code_pages() {
+        fn reference_fill(
+            mem: &mut Arena,
+            (pixels, pitch, depth): (u32, u32, u32),
+            (x0, y0, x1, y1): (u32, u32, u32, u32),
+            value: u32,
+        ) {
+            let bytes = depth.div_ceil(8);
+            let one = value.to_le_bytes();
+            let row: Vec<u8> = (x0..x1.max(x0))
+                .flat_map(|_| one.iter().copied().take(bytes as usize))
+                .collect();
+            for y in y0..y1 {
+                mem.write(pixels + y * pitch + x0 * bytes, &row).unwrap();
+            }
+        }
+
+        for depth in [8u32, 16, 24, 32] {
+            let bytes = depth.div_ceil(8);
+            let (w, h) = (19u32, 7u32);
+            for (label, pitch, rect) in [
+                ("contiguous", w * bytes, (0, 0, w, h)),
+                ("strided-full", w * bytes + 12, (0, 0, w, h)),
+                ("strided-subrect", w * bytes + 8, (3, 1, 15, 6)),
+                ("single-row", w * bytes + 4, (2, 4, 17, 5)),
+                ("empty-rows", w * bytes, (0, 3, w, 3)),
+                ("empty-cols", w * bytes, (5, 0, 5, h)),
+            ] {
+                for value in [0x0000_0000u32, 0xffff_ffff, 0x1234_5678] {
+                    let mut expected = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+                    let seed: Vec<u8> = (0usize..4096)
+                        .map(|i| (i.wrapping_mul(29) ^ 0xa5) as u8)
+                        .collect();
+                    expected.write(0x2000, &seed).unwrap();
+                    reference_fill(&mut expected, (0x2000, pitch, depth), rect, value);
+
+                    with_test_ctx(1 << 16, |ctx| {
+                        ctx.mem.write(0x2000, &seed).unwrap();
+                        fill(ctx, (0x2000, pitch, depth), rect, value).unwrap();
+                        assert_eq!(
+                            ctx.mem.slice(0x2000, 4096).unwrap(),
+                            expected.slice(0x2000, 4096).unwrap(),
+                            "depth={depth} {label} value={value:#x}"
+                        );
+                    });
+                }
+            }
+        }
+
+        // Code-page invalidation and out-of-bounds fault.
+        with_test_ctx(0x4000, |ctx| {
+            ctx.mem.mark_code(0x2000);
+            fill(ctx, (0x2000, 32, 16), (0, 0, 8, 4), 0x1234).unwrap();
+            assert!(ctx.mem.code_written);
+            assert!(ctx.mem.written_code.contains(&2));
+
+            let err = fill(ctx, (0x3ff0, 32, 16), (0, 0, 16, 2), 0).unwrap_err();
+            assert!(matches!(err, Stop::Fault(Fault { write: true, .. })));
+        });
     }
 }

@@ -1161,41 +1161,64 @@ pub(super) fn running_thread(ctx: &Ctx<'_>) -> u32 {
 /// keeps them out of each other's C++ runtime: Alpha Team's sound thread and
 /// its loader share one allocator.
 fn enter_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let cs = args[0];
     let me = running_thread(ctx);
-    match ctx.state.sections.get_mut(&args[0]) {
-        Some((owner, depth)) if *owner == me => {
+    if let Some((_, owner, depth)) = ctx.state.sections.iter_mut().find(|(s, _, _)| *s == cs) {
+        if *owner == me {
             // A thread already holding one may take it again, and has to
             // leave it as many times as it took it.
             *depth += 1;
-            park(ctx, &[], 0);
-            Ok(0)
+            if ctx.state.section_waiters > 0 {
+                unpark_section(ctx);
+            }
+            return Ok(0);
         }
-        Some(_) => {
-            // Somebody else has it. This thread is put down on it until they
-            // leave, rather than left runnable to ask again: a thread that
-            // asks again retires no instructions, so the declared clock never
-            // moves, so whoever holds the section never reaches its hour
-            // either — the machine spins with every thread alive and nothing
-            // happening (#60).
-            park(ctx, &[args[0]], u64::MAX);
-            Err(Stop::Blocked)
+        // Somebody else has it. This thread is put down on it until they
+        // leave, rather than left runnable to ask again: a thread that
+        // asks again retires no instructions, so the declared clock never
+        // moves, so whoever holds the section never reaches its hour
+        // either — the machine spins with every thread alive and nothing
+        // happening (#60).
+        if ctx
+            .state
+            .threads
+            .get(ctx.state.thread)
+            .is_some_and(|t| t.waiting_on.is_empty())
+        {
+            ctx.state.section_waiters += 1;
         }
-        None => {
-            ctx.state.sections.insert(args[0], (me, 1));
-            park(ctx, &[], 0);
-            Ok(0)
+        park(ctx, &[cs], u64::MAX);
+        return Err(Stop::Blocked);
+    }
+    ctx.state.sections.push((cs, me, 1));
+    if ctx.state.section_waiters > 0 {
+        unpark_section(ctx);
+    }
+    Ok(0)
+}
+
+fn unpark_section(ctx: &mut Ctx<'_>) {
+    if let Some(thread) = ctx.state.threads.get_mut(ctx.state.thread) {
+        if !thread.waiting_on.is_empty() {
+            thread.waiting_on.clear();
+            thread.wake_at = 0;
+            thread.gives_up_at = 0;
+            ctx.state.section_waiters = ctx.state.section_waiters.saturating_sub(1);
         }
     }
 }
 
 fn leave_critical_section(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let cs = args[0];
     let me = running_thread(ctx);
-    if let Some((owner, depth)) = ctx.state.sections.get_mut(&args[0]) {
-        if *owner == me {
-            *depth -= 1;
-            if *depth == 0 {
-                ctx.state.sections.remove(&args[0]);
-                wake_waiters(ctx.state, args[0]);
+    if let Some(i) = ctx.state.sections.iter().position(|(s, _, _)| *s == cs) {
+        if ctx.state.sections[i].1 == me {
+            ctx.state.sections[i].2 -= 1;
+            if ctx.state.sections[i].2 == 0 {
+                ctx.state.sections.swap_remove(i);
+                if ctx.state.section_waiters > 0 {
+                    wake_waiters(ctx.state, cs);
+                }
             }
         }
     }
@@ -1633,7 +1656,46 @@ const WAIT_FAILED: u32 = 0xffff_ffff;
 const INFINITE: u32 = 0xffff_ffff;
 
 fn wait_for_single_object(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    wait_for(ctx, &[args[0]], false, args[1])
+    let (handle, timeout) = (args[0], args[1]);
+    let me = running_thread(ctx);
+    match ctx.state.object_mut(handle) {
+        None => {
+            // ERROR_INVALID_HANDLE.
+            ctx.state.last_error = 6;
+            unpark(ctx);
+            return Ok(WAIT_FAILED);
+        }
+        Some(Object::Semaphore { count, .. }) if *count > 0 => {
+            *count -= 1;
+            unpark(ctx);
+            return Ok(0);
+        }
+        Some(Object::Named {
+            kind: "mutex",
+            signalled,
+            held,
+            ..
+        }) if held.is_none_or(|(owner, _)| owner == me) => {
+            *held = Some((me, held.map_or(1, |(_, depth)| depth + 1)));
+            *signalled = false;
+            unpark(ctx);
+            return Ok(0);
+        }
+        Some(Object::Named {
+            kind,
+            signalled,
+            manual,
+            ..
+        }) if *kind != "mutex" && *signalled => {
+            if !*manual {
+                *signalled = false;
+            }
+            unpark(ctx);
+            return Ok(0);
+        }
+        Some(_) => {}
+    }
+    wait_blocked(ctx, &[handle], timeout)
 }
 
 fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1652,7 +1714,7 @@ fn wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Sto
     // semaphore's last one or an automatic event's signal cannot be taken twice.
     if all && (1..count).any(|i| handles[..i].contains(&handles[i])) {
         ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
-        park(ctx, &[], 0);
+        unpark(ctx);
         return Ok(WAIT_FAILED);
     }
     wait_for(ctx, &handles, all, args[3])
@@ -1673,7 +1735,7 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Resu
     if handles.is_empty() || handles.iter().any(|h| ctx.state.object(*h).is_none()) {
         // ERROR_INVALID_HANDLE.
         ctx.state.last_error = 6;
-        park(ctx, &[], 0);
+        unpark(ctx);
         return Ok(WAIT_FAILED);
     }
     if all {
@@ -1681,22 +1743,20 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Resu
             for handle in handles {
                 claim(ctx, *handle);
             }
-            park(ctx, &[], 0);
+            unpark(ctx);
             return Ok(0);
         }
     } else if let Some(i) = handles.iter().position(|h| claim(ctx, *h)) {
-        park(ctx, &[], 0);
+        unpark(ctx);
         return Ok(u32::try_from(i).unwrap_or(0));
     }
+    wait_blocked(ctx, handles, timeout)
+}
+
+/// Handle a wait whose objects are not yet available.
+fn wait_blocked(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
     // Not available. Whether this thread can be woken at all decides what a
     // wait means: with nobody else to run, waiting is only spending time.
-    let now = ctx.clock_millis;
-    let running = ctx.state.thread;
-    let parked = ctx
-        .state
-        .threads
-        .get(running)
-        .is_some_and(|t| !t.waiting_on.is_empty());
     if ctx.state.threads.len() < 2 {
         // There is nobody to be waiting for. A title with one thread waits on
         // an event a device would have signalled, or a mutex nothing else
@@ -1705,6 +1765,13 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Resu
         // by one of these and stops dead if it is told the wait ran out.
         return Ok(0);
     }
+    let now = ctx.clock_millis;
+    let running = ctx.state.thread;
+    let parked = ctx
+        .state
+        .threads
+        .get(running)
+        .is_some_and(|t| !t.waiting_on.is_empty());
     if !parked {
         if timeout == 0 {
             return Ok(WAIT_TIMEOUT);
@@ -1731,8 +1798,24 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Resu
         park(ctx, handles, until);
         return Err(Stop::Blocked);
     }
-    park(ctx, &[], 0);
+    unpark(ctx);
     Ok(WAIT_TIMEOUT)
+}
+
+/// Clear any parked wait state on the running thread without touching
+/// `threads` when single-threaded or already unparked.
+#[inline(always)]
+fn unpark(ctx: &mut Ctx<'_>) {
+    if ctx.state.threads.len() < 2 {
+        return;
+    }
+    if let Some(thread) = ctx.state.threads.get_mut(ctx.state.thread) {
+        if !thread.waiting_on.is_empty() || thread.wake_at != 0 || thread.gives_up_at != 0 {
+            thread.waiting_on.clear();
+            thread.wake_at = 0;
+            thread.gives_up_at = 0;
+        }
+    }
 }
 
 /// Put the running thread down on these objects until an hour, or pick it
@@ -1921,7 +2004,7 @@ fn shared(state: &State, path: &str, access: u32, share: u32) -> bool {
         open.replace('/', "\\")
             .eq_ignore_ascii_case(&path.replace('/', "\\"))
     };
-    state.handles.values().all(|object| match object {
+    state.objects().all(|object| match object {
         Object::File {
             path: open,
             access: theirs,
@@ -3264,8 +3347,7 @@ fn move_file(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let key = |path: &str| path.replace('/', "\\").to_ascii_uppercase();
     let open = ctx
         .state
-        .handles
-        .values()
+        .objects()
         .any(|object| matches!(object, Object::File { path, .. } if key(path) == key(&from)));
     let moved = if open || key(&to).starts_with("D:") {
         None
@@ -3630,5 +3712,140 @@ mod tests {
         // so rather than being sent four gigabytes along it.
         assert_eq!(seek_to(0, -4), None);
         assert_eq!(seek_to(3, -4), None);
+    }
+
+    #[test]
+    fn wait_for_single_object_single_lookup_and_critical_section_waiters() {
+        use super::{
+            enter_critical_section, leave_critical_section, release_mutex, wait_for_single_object,
+            WAIT_FAILED, WAIT_TIMEOUT,
+        };
+        use crate::cpu::{Cpu, Stop};
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::{GuestThread, Object};
+
+        with_test_ctx(1 << 16, |ctx| {
+            // Invalid handle returns WAIT_FAILED and sets ERROR_INVALID_HANDLE (6).
+            assert_eq!(
+                wait_for_single_object(ctx, &[0x9999, 0]).unwrap(),
+                WAIT_FAILED
+            );
+            assert_eq!(ctx.state.last_error, 6);
+
+            // Semaphore decrements on acquire.
+            let sem = ctx.state.give(Object::Semaphore { count: 1, max: 2 });
+            assert_eq!(wait_for_single_object(ctx, &[sem, 0]).unwrap(), 0);
+            assert!(matches!(
+                ctx.state.object(sem),
+                Some(Object::Semaphore { count: 0, .. })
+            ));
+
+            // Auto-reset event clears on acquire; manual-reset stays signalled.
+            let auto = ctx.state.give(Object::Named {
+                kind: "event",
+                name: String::new(),
+                signalled: true,
+                manual: false,
+                held: None,
+            });
+            let manual = ctx.state.give(Object::Named {
+                kind: "event",
+                name: String::new(),
+                signalled: true,
+                manual: true,
+                held: None,
+            });
+            assert_eq!(wait_for_single_object(ctx, &[auto, 0]).unwrap(), 0);
+            assert!(matches!(
+                ctx.state.object(auto),
+                Some(Object::Named {
+                    signalled: false,
+                    ..
+                })
+            ));
+            assert_eq!(wait_for_single_object(ctx, &[manual, 0]).unwrap(), 0);
+            assert!(matches!(
+                ctx.state.object(manual),
+                Some(Object::Named {
+                    signalled: true,
+                    ..
+                })
+            ));
+
+            // Add a second thread to test multi-thread mutex blocking and critical sections.
+            ctx.state.threads.push(GuestThread {
+                cpu: Cpu::default(),
+                handle: 0,
+                id: crate::machine::THREAD_ID + 1,
+                suspended: false,
+                ended: false,
+                code: 0,
+                tls: Vec::new(),
+                wake_at: 0,
+                gives_up_at: 0,
+                waiting_on: Vec::new(),
+                time_critical: false,
+            });
+
+            // Thread 0 owns mutex recursively; thread 1 times out with timeout 0.
+            let mtx = ctx.state.give(Object::Named {
+                kind: "mutex",
+                name: String::new(),
+                signalled: true,
+                manual: false,
+                held: None,
+            });
+            assert_eq!(wait_for_single_object(ctx, &[mtx, 0]).unwrap(), 0);
+            assert_eq!(wait_for_single_object(ctx, &[mtx, 0]).unwrap(), 0);
+            ctx.state.thread = 1;
+            assert_eq!(
+                wait_for_single_object(ctx, &[mtx, 0]).unwrap(),
+                WAIT_TIMEOUT
+            );
+            ctx.state.thread = 0;
+            assert_eq!(release_mutex(ctx, &[mtx]).unwrap(), 1);
+            assert_eq!(release_mutex(ctx, &[mtx]).unwrap(), 1);
+            ctx.state.thread = 1;
+            assert_eq!(wait_for_single_object(ctx, &[mtx, 0]).unwrap(), 0);
+
+            // Critical sections: re-entrant, contended, re-contended, and waiter counter exactness.
+            ctx.state.thread = 0;
+            let cs = 0x4000u32;
+            assert_eq!(enter_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert_eq!(enter_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert_eq!(ctx.state.section_waiters, 0);
+
+            // Thread 1 blocks on cs -> section_waiters becomes 1.
+            ctx.state.thread = 1;
+            assert!(matches!(
+                enter_critical_section(ctx, &[cs]),
+                Err(Stop::Blocked)
+            ));
+            assert_eq!(ctx.state.section_waiters, 1);
+            assert_eq!(ctx.state.threads[1].wake_at, u64::MAX);
+
+            // Thread 1 retrying while still contended must not double-increment section_waiters.
+            assert!(matches!(
+                enter_critical_section(ctx, &[cs]),
+                Err(Stop::Blocked)
+            ));
+            assert_eq!(ctx.state.section_waiters, 1);
+
+            // Thread 0 leaves twice -> wakes thread 1 on outermost leave.
+            ctx.state.thread = 0;
+            assert_eq!(leave_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert_eq!(ctx.state.threads[1].wake_at, u64::MAX);
+            assert_eq!(leave_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert_eq!(ctx.state.threads[1].wake_at, 0);
+            assert!(ctx.state.sections.is_empty());
+
+            // Thread 1 now acquires cs and decrements section_waiters back to 0.
+            ctx.state.thread = 1;
+            assert_eq!(enter_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert_eq!(ctx.state.section_waiters, 0);
+            assert!(ctx.state.threads[1].waiting_on.is_empty());
+            assert_eq!(leave_critical_section(ctx, &[cs]).unwrap(), 0);
+            assert!(ctx.state.sections.is_empty());
+        });
     }
 }

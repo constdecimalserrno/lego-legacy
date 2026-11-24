@@ -59,6 +59,12 @@ struct Buffer {
     part: u64,
     /// Where it is, when the title made it with 3D.
     place: Option<Place>,
+    /// Cached `(millis, at, playing)` result of `progress(millis)` to skip
+    /// repeated 64-bit divisions within the same declared millisecond.
+    /// `u64::MAX` marks the cache invalid.
+    cached_millis: u64,
+    cached_at: u32,
+    cached_playing: bool,
 }
 
 /// `DS3DMODE_*`: how a 3D buffer's position is taken.
@@ -509,7 +515,29 @@ impl Buffer {
             offset: 0,
             part: 0,
             place: three_d.then(Place::default),
+            cached_millis: u64::MAX,
+            cached_at: 0,
+            cached_playing: false,
         }
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.cached_millis = u64::MAX;
+    }
+
+    /// Cached version of [`Buffer::progress`], invalidated on any mutation
+    /// that can affect playback position or state.
+    fn progress_cached(&mut self, millis: u64) -> (u32, bool) {
+        if millis != u64::MAX && self.cached_millis == millis {
+            return (self.cached_at, self.cached_playing);
+        }
+        let (at, playing) = self.progress(millis);
+        if millis != u64::MAX {
+            self.cached_millis = millis;
+            self.cached_at = at;
+            self.cached_playing = playing;
+        }
+        (at, playing)
     }
 
     /// The rate it plays at.
@@ -560,6 +588,7 @@ impl Buffer {
             self.part = if playing { played % 1000 } else { 0 };
             self.offset = at;
             self.started = playing.then_some(millis);
+            self.invalidate_cache();
         }
     }
 }
@@ -663,6 +692,9 @@ fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
         offset: 0,
         part: 0,
         looping: false,
+        cached_millis: u64::MAX,
+        cached_at: 0,
+        cached_playing: false,
         ..template
     };
     ctx.state.sound.buffers.insert(object, copy);
@@ -692,7 +724,7 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Ok(DSERR_INVALIDCALL);
     };
     let at = if b.format.is_some() {
-        b.progress(millis).0
+        b.progress_cached(millis).0
     } else {
         (frame_at(millis * 1_000_000) * 4) as u32
     };
@@ -707,7 +739,7 @@ fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 fn status(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetStatus(out): whether it plays, and whether round and round.
     let millis = ctx.clock_millis;
-    let word = buffer(ctx, this).map(|b| match (b.progress(millis).1, b.looping) {
+    let word = buffer(ctx, this).map(|b| match (b.progress_cached(millis).1, b.looping) {
         (false, _) => 0,
         (true, false) => DSBSTATUS_PLAYING,
         (true, true) => DSBSTATUS_PLAYING | DSBSTATUS_LOOPING,
@@ -829,13 +861,14 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(b) = buffer(ctx, this) else {
         return Ok(DSERR_INVALIDCALL);
     };
-    let playing = b.progress(millis).1;
+    let playing = b.progress_cached(millis).1;
     if playing && b.looping == looping {
         return Ok(S_OK);
     }
     b.settle(millis);
     b.looping = looping;
     b.started = Some(millis);
+    b.invalidate_cache();
     start_voice(ctx, this, playing)
 }
 
@@ -884,6 +917,7 @@ fn stop_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop>
         b.started = None;
         // Stopped, it is at a byte, and plays again from that byte.
         b.part = 0;
+        b.invalidate_cache();
     }
     ctx.state.mixer.stop(identity, millis * 1_000_000);
     Ok(S_OK)
@@ -903,6 +937,7 @@ fn change(
     };
     b.settle(millis);
     edit(b);
+    b.invalidate_cache();
     if b.started.is_some() {
         b.started = Some(millis);
         return start_voice(ctx, this, go_on);
@@ -1004,5 +1039,65 @@ mod tests {
             (right - 0.25).abs() < 1e-9,
             "twice the rolloff, twice as fast"
         );
+    }
+
+    #[test]
+    fn buffer_progress_cache_hits_and_invalidates_on_every_mutation() {
+        // Two seconds of mono 16-bit PCM = 88,200 bytes (44,100 bytes/sec).
+        let mut b = Buffer::new(0, 88_200, Some(mono_16bit(22_050)), false);
+        assert_eq!(b.cached_millis, u64::MAX);
+
+        // Millis 0 must not collide with the invalid sentinel.
+        assert_eq!(b.progress_cached(0), (0, false));
+        assert_eq!(b.cached_millis, 0);
+
+        // Start playback and invalidate cache.
+        b.started = Some(1_000);
+        b.invalidate_cache();
+        assert_eq!(b.progress_cached(1_500), (22_050, true));
+        assert_eq!(b.cached_millis, 1_500);
+        assert_eq!(b.cached_at, 22_050);
+        assert!(b.cached_playing);
+
+        // Second call at the same millisecond serves from cache.
+        assert_eq!(b.progress_cached(1_500), (22_050, true));
+
+        // Advancing millis updates the cache.
+        assert_eq!(b.progress_cached(1_750), b.progress(1_750));
+        assert_eq!(b.cached_millis, 1_750);
+
+        // Mutating offset + invalidating yields the new position at the same millis.
+        b.offset = 44_100;
+        b.part = 0;
+        b.started = Some(1_750);
+        b.invalidate_cache();
+        assert_eq!(b.progress_cached(1_750), (44_100, true));
+
+        // Mutating frequency + invalidating updates progress rate.
+        b.frequency = Some(44_100);
+        b.invalidate_cache();
+        assert_eq!(b.progress_cached(2_000), b.progress(2_000));
+        assert_eq!(b.progress_cached(2_000), (66_150, true));
+
+        // Settle invalidates the cache.
+        b.settle(2_000);
+        assert_eq!(b.cached_millis, u64::MAX);
+        assert_eq!(b.progress_cached(2_000), (66_150, true));
+
+        // Looping toggle + invalidation past buffer end switches from stopped to wrapped.
+        assert_eq!(b.progress_cached(5_000), (0, false));
+        b.looping = true;
+        b.invalidate_cache();
+        assert_eq!(b.progress_cached(5_000), b.progress(5_000));
+        assert!(b.progress_cached(5_000).1);
+
+        // Stopping + invalidating returns stopped at the same millis.
+        b.started = None;
+        b.invalidate_cache();
+        assert_eq!(b.progress_cached(5_000), (66_150, false));
+
+        // Sentinel boundary millis = u64::MAX never corrupts cache state.
+        assert_eq!(b.progress_cached(u64::MAX), b.progress(u64::MAX));
+        assert_eq!(b.cached_millis, 5_000);
     }
 }

@@ -135,6 +135,13 @@ fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     // this way gets what a person did, oldest first; one that reads the state
     // instead gets the same input through `device_state`.
     let (size, out, count_at, flags) = (args[0], args[1], args[2], args[3]);
+    if ctx.state.keyboard_data.is_empty() && ctx.state.mouse_data.is_empty() {
+        if count_at != 0 {
+            let _ = ctx.mem.read_u32(count_at).map_err(Stop::Fault)?;
+            ctx.mem.write_u32(count_at, 0).map_err(Stop::Fault)?;
+        }
+        return Ok(DI_OK);
+    }
     let keyboard = matches!(
         ctx.state.com(this).map(|o| &o.state),
         Some(ComState::Device { keyboard: true })
@@ -149,6 +156,12 @@ fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     } else {
         ctx.state.mouse_data.len()
     };
+    if waiting == 0 {
+        if count_at != 0 {
+            ctx.mem.write_u32(count_at, 0).map_err(Stop::Fault)?;
+        }
+        return Ok(DI_OK);
+    }
     // A title asks how much is waiting by passing no buffer, and empties the
     // lane by passing none and not peeking.
     let take = (asked as usize).min(waiting);
@@ -185,4 +198,53 @@ fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
             .map_err(Stop::Fault)?;
     }
     Ok(DI_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{device_data, DIRECT_INPUT_DEVICE, DI_OK};
+    use crate::cpu::Stop;
+    use crate::guest::{Fault, GuestMem};
+    use crate::win32::tests::with_test_ctx;
+    use crate::win32::{ComState, State};
+
+    #[test]
+    fn device_data_empty_fast_path_preserves_fault_checks_and_zero_count() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let kbd = State::make_com(
+                ctx,
+                &DIRECT_INPUT_DEVICE,
+                ComState::Device { keyboard: true },
+            )
+            .expect("keyboard device");
+            let count_at = 0x1000u32;
+            let oob = 0x3000_0000u32;
+
+            // Both queues empty, valid count_at -> writes 0.
+            ctx.mem.write_u32(count_at, 16).unwrap();
+            assert_eq!(
+                device_data(ctx, kbd, &[16, 0x1100, count_at, 0]).unwrap(),
+                DI_OK
+            );
+            assert_eq!(ctx.mem.read_u32(count_at).unwrap(), 0);
+
+            // Both queues empty, null count_at -> succeeds without touching memory.
+            assert_eq!(device_data(ctx, kbd, &[16, 0x1100, 0, 0]).unwrap(), DI_OK);
+
+            // Both queues empty, out-of-bounds count_at -> preserves read fault.
+            let err = device_data(ctx, kbd, &[16, 0x1100, oob, 0]).unwrap_err();
+            assert!(matches!(err, Stop::Fault(Fault { write: false, .. })));
+
+            // Other lane non-empty, selected lane empty -> still writes 0 and preserves read fault.
+            ctx.state.buffer_input(false, 0, 1);
+            ctx.mem.write_u32(count_at, 8).unwrap();
+            assert_eq!(
+                device_data(ctx, kbd, &[16, 0x1100, count_at, 0]).unwrap(),
+                DI_OK
+            );
+            assert_eq!(ctx.mem.read_u32(count_at).unwrap(), 0);
+            let err = device_data(ctx, kbd, &[16, 0x1100, oob, 0]).unwrap_err();
+            assert!(matches!(err, Stop::Fault(Fault { write: false, .. })));
+        });
+    }
 }

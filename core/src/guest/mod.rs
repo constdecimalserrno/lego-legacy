@@ -646,12 +646,33 @@ impl Arena {
     #[cold]
     #[inline(never)]
     fn wrote_over_code_multi(&self, first: usize, addr: u32, len: usize) -> bool {
-        let last = ((addr as usize + len.saturating_sub(1)) / CODE_PAGE as usize).max(first);
-        (first..=last).any(|page| {
-            self.code
-                .get(page >> 6)
-                .is_some_and(|word| word & (1u64 << (page & 63)) != 0)
-        })
+        let last =
+            ((addr as usize).saturating_add(len.saturating_sub(1)) / CODE_PAGE as usize).max(first);
+        let first_word = first >> 6;
+        let last_word = last >> 6;
+        let head_mask = !0u64 << (first & 63);
+        let tail_mask = !0u64 >> (63 - (last & 63));
+        if first_word == last_word {
+            return self
+                .code
+                .get(first_word)
+                .is_some_and(|&w| (w & (head_mask & tail_mask)) != 0);
+        }
+        if self
+            .code
+            .get(first_word)
+            .is_some_and(|&w| (w & head_mask) != 0)
+        {
+            return true;
+        }
+        let mid_start = first_word + 1;
+        let mid_end = last_word.min(self.code.len());
+        if mid_start < mid_end && self.code[mid_start..mid_end].iter().any(|&w| w != 0) {
+            return true;
+        }
+        self.code
+            .get(last_word)
+            .is_some_and(|&w| (w & tail_mask) != 0)
     }
 
     /// Borrow one run of guest bytes to read and another, apart from it, to
@@ -909,5 +930,64 @@ mod tests {
         mem.watch();
         mem.write_u64(0x1000, 0xdead_beef_0000_0001).unwrap();
         assert!(!mem.unchanged());
+    }
+
+    #[test]
+    fn wrote_over_code_multi_word_wise_scan_matches_bit_oracle() {
+        // 256 pages = 1 MiB, spanning 4 full u64 bitmap words (pages 0..256).
+        let pages = 256usize;
+        let mut mem = Arena::new(&mut Headless::new(), pages * 4096).expect("an arena");
+
+        let check = |mem: &Arena, first_page: usize, last_page: usize, marked: Option<usize>| {
+            let addr = (first_page * 4096) as u32;
+            let len = (last_page - first_page + 1) * 4096;
+            let expected = marked.is_some_and(|m| (first_page..=last_page).contains(&m));
+            assert_eq!(
+                mem.wrote_over_code_multi(first_page, addr, len),
+                expected,
+                "range {first_page}..={last_page}, marked {marked:?}"
+            );
+        };
+
+        // Test same-word, adjacent-word (straddling 63/64), and multi-word
+        // ranges (spanning 3+ words, like a 150-page 640x480x16 framebuffer).
+        let ranges = [
+            (0, 1),
+            (5, 62),
+            (0, 63),
+            (63, 64),
+            (62, 65),
+            (30, 100),
+            (63, 128),
+            (10, 160),
+            (0, 255),
+            (128, 255),
+        ];
+
+        // Empty bitmap: every range is false.
+        for &(a, b) in &ranges {
+            check(&mem, a, b, None);
+        }
+
+        // Probe every boundary bit: word edges (0, 63, 64, 127, 128, 191, 192, 255)
+        // plus interior bits (1, 10, 62, 65, 100, 159, 160, 161).
+        for bit in [
+            0, 1, 5, 10, 29, 30, 62, 63, 64, 65, 100, 101, 127, 128, 129, 159, 160, 161, 191, 192,
+            254, 255,
+        ] {
+            mem.mark_code((bit * 4096) as u32);
+            for &(a, b) in &ranges {
+                check(&mem, a, b, Some(bit));
+            }
+            mem.unmark_code((bit * 4096) as u32);
+        }
+
+        // Unaligned sub-page start/end spanning adjacent and multi-word boundaries.
+        mem.mark_code(64 * 4096);
+        assert!(mem.wrote_over_code(63 * 4096 + 0xfff, 2));
+        assert!(!mem.wrote_over_code(63 * 4096 + 0xfff, 1));
+        assert!(mem.wrote_over_code(10 * 4096 + 123, 150 * 4096));
+        mem.unmark_code(64 * 4096);
+        assert!(!mem.wrote_over_code(10 * 4096 + 123, 150 * 4096));
     }
 }
