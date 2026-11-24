@@ -5,6 +5,27 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Per-call machine allocations are removed, guest arena scalar accesses and code-page invalidation
+checks are tightened, and flat forward `rep movs`/`rep stos` take bulk copy/fill paths (#252):
+- `Machine::stack_args` reads up to 16 arguments into a stack buffer (`StackArgs::Inline`) and
+  falls back to the heap only past that; `Machine::deadlocked` short-circuits when fewer than two
+  guest threads are live and allocates only when formatting an actual deadlock.
+- `GuestMem` gains typed `read_u8`/`write_u8`, `read_u16`/`write_u16`, and `read_u64`/`write_u64`
+  beside `read_u32`/`write_u32`; `Arena` implements all eight with a single non-zero bounds check,
+  unaligned little-endian scalar access, a single-page code-bitmap fast path in `wrote_over_code`
+  (out-of-line `wrote_over_code_multi` on page crossings), `#[cold] #[inline(never)]` on
+  `note_written`, and clock-spin watch preservation via `hold_bytes`.
+- `cpu::exec` routes scalar loads/stores through `Arena`'s typed helpers and executes 32-bit
+  forward `rep movs` / `rep stos` (when `count > 1`, non-wrapping, in bounds, disjoint for `movs`,
+  and not watching) in bulk via `read_and_write` / `slice_mut`, falling back element-by-element on
+  overlaps, `DF = 1`, active watches, or mid-way faults.
+- All 877+ 80386 conformance vectors pass, unit tests cover page-crossing writes, code
+  invalidation, floor/end faults, `stack_args` overflow, and `rep` edge cases, and no route moves:
+  Hot Wheels' `first-race.route` drops from 103.3 s to 79.8 s wall (97.6 s to 79.1 s user;
+  90.4 s in #246) and LEGO Chess's `throne-room.route` from 6.32 s to 5.32 s wall (6.07 s to
+  5.39 s user; 5.48 s in #246), both with identical cursor, flips, declared milliseconds, and
+  `state_digest()`.
+
 DirectDraw's surface blit transfer (`win32::ddraw::transfer`) now takes pure-Rust fast paths (#251),
 replacing per-scanline heap copies, per-pixel 64-bit integer divisions, and dynamic-width per-pixel
 `copy_from_slice` calls with bit-exact equivalents:

@@ -90,25 +90,22 @@ fn place(cpu: &Cpu, m: &MemRef, off: u32) -> u32 {
 
 #[inline(always)]
 fn read_mem(mem: &Arena, addr: u32, w: Width) -> Result<u32, Stop> {
-    let s = mem.slice(addr, w.bytes() as usize).map_err(Stop::Fault)?;
-    Ok(match w {
-        Width::B8 => u32::from(s[0]),
-        Width::B16 => u32::from(u16::from_le_bytes([s[0], s[1]])),
-        Width::B32 => u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
-    })
+    match w {
+        Width::B8 => mem.read_u8(addr).map(u32::from),
+        Width::B16 => mem.read_u16(addr).map(u32::from),
+        Width::B32 => mem.read_u32(addr),
+    }
+    .map_err(Stop::Fault)
 }
 
 #[inline(always)]
 fn write_mem(mem: &mut Arena, addr: u32, w: Width, value: u32) -> Result<(), Stop> {
-    let s = mem
-        .slice_mut(addr, w.bytes() as usize)
-        .map_err(Stop::Fault)?;
-    // Byte by byte rather than as a copy of a run, which the compiler calls
-    // out to memmove for: this is every write an instruction makes.
-    for (to, byte) in s.iter_mut().zip(value.to_le_bytes()) {
-        *to = byte;
+    match w {
+        Width::B8 => mem.write_u8(addr, value as u8),
+        Width::B16 => mem.write_u16(addr, value as u16),
+        Width::B32 => mem.write_u32(addr, value),
     }
-    Ok(())
+    .map_err(Stop::Fault)
 }
 
 #[inline(always)]
@@ -265,19 +262,12 @@ pub fn shape_of(insn: &Insn, mode: Mode) -> Fast {
 
 #[inline(always)]
 fn read32(mem: &Arena, addr: u32) -> Result<u32, Stop> {
-    let s = mem.slice(addr, 4).map_err(Stop::Fault)?;
-    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    mem.read_u32(addr).map_err(Stop::Fault)
 }
 
 #[inline(always)]
 fn write32(mem: &mut Arena, addr: u32, value: u32) -> Result<(), Stop> {
-    let s = mem.slice_mut(addr, 4).map_err(Stop::Fault)?;
-    // Byte by byte rather than as a copy of a run, which the compiler calls
-    // out to memmove for, as [`write_mem`] does for the same reason.
-    for (to, byte) in s.iter_mut().zip(value.to_le_bytes()) {
-        *to = byte;
-    }
-    Ok(())
+    mem.write_u32(addr, value).map_err(Stop::Fault)
 }
 
 /// Run one instruction of a named shape, or hand it to [`execute`].
@@ -1222,11 +1212,6 @@ fn string_op(
     mode: Mode,
 ) -> Result<(), Stop> {
     let w = insn.width;
-    let step = if cpu.flags.df {
-        0u32.wrapping_sub(w.bytes())
-    } else {
-        w.bytes()
-    };
     let counter = |cpu: &Cpu| {
         if insn.addr32 {
             cpu.r[ECX]
@@ -1234,17 +1219,84 @@ fn string_op(
             cpu.r[ECX] & 0xffff
         }
     };
+    if insn.rep.is_some() && counter(cpu) == 0 {
+        return Ok(());
+    }
+    // The source is read through whatever segment the prefix named; the
+    // destination is always the extra segment, which no prefix can move.
+    let src_seg = insn.src.map_or(super::DS, |op| match op {
+        Op::Mem(m) => m.seg.index(),
+        _ => super::DS,
+    });
+
+    if insn.rep.is_some() && insn.addr32 && !cpu.flags.df && !mem.is_watching() && cpu.r[ECX] > 1 {
+        let count = cpu.r[ECX];
+        if let Some(total) = count.checked_mul(w.bytes()) {
+            let di = cpu.r[EDI];
+            let to = cpu.seg_base[super::ES].wrapping_add(di);
+            match which {
+                StringOp::Movs => {
+                    let si = cpu.r[ESI];
+                    let from = cpu.seg_base[src_seg].wrapping_add(si);
+                    if si.checked_add(total).is_some()
+                        && di.checked_add(total).is_some()
+                        && from.checked_add(total).is_some()
+                        && to.checked_add(total).is_some()
+                    {
+                        if let Ok((src, dst)) =
+                            mem.read_and_write((from, total as usize), (to, total as usize))
+                        {
+                            dst.copy_from_slice(src);
+                            cpu.r[ESI] = si + total;
+                            cpu.r[EDI] = di + total;
+                            cpu.r[ECX] = 0;
+                            return Ok(());
+                        }
+                    }
+                }
+                StringOp::Stos => {
+                    if di.checked_add(total).is_some() && to.checked_add(total).is_some() {
+                        if let Ok(dst) = mem.slice_mut(to, total as usize) {
+                            match w {
+                                Width::B8 => dst.fill(cpu.r[EAX] as u8),
+                                Width::B16 => {
+                                    let bytes = (cpu.r[EAX] as u16).to_le_bytes();
+                                    if bytes[0] == bytes[1] {
+                                        dst.fill(bytes[0]);
+                                    } else {
+                                        dst.as_chunks_mut::<2>().0.fill(bytes);
+                                    }
+                                }
+                                Width::B32 => {
+                                    let bytes = cpu.r[EAX].to_le_bytes();
+                                    if bytes[0] == bytes[1]
+                                        && bytes[0] == bytes[2]
+                                        && bytes[0] == bytes[3]
+                                    {
+                                        dst.fill(bytes[0]);
+                                    } else {
+                                        dst.as_chunks_mut::<4>().0.fill(bytes);
+                                    }
+                                }
+                            }
+                            cpu.r[EDI] = di + total;
+                            cpu.r[ECX] = 0;
+                            return Ok(());
+                        }
+                    }
+                }
+                StringOp::Lods | StringOp::Cmps | StringOp::Scas => {}
+            }
+        }
+    }
+
+    let step = if cpu.flags.df {
+        0u32.wrapping_sub(w.bytes())
+    } else {
+        w.bytes()
+    };
 
     loop {
-        if insn.rep.is_some() && counter(cpu) == 0 {
-            return Ok(());
-        }
-        // The source is read through whatever segment the prefix named; the
-        // destination is always the extra segment, which no prefix can move.
-        let src_seg = insn.src.map_or(super::DS, |op| match op {
-            Op::Mem(m) => m.seg.index(),
-            _ => super::DS,
-        });
         let si = if insn.addr32 {
             cpu.r[ESI]
         } else {
@@ -1363,4 +1415,259 @@ pub fn cpuid(processor: Processor, leaf: u32) -> [u32; 4] {
         ],
     };
     leaves.get(leaf as usize).copied().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::interp::Interp;
+    use super::super::{Cpu, CpuEngine, Mode, Stop, EAX, ECX, EDI, ESI};
+    use crate::guest::{Arena, Fault, GuestMem};
+    use crate::host::headless::Headless;
+
+    const CODE: u32 = 0x1000;
+
+    fn run_one(mem: &mut Arena, bytes: &[u8], cpu: &mut Cpu) -> (u64, Result<(), Stop>) {
+        mem.write(CODE, bytes).unwrap();
+        cpu.eip = CODE;
+        let mut engine = Interp::new(Mode::FLAT);
+        engine.run(cpu, mem, 1, 0..0)
+    }
+
+    #[test]
+    fn rep_movs_and_stos_bulk_paths_copy_fill_and_invalidate_code() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+
+        // Bulk rep movsd: 64 bytes from 0x2000 to 0x3000 (marked as code).
+        let src: Vec<u8> = (0u8..64)
+            .map(|b| b.wrapping_mul(3).wrapping_add(7))
+            .collect();
+        mem.write(0x2000, &src).unwrap();
+        mem.mark_code(0x3000);
+
+        let mut cpu = Cpu::default();
+        cpu.r[ESI] = 0x2000;
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 16;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xa5], &mut cpu);
+        assert_eq!(retired, 1);
+        assert_eq!(res, Ok(()));
+        assert_eq!(cpu.r[ESI], 0x2040);
+        assert_eq!(cpu.r[EDI], 0x3040);
+        assert_eq!(cpu.r[ECX], 0);
+        assert_eq!(mem.slice(0x3000, 64).unwrap(), src.as_slice());
+        assert!(mem.code_written);
+
+        // Bulk rep stosd: uniform byte pattern (0) and non-uniform 32-bit pattern.
+        mem.code_written = false;
+        mem.written_code.clear();
+        cpu = Cpu::default();
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 8;
+        cpu.r[EAX] = 0;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xab], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(cpu.r[EDI], 0x3020);
+        assert_eq!(cpu.r[ECX], 0);
+        assert_eq!(mem.slice(0x3000, 32).unwrap(), &[0u8; 32]);
+        assert!(mem.code_written);
+
+        cpu = Cpu::default();
+        cpu.r[EDI] = 0x4000;
+        cpu.r[ECX] = 6;
+        cpu.r[EAX] = 0x1122_3344;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xab], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(cpu.r[EDI], 0x4018);
+        assert_eq!(cpu.r[ECX], 0);
+        for i in 0..6u32 {
+            assert_eq!(mem.read_u32(0x4000 + i * 4).unwrap(), 0x1122_3344);
+        }
+
+        // Bulk rep stosw (non-uniform 16-bit pattern) and rep stosb.
+        cpu = Cpu::default();
+        cpu.r[EDI] = 0x4100;
+        cpu.r[ECX] = 5;
+        cpu.r[EAX] = 0xabcd;
+        let (retired, res) = run_one(&mut mem, &[0x66, 0xf3, 0xab], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(cpu.r[EDI], 0x410a);
+        assert_eq!(cpu.r[ECX], 0);
+        for i in 0..5u32 {
+            assert_eq!(mem.read_u16(0x4100 + i * 2).unwrap(), 0xabcd);
+        }
+
+        cpu = Cpu::default();
+        cpu.r[EDI] = 0x4200;
+        cpu.r[ECX] = 7;
+        cpu.r[EAX] = 0x5a;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xaa], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(cpu.r[EDI], 0x4207);
+        assert_eq!(cpu.r[ECX], 0);
+        assert_eq!(mem.slice(0x4200, 7).unwrap(), &[0x5a; 7]);
+
+        // Count 0 is a no-op and still retires once.
+        cpu = Cpu::default();
+        cpu.r[EDI] = 0; // Would fault if anything were written.
+        cpu.r[ECX] = 0;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xaa], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(cpu.r[EDI], 0);
+    }
+
+    #[test]
+    fn rep_movs_overlapping_ranges_preserve_element_order() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+
+        // Forward overlap (from < to < from + total): x86 rep movsb repeats
+        // the leading slice rather than behaving like backward memmove.
+        mem.write(0x2000, b"ABCDxxxxxxxx").unwrap();
+        let mut cpu = Cpu::default();
+        cpu.r[ESI] = 0x2000;
+        cpu.r[EDI] = 0x2004;
+        cpu.r[ECX] = 8;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xa4], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(mem.slice(0x2000, 12).unwrap(), b"ABCDABCDABCD");
+        assert_eq!((cpu.r[ESI], cpu.r[EDI], cpu.r[ECX]), (0x2008, 0x200c, 0));
+
+        // Backward overlap (to < from < to + total): shifts left element-by-element.
+        mem.write(0x2100, b"0123456789").unwrap();
+        cpu = Cpu::default();
+        cpu.r[ESI] = 0x2102;
+        cpu.r[EDI] = 0x2100;
+        cpu.r[ECX] = 8;
+        let (_, res) = run_one(&mut mem, &[0xf3, 0xa4], &mut cpu);
+        assert_eq!(res, Ok(()));
+        assert_eq!(mem.slice(0x2100, 10).unwrap(), b"2345678989");
+        assert_eq!((cpu.r[ESI], cpu.r[EDI], cpu.r[ECX]), (0x210a, 0x2108, 0));
+
+        // Self overlap (to == from) keeps bytes intact and advances indices.
+        mem.write(0x2200, b"SAME").unwrap();
+        cpu = Cpu::default();
+        cpu.r[ESI] = 0x2200;
+        cpu.r[EDI] = 0x2200;
+        cpu.r[ECX] = 4;
+        let (_, res) = run_one(&mut mem, &[0xf3, 0xa4], &mut cpu);
+        assert_eq!(res, Ok(()));
+        assert_eq!(mem.slice(0x2200, 4).unwrap(), b"SAME");
+        assert_eq!((cpu.r[ESI], cpu.r[EDI], cpu.r[ECX]), (0x2204, 0x2204, 0));
+    }
+
+    #[test]
+    fn rep_movs_and_stos_with_df_set_step_backward() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+        mem.write(0x2000, &[1, 2, 3, 4]).unwrap();
+
+        let mut cpu = Cpu::default();
+        cpu.flags.df = true;
+        cpu.r[ESI] = 0x2003;
+        cpu.r[EDI] = 0x3003;
+        cpu.r[ECX] = 4;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xa4], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        assert_eq!(mem.slice(0x3000, 4).unwrap(), &[1, 2, 3, 4]);
+        assert_eq!((cpu.r[ESI], cpu.r[EDI], cpu.r[ECX]), (0x1fff, 0x2fff, 0));
+
+        cpu = Cpu::default();
+        cpu.flags.df = true;
+        cpu.r[EDI] = 0x310c;
+        cpu.r[ECX] = 4;
+        cpu.r[EAX] = 0xdead_beef;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xab], &mut cpu);
+        assert_eq!((retired, res), (1, Ok(())));
+        for i in 0..4u32 {
+            assert_eq!(mem.read_u32(0x3100 + i * 4).unwrap(), 0xdead_beef);
+        }
+        assert_eq!((cpu.r[EDI], cpu.r[ECX]), (0x30fc, 0));
+    }
+
+    #[test]
+    fn rep_movs_and_stos_midway_fault_preserves_partial_state() {
+        let len = 1 << 16;
+        let end = u32::try_from(len).unwrap();
+        let mut mem = Arena::new(&mut Headless::new(), len).unwrap();
+
+        // rep stosd writes 3 dwords before faulting on the 4th at `end`.
+        let mut cpu = Cpu::default();
+        cpu.r[EDI] = end - 12;
+        cpu.r[ECX] = 5;
+        cpu.r[EAX] = 0xfeed_face;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xab], &mut cpu);
+        assert_eq!(retired, 0);
+        assert_eq!(
+            res,
+            Err(Stop::Fault(Fault {
+                addr: end,
+                len: 4,
+                write: true,
+            }))
+        );
+        assert_eq!(cpu.eip, CODE);
+        assert_eq!(cpu.r[EDI], end);
+        assert_eq!(cpu.r[ECX], 2);
+        for i in 0..3u32 {
+            assert_eq!(mem.read_u32(end - 12 + i * 4).unwrap(), 0xfeed_face);
+        }
+
+        // rep movsd copies 2 dwords before faulting on the 3rd destination write at `end`.
+        mem.write_u32(0x2000, 0x1111_1111).unwrap();
+        mem.write_u32(0x2004, 0x2222_2222).unwrap();
+        mem.write_u32(0x2008, 0x3333_3333).unwrap();
+        cpu = Cpu::default();
+        cpu.r[ESI] = 0x2000;
+        cpu.r[EDI] = end - 8;
+        cpu.r[ECX] = 4;
+        let (retired, res) = run_one(&mut mem, &[0xf3, 0xa5], &mut cpu);
+        assert_eq!(retired, 0);
+        assert_eq!(
+            res,
+            Err(Stop::Fault(Fault {
+                addr: end,
+                len: 4,
+                write: true,
+            }))
+        );
+        assert_eq!(cpu.eip, CODE);
+        assert_eq!(cpu.r[ESI], 0x2008);
+        assert_eq!(cpu.r[EDI], end);
+        assert_eq!(cpu.r[ECX], 2);
+        assert_eq!(mem.read_u32(end - 8).unwrap(), 0x1111_1111);
+        assert_eq!(mem.read_u32(end - 4).unwrap(), 0x2222_2222);
+    }
+
+    #[test]
+    fn rep_movs_and_stos_while_watching_preserve_watch_state() {
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+        mem.write(CODE, &[0xf3, 0xa5]).unwrap(); // rep movsd
+        mem.write(CODE + 0x10, &[0xf3, 0xab]).unwrap(); // rep stosd
+        mem.write(0x2000, &[0x42; 16]).unwrap();
+        mem.write(0x3000, &[0x42; 16]).unwrap();
+
+        // Identical overwrite while watching keeps `unchanged()` true.
+        mem.watch();
+        let mut cpu = Cpu {
+            eip: CODE,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = 0x2000;
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 4;
+        let (_, res) = Interp::new(Mode::FLAT).run(&mut cpu, &mut mem, 1, 0..0);
+        assert_eq!(res, Ok(()));
+        assert!(mem.unchanged());
+
+        // Differing rep stosd while watching marks memory changed.
+        mem.watch();
+        cpu = Cpu {
+            eip: CODE + 0x10,
+            ..Cpu::default()
+        };
+        cpu.r[EDI] = 0x3000;
+        cpu.r[ECX] = 4;
+        cpu.r[EAX] = 0x9999_9999;
+        let (_, res) = Interp::new(Mode::FLAT).run(&mut cpu, &mut mem, 1, 0..0);
+        assert_eq!(res, Ok(()));
+        assert!(!mem.unchanged());
+    }
 }

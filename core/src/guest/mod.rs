@@ -144,11 +144,18 @@ impl Arena {
     /// under the floor wraps round to far past the end (#132). No bytes at
     /// all touch nothing there, which is what the rasteriser borrows at a
     /// null pointer when no texture is set.
+    #[inline(always)]
     fn in_bounds(&self, addr: u32, len: usize) -> bool {
+        self.in_bounds_nonzero(addr, len) || (len == 0 && addr < self.floor)
+    }
+
+    /// Bounds check for fixed non-zero lengths, omitting the zero-length
+    /// floor exception.
+    #[inline(always)]
+    fn in_bounds_nonzero(&self, addr: u32, len: usize) -> bool {
         (addr.wrapping_sub(self.floor) as usize)
             .checked_add(len)
             .is_some_and(|end| end <= self.mapping.len() - self.floor as usize)
-            || (len == 0 && addr < self.floor)
     }
 }
 
@@ -168,6 +175,34 @@ pub trait GuestMem {
 
     /// # Errors
     /// When the range is outside the arena.
+    fn read_u8(&self, addr: u32) -> Result<u8, Fault> {
+        let mut b = [0u8; 1];
+        self.read(addr, &mut b)?;
+        Ok(b[0])
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
+    fn write_u8(&mut self, addr: u32, value: u8) -> Result<(), Fault> {
+        self.write(addr, &[value])
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
+    fn read_u16(&self, addr: u32) -> Result<u16, Fault> {
+        let mut b = [0u8; 2];
+        self.read(addr, &mut b)?;
+        Ok(u16::from_le_bytes(b))
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
+    fn write_u16(&mut self, addr: u32, value: u16) -> Result<(), Fault> {
+        self.write(addr, &value.to_le_bytes())
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
     fn read_u32(&self, addr: u32) -> Result<u32, Fault> {
         let mut b = [0u8; 4];
         self.read(addr, &mut b)?;
@@ -177,6 +212,20 @@ pub trait GuestMem {
     /// # Errors
     /// When the range is outside the arena.
     fn write_u32(&mut self, addr: u32, value: u32) -> Result<(), Fault> {
+        self.write(addr, &value.to_le_bytes())
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
+    fn read_u64(&self, addr: u32) -> Result<u64, Fault> {
+        let mut b = [0u8; 8];
+        self.read(addr, &mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    /// # Errors
+    /// When the range is outside the arena.
+    fn write_u64(&mut self, addr: u32, value: u64) -> Result<(), Fault> {
         self.write(addr, &value.to_le_bytes())
     }
 
@@ -223,6 +272,179 @@ impl GuestMem for Arena {
                 self.mapping.as_ptr().add(addr as usize),
                 bytes.len(),
             );
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn read_u8(&self, addr: u32) -> Result<u8, Fault> {
+        if !self.in_bounds_nonzero(addr, 1) {
+            return Err(Fault {
+                addr,
+                len: 1,
+                write: false,
+            });
+        }
+        // Safety: bounds checked directly above; the mapping is live and readable.
+        Ok(unsafe { *self.mapping.as_ptr().add(addr as usize) })
+    }
+
+    #[inline(always)]
+    fn write_u8(&mut self, addr: u32, value: u8) -> Result<(), Fault> {
+        if !self.in_bounds_nonzero(addr, 1) {
+            return Err(Fault {
+                addr,
+                len: 1,
+                write: true,
+            });
+        }
+        if self.wrote_over_code(addr, 1) {
+            self.note_written(addr, 1);
+        }
+        if self.watching {
+            self.hold_bytes(addr, &[value]);
+        }
+        // Safety: bounds checked directly above; the mapping is live and writable.
+        unsafe {
+            *self.mapping.as_ptr().add(addr as usize) = value;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn read_u16(&self, addr: u32) -> Result<u16, Fault> {
+        if !self.in_bounds_nonzero(addr, 2) {
+            return Err(Fault {
+                addr,
+                len: 2,
+                write: false,
+            });
+        }
+        // Safety: bounds checked directly above; `read_unaligned` permits any alignment.
+        let raw = unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u16>()
+                .read_unaligned()
+        };
+        Ok(u16::from_le(raw))
+    }
+
+    #[inline(always)]
+    fn write_u16(&mut self, addr: u32, value: u16) -> Result<(), Fault> {
+        if !self.in_bounds_nonzero(addr, 2) {
+            return Err(Fault {
+                addr,
+                len: 2,
+                write: true,
+            });
+        }
+        if self.wrote_over_code(addr, 2) {
+            self.note_written(addr, 2);
+        }
+        if self.watching {
+            self.hold_bytes(addr, &value.to_le_bytes());
+        }
+        // Safety: bounds checked directly above; `write_unaligned` permits any alignment.
+        unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u16>()
+                .write_unaligned(value.to_le());
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn read_u32(&self, addr: u32) -> Result<u32, Fault> {
+        if !self.in_bounds_nonzero(addr, 4) {
+            return Err(Fault {
+                addr,
+                len: 4,
+                write: false,
+            });
+        }
+        // Safety: bounds checked directly above; `read_unaligned` permits any alignment.
+        let raw = unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u32>()
+                .read_unaligned()
+        };
+        Ok(u32::from_le(raw))
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, addr: u32, value: u32) -> Result<(), Fault> {
+        if !self.in_bounds_nonzero(addr, 4) {
+            return Err(Fault {
+                addr,
+                len: 4,
+                write: true,
+            });
+        }
+        if self.wrote_over_code(addr, 4) {
+            self.note_written(addr, 4);
+        }
+        if self.watching {
+            self.hold_bytes(addr, &value.to_le_bytes());
+        }
+        // Safety: bounds checked directly above; `write_unaligned` permits any alignment.
+        unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u32>()
+                .write_unaligned(value.to_le());
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn read_u64(&self, addr: u32) -> Result<u64, Fault> {
+        if !self.in_bounds_nonzero(addr, 8) {
+            return Err(Fault {
+                addr,
+                len: 8,
+                write: false,
+            });
+        }
+        // Safety: bounds checked directly above; `read_unaligned` permits any alignment.
+        let raw = unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u64>()
+                .read_unaligned()
+        };
+        Ok(u64::from_le(raw))
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, addr: u32, value: u64) -> Result<(), Fault> {
+        if !self.in_bounds_nonzero(addr, 8) {
+            return Err(Fault {
+                addr,
+                len: 8,
+                write: true,
+            });
+        }
+        if self.wrote_over_code(addr, 8) {
+            self.note_written(addr, 8);
+        }
+        if self.watching {
+            self.hold_bytes(addr, &value.to_le_bytes());
+        }
+        // Safety: bounds checked directly above; `write_unaligned` permits any alignment.
+        unsafe {
+            self.mapping
+                .as_ptr()
+                .add(addr as usize)
+                .cast::<u64>()
+                .write_unaligned(value.to_le());
         }
         Ok(())
     }
@@ -283,6 +505,12 @@ impl Arena {
         self.watching = false;
     }
 
+    #[inline(always)]
+    #[must_use]
+    pub(crate) fn is_watching(&self) -> bool {
+        self.watching
+    }
+
     /// Whether, since [`Arena::watch`], no byte has changed. A byte is judged
     /// by what the first run over it held: a later run found what an earlier
     /// one left there, which says nothing of before. Asked only once the
@@ -312,6 +540,16 @@ impl Arena {
     fn compare(&mut self, addr: u32, bytes: &[u8]) {
         if self.slice(addr, bytes.len()).ok() != Some(bytes) {
             self.watching = false;
+        }
+    }
+
+    /// A scalar write while watching: skip holding if memory already holds the
+    /// exact bytes, otherwise record what was there so a later write in the
+    /// same pass can still restore it (#217).
+    #[cold]
+    fn hold_bytes(&mut self, addr: u32, bytes: &[u8]) {
+        if self.slice(addr, bytes.len()).ok() != Some(bytes) {
+            self.hold(addr, bytes.len());
         }
     }
 
@@ -353,7 +591,8 @@ impl Arena {
     /// ponytail: eight pages, which is more than any write this roster makes;
     /// a title that writes over its own code in wider strides would want a
     /// range rather than a list.
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     fn note_written(&mut self, addr: u32, len: usize) {
         self.code_written = true;
         if self.written_all {
@@ -376,14 +615,30 @@ impl Arena {
     }
 
     /// Whether a write of `len` bytes at `addr` lands on anything decoded.
+    ///
+    /// Precondition: `self.in_bounds(addr, len)` holds, so `addr <= mapping.len()`
+    /// and the single-page word index is within `self.code`.
     #[inline(always)]
     fn wrote_over_code(&self, addr: u32, len: usize) -> bool {
         let first = (addr / CODE_PAGE) as usize;
+        if (addr & (CODE_PAGE - 1)) as usize + len <= CODE_PAGE as usize {
+            let word = first >> 6;
+            debug_assert!(word < self.code.len());
+            // Safety: `self.code` has `(mapping.len() / CODE_PAGE).div_ceil(64) + 1`
+            // entries and `addr <= mapping.len()`, so `word < self.code.len()`.
+            return unsafe { (*self.code.get_unchecked(word) & (1u64 << (first & 63))) != 0 };
+        }
+        self.wrote_over_code_multi(first, addr, len)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wrote_over_code_multi(&self, first: usize, addr: u32, len: usize) -> bool {
         let last = ((addr as usize + len.saturating_sub(1)) / CODE_PAGE as usize).max(first);
         (first..=last).any(|page| {
             self.code
-                .get(page / 64)
-                .is_some_and(|word| word & (1 << (page % 64)) != 0)
+                .get(page >> 6)
+                .is_some_and(|word| word & (1u64 << (page & 63)) != 0)
         })
     }
 
@@ -464,5 +719,183 @@ mod tests {
             mem.slice((1 << 21) - 4, 5).is_err(),
             "and the end is where it was"
         );
+    }
+
+    #[test]
+    fn scalar_reads_and_writes_cover_all_widths_and_page_crossings() {
+        use super::GuestMem;
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).expect("an arena");
+
+        // Aligned and unaligned addresses, including every straddling boundary across 0x2000.
+        for addr in [0x1000u32, 0x1001, 0x1fff] {
+            mem.write_u8(addr, 0xa5).unwrap();
+            assert_eq!(mem.read_u8(addr).unwrap(), 0xa5);
+        }
+        for addr in [0x1000u32, 0x1001, 0x1ffe, 0x1fff] {
+            mem.write_u16(addr, 0x1234).unwrap();
+            assert_eq!(mem.read_u16(addr).unwrap(), 0x1234);
+            assert_eq!(mem.slice(addr, 2).unwrap(), 0x1234u16.to_le_bytes());
+        }
+        for addr in [0x1000u32, 0x1003, 0x1ffc, 0x1ffd, 0x1ffe, 0x1fff] {
+            mem.write_u32(addr, 0x89ab_cdef).unwrap();
+            assert_eq!(mem.read_u32(addr).unwrap(), 0x89ab_cdef);
+            assert_eq!(mem.slice(addr, 4).unwrap(), 0x89ab_cdefu32.to_le_bytes());
+        }
+        for addr in [0x1000u32, 0x1005, 0x1ff8, 0x1ff9, 0x1ffc, 0x1fff] {
+            let v = 0x0123_4567_89ab_cdefu64;
+            mem.write_u64(addr, v).unwrap();
+            assert_eq!(mem.read_u64(addr).unwrap(), v);
+            assert_eq!(mem.slice(addr, 8).unwrap(), v.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn wrote_over_code_handles_single_page_and_multi_page_writes() {
+        use super::GuestMem;
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).expect("an arena");
+        mem.mark_code(0x2000);
+
+        // Single-page write on unmarked page stays quiet.
+        mem.write_u32(0x1ffc, 0x1111_1111).unwrap();
+        assert!(!mem.code_written);
+
+        // Single-page write on marked page 2 triggers invalidation.
+        mem.write_u32(0x2000, 0x2222_2222).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [2]);
+
+        // Reset, then cross from unmarked page 1 into marked page 2.
+        mem.code_written = false;
+        mem.written_code.clear();
+        mem.write_u32(0x1ffd, 0x3333_3333).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [1, 2]);
+
+        // Reset, then cross from marked page 2 into unmarked page 3 via write_u64.
+        mem.code_written = false;
+        mem.written_code.clear();
+        mem.write_u64(0x2ffc, 0x4444_5555_6666_7777).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [2, 3]);
+
+        // Multi-page write spanning unmarked -> marked -> unmarked.
+        mem.code_written = false;
+        mem.written_code.clear();
+        mem.write(0x1800, &[0u8; 0x2000]).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [1, 2, 3]);
+
+        // Unmarking silences further writes to page 2.
+        mem.unmark_code(0x2000);
+        mem.code_written = false;
+        mem.written_code.clear();
+        mem.write_u64(0x1ffc, 0).unwrap();
+        assert!(!mem.code_written);
+    }
+
+    #[test]
+    fn scalar_faults_report_exact_addr_len_and_write_for_floor_and_end() {
+        use super::{Fault, GuestMem, DOS_MEMORY, NULL_PAGE};
+        let len = 1 << 21;
+        let end = u32::try_from(len).unwrap();
+        let mut mem = Arena::new(&mut Headless::new(), len)
+            .expect("an arena")
+            .with_floor(DOS_MEMORY);
+
+        assert_eq!(
+            mem.read_u8(NULL_PAGE - 1),
+            Err(Fault {
+                addr: NULL_PAGE - 1,
+                len: 1,
+                write: false,
+            })
+        );
+        assert_eq!(
+            mem.write_u16(DOS_MEMORY - 1, 1),
+            Err(Fault {
+                addr: DOS_MEMORY - 1,
+                len: 2,
+                write: true,
+            })
+        );
+        assert_eq!(
+            mem.read_u32(DOS_MEMORY - 2),
+            Err(Fault {
+                addr: DOS_MEMORY - 2,
+                len: 4,
+                write: false,
+            })
+        );
+        assert_eq!(
+            mem.write_u64(DOS_MEMORY - 4, 1),
+            Err(Fault {
+                addr: DOS_MEMORY - 4,
+                len: 8,
+                write: true,
+            })
+        );
+        assert_eq!(
+            mem.read_u64(end - 4),
+            Err(Fault {
+                addr: end - 4,
+                len: 8,
+                write: false,
+            })
+        );
+        assert_eq!(
+            mem.write_u32(end - 2, 1),
+            Err(Fault {
+                addr: end - 2,
+                len: 4,
+                write: true,
+            })
+        );
+        assert_eq!(
+            mem.read_u32(u32::MAX),
+            Err(Fault {
+                addr: u32::MAX,
+                len: 4,
+                write: false,
+            })
+        );
+        assert_eq!(
+            mem.write_u64(u32::MAX - 2, 0),
+            Err(Fault {
+                addr: u32::MAX - 2,
+                len: 8,
+                write: true,
+            })
+        );
+
+        // Exact boundaries remain valid.
+        mem.write_u64(DOS_MEMORY, 0xdead_beef_cafe_babe).unwrap();
+        assert_eq!(mem.read_u64(DOS_MEMORY).unwrap(), 0xdead_beef_cafe_babe);
+        mem.write_u64(end - 8, 0x1122_3344_5566_7788).unwrap();
+        assert_eq!(mem.read_u64(end - 8).unwrap(), 0x1122_3344_5566_7788);
+    }
+
+    #[test]
+    fn scalar_writes_preserve_clock_spin_watch_semantics() {
+        use super::GuestMem;
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 16).expect("an arena");
+        mem.write_u32(0x1000, 0xaaaa_bbbb).unwrap();
+
+        // Identical writes never consume held slots or break the watch.
+        mem.watch();
+        for _ in 0..32 {
+            mem.write_u32(0x1000, 0xaaaa_bbbb).unwrap();
+        }
+        assert!(mem.unchanged());
+
+        // Writing a new value then restoring the original stays unchanged.
+        mem.watch();
+        mem.write_u32(0x1000, 0x1234_5678).unwrap();
+        mem.write_u32(0x1000, 0xaaaa_bbbb).unwrap();
+        assert!(mem.unchanged());
+
+        // Writing a different value without restoring marks memory changed.
+        mem.watch();
+        mem.write_u64(0x1000, 0xdead_beef_0000_0001).unwrap();
+        assert!(!mem.unchanged());
     }
 }

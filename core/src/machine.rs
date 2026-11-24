@@ -1067,6 +1067,30 @@ fn listed(args: &[u32]) -> String {
         .join(", ")
 }
 
+/// How many four-byte stack arguments fit inline without a heap allocation.
+/// Covers every Win32 and COM call on the roster (the widest is 14).
+const INLINE_STACK_ARGS: usize = 16;
+
+/// Arguments read off the guest stack for one boundary crossing.
+enum StackArgs {
+    Inline {
+        buf: [u32; INLINE_STACK_ARGS],
+        len: usize,
+    },
+    Heap(Vec<u32>),
+}
+
+impl std::ops::Deref for StackArgs {
+    type Target = [u32];
+
+    fn deref(&self) -> &[u32] {
+        match self {
+            Self::Inline { buf, len } => &buf[..*len],
+            Self::Heap(v) => v,
+        }
+    }
+}
+
 impl Machine {
     /// What a shim or a method is handed: the machine, for the one call.
     fn ctx<'a>(&'a mut self, log: &'a mut RunLog) -> Ctx<'a> {
@@ -1087,10 +1111,28 @@ impl Machine {
     }
 
     /// A call's four-byte arguments, from where on the stack they start.
-    fn stack_args(&self, from: u32, count: u32) -> Result<Vec<u32>, Stop> {
-        (0..count)
-            .map(|i| self.arena.read_u32(from + i * 4).map_err(Stop::Fault))
-            .collect()
+    fn stack_args(&self, from: u32, count: u32) -> Result<StackArgs, Stop> {
+        let len = count as usize;
+        if len <= INLINE_STACK_ARGS {
+            let mut buf = [0u32; INLINE_STACK_ARGS];
+            for (i, slot) in buf[..len].iter_mut().enumerate() {
+                *slot = self
+                    .arena
+                    .read_u32(from.wrapping_add((i as u32) * 4))
+                    .map_err(Stop::Fault)?;
+            }
+            Ok(StackArgs::Inline { buf, len })
+        } else {
+            let mut args = Vec::with_capacity(len);
+            for i in 0..count {
+                args.push(
+                    self.arena
+                        .read_u32(from.wrapping_add(i.wrapping_mul(4)))
+                        .map_err(Stop::Fault)?,
+                );
+            }
+            Ok(StackArgs::Heap(args))
+        }
     }
 
     /// Answer a call the guest made across the boundary.
@@ -1789,13 +1831,34 @@ impl Machine {
     /// thread takes its turn, makes its wait again, hands the turn back, and
     /// the cursor never moves.
     fn deadlocked(&self) -> Option<String> {
-        let live: Vec<_> = self.state.threads.iter().filter(|t| !t.ended).collect();
-        if live.len() < 2 || !live.iter().all(|t| t.suspended || t.wake_at == u64::MAX) {
+        if self.state.threads.len() < 2 {
             return None;
         }
-        Some(format!(
+        let mut live = 0usize;
+        for t in &self.state.threads {
+            if t.ended {
+                continue;
+            }
+            if !t.suspended && t.wake_at != u64::MAX {
+                return None;
+            }
+            live += 1;
+        }
+        if live < 2 {
+            return None;
+        }
+        Some(self.deadlock_message())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn deadlock_message(&self) -> String {
+        format!(
             "every thread is waiting for another: {}",
-            live.iter()
+            self.state
+                .threads
+                .iter()
+                .filter(|t| !t.ended)
                 .map(|t| format!(
                     "thread {} {}",
                     t.id,
@@ -1814,7 +1877,7 @@ impl Machine {
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))
+        )
     }
 
     /// Hand the host every block of the mix the declared clock has passed.
@@ -2198,5 +2261,115 @@ mod tests {
         for name in super::POLLS.iter().chain(&not_polls) {
             assert!(calls.contains(name), "{name} is a call core has written");
         }
+    }
+
+    #[test]
+    fn stack_args_handles_zero_inline_and_overflow_fallback() {
+        use super::{Machine, StackArgs, INLINE_STACK_ARGS};
+        use crate::cpu::Stop;
+        use crate::guest::{Fault, GuestMem};
+        use crate::host::headless::Headless;
+        use crate::Title;
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("a machine");
+        let base = 0x0020_0000u32;
+        for i in 0..20u32 {
+            machine
+                .arena
+                .write_u32(base + i * 4, 0x1000 + i)
+                .expect("in arena");
+        }
+
+        let empty = machine.stack_args(base, 0).expect("zero args");
+        assert!(matches!(empty, StackArgs::Inline { len: 0, .. }));
+        assert_eq!(&*empty, &[]);
+
+        let inline = machine
+            .stack_args(base, INLINE_STACK_ARGS as u32)
+            .expect("inline args");
+        assert!(matches!(inline, StackArgs::Inline { len: 16, .. }));
+        let expected_inline: Vec<u32> = (0..16).map(|i| 0x1000 + i).collect();
+        assert_eq!(&*inline, expected_inline.as_slice());
+
+        let overflow = machine.stack_args(base, 20).expect("overflow args");
+        assert!(matches!(overflow, StackArgs::Heap(_)));
+        let expected_overflow: Vec<u32> = (0..20).map(|i| 0x1000 + i).collect();
+        assert_eq!(&*overflow, expected_overflow.as_slice());
+
+        // Faults report the exact faulting stack slot in both paths.
+        let end = u32::try_from(machine.arena.len()).unwrap();
+        assert_eq!(
+            machine.stack_args(end - 8, 4).err(),
+            Some(Stop::Fault(Fault {
+                addr: end,
+                len: 4,
+                write: false,
+            }))
+        );
+        assert_eq!(
+            machine.stack_args(end - 4 * 17, 20).err(),
+            Some(Stop::Fault(Fault {
+                addr: end,
+                len: 4,
+                write: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn deadlocked_short_circuits_with_fewer_than_two_live_threads() {
+        use super::Machine;
+        use crate::cpu::Cpu;
+        use crate::host::headless::Headless;
+        use crate::win32::GuestThread;
+        use crate::Title;
+
+        let thread = |id: u32, suspended: bool, ended: bool, wake_at: u64, waiting_on: Vec<u32>| {
+            GuestThread {
+                cpu: Cpu::default(),
+                handle: id,
+                id,
+                suspended,
+                ended,
+                code: 0,
+                tls: Vec::new(),
+                wake_at,
+                gives_up_at: 0,
+                waiting_on,
+                time_critical: false,
+            }
+        };
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("a machine");
+
+        // Single-threaded (default) short-circuits with None.
+        machine.state.threads = vec![thread(1, false, false, u64::MAX, vec![0x10])];
+        assert!(machine.deadlocked().is_none());
+
+        // Two threads, one ended: only one live thread, not deadlocked.
+        machine.state.threads = vec![
+            thread(1, false, false, u64::MAX, vec![0x10]),
+            thread(2, false, true, u64::MAX, vec![]),
+        ];
+        assert!(machine.deadlocked().is_none());
+
+        // Two live threads, one runnable (finite wake_at): not deadlocked.
+        machine.state.threads = vec![
+            thread(1, false, false, u64::MAX, vec![0x10]),
+            thread(2, false, false, 100, vec![0x20]),
+        ];
+        assert!(machine.deadlocked().is_none());
+
+        // Two live threads, both blocked indefinitely / suspended: deadlocked.
+        machine.state.threads = vec![
+            thread(1, false, false, u64::MAX, vec![0x10, 0x20]),
+            thread(2, true, false, 0, vec![]),
+        ];
+        assert_eq!(
+            machine.deadlocked().as_deref(),
+            Some("every thread is waiting for another: thread 1 on handle 0x10, 0x20, thread 2 suspended")
+        );
     }
 }
