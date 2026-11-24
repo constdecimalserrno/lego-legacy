@@ -1399,33 +1399,250 @@ fn transfer(
     if sw <= 0 || sh <= 0 || cx1 <= cx0 || cy1 <= cy0 {
         return Ok(());
     }
-    let key = key.map(|k| k.to_le_bytes());
-    let mut row = vec![0u8; (cx1 - cx0) as usize * bytes];
+
+    let cols = (cx1 - cx0) as usize;
+    let rows = (cy1 - cy0) as usize;
+    let row_bytes = cols * bytes;
+    let src_pitch = source.pitch as usize;
+    let dst_pitch = destination.pitch as usize;
+    let unstretched = sw == dw && sh == dh;
+
+    let sy_first = (sy0 + (cy0 - dy0) * sh / dh) as u32;
+    let sy_last = (sy0 + (cy1 - 1 - dy0) * sh / dh) as u32;
+    let sx_first = (sx0 + (cx0 - dx0) * sw / dw) as usize;
+    let sx_last = (sx0 + (cx1 - 1 - dx0) * sw / dw) as usize;
+    let src_row_bytes = (sx_last - sx_first + 1) * bytes;
+    let src_start =
+        u64::from(source.at) + u64::from(sy_first) * src_pitch as u64 + (sx_first * bytes) as u64;
+    let src_len = (sy_last - sy_first) as usize * src_pitch + src_row_bytes;
+    let dst_start =
+        u64::from(destination.at) + cy0 as u64 * dst_pitch as u64 + (cx0 as usize * bytes) as u64;
+    let dst_len = (rows - 1) * dst_pitch + row_bytes;
+
+    let to_addr = |addr: u64, len: usize, write: bool| -> Result<u32, Stop> {
+        u32::try_from(addr).map_err(|_| {
+            Stop::Fault(crate::guest::Fault {
+                addr: u32::MAX,
+                len,
+                write,
+            })
+        })
+    };
+
+    let build_sx_table = || -> Vec<usize> {
+        (cx0..cx1)
+            .map(|x| (sx0 + (x - dx0) * sw / dw) as usize - sx_first)
+            .collect()
+    };
+
+    let disjoint =
+        src_start + src_len as u64 <= dst_start || dst_start + dst_len as u64 <= src_start;
+
+    if disjoint {
+        let src_addr = to_addr(src_start, src_len, false)?;
+        let dst_addr = to_addr(dst_start, dst_len, true)?;
+        let (src, dst) = mem
+            .read_and_write((src_addr, src_len), (dst_addr, dst_len))
+            .map_err(Stop::Fault)?;
+
+        if unstretched {
+            match key {
+                None if src_pitch == row_bytes && dst_pitch == row_bytes => {
+                    dst.copy_from_slice(src);
+                }
+                None => {
+                    for row in 0..rows {
+                        let s = row * src_pitch;
+                        let d = row * dst_pitch;
+                        dst[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
+                    }
+                }
+                Some(k) if src_pitch == row_bytes && dst_pitch == row_bytes => {
+                    copy_keyed_row(src, dst, bytes, k);
+                }
+                Some(k) => {
+                    for row in 0..rows {
+                        let s = row * src_pitch;
+                        let d = row * dst_pitch;
+                        copy_keyed_row(
+                            &src[s..s + row_bytes],
+                            &mut dst[d..d + row_bytes],
+                            bytes,
+                            k,
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        let sx_table = build_sx_table();
+        let mut prev: Option<(u32, usize)> = None;
+        for y in cy0..cy1 {
+            let sy = (sy0 + (y - dy0) * sh / dh) as u32;
+            let d = (y - cy0) as usize * dst_pitch;
+            if key.is_none() && dst_pitch >= row_bytes {
+                if let Some((_, prev_d)) = prev.filter(|&(ps, _)| ps == sy) {
+                    dst.copy_within(prev_d..prev_d + row_bytes, d);
+                    continue;
+                }
+            }
+            let s = (sy - sy_first) as usize * src_pitch;
+            stretch_row(
+                &src[s..s + src_row_bytes],
+                &mut dst[d..d + row_bytes],
+                &sx_table,
+                bytes,
+                key,
+            );
+            prev = Some((sy, d));
+        }
+        return Ok(());
+    }
+
+    // Overlapping source and destination: walk scanlines in ascending `y`
+    // order through a reusable row buffer, preserving the reference scanline
+    // order across all four self-overlap directions.
+    let sx_table = (!unstretched).then(build_sx_table);
+    let mut src_buf = vec![0u8; src_row_bytes];
+    let mut dst_buf = if unstretched && key.is_none() {
+        Vec::new()
+    } else {
+        vec![0u8; row_bytes]
+    };
     for y in cy0..cy1 {
         let sy = (sy0 + (y - dy0) * sh / dh) as u32;
-        let line = mem
-            .slice(source.at + sy * source.pitch, sx1 as usize * bytes)
-            .map_err(Stop::Fault)?
-            .to_vec();
-        let at = destination.at + y as u32 * destination.pitch + cx0 as u32 * bytes as u32;
+        let src_at = to_addr(
+            u64::from(source.at) + u64::from(sy) * src_pitch as u64 + (sx_first * bytes) as u64,
+            src_row_bytes,
+            false,
+        )?;
+        src_buf.copy_from_slice(mem.slice(src_at, src_row_bytes).map_err(Stop::Fault)?);
+        let dst_at = to_addr(
+            u64::from(destination.at) + y as u64 * dst_pitch as u64 + (cx0 as usize * bytes) as u64,
+            row_bytes,
+            true,
+        )?;
+        if unstretched && key.is_none() {
+            mem.write(dst_at, &src_buf).map_err(Stop::Fault)?;
+            continue;
+        }
         if key.is_some() {
-            let len = row.len();
-            row.copy_from_slice(mem.slice(at, len).map_err(Stop::Fault)?);
+            dst_buf.copy_from_slice(mem.slice(dst_at, row_bytes).map_err(Stop::Fault)?);
         }
-        for x in cx0..cx1 {
-            let sx = (sx0 + (x - dx0) * sw / dw) as usize * bytes;
-            let pixel = &line[sx..sx + bytes];
-            // Compared byte by byte, not as a slice, which calls out to
-            // memcmp: this is every pixel a keyed blit copies.
-            if key.is_some_and(|k| pixel.iter().zip(k).all(|(p, k)| p == &k)) {
-                continue;
-            }
-            let out = (x - cx0) as usize * bytes;
-            row[out..out + bytes].copy_from_slice(pixel);
+        match (&sx_table, key) {
+            (None, Some(k)) => copy_keyed_row(&src_buf, &mut dst_buf, bytes, k),
+            (Some(table), k) => stretch_row(&src_buf, &mut dst_buf, table, bytes, k),
+            (None, None) => unreachable!(),
         }
-        mem.write(at, &row).map_err(Stop::Fault)?;
+        mem.write(dst_at, &dst_buf).map_err(Stop::Fault)?;
     }
     Ok(())
+}
+
+/// Copy `src` into `dst` pixel by pixel, leaving destination pixels untouched
+/// wherever the source pixel matches `key` (in its low `bytes` little-endian
+/// bytes).
+fn copy_keyed_row(src: &[u8], dst: &mut [u8], bytes: usize, key: u32) {
+    match bytes {
+        1 => {
+            let k = key as u8;
+            for (&s, d) in src.iter().zip(dst.iter_mut()) {
+                *d = if s == k { *d } else { s };
+            }
+        }
+        2 => {
+            let k = key as u16;
+            for (&s, d) in src
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<2>().0.iter_mut())
+            {
+                *d = if u16::from_le_bytes(s) == k { *d } else { s };
+            }
+        }
+        3 => {
+            let [k0, k1, k2, _] = key.to_le_bytes();
+            let k = [k0, k1, k2];
+            for (&s, d) in src
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<3>().0.iter_mut())
+            {
+                if s != k {
+                    *d = s;
+                }
+            }
+        }
+        4 => {
+            for (&s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+            {
+                *d = if u32::from_le_bytes(s) == key { *d } else { s };
+            }
+        }
+        0 => {}
+        _ => {
+            let k = key.to_le_bytes();
+            for (s, d) in src.chunks_exact(bytes).zip(dst.chunks_exact_mut(bytes)) {
+                if !s.iter().zip(k).all(|(p, kb)| *p == kb) {
+                    d.copy_from_slice(s);
+                }
+            }
+        }
+    }
+}
+
+fn stretch_fixed<const N: usize>(
+    src: &[u8],
+    dst: &mut [u8],
+    sx_table: &[usize],
+    key: Option<[u8; N]>,
+) {
+    let src = src.as_chunks::<N>().0;
+    let dst = dst.as_chunks_mut::<N>().0;
+    match key {
+        None => {
+            for (&sx, d) in sx_table.iter().zip(dst.iter_mut()) {
+                *d = src[sx];
+            }
+        }
+        Some(k) => {
+            for (&sx, d) in sx_table.iter().zip(dst.iter_mut()) {
+                let p = src[sx];
+                if p != k {
+                    *d = p;
+                }
+            }
+        }
+    }
+}
+
+/// Stretch one scanline from `src` into `dst` using precomputed pixel indices
+/// in `sx_table`, leaving destination pixels untouched where `key` matches.
+fn stretch_row(src: &[u8], dst: &mut [u8], sx_table: &[usize], bytes: usize, key: Option<u32>) {
+    let kb = key.map(u32::to_le_bytes);
+    match bytes {
+        1 => stretch_fixed::<1>(src, dst, sx_table, kb.map(|k| [k[0]])),
+        2 => stretch_fixed::<2>(src, dst, sx_table, kb.map(|k| [k[0], k[1]])),
+        3 => stretch_fixed::<3>(src, dst, sx_table, kb.map(|k| [k[0], k[1], k[2]])),
+        4 => stretch_fixed::<4>(src, dst, sx_table, kb),
+        0 => {}
+        _ => {
+            for (&sx, d) in sx_table.iter().zip(dst.chunks_exact_mut(bytes)) {
+                let p = &src[sx * bytes..(sx + 1) * bytes];
+                if kb.is_some_and(|k| p.iter().zip(k).all(|(pb, kb)| *pb == kb)) {
+                    continue;
+                }
+                d.copy_from_slice(p);
+            }
+        }
+    }
 }
 
 /// How long a `DDSURFACEDESC` is, and DirectX 6's `DDSURFACEDESC2`.
@@ -1600,8 +1817,105 @@ fn uniqueness(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> 
 #[cfg(test)]
 mod tests {
     use super::{transfer, Pixels};
-    use crate::guest::{Arena, GuestMem};
+    use crate::cpu::Stop;
+    use crate::guest::{Arena, Fault, GuestMem};
     use crate::host::headless::Headless;
+
+    /// Reference implementation of `transfer` (pre-#251 algorithm) used as the
+    /// bit-exact oracle for every fast path.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_transfer(
+        mem: &mut Arena,
+        source: Pixels,
+        (sx0, sy0, sx1, sy1): (i64, i64, i64, i64),
+        destination: Pixels,
+        (dx0, dy0, dx1, dy1): (i64, i64, i64, i64),
+        (width, height): (u32, u32),
+        depth: u32,
+        key: Option<u32>,
+    ) -> Result<(), Stop> {
+        let bytes = depth.div_ceil(8) as usize;
+        let (sw, sh) = (sx1 - sx0, sy1 - sy0);
+        let (dw, dh) = (dx1 - dx0, dy1 - dy0);
+        let (cx0, cy0) = (dx0.max(0), dy0.max(0));
+        let (cx1, cy1) = (dx1.min(i64::from(width)), dy1.min(i64::from(height)));
+        if sw <= 0 || sh <= 0 || cx1 <= cx0 || cy1 <= cy0 {
+            return Ok(());
+        }
+        let key = key.map(u32::to_le_bytes);
+        let mut row = vec![0u8; (cx1 - cx0) as usize * bytes];
+        for y in cy0..cy1 {
+            let sy = (sy0 + (y - dy0) * sh / dh) as u32;
+            let line = mem
+                .slice(source.at + sy * source.pitch, sx1 as usize * bytes)
+                .map_err(Stop::Fault)?
+                .to_vec();
+            let at = destination.at + y as u32 * destination.pitch + cx0 as u32 * bytes as u32;
+            if key.is_some() {
+                let len = row.len();
+                row.copy_from_slice(mem.slice(at, len).map_err(Stop::Fault)?);
+            }
+            for x in cx0..cx1 {
+                let sx = (sx0 + (x - dx0) * sw / dw) as usize * bytes;
+                let pixel = &line[sx..sx + bytes];
+                if key.is_some_and(|k| pixel.iter().zip(k).all(|(p, k)| p == &k)) {
+                    continue;
+                }
+                let out = (x - cx0) as usize * bytes;
+                row[out..out + bytes].copy_from_slice(pixel);
+            }
+            mem.write(at, &row).map_err(Stop::Fault)?;
+        }
+        Ok(())
+    }
+
+    /// Deterministic non-repeating pixel data for oracle comparisons.
+    fn pattern(len: usize, seed: u8) -> Vec<u8> {
+        (0..len)
+            .map(|i| seed.wrapping_add((i.wrapping_mul(37) ^ (i >> 3)) as u8))
+            .collect()
+    }
+
+    /// Run `transfer` and `reference_transfer` on identical arenas and assert
+    /// every byte in `0..arena_len` matches bit for bit.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_matches_reference(
+        arena_len: usize,
+        init: &[(u32, &[u8])],
+        source: Pixels,
+        from: (i64, i64, i64, i64),
+        destination: Pixels,
+        to: (i64, i64, i64, i64),
+        size: (u32, u32),
+        depth: u32,
+        key: Option<u32>,
+        label: &str,
+    ) {
+        let mut actual = Arena::new(&mut Headless::new(), arena_len).expect("an arena");
+        let mut expected = Arena::new(&mut Headless::new(), arena_len).expect("an arena");
+        for &(addr, bytes) in init {
+            actual.write(addr, bytes).expect("init fits");
+            expected.write(addr, bytes).expect("init fits");
+        }
+        transfer(&mut actual, source, from, destination, to, size, depth, key)
+            .unwrap_or_else(|e| panic!("{label}: transfer failed: {e:?}"));
+        reference_transfer(
+            &mut expected,
+            source,
+            from,
+            destination,
+            to,
+            size,
+            depth,
+            key,
+        )
+        .unwrap_or_else(|e| panic!("{label}: reference failed: {e:?}"));
+        assert_eq!(
+            actual.slice(0, arena_len).expect("readable"),
+            expected.slice(0, arena_len).expect("readable"),
+            "{label}"
+        );
+    }
 
     #[test]
     fn a_blit_past_the_top_left_of_its_destination_draws_what_is_still_on_it() {
@@ -1653,6 +1967,371 @@ mod tests {
             &mem.slice(0x200, 16).expect("in memory")[10..],
             [1, 1, 0, 0, 1, 1]
         );
+    }
+
+    #[test]
+    fn unkeyed_one_to_one_blits_match_reference_across_depths_pitches_and_clipping() {
+        for depth in [8u32, 16, 24, 32] {
+            let bytes = depth.div_ceil(8);
+            // Full-width contiguous surface copy (fast single memcpy path).
+            let (w, h) = (37u32, 11u32);
+            let pitch = w * bytes;
+            let src_data = pattern((pitch * h) as usize, 0x11);
+            let dst_data = pattern((pitch * h) as usize, 0x99);
+            assert_matches_reference(
+                1 << 16,
+                &[(0x1000, &src_data), (0x8000, &dst_data)],
+                Pixels { at: 0x1000, pitch },
+                (0, 0, i64::from(w), i64::from(h)),
+                Pixels { at: 0x8000, pitch },
+                (0, 0, i64::from(w), i64::from(h)),
+                (w, h),
+                depth,
+                None,
+                &format!("contiguous 1:1 depth={depth}"),
+            );
+
+            // Padded pitches, sub-rectangle source, and clipping on every edge.
+            let src_pitch = w * bytes + 12;
+            let dst_pitch = w * bytes + 20;
+            let src_padded = pattern((src_pitch * h) as usize, 0x23);
+            let dst_padded = pattern((dst_pitch * h) as usize, 0x77);
+            let cases = [
+                ("subrect", (3, 2, 25, 9), (5, 1, 27, 8)),
+                ("clip-top-left", (0, 0, 20, 8), (-4, -3, 16, 5)),
+                ("clip-bottom-right", (2, 1, 22, 9), (25, 6, 45, 14)),
+                ("clip-all-edges", (0, 0, 37, 11), (-2, -2, 35, 9)),
+                ("single-row", (4, 5, 30, 6), (1, 10, 27, 11)),
+                ("clipped-out", (0, 0, 10, 5), (40, 0, 50, 5)),
+            ];
+            for (name, from, to) in cases {
+                assert_matches_reference(
+                    1 << 16,
+                    &[(0x1000, &src_padded), (0x8000, &dst_padded)],
+                    Pixels {
+                        at: 0x1000,
+                        pitch: src_pitch,
+                    },
+                    from,
+                    Pixels {
+                        at: 0x8000,
+                        pitch: dst_pitch,
+                    },
+                    to,
+                    (w, h),
+                    depth,
+                    None,
+                    &format!("padded 1:1 {name} depth={depth}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_one_to_one_blits_match_reference_for_all_pixel_widths() {
+        // Upper bits set to ensure sub-32-bit depths match only their low bytes.
+        let key = 0xDEAD_BEEFu32;
+        let key_bytes = key.to_le_bytes();
+        for depth in [8u32, 16, 24, 32] {
+            let bytes = depth.div_ceil(8) as usize;
+            let (w, h) = (39u32, 9u32);
+            let tight_pitch = w * bytes as u32;
+            let padded_pitch = tight_pitch + 16;
+
+            for (label, src_pitch, dst_pitch, from, to) in [
+                (
+                    "contiguous",
+                    tight_pitch,
+                    tight_pitch,
+                    (0, 0, i64::from(w), i64::from(h)),
+                    (0, 0, i64::from(w), i64::from(h)),
+                ),
+                (
+                    "padded-subrect",
+                    padded_pitch,
+                    padded_pitch + 8,
+                    (2, 1, 37, 8),
+                    (1, 1, 36, 8),
+                ),
+                (
+                    "clipped",
+                    padded_pitch,
+                    padded_pitch,
+                    (0, 0, 30, 7),
+                    (-5, -2, 25, 5),
+                ),
+            ] {
+                let mut src_data = pattern((src_pitch * h) as usize, 0x31);
+                // Sprinkle matching key pixels in every row: start, middle,
+                // adjacent pairs, and tail.
+                for y in 0..h as usize {
+                    for x in 0..w as usize {
+                        if x % 3 == 0 || x == 1 || x + 1 == w as usize {
+                            let off = y * src_pitch as usize + x * bytes;
+                            src_data[off..off + bytes].copy_from_slice(&key_bytes[..bytes]);
+                        }
+                    }
+                }
+                let dst_data = pattern((dst_pitch * h) as usize, 0xC5);
+                assert_matches_reference(
+                    1 << 16,
+                    &[(0x1000, &src_data), (0x8000, &dst_data)],
+                    Pixels {
+                        at: 0x1000,
+                        pitch: src_pitch,
+                    },
+                    from,
+                    Pixels {
+                        at: 0x8000,
+                        pitch: dst_pitch,
+                    },
+                    to,
+                    (w, h),
+                    depth,
+                    Some(key),
+                    &format!("keyed 1:1 {label} depth={depth}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn self_overlapping_blits_preserve_reference_output_in_all_four_directions() {
+        let key = 0x0012_3456u32;
+        let key_bytes = key.to_le_bytes();
+        for depth in [8u32, 16, 24, 32] {
+            let bytes = depth.div_ceil(8) as usize;
+            let (w, h) = (16u32, 12u32);
+            let pitch = w * bytes as u32 + 4;
+            let mut surface = pattern((pitch * h) as usize, 0x42);
+            for y in 0..h as usize {
+                let off = y * pitch as usize + (y % w as usize) * bytes;
+                surface[off..off + bytes].copy_from_slice(&key_bytes[..bytes]);
+            }
+            let surf = Pixels { at: 0x2000, pitch };
+            let directions = [
+                ("left", (3, 2, 13, 9), (1, 2, 11, 9)),
+                ("right", (1, 2, 11, 9), (3, 2, 13, 9)),
+                ("up", (2, 3, 12, 10), (2, 1, 12, 8)),
+                ("down", (2, 1, 12, 8), (2, 3, 12, 10)),
+                ("up-left", (3, 3, 13, 10), (1, 1, 11, 8)),
+                ("down-right", (1, 1, 11, 8), (3, 3, 13, 10)),
+                ("same-spot", (2, 2, 10, 8), (2, 2, 10, 8)),
+                ("stretched-overlap", (1, 1, 7, 5), (2, 2, 14, 10)),
+            ];
+            for (name, from, to) in directions {
+                for k in [None, Some(key)] {
+                    assert_matches_reference(
+                        1 << 16,
+                        &[(0x2000, &surface)],
+                        surf,
+                        from,
+                        surf,
+                        to,
+                        (w, h),
+                        depth,
+                        k,
+                        &format!("self-overlap {name} depth={depth} key={k:?}"),
+                    );
+                }
+            }
+            // Distinct base pointers whose byte spans still overlap partially.
+            assert_matches_reference(
+                1 << 16,
+                &[(0x2000, &surface)],
+                Pixels { at: 0x2000, pitch },
+                (0, 0, 12, 8),
+                Pixels {
+                    at: 0x2000 + pitch * 2,
+                    pitch,
+                },
+                (0, 0, 12, 8),
+                (w, h),
+                depth,
+                None,
+                &format!("partial base overlap depth={depth}"),
+            );
+        }
+    }
+
+    #[test]
+    fn stretched_blits_match_reference_exact_nearest_neighbour() {
+        let key = 0x00A1_B2C3u32;
+        let key_bytes = key.to_le_bytes();
+        for depth in [8u32, 16, 24, 32] {
+            let bytes = depth.div_ceil(8) as usize;
+            let (sw, sh) = (17u32, 11u32);
+            let (dw, dh) = (35u32, 23u32);
+            let src_pitch = sw * bytes as u32 + 8;
+            let dst_pitch = dw * bytes as u32 + 12;
+            let mut src_data = pattern((src_pitch * sh) as usize, 0x55);
+            for y in 0..sh as usize {
+                for x in (0..sw as usize).step_by(4) {
+                    let off = y * src_pitch as usize + x * bytes;
+                    src_data[off..off + bytes].copy_from_slice(&key_bytes[..bytes]);
+                }
+            }
+            let dst_data = pattern((dst_pitch * dh) as usize, 0xAA);
+            let cases = [
+                ("upscale", (0, 0, 11, 7), (0, 0, 29, 19)),
+                ("downscale", (1, 1, 16, 10), (2, 1, 9, 6)),
+                ("x-only", (0, 0, 10, 6), (3, 2, 27, 8)),
+                ("y-only", (2, 0, 12, 5), (4, 1, 14, 16)),
+                ("clipped-upscale", (1, 1, 13, 9), (-5, -3, 38, 25)),
+                ("clipped-downscale", (0, 0, 17, 11), (30, 18, 41, 26)),
+            ];
+            for (name, from, to) in cases {
+                for k in [None, Some(key)] {
+                    assert_matches_reference(
+                        1 << 16,
+                        &[(0x1000, &src_data), (0x8000, &dst_data)],
+                        Pixels {
+                            at: 0x1000,
+                            pitch: src_pitch,
+                        },
+                        from,
+                        Pixels {
+                            at: 0x8000,
+                            pitch: dst_pitch,
+                        },
+                        to,
+                        (dw, dh),
+                        depth,
+                        k,
+                        &format!("stretch {name} depth={depth} key={k:?}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_faults_out_of_bounds_and_notifies_code_pages_and_watch() {
+        // Source out of bounds -> read fault.
+        let mut mem = Arena::new(&mut Headless::new(), 0x4000)
+            .expect("an arena")
+            .with_floor(0x1000);
+        let err = transfer(
+            &mut mem,
+            Pixels {
+                at: 0x3FF0,
+                pitch: 32,
+            },
+            (0, 0, 16, 2),
+            Pixels {
+                at: 0x2000,
+                pitch: 32,
+            },
+            (0, 0, 16, 2),
+            (16, 2),
+            16,
+            None,
+        )
+        .expect_err("source past end faults");
+        assert!(matches!(err, Stop::Fault(Fault { write: false, .. })));
+
+        // Destination out of bounds -> write fault.
+        let err = transfer(
+            &mut mem,
+            Pixels {
+                at: 0x2000,
+                pitch: 32,
+            },
+            (0, 0, 16, 2),
+            Pixels {
+                at: 0x3FF0,
+                pitch: 32,
+            },
+            (0, 0, 16, 2),
+            (16, 2),
+            16,
+            None,
+        )
+        .expect_err("destination past end faults");
+        assert!(matches!(err, Stop::Fault(Fault { write: true, .. })));
+
+        // Under floor -> fault.
+        let err = transfer(
+            &mut mem,
+            Pixels {
+                at: 0x0100,
+                pitch: 16,
+            },
+            (0, 0, 4, 2),
+            Pixels {
+                at: 0x2000,
+                pitch: 16,
+            },
+            (0, 0, 4, 2),
+            (4, 2),
+            16,
+            None,
+        )
+        .expect_err("source under floor faults");
+        assert!(matches!(err, Stop::Fault(Fault { write: false, .. })));
+
+        // Code-page invalidation and watch cancellation across every path:
+        // disjoint 1:1 unkeyed, disjoint 1:1 keyed, disjoint stretched, and
+        // overlapping.
+        let paths = [
+            ("1:1-unkeyed", 0x1000u32, (0, 0, 8, 4), (0, 0, 8, 4), None),
+            ("1:1-keyed", 0x1000, (0, 0, 8, 4), (0, 0, 8, 4), Some(0xFF)),
+            ("stretched", 0x1000, (0, 0, 4, 2), (0, 0, 8, 4), None),
+            ("overlapping", 0x2000, (0, 0, 6, 3), (1, 1, 7, 4), None),
+        ];
+        for (name, src_at, from, to, key) in paths {
+            let mut mem = Arena::new(&mut Headless::new(), 0x4000).expect("an arena");
+            mem.write(src_at, &pattern(256, 0x2A)).expect("fits");
+            mem.mark_code(0x2000);
+            mem.watch();
+            transfer(
+                &mut mem,
+                Pixels {
+                    at: src_at,
+                    pitch: 16,
+                },
+                from,
+                Pixels {
+                    at: 0x2000,
+                    pitch: 16,
+                },
+                to,
+                (8, 4),
+                16,
+                key,
+            )
+            .expect("in bounds");
+            assert!(mem.code_written, "{name}: must notice code page write");
+            assert!(
+                mem.written_code.contains(&2),
+                "{name}: page 2 (0x2000) recorded"
+            );
+            assert!(!mem.unchanged(), "{name}: watch must observe write");
+        }
+
+        // Completely clipped-out blit touches nothing: neither code nor watch.
+        let mut mem = Arena::new(&mut Headless::new(), 0x4000).expect("an arena");
+        mem.mark_code(0x2000);
+        mem.watch();
+        transfer(
+            &mut mem,
+            Pixels {
+                at: 0x1000,
+                pitch: 16,
+            },
+            (0, 0, 4, 4),
+            Pixels {
+                at: 0x2000,
+                pitch: 16,
+            },
+            (10, 10, 14, 14),
+            (8, 8),
+            16,
+            None,
+        )
+        .expect("clipped out");
+        assert!(!mem.code_written);
+        assert!(mem.unchanged());
     }
 
     /// A palette's entries are reached from the start asked for to its end,

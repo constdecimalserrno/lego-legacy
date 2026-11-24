@@ -5,6 +5,28 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+DirectDraw's surface blit transfer (`win32::ddraw::transfer`) now takes pure-Rust fast paths (#251),
+replacing per-scanline heap copies, per-pixel 64-bit integer divisions, and dynamic-width per-pixel
+`copy_from_slice` calls with bit-exact equivalents:
+- Disjoint 1:1 unkeyed blits borrow source and destination once through `Arena::read_and_write` and
+  copy contiguously (single `copy_from_slice` when pitches match row width) or row by row with zero
+  allocations.
+- Disjoint 1:1 colour-keyed blits specialize by pixel byte width (`u8`, `u16`, 24-bit, `u32`) with
+  fixed-width chunk loops and zero per-scanline allocations.
+- Stretched blits precompute the nearest-neighbour source-X index table once per blit (keeping the
+  exact `sx0 + (x - dx0) * sw / dw` integer formula), reuse repeated unkeyed scanlines, and
+  specialize pixel copies by byte width.
+- Overlapping source/destination blits walk scanlines in ascending `y` order through a single
+  reusable scratch row buffer, preserving exact reference behaviour across all four self-overlap
+  directions, bounds faults, `wrote_over_code` invalidation, and `Arena::watch` cancellation.
+- Unit tests in `core/src/win32/ddraw.rs` hold every path against the pre-#251 reference algorithm
+  across 8/16/24/32-bit depths, clipping, self-overlap directions, stretches, faults, code-page
+  writes, and watch notifications.
+- Measured headless on the Mac mini, LEGO Island's `maintainer-first-play.route` drops from 53.37 s
+  to 43.70 s (-18.1%) and `pizza-delivery.route` from 126.45 s to 105.91 s (-16.2%), and LEGO Rock
+  Raiders' `first-mission.route` from 118.38 s to 116.89 s, each ending at the identical cursor,
+  flips, declared milliseconds, and state digest. No released run moves.
+
 Cross-platform static host assembly seam and determinism scaffolding (#249, ADR-0009):
 - `arch` (`core/src/arch.rs`) exposes `Tier` (`Rust`, `Aarch64`, `X86_64`), `Tier::native()`,
   `Tier::active()`, and `arch::use_rust()`, backed by a single `OnceLock` reading the startup
