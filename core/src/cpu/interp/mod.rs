@@ -130,6 +130,7 @@ pub(crate) struct FastCtx {
     pub outside_danger_len: u64,
     pub outside_danger_start: u32,
     pub _pad: u32,
+    pub fpu: *mut super::x87::X87,
 }
 
 /// Sentinel [`FastInsn`] appended after non-transfer runs for `naked_asm!`.
@@ -445,6 +446,7 @@ impl Interp {
             outside_danger_len,
             outside_danger_start,
             _pad: 0,
+            fpu: &raw mut cpu.fpu,
         };
 
         while retired < count && !outside.contains(&cpu.eip) {
@@ -460,6 +462,7 @@ impl Interp {
             }
 
             ctx.regs = cpu.r.as_mut_ptr();
+            ctx.fpu = &raw mut cpu.fpu;
             ctx.fast_insns = self.fast_insns.as_mut_ptr();
             ctx.runs = self.runs.as_ptr();
             ctx.directory = self.directory.as_ptr();
@@ -677,7 +680,9 @@ mod tests {
 
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
-            assert_eq!(size_of::<FastCtx>(), 168);
+            assert_eq!(size_of::<crate::cpu::x87::X87>(), 72);
+            assert_eq!(align_of::<crate::cpu::x87::X87>(), 8);
+            assert_eq!(size_of::<FastCtx>(), 176);
             assert_eq!(align_of::<FastCtx>(), 8);
             assert_eq!(offset_of!(FastCtx, regs), 0);
             assert_eq!(offset_of!(FastCtx, arena_base), 8);
@@ -705,6 +710,7 @@ mod tests {
             assert_eq!(offset_of!(FastCtx, l1_cache), 144);
             assert_eq!(offset_of!(FastCtx, outside_danger_len), 152);
             assert_eq!(offset_of!(FastCtx, outside_danger_start), 160);
+            assert_eq!(offset_of!(FastCtx, fpu), 168);
         }
     }
 
@@ -795,7 +801,12 @@ mod tests {
             c_rust.flags.to_eflags()
         );
         assert_eq!(c_nat.tsc, c_rust.tsc, "{label}: TSC mismatch");
-        assert_eq!(c_nat.fpu, c_rust.fpu, "{label}: FPU mismatch");
+        assert!(
+            c_nat.fpu.same_bits(&c_rust.fpu),
+            "{label}: FPU bit mismatch\n  nat ={:?}\n  rust={:?}",
+            c_nat.fpu,
+            c_rust.fpu
+        );
         assert_eq!(
             i_nat.cached(),
             i_rust.cached(),
@@ -1710,6 +1721,745 @@ mod tests {
                 (rn, sn, cn.eip, cn.r, cn.tsc),
                 (rr, sr, cr.eip, cr.r, cr.tsc)
             );
+        }
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn differential_x87_inline_all_ops_edges_nan_pc0_rc_ftol_stack_and_faults() {
+        use crate::cpu::x87::{INDEFINITE, X87};
+        let code_at = 0x0018_0000u32;
+        let data = 0x0020_0000u32;
+        let fs_base = 0x0022_0000u32;
+
+        let make_fpu = |top_pushes: usize, vals: &[f64], control: u16, status: u16| -> X87 {
+            let mut fpu = X87::new();
+            for _ in 0..top_pushes {
+                fpu.decrement_top();
+            }
+            for &v in vals {
+                fpu.push(v);
+            }
+            fpu.set_control(control);
+            if status != 0 {
+                // Compare against NaN or equal to seed non-zero status bits if needed.
+                fpu.compare(f64::NAN, 1.0);
+            }
+            fpu
+        };
+
+        let edge_f64: &[f64] = &[
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            2.25,
+            -3.75,
+            1e-100,
+            -1e100,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::from_bits(1),                     // smallest +subnormal
+            f64::from_bits(0x8000_0000_0000_0001), // smallest -subnormal
+            f64::MAX,
+            -f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            INDEFINITE,
+            f64::from_bits(0x7ff0_0000_0000_0001), // +sNaN
+            f64::from_bits(0xfff0_0000_0000_0007), // -sNaN
+            f64::from_bits(0x7ff8_0000_0000_0005), // +qNaN with payload
+        ];
+
+        let edge_f32_bits: &[u32] = &[
+            0.0f32.to_bits(),
+            (-0.0f32).to_bits(),
+            1.0f32.to_bits(),
+            (-2.5f32).to_bits(),
+            0.1f32.to_bits(),
+            1,           // +subnormal f32
+            0x8000_0001, // -subnormal f32
+            f32::MAX.to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            0x7fc0_0000, // +qNaN
+            0xffc0_0003, // -qNaN payload
+            0x7f80_0001, // +sNaN
+            0xff80_0005, // -sNaN
+        ];
+
+        // 1. Register unary/load/store/fxch/compare ops across stack wraps (top 0..8),
+        //    control words (PC=0 Single, PC=2 Double, PC=3 Extended), and edge values.
+        let reg_ops_1arg: &[(&str, &[u8])] = &[
+            ("fnop", &[0xd9, 0xd0, 0xf4]),
+            ("fchs", &[0xd9, 0xe0, 0xf4]),
+            ("fabs", &[0xd9, 0xe1, 0xf4]),
+            ("ftst", &[0xd9, 0xe4, 0xf4]),
+            ("fld1", &[0xd9, 0xe8, 0xf4]),
+            ("fldz", &[0xd9, 0xee, 0xf4]),
+            ("fsqrt", &[0xd9, 0xfa, 0xf4]),
+            ("fnstsw_ax", &[0xdf, 0xe0, 0xf4]),
+            ("fld_st0", &[0xd9, 0xc0, 0xf4]),
+            ("fld_st2", &[0xd9, 0xc2, 0xf4]),
+            ("fxch_0", &[0xd9, 0xc8, 0xf4]),
+            ("fxch_1", &[0xd9, 0xc9, 0xf4]),
+            ("fxch_3", &[0xd9, 0xcb, 0xf4]),
+            ("fst_st0", &[0xdd, 0xd0, 0xf4]),
+            ("fst_st2", &[0xdd, 0xd2, 0xf4]),
+            ("fst_st5_unocc", &[0xdd, 0xd5, 0xf4]),
+            ("fstp_st0", &[0xdd, 0xd8, 0xf4]),
+            ("fstp_st2", &[0xdd, 0xda, 0xf4]),
+            ("fstp_st5_unocc", &[0xdd, 0xdd, 0xf4]),
+            ("fcom_st1", &[0xd8, 0xd1, 0xf4]),
+            ("fucom_st2", &[0xdd, 0xe2, 0xf4]),
+            ("fcomp_st1", &[0xd8, 0xd9, 0xf4]),
+            ("fucomp_st2", &[0xdd, 0xea, 0xf4]),
+            ("fcompp", &[0xde, 0xd9, 0xf4]),
+            ("fucompp", &[0xda, 0xe9, 0xf4]),
+        ];
+
+        for &(name, code) in reg_ops_1arg {
+            for &ctrl in &[0x007fu16, 0x027f, 0x037f] {
+                for shift in 0..8usize {
+                    for &v0 in &[
+                        0.0,
+                        -0.0,
+                        -4.0,
+                        9.0,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        f64::from_bits(1),
+                        f64::from_bits(0x7ff0_0000_0000_0001),
+                        INDEFINITE,
+                    ] {
+                        let mut cpu = Cpu {
+                            eip: code_at,
+                            fpu: make_fpu(shift, &[1.5, -2.5, 0.25, v0], ctrl, 1),
+                            ..Cpu::default()
+                        };
+                        cpu.r[EAX] = 0xdead_beef;
+                        assert_native_matches_rust(name, code, cpu, &[], &[], 20, 0..0, DOS_MEMORY);
+                    }
+                }
+            }
+        }
+
+        // 2. Fcomi / Fucomi / Fcomip / Fucomip preserving lazy & materialized AF!
+        for &(name, op_bytes) in &[
+            ("fcomi", [0xdbu8, 0xf1]),
+            ("fucomi", [0xdb, 0xe9]),
+            ("fcomip", [0xdf, 0xf1]),
+            ("fucomip", [0xdf, 0xe9]),
+        ] {
+            for &(a, b) in &[
+                (2.0, 1.0),
+                (1.0, 2.0),
+                (1.5, 1.5),
+                (-0.0, 0.0),
+                (f64::INFINITY, 1.0),
+                (f64::NEG_INFINITY, f64::INFINITY),
+                (f64::NAN, 1.0),
+                (1.0, f64::from_bits(0x7ff0_0000_0000_0001)),
+            ] {
+                // Test both materialized AF (0/1) and lazy AF (from `add eax, ebx`: 0x0f+1 sets AF, 1+1 clears AF)
+                for &(eax_init, ebx_init, prefix_add) in &[
+                    (0u32, 0u32, false),
+                    (0x0f, 1, true), // lazy AF = 1
+                    (0x01, 1, true), // lazy AF = 0
+                ] {
+                    for af_mat in [false, true] {
+                        let mut prog = Vec::new();
+                        if prefix_add {
+                            prog.extend_from_slice(&[0x01, 0xd8]); // add eax, ebx (lazy flags on aarch64!)
+                        }
+                        prog.extend_from_slice(&op_bytes);
+                        prog.extend_from_slice(&[0x0f, 0x92, 0xc1]); // setb cl
+                        prog.extend_from_slice(&[0x0f, 0x94, 0xc5]); // sete ch
+                        prog.extend_from_slice(&[0x0f, 0x9a, 0xc2]); // setp dl
+                        prog.push(0xf4);
+
+                        let mut cpu = Cpu {
+                            eip: code_at,
+                            fpu: make_fpu(7, &[b, a], 0x037f, 0),
+                            flags: Flags::from_eflags(
+                                CF | PF | ZF | SF | OF | if af_mat { AF } else { 0 },
+                            ),
+                            ..Cpu::default()
+                        };
+                        cpu.r[EAX] = eax_init;
+                        cpu.r[EBX] = ebx_init;
+                        assert_native_matches_rust(
+                            name,
+                            &prog,
+                            cpu,
+                            &[],
+                            &[],
+                            30,
+                            0..0,
+                            DOS_MEMORY,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. All 18 register binary arithmetic ops (St0 / Sti / Pop) across edge pairs
+        //    (including NaN-generating 0/0, Inf-Inf, 0*Inf, Inf/Inf, sNaNs, i==0, i==1, PC=0).
+        let binop_pairs: &[(f64, f64)] = &[
+            (3.5, 1.25),
+            (-3.5, 1.25),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (0.0, -0.0),
+            (1.0, 0.0),
+            (-1.0, -0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (0.0, f64::INFINITY),
+            (f64::from_bits(1), f64::from_bits(0x8000_0000_0000_0001)),
+            (f64::from_bits(0x7ff0_0000_0000_0001), 2.0),
+            (2.0, f64::from_bits(0xfff0_0000_0000_0007)),
+            (
+                f64::from_bits(0x7ff0_0000_0000_0001),
+                f64::from_bits(0xfff8_0000_0000_0009),
+            ),
+        ];
+        for &esc in &[0xd8u8, 0xdc, 0xde] {
+            for &reg_base in &[0xc0u8, 0xc8, 0xe0, 0xe8, 0xf0, 0xf8] {
+                for i in [0u8, 1, 2] {
+                    let prog = [esc, reg_base + i, 0xf4];
+                    for &(a, b) in binop_pairs {
+                        for &ctrl in &[0x007fu16, 0x037f] {
+                            let cpu = Cpu {
+                                eip: code_at,
+                                fpu: make_fpu(5, &[7.0, b, a], ctrl, 0),
+                                ..Cpu::default()
+                            };
+                            assert_native_matches_rust(
+                                "reg_binop",
+                                &prog,
+                                cpu,
+                                &[],
+                                &[],
+                                10,
+                                0..0,
+                                DOS_MEMORY,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Memory loads (FldF32, FldF64, FildI32, FildI16), stores (Fst/Fstp F32/F64),
+        //    arithmetic & compares (F32 & F64), plus FS: override & unaligned addresses.
+        for &bits in edge_f32_bits {
+            let mem_bytes = bits.to_le_bytes();
+            for &(name, prog) in &[
+                ("fld_f32", &[0xd9u8, 0x06, 0xf4][..]),
+                ("fld_f32_fs", &[0x64u8, 0xd9, 0x06, 0xf4][..]),
+                ("fadd_f32", &[0xd8, 0x06, 0xf4][..]),
+                ("fmul_f32", &[0xd8, 0x0e, 0xf4][..]),
+                ("fcom_f32", &[0xd8, 0x16, 0xf4][..]),
+                ("fcomp_f32", &[0xd8, 0x1e, 0xf4][..]),
+                ("fsub_f32", &[0xd8, 0x26, 0xf4][..]),
+                ("fsubr_f32", &[0xd8, 0x2e, 0xf4][..]),
+                ("fdiv_f32", &[0xd8, 0x36, 0xf4][..]),
+                ("fdivr_f32", &[0xd8, 0x3e, 0xf4][..]),
+            ] {
+                for &st0 in &[
+                    0.0,
+                    -0.0,
+                    2.5,
+                    f64::INFINITY,
+                    f64::from_bits(0x7ff0_0000_0000_0001),
+                ] {
+                    for &ctrl in &[0x007fu16, 0x037f] {
+                        let mut cpu = Cpu {
+                            eip: code_at,
+                            fpu: make_fpu(6, &[st0], ctrl, 1),
+                            ..Cpu::default()
+                        };
+                        cpu.r[ESI] = if name == "fld_f32_fs" { 3 } else { data + 1 }; // odd unaligned offset!
+                        cpu.seg_base[FS] = fs_base;
+                        assert_native_matches_rust(
+                            name,
+                            prog,
+                            cpu,
+                            &[(data + 1, &mem_bytes), (fs_base + 3, &mem_bytes)],
+                            &[],
+                            10,
+                            0..0,
+                            DOS_MEMORY,
+                        );
+                    }
+                }
+            }
+        }
+
+        for &val in edge_f64 {
+            let mem_bytes = val.to_le_bytes();
+            for &(name, prog) in &[
+                ("fld_f64", &[0xddu8, 0x06, 0xf4][..]),
+                ("fadd_f64", &[0xdc, 0x06, 0xf4][..]),
+                ("fmul_f64", &[0xdc, 0x0e, 0xf4][..]),
+                ("fcom_f64", &[0xdc, 0x16, 0xf4][..]),
+                ("fcomp_f64", &[0xdc, 0x1e, 0xf4][..]),
+                ("fsub_f64", &[0xdc, 0x26, 0xf4][..]),
+                ("fsubr_f64", &[0xdc, 0x2e, 0xf4][..]),
+                ("fdiv_f64", &[0xdc, 0x36, 0xf4][..]),
+                ("fdivr_f64", &[0xdc, 0x3e, 0xf4][..]),
+                ("fst_f32", &[0xd9, 0x16, 0xf4][..]),
+                ("fstp_f32", &[0xd9, 0x1e, 0xf4][..]),
+                ("fst_f64", &[0xdd, 0x16, 0xf4][..]),
+                ("fstp_f64", &[0xdd, 0x1e, 0xf4][..]),
+            ] {
+                for &ctrl in &[0x007fu16, 0x037f] {
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        fpu: make_fpu(0, &[val], ctrl, 1),
+                        ..Cpu::default()
+                    };
+                    cpu.r[ESI] = data + 3; // unaligned 8-byte offset
+                    assert_native_matches_rust(
+                        name,
+                        prog,
+                        cpu,
+                        &[(data + 3, &mem_bytes)],
+                        &[(data + 3, 8)],
+                        10,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                }
+            }
+        }
+
+        // FildI16 & FildI32 across extremes & PC=0/PC=3
+        for &i16v in &[0i16, 1, -1, i16::MIN, i16::MAX, 12345, -23456] {
+            for &ctrl in &[0x007fu16, 0x037f] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    fpu: make_fpu(3, &[], ctrl, 0),
+                    ..Cpu::default()
+                };
+                cpu.r[ESI] = data + 1;
+                assert_native_matches_rust(
+                    "fild_i16",
+                    &[0xdf, 0x06, 0xf4],
+                    cpu,
+                    &[(data + 1, &i16v.to_le_bytes())],
+                    &[],
+                    10,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+        }
+        for &i32v in &[0i32, 1, -1, i32::MIN, i32::MAX, 0x0100_0001, -0x0100_0001] {
+            for &ctrl in &[0x007fu16, 0x037f] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    fpu: make_fpu(4, &[], ctrl, 0),
+                    ..Cpu::default()
+                };
+                cpu.r[ESI] = data + 1;
+                assert_native_matches_rust(
+                    "fild_i32",
+                    &[0xdb, 0x06, 0xf4],
+                    cpu,
+                    &[(data + 1, &i32v.to_le_bytes())],
+                    &[],
+                    10,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+        }
+
+        // 5. FistpI32 & FistpI64 across RC=0..3, PC=0..3, and ALL _ftol boundaries + full MSVC _ftol idiom!
+        let ftol_vals: &[f64] = &[
+            0.0,
+            -0.0,
+            0.25,
+            -0.25,
+            0.5,
+            -0.5,
+            0.999_999_999,
+            -0.999_999_999,
+            1.5,
+            -1.5,
+            2.5,
+            -2.5,
+            -1_073_741_824.5,          // < -2^30 (RC=0 bail, RC=3 inline)
+            -1_073_741_824.0,          // exact -2^30 (RC=0 bail)
+            -1_073_741_823.5,          // > -2^30 (RC=0 inline!)
+            1_073_741_823.5,           // < +2^30 (RC=0 inline!)
+            1_073_741_824.0,           // exact +2^30 (RC=0 bail)
+            -2_147_483_648.0,          // exact -2^31 (in range for Fistp32!)
+            -2_147_483_648.5,          // < -2^31 (bail!)
+            -2_147_483_649.0,          // -2^31 - 1 (bail!)
+            -2_147_483_647.999_999_5,  // > -2^31 (in range!)
+            2_147_483_647.0,           // 2^31 - 1 (in range!)
+            2_147_483_647.999_999_5,   // < 2^31 (in range!)
+            2_147_483_648.0,           // exact +2^31 (bail for Fistp32, in range for Fistp64!)
+            2_147_483_649.0,           // +2^31 + 1
+            ((1u64 << 52) - 1) as f64, // 2^52 - 1 (in range for Fistp64!)
+            -(((1u64 << 52) - 1) as f64),
+            (1u64 << 52) as f64 - 0.5, // < 2^52 (in range for Fistp64!)
+            -((1u64 << 52) as f64 - 0.5),
+            (1u64 << 52) as f64,    // exact 2^52 (bail for Fistp64!)
+            -((1u64 << 52) as f64), // exact -2^52 (bail for Fistp64!)
+            (1u64 << 53) as f64,
+            f64::from_bits(1),
+            f64::from_bits(0x8000_0000_0000_0001),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            INDEFINITE,
+            f64::from_bits(0x7ff0_0000_0000_0001),
+        ];
+        for &val in ftol_vals {
+            for rc in 0u16..4 {
+                for pc in [0u16, 2, 3] {
+                    let ctrl = 0x007f | (pc << 8) | (rc << 10);
+                    for &(name, prog) in &[
+                        ("fistp_i32", &[0xdbu8, 0x1e, 0xf4][..]),
+                        ("fistp_i64", &[0xdfu8, 0x3e, 0xf4][..]),
+                    ] {
+                        let mut cpu = Cpu {
+                            eip: code_at,
+                            fpu: make_fpu(2, &[val], ctrl, 0),
+                            ..Cpu::default()
+                        };
+                        cpu.r[ESI] = data + 3;
+                        assert_native_matches_rust(
+                            name,
+                            prog,
+                            cpu,
+                            &[],
+                            &[(data + 3, 8)],
+                            10,
+                            0..0,
+                            DOS_MEMORY,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Full MSVC `_ftol` sequence (`fnstcw`, `or ah, 0xc`, `fldcw`, `fistp qword`, `fldcw`, `mov eax`, `mov edx`)
+        let msvc_ftol: &[u8] = &[
+            0xd9, 0x3e, // fnstcw [esi]
+            0x66, 0x8b, 0x06, // mov ax, [esi]
+            0x80, 0xcc, 0x0c, // or ah, 0x0c (RC = 3)
+            0x66, 0x89, 0x46, 0x02, // mov [esi+2], ax
+            0xd9, 0x6e, 0x02, // fldcw [esi+2]
+            0xdf, 0x7e, 0x08, // fistp qword [esi+8]
+            0xd9, 0x2e, // fldcw [esi]
+            0x8b, 0x46, 0x08, // mov eax, [esi+8]
+            0x8b, 0x56, 0x0c, // mov edx, [esi+12]
+            0xf4, // hlt
+        ];
+        for &val in &[
+            0.0,
+            -0.0,
+            42.9,
+            -42.9,
+            1e12,
+            -1e12,
+            -2_147_483_648.0,
+            2_147_483_648.0,
+            f64::NAN,
+        ] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                fpu: make_fpu(0, &[val], 0x037f, 0),
+                ..Cpu::default()
+            };
+            cpu.r[ESI] = data;
+            assert_native_matches_rust(
+                "msvc_ftol",
+                msvc_ftol,
+                cpu,
+                &[],
+                &[(data, 16)],
+                50,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+
+        // 6. Empty-stack underflow & full-stack overflow faults across ops!
+        let mut full_fpu = X87::new();
+        for k in 1..=8 {
+            full_fpu.push(f64::from(k));
+        }
+        let empty_fpu = X87::new();
+        for &(name, prog) in &[
+            ("empty_fchs", &[0xd9u8, 0xe0, 0xf4][..]),
+            ("empty_fabs", &[0xd9, 0xe1, 0xf4][..]),
+            ("empty_ftst", &[0xd9, 0xe4, 0xf4][..]),
+            ("empty_fsqrt", &[0xd9, 0xfa, 0xf4][..]),
+            ("empty_fcompp", &[0xde, 0xd9, 0xf4][..]),
+            ("empty_fld_st0", &[0xd9, 0xc0, 0xf4][..]),
+            ("empty_fxch", &[0xd9, 0xc9, 0xf4][..]),
+            ("empty_fst_st1", &[0xdd, 0xd1, 0xf4][..]),
+            ("empty_fstp_st0", &[0xdd, 0xd8, 0xf4][..]),
+            ("empty_fcom_st1", &[0xd8, 0xd1, 0xf4][..]),
+            ("empty_fcomi", &[0xdb, 0xf1, 0xf4][..]),
+            ("empty_fadd_st0", &[0xd8, 0xc1, 0xf4][..]),
+            ("empty_faddp", &[0xde, 0xc1, 0xf4][..]),
+            ("empty_fadd_f32", &[0xd8, 0x06, 0xf4][..]),
+            ("empty_fadd_f64", &[0xdc, 0x06, 0xf4][..]),
+            ("empty_fstp_f32", &[0xd9, 0x1e, 0xf4][..]),
+            ("empty_fstp_f64", &[0xdd, 0x1e, 0xf4][..]),
+            ("empty_fistp_i32", &[0xdb, 0x1e, 0xf4][..]),
+            ("empty_fistp_i64", &[0xdf, 0x3e, 0xf4][..]),
+        ] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                fpu: empty_fpu,
+                ..Cpu::default()
+            };
+            cpu.fpu.set_control(0x0f7f); // RC=3 so Fistp tests empty check too
+            cpu.r[ESI] = data;
+            assert_native_matches_rust(
+                name,
+                prog,
+                cpu,
+                &[(data, &1.5f64.to_le_bytes())],
+                &[(data, 8)],
+                10,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+        for &(name, prog) in &[
+            ("full_fld1", &[0xd9u8, 0xe8, 0xf4][..]),
+            ("full_fldz", &[0xd9, 0xee, 0xf4][..]),
+            ("full_fld_st0", &[0xd9, 0xc0, 0xf4][..]),
+            ("full_fld_f32", &[0xd9, 0x06, 0xf4][..]),
+            ("full_fld_f64", &[0xdd, 0x06, 0xf4][..]),
+            ("full_fild_i32", &[0xdb, 0x06, 0xf4][..]),
+            ("full_fild_i16", &[0xdf, 0x06, 0xf4][..]),
+        ] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                fpu: full_fpu,
+                ..Cpu::default()
+            };
+            cpu.r[ESI] = data;
+            assert_native_matches_rust(
+                name,
+                prog,
+                cpu,
+                &[(data, &1.5f64.to_le_bytes())],
+                &[],
+                10,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+
+        // 7. Memory faults (floor & arena end for 2B/4B/8B reads & writes), page-crossing writes,
+        //    and code-page write hits (code_bitmap) for Fst/Fstp/Fistp/Fnstcw!
+        let end = 1u32 << 22;
+        for &(name, prog, addr) in &[
+            (
+                "x87_fault_fld_f32_floor",
+                &[0x40u8, 0xd9, 0x06, 0xf4][..],
+                DOS_MEMORY - 2,
+            ),
+            (
+                "x87_fault_fld_f64_end4",
+                &[0x40, 0xdd, 0x06, 0xf4][..],
+                end - 4,
+            ),
+            (
+                "x87_fault_fild_i16_end1",
+                &[0x40, 0xdf, 0x06, 0xf4][..],
+                end - 1,
+            ),
+            (
+                "x87_fault_fldcw_end1",
+                &[0x40, 0xd9, 0x2e, 0xf4][..],
+                end - 1,
+            ),
+            (
+                "x87_fault_fadd_f64_end4",
+                &[0x40, 0xdc, 0x06, 0xf4][..],
+                end - 4,
+            ),
+            (
+                "x87_fault_fstp_f32_end2",
+                &[0x40, 0xd9, 0x1e, 0xf4][..],
+                end - 2,
+            ),
+            (
+                "x87_fault_fstp_f64_end4",
+                &[0x40, 0xdd, 0x1e, 0xf4][..],
+                end - 4,
+            ),
+            (
+                "x87_fault_fistp_i32_floor",
+                &[0x40, 0xdb, 0x1e, 0xf4][..],
+                DOS_MEMORY - 4,
+            ),
+            (
+                "x87_fault_fistp_i64_end4",
+                &[0x40, 0xdf, 0x3e, 0xf4][..],
+                end - 4,
+            ),
+            (
+                "x87_fault_fnstcw_end1",
+                &[0x40, 0xd9, 0x3e, 0xf4][..],
+                end - 1,
+            ),
+            // Page-crossing writes (valid memory, crosses 4 KiB page boundary!)
+            ("x87_cross_fstp_f32", &[0xd9, 0x1e, 0xf4][..], data + 0xffe),
+            ("x87_cross_fstp_f64", &[0xdd, 0x1e, 0xf4][..], data + 0xffc),
+            ("x87_cross_fistp_i32", &[0xdb, 0x1e, 0xf4][..], data + 0xffe),
+            ("x87_cross_fistp_i64", &[0xdf, 0x3e, 0xf4][..], data + 0xffc),
+            ("x87_cross_fnstcw", &[0xd9, 0x3e, 0xf4][..], data + 0xfff),
+        ] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                fpu: make_fpu(0, &[12.5], 0x0f7f, 0),
+                ..Cpu::default()
+            };
+            cpu.r[ESI] = addr;
+            let checks: &[(u32, usize)] = if addr < end - 8 && addr >= DOS_MEMORY {
+                &[(addr, 8)]
+            } else {
+                &[]
+            };
+            assert_native_matches_rust(name, prog, cpu, &[], checks, 20, 0..0, DOS_MEMORY);
+        }
+
+        // Code-page write hit via FstpF64 / FistpI64 / Fnstcw into a decoded target page (SMC!)
+        let target_page = 0x0018_2000u32;
+        let stack = 0x0030_0000u32;
+        let mut smc = Vec::new();
+        let rel1 = target_page.wrapping_sub(code_at + 5).to_le_bytes();
+        smc.push(0xe8);
+        smc.extend_from_slice(&rel1); // call target_page (marks page as code)
+        smc.extend_from_slice(&[0xdf, 0x3e]); // fistp qword [esi] -> overwrites target_page with `mov eax, 99; ret`!
+        let rel2 = target_page
+            .wrapping_sub(code_at + smc.len() as u32 + 5)
+            .to_le_bytes();
+        smc.push(0xe8);
+        smc.extend_from_slice(&rel2); // call target_page again!
+        smc.push(0xf4);
+        // Encode `mov eax, 99; ret; nop; nop` as a finite integer value (< 2^52) in f64!
+        let new_code_u64 = u64::from_le_bytes([0xb8, 99, 0, 0, 0, 0xc3, 0x00, 0x00]);
+        assert!(new_code_u64 < (1u64 << 52));
+        let mut cpu = Cpu {
+            eip: code_at,
+            fpu: make_fpu(0, &[new_code_u64 as f64], 0x0f7f, 0),
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = target_page;
+        cpu.r[ESP] = stack;
+        assert_native_matches_rust(
+            "x87_smc_fistp64_code_bitmap",
+            &smc,
+            cpu,
+            &[(target_page, &[0xb8, 1, 0, 0, 0, 0xc3, 0x90, 0x90])],
+            &[(target_page, 8)],
+            50,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        // 8. Prove hot inlined x87 loop executes inside run_fast_block with ZERO STATUS_FALLBACK!
+        {
+            let mut h = Headless::new();
+            let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+            // Straight-line + loop using FldF32, FmulF32, FaddF64, Fsqrt, Fchs, Fabs, Fxch,
+            // FcomSt, FnstswAx, FstF32, FstpF64, FildI32, FildI16, Fnstcw, Fldcw, FistpI64:
+            let mut loop_prog = Vec::new();
+            loop_prog.extend_from_slice(&[0xd9, 0x06]); // fld dword [esi]
+            loop_prog.extend_from_slice(&[0xd8, 0x4e, 0x04]); // fmul dword [esi+4]
+            loop_prog.extend_from_slice(&[0xdc, 0x46, 0x08]); // fadd qword [esi+8]
+            loop_prog.extend_from_slice(&[0xd9, 0xfa]); // fsqrt
+            loop_prog.extend_from_slice(&[0xd9, 0xe0]); // fchs
+            loop_prog.extend_from_slice(&[0xd9, 0xe1]); // fabs
+            loop_prog.extend_from_slice(&[0xd9, 0xe8]); // fld1
+            loop_prog.extend_from_slice(&[0xd9, 0xc9]); // fxch st(1)
+            loop_prog.extend_from_slice(&[0xde, 0xc1]); // faddp st(1)
+            loop_prog.extend_from_slice(&[0xd9, 0x56, 0x10]); // fst dword [esi+16]
+            loop_prog.extend_from_slice(&[0xdf, 0x7e, 0x18]); // fistp qword [esi+24]
+            loop_prog.extend_from_slice(&[0xd9, 0xee]); // fldz
+            loop_prog.extend_from_slice(&[0xd9, 0xe4]); // ftst
+            loop_prog.extend_from_slice(&[0xdf, 0xe0]); // fnstsw ax
+            loop_prog.extend_from_slice(&[0xdd, 0xd8]); // fstp st(0)
+            loop_prog.push(0x49); // dec ecx
+            let back = -(loop_prog.len() as i8 + 2);
+            loop_prog.extend_from_slice(&[0x75, back as u8]); // jnz loop_prog
+            mem.write(code_at, &loop_prog).unwrap();
+            mem.write(data, &2.0f32.to_le_bytes()).unwrap();
+            mem.write(data + 4, &4.5f32.to_le_bytes()).unwrap();
+            mem.write(data + 8, &7.0f64.to_le_bytes()).unwrap();
+
+            let mut interp = Interp::new(Mode::FLAT);
+            // Pre-decode the loop block
+            let _ = interp.run_at(code_at, &mut mem).unwrap();
+            // Verify ZERO STATUS_FALLBACK across Extended+RC=3, Single(PC=0)+RC=3, and Double+RC=0!
+            for &ctrl in &[0x0f7fu16, 0x0c3f, 0x003f, 0x127f] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    ..Cpu::default()
+                };
+                cpu.fpu.set_control(ctrl);
+                cpu.r[ESI] = data;
+                cpu.r[ECX] = 50;
+
+                let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+                let mut ctx = FastCtx {
+                    regs: cpu.r.as_mut_ptr(),
+                    arena_base,
+                    code_bitmap,
+                    arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
+                    remaining: 50 * 17,
+                    retired: 0,
+                    fast_insns: interp.fast_insns.as_mut_ptr(),
+                    runs: interp.runs.as_ptr(),
+                    directory: interp.directory.as_ptr(),
+                    region_ptrs: interp.region_ptrs.as_ptr(),
+                    page_ptrs: interp.page_ptrs.as_ptr(),
+                    fault_pc: core::ptr::null(),
+                    run_first_pc: core::ptr::null(),
+                    eip: cpu.eip,
+                    flags: native::pack_flags(&cpu.flags),
+                    fs_base: 0,
+                    arena_floor,
+                    outside_start: 0,
+                    outside_end: 0,
+                    outside_len: 0,
+                    run_start_eip: 0,
+                    run_bytes: 0,
+                    run_len: 0,
+                    l1_cache: interp.l1.as_mut_ptr(),
+                    outside_danger_len: 0,
+                    outside_danger_start: 0,
+                    _pad: 0,
+                    fpu: &raw mut cpu.fpu,
+                };
+                // All 50 iterations (850 instructions!) must finish in ONE call with STATUS_DONE!
+                let status = unsafe { native::run_fast_block(&mut ctx) };
+                assert_eq!(
+                    status, STATUS_DONE,
+                    "hot scalar x87 loop fell back for ctrl={ctrl:#06x} (status={status})"
+                );
+                assert_eq!(ctx.retired, 50 * 17);
+                assert_eq!(cpu.r[ECX], 0);
+                assert_eq!(mem.read_u32(data + 16).unwrap(), 5.0f32.to_bits());
+                assert_eq!(mem.read_u64(data + 24).unwrap(), 5u64);
+            }
         }
     }
 }

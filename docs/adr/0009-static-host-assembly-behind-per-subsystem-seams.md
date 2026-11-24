@@ -1,6 +1,6 @@
 # Static host assembly behind per-subsystem seams
 
-**Status: Accepted** (#247, #249, #257).
+**Status: Accepted** (#247, #249, #257, #280).
 
 ## Context
 
@@ -76,11 +76,19 @@ Every optimization climbs this ladder in order and stops at the lowest rung that
    as flat32 CPU direct-threaded dispatch). `rustc 1.98` handles Darwin's leading `_` symbol
    prefix, ELF `.type`/`.size`, and MSVC `.def`/COMDAT sections automatically and forbids
    duplicating the body. Whole-loop naked kernels use a single-pointer, integer-only C ABI
-   (`extern "C"`, or explicit `sysv64` / `win64` adapters) that touches zero FP/XMM/NEON
-   registers (leaving Win64 callee-saved `xmm6..xmm15` untouched), makes zero outgoing calls, and
-   returns a status code to Rust for slow ops, x87, faults, code writes, watches, or budget end.
-   `global_asm!` is reserved strictly for read-only tables or assembler directives that cannot
-   live in `naked_asm!`.
+   (`extern "C"`, or explicit `sysv64` / `win64` adapters), make zero outgoing calls, and return a
+   status code to Rust for slow ops, cold/transcendental x87 ops, faults, code writes, watches, or
+   budget end. `global_asm!` is reserved strictly for read-only tables or assembler directives that
+   cannot live in `naked_asm!`.
+
+   **Rung 4 scalar FP clarification (#280):** `run_fast_block` may use strictly caller-saved
+   volatile scalar IEEE-754 floating-point registers (`d0..d3` on `aarch64`, `xmm0..xmm3` on
+   `x86_64`) to inline hot scalar x87 operations, with zero callee-saved FP spills (Win64
+   `xmm6..xmm15` and AAPCS64 `d8..d15` remain 100% untouched), zero FMA contraction, zero
+   approximate `rcp`/`rsqrt`, zero `FPCR`/`FPSR`/`MXCSR` mutation, exact IEEE-754 `f64 -> f32 -> f64`
+   rounding when `PC == 0` (Single precision, matching `X87::round`), and mandatory pre-mutation
+   bailout to `STATUS_FALLBACK` on any `NaN` input or result, stack overflow/underflow/tag fault,
+   memory/code-bitmap fault, `RC == 1/2` or out-of-range integer store, or cold/transcendental op.
 
 ### 4. Cross-platform parity across six desktop targets
 

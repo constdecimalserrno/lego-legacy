@@ -568,6 +568,70 @@ fn custom_outside_range_clamps_both_before_and_after_block_chaining() {
 }
 
 #[test]
+fn inline_x87_dot_product_and_ftol_match_exact_ieee754_and_preserve_cold_ops() {
+    use lego_legacy_core::cpu::{ECX, EDX, ESI};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let data = 0x0050_0000u32;
+
+    // Loop computing sum += a[i] * b[i] (f32 -> f64), sqrt, compare with threshold,
+    // convert via MSVC _ftol (fnstcw / fldcw RC=3 / fistp qword / fldcw), then cold `fsin` + `hlt`.
+    let mut prog = Vec::new();
+    prog.extend_from_slice(&[0xd9, 0xee]); // fldz (accumulator)
+    let loop_top = prog.len();
+    prog.extend_from_slice(&[0xd9, 0x06]); // fld dword [esi]
+    prog.extend_from_slice(&[0xd8, 0x4e, 0x04]); // fmul dword [esi+4]
+    prog.extend_from_slice(&[0xde, 0xc1]); // faddp st(1)
+    prog.extend_from_slice(&[0x83, 0xc6, 0x08]); // add esi, 8
+    prog.push(0x49); // dec ecx
+    let rel = (loop_top as i32) - (prog.len() as i32 + 2);
+    prog.extend_from_slice(&[0x75, rel as i8 as u8]); // jnz loop_top
+    prog.extend_from_slice(&[0xd9, 0xfa]); // fsqrt
+    prog.extend_from_slice(&[0xd9, 0x16]); // fst dword [esi]
+    prog.extend_from_slice(&[0xd9, 0x7e, 0x04]); // fnstcw [esi+4]
+    prog.extend_from_slice(&[0x66, 0x8b, 0x46, 0x04]); // mov ax, [esi+4]
+    prog.extend_from_slice(&[0x80, 0xcc, 0x0c]); // or ah, 0x0c
+    prog.extend_from_slice(&[0x66, 0x89, 0x46, 0x06]); // mov [esi+6], ax
+    prog.extend_from_slice(&[0xd9, 0x6e, 0x06]); // fldcw [esi+6]
+    prog.extend_from_slice(&[0xd9, 0xc0]); // fld st(0)
+    prog.extend_from_slice(&[0xdf, 0x7e, 0x08]); // fistp qword [esi+8]
+    prog.extend_from_slice(&[0xd9, 0x6e, 0x04]); // fldcw [esi+4]
+    prog.extend_from_slice(&[0x8b, 0x46, 0x08]); // mov eax, [esi+8]
+    prog.extend_from_slice(&[0x8b, 0x56, 0x0c]); // mov edx, [esi+12]
+    prog.extend_from_slice(&[0xd9, 0xfe]); // fsin (cold op -> STATUS_FALLBACK!)
+    prog.push(0xf4); // hlt
+
+    mem.write(code, &prog).unwrap();
+    // 4 pairs: (3,3) + (4,4) + (12,12) + (0,0) = 9 + 16 + 144 = 169 -> sqrt = 13.0
+    let pairs: [(f32, f32); 4] = [(3.0, 3.0), (4.0, 4.0), (12.0, 12.0), (0.0, 0.0)];
+    for (k, (a, b)) in pairs.iter().enumerate() {
+        let off = data + (k as u32) * 8;
+        mem.write(off, &a.to_le_bytes()).unwrap();
+        mem.write(off + 4, &b.to_le_bytes()).unwrap();
+    }
+
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ESI] = data;
+    regs.r[ECX] = 4;
+
+    let mut engine = Interp::new(Mode::FLAT);
+    let (_, res) = engine.run(&mut regs, &mut mem, 10_000, 0..0);
+    assert_eq!(res, Err(Stop::Halted));
+    let out_at = data + 32;
+    assert_eq!(mem.read_u32(out_at).unwrap(), 13.0f32.to_bits());
+    assert_eq!(regs.r[EAX], 13);
+    assert_eq!(regs.r[EDX], 0);
+    assert_eq!(
+        regs.fpu.st(0).to_bits(),
+        lego_legacy_core::cpu::x87::maths::sin(13.0).to_bits()
+    );
+}
+
+#[test]
 #[ignore]
 fn bench_flat32_tight_loop() {
     use lego_legacy_core::cpu::{EBX, ECX, ESI, ESP};

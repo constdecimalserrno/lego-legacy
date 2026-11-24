@@ -5,13 +5,17 @@
 //!   `extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32`
 //!
 //! ABI and determinism invariants:
-//! - Touches zero FP/NEON registers.
+//! - Uses strictly caller-saved volatile scalar IEEE-754 FP registers (`d0..d3` /
+//!   `s0..s3`, ADR-0009 Rung 4 clarification #280); leaves AAPCS64 callee-saved
+//!   `d8..d15` 100% untouched with zero FP spills, zero FMA, zero `rcp`/`rsqrt`,
+//!   and zero `FPCR`/`FPSR` writes.
 //! - Never names or modifies `x18` / `w18` (Darwin and Windows platform reg).
 //! - Makes zero outgoing calls; returns a status code to Rust for cache misses,
-//!   budget exhaustion, `outside` overlaps, `Slow`/`X87` ops, memory faults,
-//!   page-crossing writes, and `code_bitmap` hits.
-//! - Checks all bounds and `code_bitmap` invariants BEFORE mutating guest
-//!   state so any fallback re-executes the exact instruction cleanly in Rust.
+//!   budget exhaustion, `outside` overlaps, `Slow`/cold x87 ops, `NaN`, `PC == 0`,
+//!   x87 stack faults, memory faults, page-crossing writes, and `code_bitmap` hits.
+//! - Checks all bounds, `code_bitmap`, `NaN`, precision/rounding, and x87 stack
+//!   invariants BEFORE mutating guest state so any fallback re-executes the exact
+//!   instruction cleanly in Rust.
 
 use super::{
     FastCtx, STATUS_BUDGET_SHORT, STATUS_DONE, STATUS_FALLBACK, STATUS_MISS, STATUS_OUTSIDE_OVERLAP,
@@ -60,7 +64,7 @@ pub(crate) fn unpack_flags(raw: u32, f: &mut crate::cpu::flags::Flags) {
 pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
     naked_asm!(
         // Save callee-saved registers x19..x28, x29, x30 (96 bytes, 16-byte aligned).
-        // Never touch x18/w18 or any FP/NEON register.
+        // Never touch x18/w18 or callee-saved FP d8..d15 (only volatile d0..d3).
         "stp x29, x30, [sp, #-96]!",
         "stp x19, x20, [sp, #16]",
         "stp x21, x22, [sp, #32]",
@@ -68,9 +72,10 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "stp x25, x26, [sp, #64]",
         "stp x27, x28, [sp, #80]",
 
-        // Load pinned invariants from FastCtx (x0 -> x29; x19 = ctx.regs = &cpu.r[0]).
+        // Load pinned invariants from FastCtx (x0 -> x29; x19 = ctx.regs; x30 = ctx.fpu).
         "mov x29, x0",
         "ldr x19, [x29, #0]",       // x19 = regs (*mut u32)
+        "ldr x30, [x29, #168]",     // x30 = fpu (*mut X87, 72B repr(C); leaf fn so LR is free)
         "ldr x20, [x29, #8]",       // x20 = arena_base
         "ldr x21, [x29, #16]",      // x21 = code_bitmap
         "ldr x23, [x29, #24]",      // x23 = arena_limit4 (= span - 4)
@@ -241,12 +246,51 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "b 20b",
 
         // =====================================================================
-        // Op 0 (Slow), 46 (X87Reg), 47 (X87Mem) -> STATUS_FALLBACK (label 954)
+        // Op 0 (Slow) -> STATUS_FALLBACK (label 954)
         // =====================================================================
         "100:",
-        "146:",
-        "147:",
         "b 954f",
+
+        // =====================================================================
+        // Op 46 (X87Reg): dispatch via PC-relative table 920: (tags 0..=58)
+        // =====================================================================
+        "146:",
+        "ldrb w0, [x25, #7]",       // X87Op tag (0..=58)
+        "adr x1, 920f",
+        "ldrsw x2, [x1, x0, lsl #2]",
+        "add x1, x1, x2",
+        "br x1",
+
+        // =====================================================================
+        // Op 47 (X87Mem): compute flat32 ea -> w4, dispatch via 930: (tags 59..=111)
+        // =====================================================================
+        "147:",
+        "ldr w4, [x25, #8]",
+        "ldr w0, [x25, #4]",        // [base | index<<8 | scale<<16 | aux<<24]
+        "sbfx w1, w0, #0, #8",
+        "tbnz w1, #31, 1f",
+        "ldr w2, [x19, x1, lsl #2]",
+        "add w4, w4, w2",
+        "1:",
+        "ubfx w1, w0, #8, #16",     // index | (scale << 8)
+        "cmp w1, #0xff",
+        "b.eq 3f",
+        "tbnz w1, #7, 2f",
+        "and w2, w1, #7",
+        "ubfx w3, w1, #8, #2",
+        "ldr w2, [x19, x2, lsl #2]",
+        "lsl w2, w2, w3",
+        "add w4, w4, w2",
+        "2:",
+        "tbz w1, #10, 3f",
+        "add w4, w4, w6",
+        "3:",
+        "lsr w0, w0, #24",          // X87Op tag (59..=111)
+        "sub w0, w0, #59",
+        "adr x1, 930f",
+        "ldrsw x2, [x1, x0, lsl #2]",
+        "add x1, x1, x2",
+        "br x1",
 
         // =====================================================================
         // Op 1: Nop
@@ -2777,6 +2821,1281 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         "b 12b",
 
         // =====================================================================
+        // Inline hot scalar IEEE-754 x87 register ops (ADR-0009 Rung 4, #280)
+        // Strictly volatile d0..d2 / s0..s1; pre-mutation bailout to 954:.
+        // =====================================================================
+        "300:", // Fnop
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "301:", // Fchs
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "fneg d0, d0",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "str d0, [x30, x1, lsl #3]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "302:", // Fabs
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "fabs d0, d0",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "str d0, [x30, x1, lsl #3]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "303:", // Ftst
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fmov d1, xzr",
+        "b 501f",
+
+        "305:", // Fld1
+        "fmov d0, #1.0",
+        "b 500f",
+
+        "311:", // Fldz
+        "fmov d0, xzr",
+        "b 500f",
+
+        "322:", // Fsqrt
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fsqrt d2, d0",
+        "b 510f",
+
+        "330:", // Fcompp / Fucompp
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "add w3, w1, #1",
+        "and w3, w3, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "mov w0, #0x4000",
+        "mov w4, #0x0100",
+        "csel w0, w0, wzr, eq",
+        "csel w0, w4, w0, lt",
+        "ldrh w4, [x30, #68]",
+        "mov w5, #0x4500",
+        "bic w4, w4, w5",
+        "orr w4, w4, w0",
+        "strh w4, [x30, #68]",
+        "mov w0, #1",
+        "lsl w4, w0, w1",
+        "lsl w5, w0, w3",
+        "orr w4, w4, w5",
+        "bic w2, w2, w4",
+        "add w1, w1, #2",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "331:", // FnstswAx
+        "ldrb w0, [x30, #64]",
+        "ldrh w1, [x30, #68]",
+        "bic w1, w1, #0x3800",
+        "and w0, w0, #7",
+        "orr w1, w1, w0, lsl #11",
+        "strh w1, [x19]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "332:", // FldSt(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",           // src = (top + i) & 7
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",         // st(i) empty?
+        "sub w1, w1, #1",
+        "and w1, w1, #7",           // new_top = (top - 1) & 7
+        "lsr w4, w2, w1",
+        "tbnz w4, #0, 954f",        // stack overflow?
+        "ldr d0, [x30, x3, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "str d0, [x30, x1, lsl #3]",
+        "mov w4, #1",
+        "lsl w4, w4, w1",
+        "orr w2, w2, w4",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "333:", // Fxch(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "fcvt s1, d1",
+        "fcvt d1, s1",
+        "1:",
+        "str d1, [x30, x1, lsl #3]",
+        "str d0, [x30, x3, lsl #3]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "335:", // FstSt(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "str d0, [x30, x3, lsl #3]",
+        "mov w4, #1",
+        "lsl w4, w4, w3",
+        "orr w2, w2, w4",
+        "strb w2, [x30, #65]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "336:", // FstpSt(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "str d0, [x30, x3, lsl #3]",
+        "mov w4, #1",
+        "lsl w5, w4, w3",
+        "orr w2, w2, w5",           // set_st(i) marks dst occupied
+        "lsl w5, w4, w1",
+        "bic w2, w2, w5",           // pop() clears old top (handles i == 0!)
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "337:", // FcomSt(i) / FucomSt(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "b 501f",
+
+        "338:", // FcompSt(i) / FucompSt(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "b 502f",
+
+        "339:", // Fcomi(i) / Fucomi(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "tbnz w28, #0, 1f",
+        "lsr w0, w13, #4",
+        "bfi w28, w0, #4, #1",      // materialize lazy AF before overwriting w28
+        "1:",
+        "and w28, w28, #0x10",      // preserve AF; SF=OF=PF=0
+        "orr w28, w28, #1",         // mark materialized
+        "mov w0, #0x40000000",      // ZF
+        "mov w3, #0x20000000",      // CF
+        "csel w0, w0, wzr, eq",
+        "csel w0, w3, w0, lt",
+        "orr w28, w28, w0",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "340:", // Fcomip(i) / Fucomip(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "tbnz w28, #0, 1f",
+        "lsr w0, w13, #4",
+        "bfi w28, w0, #4, #1",
+        "1:",
+        "and w28, w28, #0x10",
+        "orr w28, w28, #1",
+        "mov w0, #0x40000000",
+        "mov w3, #0x20000000",
+        "csel w0, w0, wzr, eq",
+        "csel w0, w3, w0, lt",
+        "orr w28, w28, w0",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        // Register binary arithmetic: St0 (341..=346)
+        "341:", // FaddSt0(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fadd d2, d0, d1",
+        "b 510f",
+
+        "342:", // FmulSt0(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fmul d2, d0, d1",
+        "b 510f",
+
+        "343:", // FsubSt0(i): st(0) = st(0) - st(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fsub d2, d0, d1",
+        "b 510f",
+
+        "344:", // FsubrSt0(i): st(0) = st(i) - st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fsub d2, d1, d0",
+        "b 510f",
+
+        "345:", // FdivSt0(i): st(0) = st(0) / st(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fdiv d2, d0, d1",
+        "b 510f",
+
+        "346:", // FdivrSt0(i): st(0) = st(i) / st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fdiv d2, d1, d0",
+        "b 510f",
+
+        // Register binary arithmetic: Sti (347..=352, write to x1 = other)
+        "347:", // FaddSti(i)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",           // x1 = other (dst for 510:)
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fadd d2, d0, d1",
+        "b 510f",
+
+        "348:", // FmulSti(i)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fmul d2, d0, d1",
+        "b 510f",
+
+        "349:", // FsubSti(i): st(i) = st(0) - st(i)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fsub d2, d0, d1",
+        "b 510f",
+
+        "350:", // FsubrSti(i): st(i) = st(i) - st(0)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fsub d2, d1, d0",
+        "b 510f",
+
+        "351:", // FdivSti(i): st(i) = st(0) / st(i)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fdiv d2, d0, d1",
+        "b 510f",
+
+        "352:", // FdivrSti(i): st(i) = st(i) / st(0)
+        "ldr w0, [x30, #64]",
+        "and w3, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w1, [x25, #2]",
+        "add w1, w3, w1",
+        "and w1, w1, #7",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x3, lsl #3]",
+        "ldr d1, [x30, x1, lsl #3]",
+        "fdiv d2, d1, d0",
+        "b 510f",
+
+        // Register binary arithmetic: Pop (353..=358, write to x3 = other then pop w1 = top)
+        "353:", // Faddp(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fadd d2, d0, d1",
+        "b 511f",
+
+        "354:", // Fmulp(i)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fmul d2, d0, d1",
+        "b 511f",
+
+        "355:", // Fsubp(i): st(i) = st(0) - st(i); pop
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fsub d2, d0, d1",
+        "b 511f",
+
+        "356:", // Fsubrp(i): st(i) = st(i) - st(0); pop
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fsub d2, d1, d0",
+        "b 511f",
+
+        "357:", // Fdivp(i): st(i) = st(0) / st(i); pop
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fdiv d2, d0, d1",
+        "b 511f",
+
+        "358:", // Fdivrp(i): st(i) = st(i) / st(0); pop
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "ldrb w3, [x25, #2]",
+        "add w3, w1, w3",
+        "and w3, w3, #7",
+        "lsr w4, w2, w1",
+        "tbz w4, #0, 954f",
+        "lsr w4, w2, w3",
+        "tbz w4, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "ldr d1, [x30, x3, lsl #3]",
+        "fdiv d2, d1, d0",
+        "b 511f",
+
+        // =====================================================================
+        // Inline hot scalar IEEE-754 x87 memory ops (w4 = flat32 ea)
+        // =====================================================================
+        // f32 memory arithmetic & comparisons (359..=366)
+        "359:", // FaddF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fadd d2, d0, d1",
+        "b 510f",
+
+        "360:", // FmulF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fmul d2, d0, d1",
+        "b 510f",
+
+        "361:", // FcomF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "b 501f",
+
+        "362:", // FcompF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "b 502f",
+
+        "363:", // FsubF32: st(0) = st(0) - m32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fsub d2, d0, d1",
+        "b 510f",
+
+        "364:", // FsubrF32: st(0) = m32 - st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fsub d2, d1, d0",
+        "b 510f",
+
+        "365:", // FdivF32: st(0) = st(0) / m32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fdiv d2, d0, d1",
+        "b 510f",
+
+        "366:", // FdivrF32: st(0) = m32 / st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s1, [x20, x4]",
+        "fcvt d1, s1",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fdiv d2, d1, d0",
+        "b 510f",
+
+        // f64 memory arithmetic & comparisons (367..=374)
+        "367:", // FaddF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fadd d2, d0, d1",
+        "b 510f",
+
+        "368:", // FmulF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fmul d2, d0, d1",
+        "b 510f",
+
+        "369:", // FcomF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "b 501f",
+
+        "370:", // FcompF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "b 502f",
+
+        "371:", // FsubF64: st(0) = st(0) - m64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fsub d2, d0, d1",
+        "b 510f",
+
+        "372:", // FsubrF64: st(0) = m64 - st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fsub d2, d1, d0",
+        "b 510f",
+
+        "373:", // FdivF64: st(0) = st(0) / m64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fdiv d2, d0, d1",
+        "b 510f",
+
+        "374:", // FdivrF64: st(0) = m64 / st(0)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d1, [x20, x4]",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fdiv d2, d1, d0",
+        "b 510f",
+
+        // Memory loads (391..=394)
+        "391:", // FldF32
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr s0, [x20, x4]",
+        "fcvt d0, s0",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "b 500f",
+
+        "392:", // FldF64
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr d0, [x20, x4]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "b 500f",
+
+        "393:", // FildI32
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "ldr w2, [x20, x4]",
+        "scvtf d0, w2",
+        "b 500f",
+
+        "394:", // FildI16
+        "sub w0, w4, w22",
+        "add x1, x23, #2",
+        "cmp x0, x1",
+        "b.hi 954f",
+        "ldrsh w2, [x20, x4]",
+        "scvtf d0, w2",
+        "b 500f",
+
+        // Memory stores (397..=400, 403, 406, 407, 408)
+        "397:", // FstF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xffc",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "fcvt s0, d0",
+        "str s0, [x20, x4]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "398:", // FstpF32
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xffc",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "fcvt s0, d0",
+        "str s0, [x20, x4]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "399:", // FstF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xff8",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "str d0, [x20, x4]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "400:", // FstpF64
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr d0, [x30, x1, lsl #3]",
+        "fcmp d0, d0",
+        "b.vs 954f",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xff8",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "str d0, [x20, x4]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "403:", // FistpI32 (RC == 3 trunc in [-2^31, 2^31), or RC == 0 RNE in |x| < 2^30)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr x5, [x30, x1, lsl #3]",
+        "ubfx w0, w0, #26, #2",     // RC (0=RNE, 3=trunc)
+        "cmp w0, #3",
+        "b.eq 2f",
+        "cbnz w0, 954f",
+        "ubfx x3, x5, #52, #11",
+        "cmp x3, #0x41d",           // RC == 0: |x| < 2^30
+        "b.hs 954f",
+        "fmov d0, x5",
+        "fcvtns w5, d0",
+        "b 3f",
+        "2:",
+        "ubfx x3, x5, #52, #11",
+        "cmp x3, #0x41e",
+        "b.lo 1f",
+        "ror x3, x5, #52",
+        "cmp x3, #0xc1e",           // exact -2^31?
+        "b.ne 954f",
+        "1:",
+        "fmov d0, x5",
+        "fcvtzs w5, d0",
+        "3:",
+        "sub w0, w4, w22",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xffc",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "str w5, [x20, x4]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "406:", // FistpI64 (RC == 3 trunc or RC == 0 RNE, finite |x| < 2^52)
+        "ldr w0, [x30, #64]",
+        "and w1, w0, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbz w3, #0, 954f",
+        "ldr x5, [x30, x1, lsl #3]",
+        "ubfx x3, x5, #52, #11",
+        "cmp x3, #0x433",
+        "b.hs 954f",
+        "ubfx w0, w0, #26, #2",
+        "cmp w0, #3",
+        "b.eq 2f",
+        "cbnz w0, 954f",
+        "fmov d0, x5",
+        "fcvtns x5, d0",
+        "b 3f",
+        "2:",
+        "fmov d0, x5",
+        "fcvtzs x5, d0",
+        "3:",
+        "sub w0, w4, w22",
+        "add x0, x0, #4",
+        "cmp x0, x23",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xff8",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w3, w0, #6",
+        "ldr x3, [x21, x3, lsl #3]",
+        "lsr x3, x3, x0",
+        "tbnz x3, #0, 954f",
+        "str x5, [x20, x4]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "407:", // Fldcw (MSVC _ftol pair)
+        "sub w0, w4, w22",
+        "add x1, x23, #2",
+        "cmp x0, x1",
+        "b.hi 954f",
+        "ldrh w2, [x20, x4]",
+        "strh w2, [x30, #66]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "408:", // Fnstcw (MSVC _ftol pair)
+        "sub w0, w4, w22",
+        "add x1, x23, #2",
+        "cmp x0, x1",
+        "b.hi 954f",
+        "and w0, w4, #0xfff",
+        "cmp w0, #0xffe",
+        "b.hi 954f",
+        "lsr w0, w4, #12",
+        "lsr w1, w0, #6",
+        "ldr x1, [x21, x1, lsl #3]",
+        "lsr x1, x1, x0",
+        "tbnz x1, #0, 954f",
+        "ldrh w2, [x30, #66]",
+        "strh w2, [x20, x4]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        // =====================================================================
+        // Shared x87 commit tails (500..511)
+        // =====================================================================
+        "500:", // x87_push_d0 (non-NaN d0 -> check overflow, round if PC==0, push, next)
+        "ldr w0, [x30, #64]",
+        "sub w1, w0, #1",
+        "and w1, w1, #7",
+        "ubfx w2, w0, #8, #8",
+        "lsr w3, w2, w1",
+        "tbnz w3, #0, 954f",
+        "tst w0, #0x03000000",
+        "b.ne 1f",
+        "fcvt s0, d0",
+        "fcvt d0, s0",
+        "1:",
+        "str d0, [x30, x1, lsl #3]",
+        "mov w3, #1",
+        "lsl w3, w3, w1",
+        "orr w2, w2, w3",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "501:", // x87_cmp_nopop (d0 vs d1 -> bail NaN, update C3/C2/C0, next)
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "mov w0, #0x4000",
+        "mov w3, #0x0100",
+        "csel w0, w0, wzr, eq",
+        "csel w0, w3, w0, lt",
+        "ldrh w3, [x30, #68]",
+        "mov w4, #0x4500",
+        "bic w3, w3, w4",
+        "orr w3, w3, w0",
+        "strh w3, [x30, #68]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "502:", // x87_cmp_pop1 (d0 vs d1, w1=top, w2=used -> bail NaN, status, pop, next)
+        "fcmp d0, d1",
+        "b.vs 954f",
+        "mov w0, #0x4000",
+        "mov w3, #0x0100",
+        "csel w0, w0, wzr, eq",
+        "csel w0, w3, w0, lt",
+        "ldrh w3, [x30, #68]",
+        "mov w4, #0x4500",
+        "bic w3, w3, w4",
+        "orr w3, w3, w0",
+        "strh w3, [x30, #68]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "510:", // x87_store_d2_x1 (bail NaN, round if PC==0, regs[x1] = d2, next)
+        "fcmp d2, d2",
+        "b.vs 954f",
+        "ldrh w0, [x30, #66]",
+        "tst w0, #0x0300",
+        "b.ne 1f",
+        "fcvt s2, d2",
+        "fcvt d2, s2",
+        "1:",
+        "str d2, [x30, x1, lsl #3]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        "511:", // x87_store_d2_x3_pop (bail NaN, round if PC==0, regs[x3] = d2, pop w1/w2, next)
+        "fcmp d2, d2",
+        "b.vs 954f",
+        "ldrh w0, [x30, #66]",
+        "tst w0, #0x0300",
+        "b.ne 1f",
+        "fcvt s2, d2",
+        "fcvt d2, s2",
+        "1:",
+        "str d2, [x30, x3, lsl #3]",
+        "mov w0, #1",
+        "lsl w0, w0, w1",
+        "bic w2, w2, w0",
+        "add w1, w1, #1",
+        "and w1, w1, #7",
+        "orr w1, w1, w2, lsl #8",
+        "strh w1, [x30, #64]",
+        "ldrb w0, [x25, #16]!",
+        "ldrsw x1, [x24, x0, lsl #2]",
+        "add x1, x24, x1",
+        "br x1",
+
+        // =====================================================================
         // Exit trampolines: materialize lazy PF/AF, write back FastCtx, return.
         // =====================================================================
         "950:",
@@ -2933,6 +4252,126 @@ pub(crate) unsafe extern "C" fn run_fast_block(ctx: *mut FastCtx) -> u32 {
         ".short 0xAA55", // 0xd: JGE (N==V)
         ".short 0xF5FA", // 0xe: JLE (Z|(N!=V))
         ".short 0x0A05", // 0xf: JG  (!Z&(N==V))
+
+        // X87Reg PC-relative jump table (tags 0..=58)
+        ".p2align 2",
+        "920:",
+        ".long 300b - 920b", // 0: Fnop
+        ".long 301b - 920b", // 1: Fchs
+        ".long 302b - 920b", // 2: Fabs
+        ".long 303b - 920b", // 3: Ftst
+        ".long 954b - 920b", // 4: Fxam
+        ".long 305b - 920b", // 5: Fld1
+        ".long 954b - 920b", // 6: Fldl2t
+        ".long 954b - 920b", // 7: Fldl2e
+        ".long 954b - 920b", // 8: Fldpi
+        ".long 954b - 920b", // 9: Fldlg2
+        ".long 954b - 920b", // 10: Fldln2
+        ".long 311b - 920b", // 11: Fldz
+        ".long 954b - 920b", // 12: F2xm1
+        ".long 954b - 920b", // 13: Fyl2x
+        ".long 954b - 920b", // 14: Fptan
+        ".long 954b - 920b", // 15: Fpatan
+        ".long 954b - 920b", // 16: Fxtract
+        ".long 954b - 920b", // 17: Fprem1
+        ".long 954b - 920b", // 18: Fdecstp
+        ".long 954b - 920b", // 19: Fincstp
+        ".long 954b - 920b", // 20: Fprem
+        ".long 954b - 920b", // 21: Fyl2xp1
+        ".long 322b - 920b", // 22: Fsqrt
+        ".long 954b - 920b", // 23: Fsincos
+        ".long 954b - 920b", // 24: Frndint
+        ".long 954b - 920b", // 25: Fscale
+        ".long 954b - 920b", // 26: Fsin
+        ".long 954b - 920b", // 27: Fcos
+        ".long 954b - 920b", // 28: Fnclex
+        ".long 954b - 920b", // 29: Fninit
+        ".long 330b - 920b", // 30: Fcompp / Fucompp
+        ".long 331b - 920b", // 31: FnstswAx
+        ".long 332b - 920b", // 32: FldSt
+        ".long 333b - 920b", // 33: Fxch
+        ".long 954b - 920b", // 34: Ffree
+        ".long 335b - 920b", // 35: FstSt
+        ".long 336b - 920b", // 36: FstpSt
+        ".long 337b - 920b", // 37: FcomSt / FucomSt
+        ".long 338b - 920b", // 38: FcompSt / FucompSt
+        ".long 339b - 920b", // 39: Fcomi / Fucomi
+        ".long 340b - 920b", // 40: Fcomip / Fucomip
+        ".long 341b - 920b", // 41: FaddSt0
+        ".long 342b - 920b", // 42: FmulSt0
+        ".long 343b - 920b", // 43: FsubSt0
+        ".long 344b - 920b", // 44: FsubrSt0
+        ".long 345b - 920b", // 45: FdivSt0
+        ".long 346b - 920b", // 46: FdivrSt0
+        ".long 347b - 920b", // 47: FaddSti
+        ".long 348b - 920b", // 48: FmulSti
+        ".long 349b - 920b", // 49: FsubSti
+        ".long 350b - 920b", // 50: FsubrSti
+        ".long 351b - 920b", // 51: FdivSti
+        ".long 352b - 920b", // 52: FdivrSti
+        ".long 353b - 920b", // 53: Faddp
+        ".long 354b - 920b", // 54: Fmulp
+        ".long 355b - 920b", // 55: Fsubp
+        ".long 356b - 920b", // 56: Fsubrp
+        ".long 357b - 920b", // 57: Fdivp
+        ".long 358b - 920b", // 58: Fdivrp
+
+        // X87Mem PC-relative jump table (tags 59..=111)
+        ".p2align 2",
+        "930:",
+        ".long 359b - 930b", // 59: FaddF32
+        ".long 360b - 930b", // 60: FmulF32
+        ".long 361b - 930b", // 61: FcomF32
+        ".long 362b - 930b", // 62: FcompF32
+        ".long 363b - 930b", // 63: FsubF32
+        ".long 364b - 930b", // 64: FsubrF32
+        ".long 365b - 930b", // 65: FdivF32
+        ".long 366b - 930b", // 66: FdivrF32
+        ".long 367b - 930b", // 67: FaddF64
+        ".long 368b - 930b", // 68: FmulF64
+        ".long 369b - 930b", // 69: FcomF64
+        ".long 370b - 930b", // 70: FcompF64
+        ".long 371b - 930b", // 71: FsubF64
+        ".long 372b - 930b", // 72: FsubrF64
+        ".long 373b - 930b", // 73: FdivF64
+        ".long 374b - 930b", // 74: FdivrF64
+        ".long 954b - 930b", // 75: FiaddI32
+        ".long 954b - 930b", // 76: FimulI32
+        ".long 954b - 930b", // 77: FicomI32
+        ".long 954b - 930b", // 78: FicompI32
+        ".long 954b - 930b", // 79: FisubI32
+        ".long 954b - 930b", // 80: FisubrI32
+        ".long 954b - 930b", // 81: FidivI32
+        ".long 954b - 930b", // 82: FidivrI32
+        ".long 954b - 930b", // 83: FiaddI16
+        ".long 954b - 930b", // 84: FimulI16
+        ".long 954b - 930b", // 85: FicomI16
+        ".long 954b - 930b", // 86: FicompI16
+        ".long 954b - 930b", // 87: FisubI16
+        ".long 954b - 930b", // 88: FisubrI16
+        ".long 954b - 930b", // 89: FidivI16
+        ".long 954b - 930b", // 90: FidivrI16
+        ".long 391b - 930b", // 91: FldF32
+        ".long 392b - 930b", // 92: FldF64
+        ".long 393b - 930b", // 93: FildI32
+        ".long 394b - 930b", // 94: FildI16
+        ".long 954b - 930b", // 95: FldF80
+        ".long 954b - 930b", // 96: FildI64
+        ".long 397b - 930b", // 97: FstF32
+        ".long 398b - 930b", // 98: FstpF32
+        ".long 399b - 930b", // 99: FstF64
+        ".long 400b - 930b", // 100: FstpF64
+        ".long 954b - 930b", // 101: FstpF80
+        ".long 954b - 930b", // 102: FistI32
+        ".long 403b - 930b", // 103: FistpI32
+        ".long 954b - 930b", // 104: FistI16
+        ".long 954b - 930b", // 105: FistpI16
+        ".long 406b - 930b", // 106: FistpI64
+        ".long 407b - 930b", // 107: Fldcw
+        ".long 408b - 930b", // 108: Fnstcw
+        ".long 954b - 930b", // 109: FnstswMem
+        ".long 954b - 930b", // 110: Fnstenv
+        ".long 954b - 930b", // 111: Fldenv
 
         STATUS_DONE = const STATUS_DONE,
         STATUS_MISS = const STATUS_MISS,
