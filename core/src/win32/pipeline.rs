@@ -192,6 +192,376 @@ pub fn light(
     lit(position, normal, material, ambient, lights, None).0
 }
 
+/// One non-ambient light with its per-pass constants precomputed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PrecomputedLight {
+    Directional {
+        colour: [f32; 3],
+        /// Unit vector pointing toward the light (`-normalise(direction)`).
+        towards: [f32; 3],
+        /// Precomputed `normalise(towards + viewer)` when a viewer is present.
+        halfway: Option<[f32; 3]>,
+        safe_zero: bool,
+    },
+    Point {
+        colour: [f32; 3],
+        position: [f32; 3],
+        range: f32,
+        attenuation: [f32; 3],
+        safe_zero: bool,
+    },
+    Spot {
+        colour: [f32; 3],
+        position: [f32; 3],
+        /// Unit light axis (`normalise(direction)`).
+        axis: [f32; 3],
+        range: f32,
+        attenuation: [f32; 3],
+        inner: f32,
+        outer: f32,
+        cone_denom: f32,
+        safe_zero: bool,
+    },
+}
+
+/// Lights precomputed once per mesh or pass: ambient lights folded in order,
+/// directional vectors and halfway vectors normalised once, spot axes
+/// normalised once, and whether any positional (point/spot) light is present.
+#[derive(Clone, Debug, Default)]
+pub struct PreparedLights {
+    pub ambient: [f32; 3],
+    pub lights: Vec<PrecomputedLight>,
+    pub viewer: Option<[f32; 3]>,
+    pub has_positional: bool,
+    viewer_finite: bool,
+    all_colours_safe: bool,
+}
+
+#[inline]
+fn is_safe_colour(c: [f32; 3]) -> bool {
+    c[0].is_finite()
+        && c[1].is_finite()
+        && c[2].is_finite()
+        && c[0] >= 0.0
+        && c[1] >= 0.0
+        && c[2] >= 0.0
+}
+
+impl PreparedLights {
+    #[must_use]
+    pub fn new(ambient: [f32; 3], lights: &[Light], viewer: Option<[f32; 3]>) -> Self {
+        let mut prepared = Self::default();
+        prepared.prepare(ambient, lights, viewer);
+        prepared
+    }
+
+    pub fn prepare(&mut self, mut ambient: [f32; 3], lights: &[Light], viewer: Option<[f32; 3]>) {
+        self.lights.clear();
+        self.viewer = viewer;
+        self.viewer_finite =
+            viewer.is_some_and(|v| v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+        self.has_positional = false;
+        self.all_colours_safe = true;
+        for light in lights {
+            match *light {
+                Light::Ambient { colour } => {
+                    for (a, c) in ambient.iter_mut().zip(colour) {
+                        *a += c;
+                    }
+                }
+                Light::Directional { colour, direction } => {
+                    if let Some(d) = normalise(direction) {
+                        let towards = d.map(|c| -c);
+                        let halfway = viewer
+                            .and_then(|v| normalise(std::array::from_fn(|i| towards[i] + v[i])));
+                        let safe_zero = is_safe_colour(colour);
+                        self.all_colours_safe &= safe_zero;
+                        self.lights.push(PrecomputedLight::Directional {
+                            colour,
+                            towards,
+                            halfway,
+                            safe_zero,
+                        });
+                    }
+                }
+                Light::Point {
+                    colour,
+                    position,
+                    range,
+                    attenuation,
+                } => {
+                    let safe_zero = is_safe_colour(colour);
+                    self.all_colours_safe &= safe_zero;
+                    self.has_positional = true;
+                    self.lights.push(PrecomputedLight::Point {
+                        colour,
+                        position,
+                        range,
+                        attenuation,
+                        safe_zero,
+                    });
+                }
+                Light::Spot {
+                    colour,
+                    position,
+                    direction,
+                    range,
+                    attenuation,
+                    inner,
+                    outer,
+                } => {
+                    if let Some(axis) = normalise(direction) {
+                        let safe_zero = is_safe_colour(colour);
+                        self.all_colours_safe &= safe_zero;
+                        self.has_positional = true;
+                        self.lights.push(PrecomputedLight::Spot {
+                            colour,
+                            position,
+                            axis,
+                            range,
+                            attenuation,
+                            inner,
+                            outer,
+                            cone_denom: (inner - outer).max(f32::MIN_POSITIVE),
+                            safe_zero,
+                        });
+                    }
+                }
+            }
+        }
+        self.ambient = ambient;
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn has_positional(&self) -> bool {
+        self.has_positional
+    }
+}
+
+#[inline(always)]
+fn add_highlight(
+    shine: &mut [f32; 3],
+    colour: [f32; 3],
+    normal: [f32; 3],
+    halfway: [f32; 3],
+    material_power: f32,
+    reaching: f32,
+    safe_zero: bool,
+) {
+    let along = dot(normal, halfway);
+    if along <= 0.0 {
+        return;
+    }
+    if material_power > 0.0 && material_power.is_finite() {
+        let bits = along.to_bits();
+        if bits < 0x7f80_0000 {
+            let upper_log2 = if bits < 0x0080_0000 {
+                -126.0f64
+            } else {
+                f64::from(((bits >> 23) as i32) - 126)
+            };
+            if upper_log2 < 0.0 && f64::from(material_power) * upper_log2 <= -151.0 {
+                if !safe_zero {
+                    for (s, c) in shine.iter_mut().zip(colour) {
+                        *s += c * 0.0 * reaching;
+                    }
+                }
+                return;
+            }
+        }
+    }
+    // The engine's own powers, never the host's.
+    let exp = f64::from(material_power) * crate::cpu::x87::maths::log2(f64::from(along));
+    if exp <= -151.0 && exp.is_finite() {
+        if !safe_zero {
+            for (s, c) in shine.iter_mut().zip(colour) {
+                *s += c * 0.0 * reaching;
+            }
+        }
+        return;
+    }
+    let power = crate::cpu::x87::maths::pow2(exp) as f32;
+    for (s, c) in shine.iter_mut().zip(colour) {
+        *s += c * power * reaching;
+    }
+}
+
+#[inline(always)]
+fn falloff(d: f32, a: [f32; 3]) -> f32 {
+    1.0 / (a[0] + a[1] * d + a[2] * d * d).max(f32::MIN_POSITIVE)
+}
+
+/// [`lit`] using lights prepared once per pass via [`PreparedLights`].
+///
+/// When `highlights` is `false` (or `prepared.viewer` is `None`), specular
+/// highlights are skipped.
+#[must_use]
+pub fn lit_prepared(
+    position: [f32; 3],
+    normal: [f32; 3],
+    material: &Material,
+    prepared: &PreparedLights,
+    highlights: bool,
+) -> ([f32; 4], [f32; 3]) {
+    let normal_len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    let (normal, normal_finite) = if normal_len > 0.0 {
+        (
+            super::scene::normalise_with_length(normal, normal_len),
+            normal_len.is_finite(),
+        )
+    } else {
+        ([0.0, 0.0, 0.0], true)
+    };
+    let ambient = prepared.ambient;
+    let mut lit = [0.0f32; 3];
+    let mut shine = [0.0f32; 3];
+    let viewer = if highlights { prepared.viewer } else { None };
+    let safe_zero_base = prepared.all_colours_safe;
+    let safe_spot_zero = safe_zero_base
+        && normal_finite
+        && prepared.viewer_finite
+        && material.power >= 0.0
+        && material.power <= 1_000_000.0;
+
+    for light in &prepared.lights {
+        match *light {
+            PrecomputedLight::Directional {
+                colour,
+                towards,
+                halfway,
+                safe_zero,
+            } => {
+                let ndotl = dot(normal, towards);
+                let strength = ndotl.max(0.0);
+                lit[0] += colour[0] * strength;
+                lit[1] += colour[1] * strength;
+                lit[2] += colour[2] * strength;
+                if viewer.is_none() || ndotl <= 0.0 {
+                    continue;
+                }
+                if let Some(h) = halfway {
+                    add_highlight(
+                        &mut shine,
+                        colour,
+                        normal,
+                        h,
+                        material.power,
+                        1.0,
+                        safe_zero && safe_zero_base,
+                    );
+                }
+            }
+            PrecomputedLight::Point {
+                colour,
+                position: at,
+                range,
+                attenuation,
+                safe_zero,
+            } => {
+                let v = [
+                    at[0] - position[0],
+                    at[1] - position[1],
+                    at[2] - position[2],
+                ];
+                let d = dot(v, v).sqrt();
+                if d > 0.0 && d <= range {
+                    let l = super::scene::normalise_with_length(v, d);
+                    let ndotl = dot(normal, l);
+                    let att = falloff(d, attenuation);
+                    let strength = ndotl.max(0.0) * att;
+                    lit[0] += colour[0] * strength;
+                    lit[1] += colour[1] * strength;
+                    lit[2] += colour[2] * strength;
+                    let Some(view) = viewer else {
+                        continue;
+                    };
+                    if ndotl <= 0.0 {
+                        continue;
+                    }
+                    if let Some(h) = normalise(std::array::from_fn(|i| l[i] + view[i])) {
+                        add_highlight(
+                            &mut shine,
+                            colour,
+                            normal,
+                            h,
+                            material.power,
+                            att,
+                            safe_zero && safe_zero_base,
+                        );
+                    }
+                }
+            }
+            PrecomputedLight::Spot {
+                colour,
+                position: at,
+                axis,
+                range,
+                attenuation,
+                inner,
+                outer,
+                cone_denom,
+                safe_zero,
+            } => {
+                let v = [
+                    at[0] - position[0],
+                    at[1] - position[1],
+                    at[2] - position[2],
+                ];
+                let d = dot(v, v).sqrt();
+                if d <= 0.0 || d.is_nan() || d > range {
+                    continue;
+                }
+                let l = super::scene::normalise_with_length(v, d);
+                let rho = dot(l.map(|c| -c), axis);
+                let cone = if rho > inner {
+                    1.0
+                } else if rho <= outer {
+                    0.0
+                } else {
+                    (rho - outer) / cone_denom
+                };
+                let ndotl = dot(normal, l);
+                let att = falloff(d, attenuation);
+                let strength = ndotl.max(0.0) * att * cone;
+                lit[0] += colour[0] * strength;
+                lit[1] += colour[1] * strength;
+                lit[2] += colour[2] * strength;
+                let Some(view) = viewer else {
+                    continue;
+                };
+                if ndotl <= 0.0 || (cone == 0.0 && safe_spot_zero && safe_zero) {
+                    continue;
+                }
+                if let Some(h) = normalise(std::array::from_fn(|i| l[i] + view[i])) {
+                    add_highlight(
+                        &mut shine,
+                        colour,
+                        normal,
+                        h,
+                        material.power,
+                        att * cone,
+                        safe_zero && safe_zero_base,
+                    );
+                }
+            }
+        }
+    }
+    let channel = |i: usize| {
+        (material.emissive[i] + ambient[i] * material.ambient[i] + lit[i] * material.diffuse[i])
+            .clamp(0.0, 1.0)
+    };
+    (
+        [
+            channel(0),
+            channel(1),
+            channel(2),
+            material.diffuse[3].clamp(0.0, 1.0),
+        ],
+        std::array::from_fn(|i| (shine[i] * material.specular[i]).clamp(0.0, 1.0)),
+    )
+}
+
 /// [`light`]'s colour, and with `highlight` the highlight each light puts on
 /// the vertex too: Direct3D's specular term, with the viewer as far away as
 /// can be in the direction given and the material's power, which is how
@@ -206,49 +576,22 @@ pub fn lit(
     lights: &[Light],
     viewer: Option<[f32; 3]>,
 ) -> ([f32; 4], [f32; 3]) {
-    let normal = normalise(normal).unwrap_or([0.0, 0.0, 0.0]);
+    let normal_len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    let (normal, normal_finite) = if normal_len > 0.0 {
+        (
+            super::scene::normalise_with_length(normal, normal_len),
+            normal_len.is_finite(),
+        )
+    } else {
+        ([0.0, 0.0, 0.0], true)
+    };
     let mut ambient = ambient;
     let mut lit = [0.0f32; 3];
     let mut shine = [0.0f32; 3];
-    // The highlight of a light towards `l` with this much of its strength
-    // reaching the vertex, on a side the light falls on.
-    let mut highlight = |colour: [f32; 3], l: [f32; 3], ndotl: f32, reaching: f32| {
-        let Some(v) = viewer else {
-            return;
-        };
-        if ndotl <= 0.0 {
-            return;
-        }
-        let Some(h) = normalise(std::array::from_fn(|i| l[i] + v[i])) else {
-            return;
-        };
-        let along = dot(normal, h);
-        if along <= 0.0 {
-            return;
-        }
-        // The engine's own powers, never the host's.
-        let power = crate::cpu::x87::maths::pow2(
-            f64::from(material.power) * crate::cpu::x87::maths::log2(f64::from(along)),
-        ) as f32;
-        for (s, c) in shine.iter_mut().zip(colour) {
-            *s += c * power * reaching;
-        }
-    };
-    let mut add = |colour: [f32; 3], strength: f32| {
-        for (l, c) in lit.iter_mut().zip(colour) {
-            *l += c * strength;
-        }
-    };
-    let toward = |from: [f32; 3]| {
-        let v = [
-            from[0] - position[0],
-            from[1] - position[1],
-            from[2] - position[2],
-        ];
-        (normalise(v), dot(v, v).sqrt())
-    };
-    let falloff =
-        |d: f32, a: [f32; 3]| 1.0 / (a[0] + a[1] * d + a[2] * d * d).max(f32::MIN_POSITIVE);
+    let viewer_finite =
+        viewer.is_some_and(|v| v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+    let power_safe = material.power >= 0.0 && material.power <= 1_000_000.0;
+    let mut all_colours_safe = true;
     for light in lights {
         match *light {
             Light::Ambient { colour } => {
@@ -258,10 +601,31 @@ pub fn lit(
             }
             Light::Directional { colour, direction } => {
                 if let Some(d) = normalise(direction) {
+                    let safe_zero = is_safe_colour(colour);
+                    all_colours_safe &= safe_zero;
                     let towards = d.map(|c| -c);
                     let ndotl = dot(normal, towards);
-                    add(colour, ndotl.max(0.0));
-                    highlight(colour, towards, ndotl, 1.0);
+                    let strength = ndotl.max(0.0);
+                    lit[0] += colour[0] * strength;
+                    lit[1] += colour[1] * strength;
+                    lit[2] += colour[2] * strength;
+                    let Some(view) = viewer else {
+                        continue;
+                    };
+                    if ndotl <= 0.0 {
+                        continue;
+                    }
+                    if let Some(h) = normalise(std::array::from_fn(|i| towards[i] + view[i])) {
+                        add_highlight(
+                            &mut shine,
+                            colour,
+                            normal,
+                            h,
+                            material.power,
+                            1.0,
+                            safe_zero && all_colours_safe,
+                        );
+                    }
                 }
             }
             Light::Point {
@@ -270,12 +634,39 @@ pub fn lit(
                 range,
                 attenuation,
             } => {
-                let (Some(l), d) = toward(at) else { continue };
-                if d <= range {
+                let v = [
+                    at[0] - position[0],
+                    at[1] - position[1],
+                    at[2] - position[2],
+                ];
+                let d = dot(v, v).sqrt();
+                if d > 0.0 && d <= range {
+                    let safe_zero = is_safe_colour(colour);
+                    all_colours_safe &= safe_zero;
+                    let l = super::scene::normalise_with_length(v, d);
                     let ndotl = dot(normal, l);
                     let att = falloff(d, attenuation);
-                    add(colour, ndotl.max(0.0) * att);
-                    highlight(colour, l, ndotl, att);
+                    let strength = ndotl.max(0.0) * att;
+                    lit[0] += colour[0] * strength;
+                    lit[1] += colour[1] * strength;
+                    lit[2] += colour[2] * strength;
+                    let Some(view) = viewer else {
+                        continue;
+                    };
+                    if ndotl <= 0.0 {
+                        continue;
+                    }
+                    if let Some(h) = normalise(std::array::from_fn(|i| l[i] + view[i])) {
+                        add_highlight(
+                            &mut shine,
+                            colour,
+                            normal,
+                            h,
+                            material.power,
+                            att,
+                            safe_zero && all_colours_safe,
+                        );
+                    }
                 }
             }
             Light::Spot {
@@ -287,13 +678,24 @@ pub fn lit(
                 inner,
                 outer,
             } => {
-                let (Some(l), d) = toward(at) else { continue };
+                let v = [
+                    at[0] - position[0],
+                    at[1] - position[1],
+                    at[2] - position[2],
+                ];
+                let d = dot(v, v).sqrt();
+                if d <= 0.0 || d.is_nan() {
+                    continue;
+                }
                 let Some(axis) = normalise(direction) else {
                     continue;
                 };
                 if d > range {
                     continue;
                 }
+                let safe_zero = is_safe_colour(colour);
+                all_colours_safe &= safe_zero;
+                let l = super::scene::normalise_with_length(v, d);
                 let rho = dot(l.map(|c| -c), axis);
                 let cone = if rho > inner {
                     1.0
@@ -304,8 +706,29 @@ pub fn lit(
                 };
                 let ndotl = dot(normal, l);
                 let att = falloff(d, attenuation);
-                add(colour, ndotl.max(0.0) * att * cone);
-                highlight(colour, l, ndotl, att * cone);
+                let strength = ndotl.max(0.0) * att * cone;
+                lit[0] += colour[0] * strength;
+                lit[1] += colour[1] * strength;
+                lit[2] += colour[2] * strength;
+                let Some(view) = viewer else {
+                    continue;
+                };
+                let safe_spot_zero =
+                    all_colours_safe && safe_zero && normal_finite && viewer_finite && power_safe;
+                if ndotl <= 0.0 || (cone == 0.0 && safe_spot_zero) {
+                    continue;
+                }
+                if let Some(h) = normalise(std::array::from_fn(|i| l[i] + view[i])) {
+                    add_highlight(
+                        &mut shine,
+                        colour,
+                        normal,
+                        h,
+                        material.power,
+                        att * cone,
+                        safe_zero && all_colours_safe,
+                    );
+                }
             }
         }
     }
@@ -734,5 +1157,254 @@ mod tests {
         let mut buf = [Clipped::default(); super::CLIP_BUFFER];
         assert_eq!(super::clip_into(&big, &mut buf), None);
         assert_eq!(clip(&big), super::clip_vec(&big));
+    }
+
+    /// Verbatim pre-#273 reference implementation of `lit` for bit-exact
+    /// differential testing against `lit` and `lit_prepared`.
+    fn reference_lit(
+        position: [f32; 3],
+        normal: [f32; 3],
+        material: &Material,
+        ambient: [f32; 3],
+        lights: &[Light],
+        viewer: Option<[f32; 3]>,
+    ) -> ([f32; 4], [f32; 3]) {
+        let normal = super::normalise(normal).unwrap_or([0.0, 0.0, 0.0]);
+        let mut ambient = ambient;
+        let mut lit = [0.0f32; 3];
+        let mut shine = [0.0f32; 3];
+        let mut highlight = |colour: [f32; 3], l: [f32; 3], ndotl: f32, reaching: f32| {
+            let Some(v) = viewer else {
+                return;
+            };
+            if ndotl <= 0.0 {
+                return;
+            }
+            let Some(h) = super::normalise(std::array::from_fn(|i| l[i] + v[i])) else {
+                return;
+            };
+            let along = super::dot(normal, h);
+            if along <= 0.0 {
+                return;
+            }
+            let power = crate::cpu::x87::maths::pow2(
+                f64::from(material.power) * crate::cpu::x87::maths::log2(f64::from(along)),
+            ) as f32;
+            for (s, c) in shine.iter_mut().zip(colour) {
+                *s += c * power * reaching;
+            }
+        };
+        let mut add = |colour: [f32; 3], strength: f32| {
+            for (l, c) in lit.iter_mut().zip(colour) {
+                *l += c * strength;
+            }
+        };
+        let toward = |from: [f32; 3]| {
+            let v = [
+                from[0] - position[0],
+                from[1] - position[1],
+                from[2] - position[2],
+            ];
+            (super::normalise(v), super::dot(v, v).sqrt())
+        };
+        let falloff =
+            |d: f32, a: [f32; 3]| 1.0 / (a[0] + a[1] * d + a[2] * d * d).max(f32::MIN_POSITIVE);
+        for light in lights {
+            match *light {
+                Light::Ambient { colour } => {
+                    for (a, c) in ambient.iter_mut().zip(colour) {
+                        *a += c;
+                    }
+                }
+                Light::Directional { colour, direction } => {
+                    if let Some(d) = super::normalise(direction) {
+                        let towards = d.map(|c| -c);
+                        let ndotl = super::dot(normal, towards);
+                        add(colour, ndotl.max(0.0));
+                        highlight(colour, towards, ndotl, 1.0);
+                    }
+                }
+                Light::Point {
+                    colour,
+                    position: at,
+                    range,
+                    attenuation,
+                } => {
+                    let (Some(l), d) = toward(at) else { continue };
+                    if d <= range {
+                        let ndotl = super::dot(normal, l);
+                        let att = falloff(d, attenuation);
+                        add(colour, ndotl.max(0.0) * att);
+                        highlight(colour, l, ndotl, att);
+                    }
+                }
+                Light::Spot {
+                    colour,
+                    position: at,
+                    direction,
+                    range,
+                    attenuation,
+                    inner,
+                    outer,
+                } => {
+                    let (Some(l), d) = toward(at) else { continue };
+                    let Some(axis) = super::normalise(direction) else {
+                        continue;
+                    };
+                    if d > range {
+                        continue;
+                    }
+                    let rho = super::dot(l.map(|c| -c), axis);
+                    let cone = if rho > inner {
+                        1.0
+                    } else if rho <= outer {
+                        0.0
+                    } else {
+                        (rho - outer) / (inner - outer).max(f32::MIN_POSITIVE)
+                    };
+                    let ndotl = super::dot(normal, l);
+                    let att = falloff(d, attenuation);
+                    add(colour, ndotl.max(0.0) * att * cone);
+                    highlight(colour, l, ndotl, att * cone);
+                }
+            }
+        }
+        let channel = |i: usize| {
+            (material.emissive[i] + ambient[i] * material.ambient[i] + lit[i] * material.diffuse[i])
+                .clamp(0.0, 1.0)
+        };
+        (
+            [
+                channel(0),
+                channel(1),
+                channel(2),
+                material.diffuse[3].clamp(0.0, 1.0),
+            ],
+            std::array::from_fn(|i| (shine[i] * material.specular[i]).clamp(0.0, 1.0)),
+        )
+    }
+
+    #[test]
+    fn precomputed_lights_and_lit_match_reference_bit_for_bit() {
+        let lights = vec![
+            Light::Ambient {
+                colour: [0.15, 0.2, 0.25],
+            },
+            Light::Directional {
+                colour: [0.9, 0.8, 0.7],
+                direction: [-0.3, -0.8, 0.5],
+            },
+            Light::Directional {
+                colour: [1.0, 1.0, 1.0],
+                direction: [0.0, 0.0, 0.0], // degenerate zero direction
+            },
+            Light::Ambient {
+                colour: [0.05, 0.05, 0.1],
+            },
+            Light::Point {
+                colour: [0.7, 0.4, 0.2],
+                position: [2.0, 3.0, -1.0],
+                range: 10.0,
+                attenuation: [1.0, 0.1, 0.02],
+            },
+            Light::Spot {
+                colour: [0.8, 0.9, 1.0],
+                position: [0.0, 5.0, 0.0],
+                direction: [0.0, -1.0, 0.0],
+                range: 20.0,
+                attenuation: [1.0, 0.05, 0.01],
+                inner: 0.95,
+                outer: 0.80,
+            },
+            Light::Spot {
+                colour: [1.0, 0.5, 0.5],
+                position: [1.0, 2.0, 3.0],
+                direction: [0.0, 0.0, 0.0], // degenerate spot axis
+                range: 10.0,
+                attenuation: [1.0, 0.0, 0.0],
+                inner: 0.9,
+                outer: 0.7,
+            },
+        ];
+
+        // Positional detection: directional/ambient-only has_positional == false.
+        let non_pos = super::PreparedLights::new([0.0; 3], &lights[..4], Some([0.0, 0.0, -1.0]));
+        assert!(!non_pos.has_positional());
+        let with_pos = super::PreparedLights::new([0.0; 3], &lights, Some([0.0, 0.0, -1.0]));
+        assert!(with_pos.has_positional());
+
+        let viewers = [None, Some([0.0, 0.0, -1.0]), Some([0.3, 0.6, -0.74])];
+        let powers = [
+            0.0,
+            1.0,
+            8.0,
+            32.0,
+            256.0,
+            2000.0,
+            -5.0,
+            f32::INFINITY,
+            f32::NAN,
+        ];
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [2.0, 3.0, -1.0],  // coincident with point light (d == 0)
+            [0.0, 1.0, 0.0],   // inside spot inner cone
+            [2.0, 1.0, 0.0],   // inside spot falloff cone
+            [15.0, 1.0, 0.0],  // outside spot cone (cone == 0.0) & outside point range
+            [100.0, 0.0, 0.0], // outside all ranges
+        ];
+        let normals = [
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.3, 0.9, -0.2],
+            [0.99, 0.01, 0.01], // hits exp <= -151.0 underflow skip at high power
+            [f32::INFINITY, 0.0, 0.0],
+            [f32::from_bits(0x7f80_0001), 1.0, 0.0],
+        ];
+        let base_ambient = [0.1, 0.05, 0.0];
+
+        for viewer in viewers {
+            let prepared = super::PreparedLights::new(base_ambient, &lights, viewer);
+            for &power in &powers {
+                let material = Material {
+                    diffuse: [0.8, 0.6, 0.4, 0.75],
+                    ambient: [0.5, 0.5, 0.5, 1.0],
+                    specular: [0.9, 0.8, 0.7, 0.0],
+                    emissive: [0.02, 0.01, 0.0, 0.0],
+                    power,
+                };
+                for &pos in &positions {
+                    for &norm in &normals {
+                        let expected =
+                            reference_lit(pos, norm, &material, base_ambient, &lights, viewer);
+                        let got_lit =
+                            super::lit(pos, norm, &material, base_ambient, &lights, viewer);
+                        let got_prep =
+                            super::lit_prepared(pos, norm, &material, &prepared, viewer.is_some());
+                        assert_eq!(
+                            got_lit.0.map(f32::to_bits),
+                            expected.0.map(f32::to_bits),
+                            "lit diffuse mismatch pos={pos:?} norm={norm:?} power={power} viewer={viewer:?}"
+                        );
+                        assert_eq!(
+                            got_lit.1.map(f32::to_bits),
+                            expected.1.map(f32::to_bits),
+                            "lit specular mismatch pos={pos:?} norm={norm:?} power={power} viewer={viewer:?}"
+                        );
+                        assert_eq!(
+                            got_prep.0.map(f32::to_bits),
+                            expected.0.map(f32::to_bits),
+                            "lit_prepared diffuse mismatch pos={pos:?} norm={norm:?} power={power} viewer={viewer:?}"
+                        );
+                        assert_eq!(
+                            got_prep.1.map(f32::to_bits),
+                            expected.1.map(f32::to_bits),
+                            "lit_prepared specular mismatch pos={pos:?} norm={norm:?} power={power} viewer={viewer:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -25,6 +25,8 @@ pub const IDENTITY: Matrix = [
 pub struct Frame {
     /// The frame this one hangs from, or zero at a root.
     pub parent: u32,
+    /// Cached slab index of `parent` in [`FrameTable`], or `u32::MAX` when unset.
+    pub(crate) parent_slot: u32,
     pub children: Vec<u32>,
     pub visuals: Vec<u32>,
     pub lights: Vec<u32>,
@@ -42,6 +44,7 @@ impl Default for Frame {
     fn default() -> Self {
         Self {
             parent: 0,
+            parent_slot: FRAME_EMPTY,
             children: Vec::new(),
             visuals: Vec::new(),
             lights: Vec::new(),
@@ -92,6 +95,8 @@ pub struct Group {
     /// face after another.
     pub per_face: u32,
     pub indices: Vec<u32>,
+    /// True when `per_face >= 3` and every face vertex index is in bounds of `vertices`.
+    pub(crate) all_indices_in_bounds: bool,
     pub colour: Option<u32>,
     pub mapping: Option<u32>,
     pub quality: Option<u32>,
@@ -247,6 +252,154 @@ impl View {
     }
 }
 
+const FRAME_EMPTY: u32 = u32::MAX;
+
+#[inline]
+fn hash_u32(mut x: u32) -> usize {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x as usize
+}
+
+/// Flat slab of scene frames indexed by a deterministic, zero-entropy open-addressed `u32` table.
+#[derive(Clone, Debug, Default)]
+pub struct FrameTable {
+    slots: Vec<Frame>,
+    keys: Vec<u32>,
+    table: Vec<(u32, u32)>,
+}
+
+impl FrameTable {
+    #[must_use]
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn slot_of(&self, key: u32) -> Option<u32> {
+        if self.table.is_empty() {
+            return None;
+        }
+        let mask = self.table.len() - 1;
+        let mut idx = hash_u32(key) & mask;
+        loop {
+            let (k, v) = self.table[idx];
+            if v == FRAME_EMPTY {
+                return None;
+            }
+            if k == key {
+                return Some(v);
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn by_slot(&self, slot: u32) -> &Frame {
+        &self.slots[slot as usize]
+    }
+
+    #[inline]
+    pub(crate) fn by_slot_mut(&mut self, slot: u32) -> &mut Frame {
+        &mut self.slots[slot as usize]
+    }
+
+    #[inline]
+    pub(crate) fn parent_slot_of(&self, frame: &Frame) -> Option<u32> {
+        if frame.parent == 0 {
+            return None;
+        }
+        let ps = frame.parent_slot;
+        if ps != FRAME_EMPTY && self.keys[ps as usize] == frame.parent {
+            return Some(ps);
+        }
+        self.slot_of(frame.parent)
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn get(&self, key: &u32) -> Option<&Frame> {
+        self.slot_of(*key).map(|s| &self.slots[s as usize])
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn get_mut(&mut self, key: &u32) -> Option<&mut Frame> {
+        self.slot_of(*key).map(|s| &mut self.slots[s as usize])
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn contains_key(&self, key: &u32) -> bool {
+        self.slot_of(*key).is_some()
+    }
+
+    pub fn insert(&mut self, key: u32, frame: Frame) {
+        if let Some(slot) = self.slot_of(key) {
+            self.slots[slot as usize] = frame;
+            return;
+        }
+        if (self.slots.len() + 1) * 2 > self.table.len() {
+            let new_cap = (self.table.len() * 2).max(64);
+            let mut new_table = vec![(0u32, FRAME_EMPTY); new_cap];
+            let mask = new_cap - 1;
+            for &(k, v) in &self.table {
+                if v != FRAME_EMPTY {
+                    let mut idx = hash_u32(k) & mask;
+                    while new_table[idx].1 != FRAME_EMPTY {
+                        idx = (idx + 1) & mask;
+                    }
+                    new_table[idx] = (k, v);
+                }
+            }
+            self.table = new_table;
+        }
+        let slot = self.slots.len() as u32;
+        self.slots.push(frame);
+        self.keys.push(key);
+        let mask = self.table.len() - 1;
+        let mut idx = hash_u32(key) & mask;
+        while self.table[idx].1 != FRAME_EMPTY {
+            idx = (idx + 1) & mask;
+        }
+        self.table[idx] = (key, slot);
+    }
+}
+
+impl std::ops::Index<&u32> for FrameTable {
+    type Output = Frame;
+
+    fn index(&self, key: &u32) -> &Self::Output {
+        self.get(key).expect("frame key not present")
+    }
+}
+
+/// Projected clip-space vertex cached during a mesh group's frustum test.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ClipSlot {
+    pub(crate) clip: [f32; 4],
+    pub(crate) outcode: u8,
+    pub(crate) valid: bool,
+}
+
+/// Lazily lit vertex colour cached across faces sharing a vertex.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LitSlot {
+    pub(crate) diffuse: [f32; 4],
+    pub(crate) specular: [f32; 3],
+    pub(crate) valid: bool,
+}
+
 /// Reusable working buffers for retained-mode viewport renders so frame and
 /// mesh traversal do not reallocate every frame.
 #[derive(Default)]
@@ -254,7 +407,9 @@ pub(crate) struct RenderScratch {
     pub(crate) meshes: Vec<(Matrix, u32, u32)>,
     pub(crate) lights: Vec<(u32, super::pipeline::Light)>,
     pub(crate) mesh_lights: Vec<super::pipeline::Light>,
-    pub(crate) vertices: Vec<Option<super::pipeline::Clipped>>,
+    pub(crate) prepared_lights: super::pipeline::PreparedLights,
+    pub(crate) clip_slots: Vec<ClipSlot>,
+    pub(crate) lit_slots: Vec<LitSlot>,
     pub(crate) triangles: Vec<[super::pipeline::Clipped; 3]>,
 }
 
@@ -262,7 +417,7 @@ pub(crate) struct RenderScratch {
 /// every mesh, material and texture, and every viewport.
 #[derive(Default)]
 pub struct Scene {
-    pub frames: BTreeMap<u32, Frame>,
+    pub frames: FrameTable,
     pub lights: BTreeMap<u32, Light>,
     pub meshes: BTreeMap<u32, Mesh>,
     pub materials: BTreeMap<u32, Material>,
@@ -276,6 +431,18 @@ pub struct Scene {
     pub(crate) scratch: RenderScratch,
 }
 
+#[inline]
+fn is_exact_identity(m: &Matrix) -> bool {
+    for r in 0..4 {
+        for c in 0..4 {
+            if m[r][c].to_bits() != IDENTITY[r][c].to_bits() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 impl Scene {
     /// Make a frame, hung from `parent` when there is one.
     pub fn add(&mut self, at: u32, parent: u32) {
@@ -287,20 +454,32 @@ impl Scene {
 
     /// Hang `child` from `parent`, taking it off wherever it hung before.
     pub fn attach(&mut self, parent: u32, child: u32) {
-        let previous = self.frames.get(&child).map_or(0, |f| f.parent);
-        if let Some(old) = self.frames.get_mut(&previous) {
-            old.children.retain(|c| *c != child);
+        let child_slot = self.frames.slot_of(child);
+        let previous = child_slot.map_or(0, |s| self.frames.by_slot(s).parent);
+        if previous != 0 {
+            if let Some(old) = self.frames.get_mut(&previous) {
+                old.children.retain(|c| *c != child);
+            }
         }
-        if let Some(frame) = self.frames.get_mut(&child) {
+        let parent_slot = if parent != 0 {
+            self.frames.slot_of(parent)
+        } else {
+            None
+        };
+        if let Some(cs) = child_slot {
+            let frame = self.frames.by_slot_mut(cs);
             frame.parent = parent;
+            frame.parent_slot = parent_slot.unwrap_or(FRAME_EMPTY);
         }
-        if let Some(frame) = self.frames.get_mut(&parent) {
+        if let Some(ps) = parent_slot {
+            let frame = self.frames.by_slot_mut(ps);
             if !frame.children.contains(&child) {
                 frame.children.push(child);
             }
         }
     }
 
+    #[inline]
     pub fn frame(&self, at: u32) -> Option<&Frame> {
         self.frames.get(&at)
     }
@@ -308,15 +487,40 @@ impl Scene {
     /// The frame at the top of the tree a frame hangs in: its scene.
     #[must_use]
     pub fn root(&self, mut at: u32) -> Option<u32> {
+        let mut slot = self.frames.slot_of(at)?;
         let mut steps = 0;
+        let limit = self.frames.len();
         loop {
-            let frame = self.frames.get(&at)?;
-            if frame.parent == 0 || steps > self.frames.len() {
+            let frame = self.frames.by_slot(slot);
+            if frame.parent == 0 || steps > limit {
                 return Some(at);
             }
             at = frame.parent;
+            slot = self.frames.parent_slot_of(frame)?;
             steps += 1;
         }
+    }
+
+    /// Whether `frame` equals `ancestor` or hangs anywhere under it.
+    #[must_use]
+    pub(crate) fn is_under(&self, mut frame: u32, ancestor: u32) -> bool {
+        let mut slot = self.frames.slot_of(frame);
+        let limit = self.frames.len();
+        for _ in 0..=limit {
+            if frame == ancestor {
+                return true;
+            }
+            let Some(s) = slot else {
+                return false;
+            };
+            let node = self.frames.by_slot(s);
+            if node.parent == 0 {
+                return false;
+            }
+            frame = node.parent;
+            slot = self.frames.parent_slot_of(node);
+        }
+        false
     }
 
     /// Where a frame is in its scene: its own transform, then its parent's,
@@ -324,22 +528,79 @@ impl Scene {
     #[must_use]
     pub fn world(&self, at: u32) -> Option<Matrix> {
         let mut out = IDENTITY;
-        let mut next = at;
+        let mut out_finite = true;
+        let mut next_id = at;
+        let mut next_slot = if at != 0 {
+            self.frames.slot_of(at)
+        } else {
+            None
+        };
         for _ in 0..=self.frames.len() {
-            if next == 0 {
+            if next_id == 0 {
                 return Some(out);
             }
-            let frame = self.frames.get(&next)?;
-            out = multiply(&out, &frame.local);
-            next = frame.parent;
+            let slot = next_slot?;
+            let frame = self.frames.by_slot(slot);
+            if !(out_finite && is_exact_identity(&frame.local)) {
+                out = multiply(&out, &frame.local);
+                out_finite = out.iter().flatten().all(|v| v.is_finite());
+            }
+            next_id = frame.parent;
+            next_slot = self.frames.parent_slot_of(frame);
         }
         // A frame that is its own ancestor has no place in any scene.
         None
     }
 
+    /// Row 3 of [`Self::world`]: bit-for-bit identical to `self.world(at).map(|m| m[3])`.
+    #[must_use]
+    pub fn world_origin_row(&self, at: u32) -> Option<[f32; 4]> {
+        let mut row = IDENTITY[3];
+        let mut row_finite = true;
+        let mut next_id = at;
+        let mut next_slot = if at != 0 {
+            self.frames.slot_of(at)
+        } else {
+            None
+        };
+        for _ in 0..=self.frames.len() {
+            if next_id == 0 {
+                return Some(row);
+            }
+            let slot = next_slot?;
+            let frame = self.frames.by_slot(slot);
+            if !(row_finite && is_exact_identity(&frame.local)) {
+                row = multiply_row(row, &frame.local);
+                row_finite = row.iter().all(|v| v.is_finite());
+            }
+            next_id = frame.parent;
+            next_slot = self.frames.parent_slot_of(frame);
+        }
+        None
+    }
+
+    #[inline]
     pub fn frame_mut(&mut self, at: u32) -> Option<&mut Frame> {
         self.frames.get_mut(&at)
     }
+}
+
+/// One row multiplied on the left of `b`: bit-for-bit identical to `multiply(&a, b)[i]`
+/// for `row == a[i]`, including left-fold `-0.0` canonicalisation and NaN settling.
+#[must_use]
+#[inline]
+pub fn multiply_row(row: [f32; 4], b: &Matrix) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    for (j, cell) in out.iter_mut().enumerate() {
+        let sum =
+            (((0.0 + row[0] * b[0][j]) + row[1] * b[1][j]) + row[2] * b[2][j]) + row[3] * b[3][j];
+        *cell = if sum.is_nan() {
+            settle_cell(sum, row, [b[0][j], b[1][j], b[2][j], b[3][j]])
+        } else {
+            sum
+        };
+    }
+    out
 }
 
 /// `a` then `b`, for row vectors: a point goes through `a` first.
@@ -426,7 +687,14 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 #[must_use]
 pub fn normalise(v: [f32; 3]) -> Option<[f32; 3]> {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    (length > 0.0).then(|| settled(v.map(|c| c / length), || v))
+    (length > 0.0).then(|| normalise_with_length(v, length))
+}
+
+/// Divide `v` by its already-computed positive `length`, settling any NaN payload.
+#[must_use]
+#[inline]
+pub(crate) fn normalise_with_length(v: [f32; 3], length: f32) -> [f32; 3] {
+    settled(v.map(|c| c / length), || v)
 }
 
 /// A direction through a transform: turned and scaled, never moved.
@@ -686,5 +954,101 @@ mod tests {
             super::cross([sig, 0.0, 0.0], [0.0, 1.0, 0.0])[2].to_bits(),
             0x7fc0_0003
         );
+    }
+
+    #[test]
+    fn flat_frame_table_world_and_origin_row_match_reference_bit_for_bit() {
+        let mut scene = Scene::default();
+        // Insert enough frames to trigger multiple table rehashes, including key 0x1000..0x1100.
+        let root = 0x1000;
+        scene.add(root, 0);
+        // Leave root at exact IDENTITY to exercise the identity skip path.
+        let mut prev = root;
+        for i in 1u32..=120 {
+            let id = 0x1000 + i * 16;
+            scene.add(id, prev);
+            let f = scene.frame_mut(id).unwrap();
+            if i % 3 == 0 {
+                // Keep exact IDENTITY on every third frame.
+                f.local = IDENTITY;
+            } else {
+                let mut m = super::rotation([0.3, 0.7, -0.5], i as f32 * 0.13);
+                m[3] = [i as f32 * 0.5, -(i as f32) * 0.25, i as f32 * 0.125, 1.0];
+                f.local = m;
+            }
+            if i % 10 == 0 {
+                prev = root;
+            } else {
+                prev = id;
+            }
+        }
+        // Re-parent a subtree to verify parent_slot updates cleanly.
+        let reparented = 0x1000 + 25 * 16;
+        let new_parent = 0x1000 + 40 * 16;
+        scene.attach(new_parent, reparented);
+
+        // Reference bottom-up multiply without identity skip.
+        fn ref_world(scene: &Scene, at: u32) -> Option<Matrix> {
+            let mut out = IDENTITY;
+            let mut next = at;
+            for _ in 0..=scene.frames.len() {
+                if next == 0 {
+                    return Some(out);
+                }
+                let f = scene.frame(next)?;
+                out = multiply(&out, &f.local);
+                next = f.parent;
+            }
+            None
+        }
+
+        for i in 0u32..=120 {
+            let id = 0x1000 + i * 16;
+            let want = ref_world(&scene, id).unwrap();
+            let got = scene.world(id).unwrap();
+            let row = scene.world_origin_row(id).unwrap();
+            for r in 0..4 {
+                assert_eq!(got[r].map(f32::to_bits), want[r].map(f32::to_bits));
+            }
+            assert_eq!(row.map(f32::to_bits), want[3].map(f32::to_bits));
+            assert_eq!(scene.root(id), Some(root));
+            assert!(scene.is_under(id, root));
+        }
+        assert!(scene.is_under(reparented, new_parent));
+        assert!(!scene.is_under(new_parent, reparented));
+
+        // Signaling NaN and -0.0 in local matrix propagate identically through world & world_origin_row.
+        let neg_only = 0x8ff0;
+        let nan_frame = 0x9000;
+        let neg_zero_frame = 0x9010;
+        scene.add(neg_only, root);
+        scene.add(nan_frame, root);
+        scene.add(neg_zero_frame, nan_frame);
+        let mut neg_m = IDENTITY;
+        neg_m[3][0] = -0.0;
+        scene.frame_mut(neg_only).unwrap().local = neg_m;
+        scene.frame_mut(neg_zero_frame).unwrap().local = neg_m;
+        let mut nan_m = IDENTITY;
+        nan_m[3][1] = std::hint::black_box(f32::from_bits(0x7f80_0007));
+        scene.frame_mut(nan_frame).unwrap().local = nan_m;
+
+        // -0.0 canonicalises to +0.0 even when root is IDENTITY.
+        let want_neg = ref_world(&scene, neg_only).unwrap();
+        let got_neg = scene.world(neg_only).unwrap();
+        let row_neg = scene.world_origin_row(neg_only).unwrap();
+        assert_eq!(row_neg.map(f32::to_bits), want_neg[3].map(f32::to_bits));
+        assert_eq!(got_neg[3].map(f32::to_bits), want_neg[3].map(f32::to_bits));
+        assert_eq!(row_neg[0].to_bits(), 0.0f32.to_bits());
+
+        // Non-finite row still multiplies through root's IDENTITY so NaN * 0.0 propagates identically.
+        let want = ref_world(&scene, neg_zero_frame).unwrap();
+        let got = scene.world(neg_zero_frame).unwrap();
+        let row = scene.world_origin_row(neg_zero_frame).unwrap();
+        for r in 0..4 {
+            assert_eq!(got[r].map(f32::to_bits), want[r].map(f32::to_bits));
+        }
+        assert_eq!(row.map(f32::to_bits), want[3].map(f32::to_bits));
+        assert_eq!(row[0].to_bits(), 0x7fc0_0007);
+        assert_eq!(row[1].to_bits(), 0x7fc0_0007);
     }
 }

@@ -983,11 +983,17 @@ fn add_group(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     }
     let count = faces as usize * per_face as usize;
     let indices = words(ctx.mem.slice(data, count * 4).map_err(Stop::Fault)?);
+    let all_indices_in_bounds = per_face >= 3
+        && indices
+            .chunks_exact(per_face as usize)
+            .flatten()
+            .all(|&i| (i as usize) < vertices as usize);
     let id = u32::try_from(mesh.groups.len()).unwrap_or(u32::MAX);
     mesh.groups.push(super::scene::Group {
         vertices: vec![None; vertices as usize],
         per_face,
         indices,
+        all_indices_in_bounds,
         ..super::scene::Group::default()
     });
     ctx.mem.write_u32(out, id).map_err(Stop::Fault)?;
@@ -1745,23 +1751,10 @@ fn fill_lights_on(
     out: &mut Vec<super::pipeline::Light>,
 ) {
     out.clear();
-    let under = |only: u32| {
-        let mut at = frame;
-        for _ in 0..=state.scene.frames.len() {
-            if at == only {
-                return true;
-            }
-            match state.scene.frame(at) {
-                Some(f) if f.parent != 0 => at = f.parent,
-                _ => return false,
-            }
-        }
-        false
-    };
     out.extend(
         lights
             .iter()
-            .filter(|(only, _)| *only == 0 || under(*only))
+            .filter(|(only, _)| *only == 0 || state.scene.is_under(frame, *only))
             .map(|(_, light)| *light),
     );
 }
@@ -1811,7 +1804,22 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    collect_visits(ctx, scene, &mut visits, &mut scratch.meshes, 0, None)?;
+    if ctx.state.scene.frame(scene).is_some() && ctx.state.scene.world(scene).is_none() {
+        ctx.state.scene.scratch = scratch;
+        return Err(Stop::NotWritten {
+            what: "IDirect3DRMViewport2::Render: a frame that is its own ancestor".to_owned(),
+            caller: 0,
+        });
+    }
+    collect_scene(
+        ctx,
+        scene,
+        &mut visits,
+        &mut scratch.meshes,
+        &mut scratch.lights,
+        0,
+        None,
+    )?;
     // What retained mode draws itself and what it calls a title to draw are
     // drawn in the order of the tree; no title has hung both in one, so the
     // order between the two has not been needed.
@@ -1823,7 +1831,6 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    collect_lights(ctx, scene, &mut scratch.lights, 0)?;
     let (Some(immediate), Some(under)) = (
         immediate_device(ctx, device)?,
         immediate_viewport(ctx, this)?,
@@ -1912,104 +1919,27 @@ fn render(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-/// Every light in a frame's tree, put in the world by the frame it hangs on:
-/// at the frame's origin, shining down its z axis.
+/// Every visual and every light in a frame's tree, walked once in pre-order:
+/// user visuals and meshes retained mode draws itself (each where its frame
+/// puts it in the world, with the frame in the scene it is lit as hanging
+/// from, and the mesh), and every light put in the world by the frame it hangs
+/// on (at the frame's origin, shining down its z axis).
 ///
-/// What a title has not told a light is what DirectX 6's documentation says
-/// retained mode starts one with: constant attenuation of one and none
-/// otherwise, a range as far as a float goes, an umbra of 0.4 radians and a
-/// penumbra of 0.8.
-fn collect_lights(
-    ctx: &Ctx<'_>,
-    frame: u32,
-    lights: &mut Vec<(u32, super::pipeline::Light)>,
-    depth: usize,
-) -> Result<(), Stop> {
-    use super::pipeline::Light;
-    let Some(node) = ctx.state.scene.frame(frame) else {
-        return Ok(());
-    };
-    // The visits have been walked already, so every frame here has a place.
-    let (Some(world), false) = (
-        ctx.state.scene.world(frame),
-        depth > ctx.state.scene.frames.len(),
-    ) else {
-        return Ok(());
-    };
-    let position = [world[3][0], world[3][1], world[3][2]];
-    let direction = [world[2][0], world[2][1], world[2][2]];
-    for id in &node.lights {
-        let Some(light) = ctx.state.scene.lights.get(id) else {
-            return Err(Stop::NotWritten {
-                what: format!("IDirect3DRMViewport2::Render: a light at {id:#x} nothing here made"),
-                caller: 0,
-            });
-        };
-        let [r, g, b, _] = super::pipeline::colour(light.colour);
-        let colour = [r, g, b];
-        let range = light.range.unwrap_or(f32::MAX.sqrt());
-        let attenuation = [
-            light.attenuation[0].unwrap_or(1.0),
-            light.attenuation[1].unwrap_or(0.0),
-            light.attenuation[2].unwrap_or(0.0),
-        ];
-        // An umbra and a penumbra are each the angle off the light's axis to
-        // the cone's edge: as half the cone's width, Rock Raiders' lamps
-        // light a narrow circle and leave its level's walls dark.
-        // ponytail: measured against an earlier, unpublished emulator's frames
-        // of that mission, not native retained mode; immediate mode documents
-        // its own spot angles as the whole cone, so a title passing those
-        // through would be lit too wide.
-        let cone_cos = |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle)) as f32;
-        let converted = match light.kind {
-            0 => Light::Ambient { colour },
-            // ponytail: a parallel point light shines as a point light does,
-            // attenuated by distance, where retained mode's shines in parallel
-            // from where it is; nothing on the roster has been seen to use one.
-            1 | 4 => Light::Point {
-                colour,
-                position,
-                range,
-                attenuation,
-            },
-            2 => Light::Spot {
-                colour,
-                position,
-                direction,
-                range,
-                attenuation,
-                inner: cone_cos(light.umbra.unwrap_or(0.4)),
-                outer: cone_cos(light.penumbra.unwrap_or(0.8)),
-            },
-            3 => Light::Directional { colour, direction },
-            other => {
-                return Err(Stop::NotWritten {
-                    what: format!("IDirect3DRMViewport2::Render: a light of kind {other}"),
-                    caller: 0,
-                })
-            }
-        };
-        lights.push((ctx.state.identity(light.enable_frame), converted));
-    }
-    for &child in &node.children {
-        collect_lights(ctx, child, lights, depth + 1)?;
-    }
-    Ok(())
-}
-
-/// Every visual in a frame's tree, the frame's own then its children's: the
-/// title's own user visuals, and the meshes retained mode draws itself, each
-/// where its frame puts it in the world, with the frame in the scene it is
-/// lit as hanging from, and the mesh.
+/// World matrices are computed lazily bottom-up via [`super::scene::Scene::world`]
+/// only for frames that actually carry meshes, frame-visuals, or non-ambient
+/// lights, preserving exact floating-point matrix associativity while skipping
+/// empty grouping frames and user-visual-only frames.
 ///
 /// A frame can be a visual itself, which draws its tree again wherever the
 /// frame it was added to is (#120): that frame's place in the world is
-/// `instance`'s, and the frame in the scene it is drawn on.
-fn collect_visits(
+/// `instance`'s, and the frame in the scene it is drawn on. Lights are only
+/// collected on the main scene walk (`instance.is_none()`).
+fn collect_scene(
     ctx: &Ctx<'_>,
     frame: u32,
     visits: &mut Vec<Visit>,
     meshes: &mut Vec<(Matrix, u32, u32)>,
+    lights: &mut Vec<(u32, super::pipeline::Light)>,
     depth: usize,
     instance: Option<(Matrix, u32)>,
 ) -> Result<(), Stop> {
@@ -2018,15 +1948,25 @@ fn collect_visits(
     };
     // A frame that is its own ancestor, or its own visual, has no place in
     // any scene.
-    let world = match instance {
-        Some((world, _)) => Some(world),
-        None => ctx.state.scene.world(frame),
-    };
-    let Some(world) = world.filter(|_| depth <= ctx.state.scene.frames.len()) else {
+    if depth > ctx.state.scene.frames.len() {
         return Err(Stop::NotWritten {
             what: "IDirect3DRMViewport2::Render: a frame that is its own ancestor".to_owned(),
             caller: 0,
         });
+    }
+    let mut cached_world: Option<Matrix> = instance.map(|(w, _)| w);
+    let mut need_world = || -> Result<Matrix, Stop> {
+        if let Some(w) = cached_world {
+            return Ok(w);
+        }
+        let Some(w) = ctx.state.scene.world(frame) else {
+            return Err(Stop::NotWritten {
+                what: "IDirect3DRMViewport2::Render: a frame that is its own ancestor".to_owned(),
+                caller: 0,
+            });
+        };
+        cached_world = Some(w);
+        Ok(w)
     };
     let lit_as = instance.map_or(frame, |(_, on)| on);
     for &visual in &node.visuals {
@@ -2041,16 +1981,19 @@ fn collect_visits(
                 });
             }
             _ if ctx.state.scene.meshes.contains_key(&identity) => {
+                let world = need_world()?;
                 meshes.push((world, lit_as, identity));
             }
             _ if ctx.state.scene.frames.contains_key(&identity) => {
+                let world = need_world()?;
                 let local = ctx.state.scene.frames[&identity].local;
                 let placed = super::scene::multiply(&local, &world);
-                collect_visits(
+                collect_scene(
                     ctx,
                     identity,
                     visits,
                     meshes,
+                    lights,
                     depth + 1,
                     Some((placed, lit_as)),
                 )?;
@@ -2066,8 +2009,74 @@ fn collect_visits(
             }
         }
     }
+    if instance.is_none() && !node.lights.is_empty() {
+        use super::pipeline::Light;
+        for id in &node.lights {
+            let Some(light) = ctx.state.scene.lights.get(id) else {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "IDirect3DRMViewport2::Render: a light at {id:#x} nothing here made"
+                    ),
+                    caller: 0,
+                });
+            };
+            let [r, g, b, _] = super::pipeline::colour(light.colour);
+            let colour = [r, g, b];
+            let converted = match light.kind {
+                0 => Light::Ambient { colour },
+                1..=4 => {
+                    let world = need_world()?;
+                    let position = [world[3][0], world[3][1], world[3][2]];
+                    let direction = [world[2][0], world[2][1], world[2][2]];
+                    let range = light.range.unwrap_or(f32::MAX.sqrt());
+                    let attenuation = [
+                        light.attenuation[0].unwrap_or(1.0),
+                        light.attenuation[1].unwrap_or(0.0),
+                        light.attenuation[2].unwrap_or(0.0),
+                    ];
+                    // An umbra and a penumbra are each the angle off the light's axis to
+                    // the cone's edge: as half the cone's width, Rock Raiders' lamps
+                    // light a narrow circle and leave its level's walls dark.
+                    // ponytail: measured against an earlier, unpublished emulator's frames
+                    // of that mission, not native retained mode; immediate mode documents
+                    // its own spot angles as the whole cone, so a title passing those
+                    // through would be lit too wide.
+                    let cone_cos =
+                        |angle: f32| crate::cpu::x87::maths::cos(f64::from(angle)) as f32;
+                    match light.kind {
+                        // ponytail: a parallel point light shines as a point light does,
+                        // attenuated by distance, where retained mode's shines in parallel
+                        // from where it is; nothing on the roster has been seen to use one.
+                        1 | 4 => Light::Point {
+                            colour,
+                            position,
+                            range,
+                            attenuation,
+                        },
+                        2 => Light::Spot {
+                            colour,
+                            position,
+                            direction,
+                            range,
+                            attenuation,
+                            inner: cone_cos(light.umbra.unwrap_or(0.4)),
+                            outer: cone_cos(light.penumbra.unwrap_or(0.8)),
+                        },
+                        _ => Light::Directional { colour, direction },
+                    }
+                }
+                other => {
+                    return Err(Stop::NotWritten {
+                        what: format!("IDirect3DRMViewport2::Render: a light of kind {other}"),
+                        caller: 0,
+                    })
+                }
+            };
+            lights.push((ctx.state.identity(light.enable_frame), converted));
+        }
+    }
     for &child in &node.children {
-        let child_instance = instance.map(|(_, on)| {
+        let child_instance = instance.map(|(world, on)| {
             let local = ctx
                 .state
                 .scene
@@ -2076,21 +2085,57 @@ fn collect_visits(
                 .map_or(super::scene::IDENTITY, |f| f.local);
             (super::scene::multiply(&local, &world), on)
         });
-        collect_visits(ctx, child, visits, meshes, depth + 1, child_instance)?;
+        collect_scene(
+            ctx,
+            child,
+            visits,
+            meshes,
+            lights,
+            depth + 1,
+            child_instance,
+        )?;
     }
     Ok(())
 }
 
+/// Six-bit frustum outcode matching [`super::pipeline::clip_into`]'s six
+/// half-space planes. Non-finite coordinates return `0` so pathological inputs
+/// always fall through to full clipping.
+#[inline]
+fn frustum_outcode(c: [f32; 4]) -> u8 {
+    let [x, y, z, w] = c;
+    if !(x.is_finite() && y.is_finite() && z.is_finite() && w.is_finite()) {
+        return 0;
+    }
+    let mut code = 0u8;
+    if w + x < 0.0 {
+        code |= 1 << 0;
+    }
+    if w - x < 0.0 {
+        code |= 1 << 1;
+    }
+    if w + y < 0.0 {
+        code |= 1 << 2;
+    }
+    if w - y < 0.0 {
+        code |= 1 << 3;
+    }
+    if z < 0.0 {
+        code |= 1 << 4;
+    }
+    if w - z < 0.0 {
+        code |= 1 << 5;
+    }
+    code
+}
+
 /// What a viewport draws every mesh of a render with (#120).
-struct MeshPass<'a> {
+struct MeshPass {
     immediate: u32,
     device_quality: u32,
     linear: bool,
     canvas: super::d3d::Canvas,
     clip_from_world: Matrix,
-    /// The direction back towards the camera.
-    viewer: [f32; 3],
-    lights: &'a [(u32, super::pipeline::Light)],
 }
 
 /// `D3DRMRENDERQUALITY`'s three parts: how a face is shaded, whether the
@@ -2159,18 +2204,34 @@ fn draw_mesh_pass(
             place: super::pipeline::Viewport::whole(x, y, w, h),
         },
         clip_from_world,
-        viewer,
-        lights: &scratch.lights,
     };
+    let any_scoped_lights = scratch.lights.iter().any(|(only, _)| *only != 0);
+    if !any_scoped_lights {
+        scratch.mesh_lights.clear();
+        scratch
+            .mesh_lights
+            .extend(scratch.lights.iter().map(|(_, light)| *light));
+        scratch
+            .prepared_lights
+            .prepare([0.0; 3], &scratch.mesh_lights, Some(viewer));
+    }
+    let mut last_frame: Option<u32> = None;
     for &(world, frame, mesh) in &scratch.meshes {
+        if any_scoped_lights && last_frame != Some(frame) {
+            fill_lights_on(ctx.state, &scratch.lights, frame, &mut scratch.mesh_lights);
+            scratch
+                .prepared_lights
+                .prepare([0.0; 3], &scratch.mesh_lights, Some(viewer));
+            last_frame = Some(frame);
+        }
         draw_mesh(
             ctx,
             &pass,
             &world,
-            frame,
             mesh,
-            &mut scratch.mesh_lights,
-            &mut scratch.vertices,
+            &scratch.prepared_lights,
+            &mut scratch.clip_slots,
+            &mut scratch.lit_slots,
             &mut scratch.triangles,
         )?;
     }
@@ -2191,15 +2252,16 @@ fn draw_mesh_pass(
 #[allow(clippy::too_many_arguments)]
 fn draw_mesh(
     ctx: &mut Ctx<'_>,
-    pass: &MeshPass<'_>,
+    pass: &MeshPass,
     world: &Matrix,
-    frame: u32,
     mesh: u32,
-    lights: &mut Vec<super::pipeline::Light>,
-    vertices: &mut Vec<Option<super::pipeline::Clipped>>,
+    prepared_lights: &super::pipeline::PreparedLights,
+    clip_slots: &mut Vec<super::scene::ClipSlot>,
+    lit_slots: &mut Vec<super::scene::LitSlot>,
     triangles: &mut Vec<[super::pipeline::Clipped; 3]>,
 ) -> Result<(), Stop> {
     use super::pipeline::{self, Clipped};
+    use super::scene::{ClipSlot, LitSlot};
     use crate::raster::{Blend, Combine, Compare, States};
     const METHOD: &str = "IDirect3DRMViewport::Render";
     let unwritten = |what: String| Stop::NotWritten {
@@ -2210,7 +2272,7 @@ fn draw_mesh(
         return Ok(());
     };
     let clip_from_model = super::scene::multiply(world, &pass.clip_from_world);
-    fill_lights_on(ctx.state, pass.lights, frame, lights);
+    let has_positional = prepared_lights.has_positional();
     for group in 0..groups {
         let scene = &ctx.state.scene;
         let g = &scene.meshes[&mesh].groups[group];
@@ -2228,6 +2290,7 @@ fn draw_mesh(
         if part(SHADE_MASK) > SHADE_GOURAUD {
             return Err(unwritten(format!("a group shaded as {}", part(SHADE_MASK))));
         }
+        let flat = part(SHADE_MASK) == SHADE_FLAT;
         let lit = part(LIGHT_MASK) != 0;
         let colour = pipeline::colour(
             g.colour
@@ -2264,59 +2327,193 @@ fn draw_mesh(
             power: material.map_or(0.0, |m| m.power),
         };
         let highlights = surface.specular != [0.0; 4];
-        // Every vertex once, lit where it is in the world.
-        vertices.clear();
-        vertices.extend(g.vertices.iter().map(|vertex| {
-            let vertex = (*vertex)?;
-            let v = |i: usize| value(vertex[i]);
-            let position = [v(0), v(1), v(2), 1.0];
-            let (diffuse, specular) = if lit {
-                let at = pipeline::project(world, position);
-                pipeline::lit(
-                    [at[0], at[1], at[2]],
-                    super::scene::direct(world, [v(3), v(4), v(5)]),
-                    &surface,
-                    [0.0; 3],
-                    lights,
-                    highlights.then_some(pass.viewer),
-                )
+
+        // Project clip coordinates and 6-bit frustum outcodes first so
+        // off-screen groups and faces skip world-space lighting entirely.
+        clip_slots.clear();
+        let mut group_and = 0x3fu8;
+        let mut any_unset = false;
+        let mut any_valid = false;
+        for vertex in &g.vertices {
+            if let Some(vertex) = *vertex {
+                let position = [value(vertex[0]), value(vertex[1]), value(vertex[2]), 1.0];
+                let clip = pipeline::project(&clip_from_model, position);
+                let outcode = frustum_outcode(clip);
+                group_and &= outcode;
+                any_valid = true;
+                clip_slots.push(ClipSlot {
+                    clip,
+                    outcode,
+                    valid: true,
+                });
             } else {
-                (colour, [0.0; 3])
-            };
-            Some(Clipped {
-                clip: pipeline::project(&clip_from_model, position),
-                diffuse,
-                specular,
-                uv: [v(6), v(7)],
-                fog: 1.0,
-            })
-        }));
-        let corner = |index: u32| {
-            vertices
-                .get(index as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| unwritten(format!("a face's vertex {index}, never set")))
-        };
-        // Each face a fan of triangles from its first corner.
-        triangles.clear();
-        for face in g.indices.chunks_exact(g.per_face as usize) {
-            let first = corner(face[0])?;
-            for pair in face[1..].windows(2) {
-                triangles.push([first, corner(pair[0])?, corner(pair[1])?]);
+                any_unset = true;
+                clip_slots.push(ClipSlot {
+                    clip: [0.0; 4],
+                    outcode: 0,
+                    valid: false,
+                });
             }
         }
+
+        let validate_corner = |index: u32| -> Result<ClipSlot, Stop> {
+            clip_slots
+                .get(index as usize)
+                .copied()
+                .filter(|c| c.valid)
+                .ok_or_else(|| unwritten(format!("a face's vertex {index}, never set")))
+        };
+
+        triangles.clear();
+        let mut any_nonzero_specular = false;
+        let mut all_finite_diffuse = true;
+        let mut all_finite_positive_w = true;
+
+        if any_valid && group_and != 0 {
+            // Every valid vertex lies outside the same frustum plane. Still
+            // validate face vertex indices if any vertex was unset or out of
+            // bounds so unset-vertex walls fire identically.
+            if any_unset || !g.all_indices_in_bounds {
+                for face in g.indices.chunks_exact(g.per_face as usize) {
+                    validate_corner(face[0])?;
+                    for pair in face[1..].windows(2) {
+                        validate_corner(pair[0])?;
+                        validate_corner(pair[1])?;
+                    }
+                }
+            }
+        } else {
+            if lit {
+                lit_slots.clear();
+                lit_slots.resize(g.vertices.len(), LitSlot::default());
+            }
+            let mut light_vertex = |index: usize| -> ([f32; 4], [f32; 3]) {
+                if !lit {
+                    return (colour, [0.0; 3]);
+                }
+                let slot = &mut lit_slots[index];
+                if slot.valid {
+                    return (slot.diffuse, slot.specular);
+                }
+                let raw = g.vertices[index].expect("validated vertex");
+                let pos = if has_positional {
+                    let at = pipeline::project(
+                        world,
+                        [value(raw[0]), value(raw[1]), value(raw[2]), 1.0],
+                    );
+                    [at[0], at[1], at[2]]
+                } else {
+                    [0.0; 3]
+                };
+                let normal =
+                    super::scene::direct(world, [value(raw[3]), value(raw[4]), value(raw[5])]);
+                let (diffuse, specular) =
+                    pipeline::lit_prepared(pos, normal, &surface, prepared_lights, highlights);
+                *slot = LitSlot {
+                    diffuse,
+                    specular,
+                    valid: true,
+                };
+                if specular.iter().any(|&s| s != 0.0) {
+                    any_nonzero_specular = true;
+                }
+                if !diffuse.iter().all(|d| d.is_finite()) {
+                    all_finite_diffuse = false;
+                }
+                (diffuse, specular)
+            };
+            let uv_of = |index: usize| -> [f32; 2] {
+                let raw = g.vertices[index].expect("validated vertex");
+                [value(raw[6]), value(raw[7])]
+            };
+            // Each face a fan of triangles from its first corner.
+            for face in g.indices.chunks_exact(g.per_face as usize) {
+                let i0 = face[0];
+                let c0 = validate_corner(i0)?;
+                for pair in face[1..].windows(2) {
+                    let (i1, i2) = (pair[0], pair[1]);
+                    let c1 = validate_corner(i1)?;
+                    let c2 = validate_corner(i2)?;
+                    if (c0.outcode & c1.outcode & c2.outcode) != 0 {
+                        continue;
+                    }
+                    if !(c0.clip[3] > 0.0
+                        && c0.clip[3].is_finite()
+                        && c1.clip[3] > 0.0
+                        && c1.clip[3].is_finite()
+                        && c2.clip[3] > 0.0
+                        && c2.clip[3].is_finite())
+                    {
+                        all_finite_positive_w = false;
+                    }
+                    let (u0, u1, u2) = (i0 as usize, i1 as usize, i2 as usize);
+                    let (d0, s0) = light_vertex(u0);
+                    let ((d1, s1), (d2, s2)) = if flat {
+                        ((d0, s0), (d0, s0))
+                    } else {
+                        (light_vertex(u1), light_vertex(u2))
+                    };
+                    triangles.push([
+                        Clipped {
+                            clip: c0.clip,
+                            diffuse: d0,
+                            specular: s0,
+                            uv: uv_of(u0),
+                            fog: 1.0,
+                        },
+                        Clipped {
+                            clip: c1.clip,
+                            diffuse: d1,
+                            specular: s1,
+                            uv: uv_of(u1),
+                            fog: 1.0,
+                        },
+                        Clipped {
+                            clip: c2.clip,
+                            diffuse: d2,
+                            specular: s2,
+                            uv: uv_of(u2),
+                            fog: 1.0,
+                        },
+                    ]);
+                }
+            }
+        }
+        if triangles.is_empty() {
+            if texture != 0 {
+                if let Some(ComState::Surface {
+                    format, palette, ..
+                }) = ctx.state.com(texture).map(|o| &o.state)
+                {
+                    if format.masks == [0; 4]
+                        && !matches!(
+                            ctx.state.com(*palette).map(|o| &o.state),
+                            Some(ComState::Palette { .. })
+                        )
+                    {
+                        return Err(unwritten("an indexed texture with no palette".to_owned()));
+                    }
+                }
+            }
+            continue;
+        }
+        let blend = (colour[3] < 1.0).then_some((Blend::SourceAlpha, Blend::InverseSourceAlpha));
+        let specular = lit
+            && highlights
+            && (any_nonzero_specular
+                || !all_finite_diffuse
+                || (!flat && (!all_finite_positive_w || blend.is_some())));
         let states = States {
             depth_test: Some(Compare::LessEqual),
             depth_write: true,
-            flat: part(SHADE_MASK) == SHADE_FLAT,
+            flat,
             colour: Combine::Modulate,
             alpha: Combine::Modulate,
             linear: pass.linear,
             colour_key: false,
             alpha_test: None,
-            blend: (colour[3] < 1.0).then_some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
-            specular: lit && highlights,
+            blend,
+            specular,
             fog: None,
         };
         // D3DCULL_CCW.
@@ -2613,16 +2810,22 @@ fn relative(ctx: &Ctx<'_>, method: &str, this: u32, reference: u32) -> Result<Ma
     let under = ctx.state.identity(reference);
     if under != 0 {
         let (mut at, mut down) = (ctx.state.identity(this), super::scene::IDENTITY);
+        let mut slot = ctx.state.scene.frames.slot_of(at);
         for _ in 0..=ctx.state.scene.frames.len() {
             if at == under {
                 return Ok(down);
             }
-            match ctx.state.scene.frame(at) {
-                Some(f) if f.parent != 0 => {
+            match slot {
+                Some(s) => {
+                    let f = ctx.state.scene.frames.by_slot(s);
+                    if f.parent == 0 {
+                        break;
+                    }
                     down = super::scene::multiply(&down, &f.local);
                     at = f.parent;
+                    slot = ctx.state.scene.frames.parent_slot_of(f);
                 }
-                _ => break,
+                None => break,
             }
         }
     }
@@ -2642,6 +2845,64 @@ fn relative(ctx: &Ctx<'_>, method: &str, this: u32, reference: u32) -> Result<Ma
             }
         })?;
     Ok(super::scene::multiply(&world, &into))
+}
+
+/// Row 3 of [`relative`]: the frame's origin in a reference frame's space,
+/// bit-for-bit identical to `relative(ctx, method, this, reference)`'s row 3
+/// without multiplying rows 0..=2.
+fn relative_origin(
+    ctx: &Ctx<'_>,
+    method: &str,
+    this: u32,
+    reference: u32,
+) -> Result<[f32; 3], Stop> {
+    let under = ctx.state.identity(reference);
+    if under != 0 {
+        let (mut at, mut row) = (ctx.state.identity(this), super::scene::IDENTITY[3]);
+        let mut slot = ctx.state.scene.frames.slot_of(at);
+        for _ in 0..=ctx.state.scene.frames.len() {
+            if at == under {
+                return Ok([row[0], row[1], row[2]]);
+            }
+            match slot {
+                Some(s) => {
+                    let f = ctx.state.scene.frames.by_slot(s);
+                    if f.parent == 0 {
+                        break;
+                    }
+                    row = super::scene::multiply_row(row, &f.local);
+                    at = f.parent;
+                    slot = ctx.state.scene.frames.parent_slot_of(f);
+                }
+                None => break,
+            }
+        }
+    }
+    let world_row = ctx
+        .state
+        .scene
+        .world_origin_row(this)
+        .ok_or_else(|| Stop::NotWritten {
+            what: format!("IDirect3DRMFrame3::{method}: {this:#x} is not a frame"),
+            caller: 0,
+        })?;
+    if reference == 0 {
+        let row = if world_row.iter().all(|v| v.is_finite()) {
+            world_row
+        } else {
+            super::scene::multiply_row(world_row, &super::scene::IDENTITY)
+        };
+        return Ok([row[0], row[1], row[2]]);
+    }
+    let into =
+        super::scene::invert(&self::reference(ctx, method, reference)?).ok_or_else(|| {
+            Stop::NotWritten {
+                what: format!("IDirect3DRMFrame3::{method}: a reference that flattens space"),
+                caller: 0,
+            }
+        })?;
+    let row = super::scene::multiply_row(world_row, &into);
+    Ok([row[0], row[1], row[2]])
 }
 
 fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -2825,8 +3086,8 @@ fn get_scene_background(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u
 fn get_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetPosition(reference, out): the frame's origin in the reference's
     // space.
-    let m = relative(ctx, "GetPosition", this, args[0])?;
-    write_vector(ctx, args[1], [m[3][0], m[3][1], m[3][2]])?;
+    let pos = relative_origin(ctx, "GetPosition", this, args[0])?;
+    write_vector(ctx, args[1], pos)?;
     Ok(S_OK)
 }
 
@@ -3749,4 +4010,321 @@ fn viewport_get_width(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32
 
 fn viewport_get_height(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     Ok(viewport_rect(ctx, this).3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{pipeline, scene, Ctx, State};
+    use super::{frustum_outcode, relative, relative_origin};
+    use crate::cli::Trace;
+    use crate::guest::GuestMem;
+    use crate::host::headless::Headless;
+    use crate::machine::Machine;
+    use crate::runlog::RunLog;
+    use crate::title::Title;
+    use crate::win32::ComState;
+
+    fn with_test_ctx<T>(run: impl FnOnce(&mut Ctx<'_>) -> T) -> T {
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&Title::STUB, &mut host).expect("stub machine");
+        let mut log = RunLog::create("d3drm-test", Trace::Off).expect("run log");
+        let dir = log.dir().to_path_buf();
+        let out = {
+            let mut ctx = Ctx {
+                cpu: &mut machine.cpu,
+                mem: &mut machine.arena,
+                state: &mut machine.state,
+                title: &Title::STUB,
+                log: &mut log,
+                tree: &mut machine.tree,
+                modules: &mut machine.modules,
+                clock_millis: 0,
+                boundary: &mut machine.boundary,
+                call_guest: None,
+                float_answer: None,
+                answer_is_the_call_s: false,
+            };
+            run(&mut ctx)
+        };
+        drop(log);
+        let _ = std::fs::remove_dir_all(dir);
+        out
+    }
+
+    #[test]
+    fn frustum_outcode_rejection_matches_full_clipping_including_w_le_zero_and_nan() {
+        let mut seed = 0x9e37_79b9u32;
+        let mut next_f32 = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let u = (seed >> 8) as f32 / ((1u32 << 24) as f32);
+            u * 6.0 - 3.0
+        };
+        let specials: &[[f32; 4]] = &[
+            [0.0, 0.0, 0.5, 1.0],
+            [0.0, 0.0, -1.0, -1.0],
+            [-2.0, 0.0, -2.0, -1.0],
+            [2.0, 0.0, -2.0, -1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [f32::NAN, 0.0, 0.5, 1.0],
+            [0.0, f32::NAN, 0.5, 1.0],
+            [0.0, 0.0, 0.5, f32::NAN],
+            [f32::NEG_INFINITY, 0.0, 0.0, f32::INFINITY],
+            [f32::INFINITY, 0.0, 0.5, 1.0],
+        ];
+        // Exhaustive triples of special points (w <= 0, w == 0, NaN, ±Inf).
+        for &a in specials {
+            for &b in specials {
+                for &c in specials {
+                    let rejected =
+                        (frustum_outcode(a) & frustum_outcode(b) & frustum_outcode(c)) != 0;
+                    if rejected {
+                        let tri = [
+                            pipeline::Clipped {
+                                clip: a,
+                                ..pipeline::Clipped::default()
+                            },
+                            pipeline::Clipped {
+                                clip: b,
+                                ..pipeline::Clipped::default()
+                            },
+                            pipeline::Clipped {
+                                clip: c,
+                                ..pipeline::Clipped::default()
+                            },
+                        ];
+                        let clipped = pipeline::clip(&tri);
+                        assert!(
+                            clipped.len() < 3,
+                            "outcode rejected surviving special tri {a:?}, {b:?}, {c:?} -> {clipped:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // 4,000 pseudo-random triangles across positive, zero, and negative w.
+        for _ in 0..4000 {
+            let tri: [pipeline::Clipped; 3] = std::array::from_fn(|_| pipeline::Clipped {
+                clip: [next_f32(), next_f32(), next_f32(), next_f32()],
+                ..pipeline::Clipped::default()
+            });
+            let rejected = (frustum_outcode(tri[0].clip)
+                & frustum_outcode(tri[1].clip)
+                & frustum_outcode(tri[2].clip))
+                != 0;
+            if rejected {
+                let clipped = pipeline::clip(&tri);
+                assert!(
+                    clipped.len() < 3,
+                    "outcode rejected surviving random tri {:?} -> {clipped:?}",
+                    tri.map(|v| v.clip)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relative_origin_matches_relative_row_3_bit_for_bit() {
+        with_test_ctx(|ctx| {
+            let root = 0x1000;
+            let a = 0x2000;
+            let b = 0x3000;
+            let c = 0x4000;
+            let nan_frame = 0x5000;
+            ctx.state.scene.add(root, 0);
+            ctx.state.scene.add(a, root);
+            ctx.state.scene.add(b, a);
+            ctx.state.scene.add(c, root);
+            ctx.state.scene.add(nan_frame, b);
+
+            let mut ma = scene::rotation([0.0, 1.0, 0.0], 0.7);
+            ma[3] = [3.5, -1.25, 4.0, 1.0];
+            ctx.state.scene.frame_mut(a).unwrap().local = ma;
+
+            let mut mb = scene::rotation([1.0, 0.0, 0.0], -0.4);
+            mb[3] = [-2.0, 5.0, 1.5, 1.0];
+            ctx.state.scene.frame_mut(b).unwrap().local = mb;
+
+            let mut mc = scene::rotation([0.0, 0.0, 1.0], 1.1);
+            mc[3] = [10.0, -3.0, 2.0, 1.0];
+            ctx.state.scene.frame_mut(c).unwrap().local = mc;
+
+            let mut mn = scene::IDENTITY;
+            mn[3] = [
+                std::hint::black_box(f32::from_bits(0x7f80_0009)),
+                -0.0,
+                2.0,
+                1.0,
+            ];
+            ctx.state.scene.frame_mut(nan_frame).unwrap().local = mn;
+
+            for &(frame, reference) in &[
+                (b, 0),
+                (b, root),
+                (b, a),
+                (b, b),
+                (b, c),
+                (nan_frame, 0),
+                (nan_frame, root),
+                (nan_frame, c),
+            ] {
+                let full = relative(ctx, "GetPosition", frame, reference).unwrap();
+                let fast = relative_origin(ctx, "GetPosition", frame, reference).unwrap();
+                assert_eq!(
+                    fast.map(f32::to_bits),
+                    [full[3][0], full[3][1], full[3][2]].map(f32::to_bits),
+                    "frame={frame:#x} ref={reference:#x}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn lazy_flat_and_culled_mesh_draw_preserves_unset_walls_and_matches_pixel_output() {
+        use crate::raster::PixelFormat;
+
+        let run_draw = |flat: bool,
+                        offscreen: bool,
+                        unset_vertex: bool|
+         -> Result<Vec<u8>, crate::cpu::Stop> {
+            with_test_ctx(|ctx| {
+                let surface_addr = 0x0010_0000u32;
+                let (w, h) = (32u32, 32u32);
+                let pitch = w * 2;
+                ctx.mem
+                    .write(surface_addr, &vec![0u8; (pitch * h) as usize])
+                    .unwrap();
+
+                let surface = State::make_com(
+                    ctx,
+                    &super::super::ddraw::DIRECT_DRAW_SURFACE,
+                    ComState::Surface {
+                        width: w,
+                        height: h,
+                        pitch,
+                        pixels: surface_addr,
+                        format: PixelFormat::RGB565,
+                        primary: false,
+                        caps: 0,
+                        palette: 0,
+                        back: 0,
+                    },
+                )
+                .unwrap();
+                let immediate = State::make_com(
+                    ctx,
+                    &super::super::d3d::DEVICE2,
+                    ComState::Device3D { surface },
+                )
+                .unwrap();
+                let device = State::make_com(
+                    ctx,
+                    &super::DEVICE2,
+                    ComState::RetainedDevice {
+                        surface,
+                        buffers: 1,
+                        immediate,
+                    },
+                )
+                .unwrap();
+                let quality = super::FILL_SOLID
+                    | 0x08
+                    | if flat {
+                        super::SHADE_FLAT
+                    } else {
+                        super::SHADE_GOURAUD
+                    };
+                ctx.state.set_values.insert((device, "quality"), quality);
+
+                let root = 0x1000;
+                let mesh_id = 0x2000;
+                ctx.state.scene.add(root, 0);
+                let z = if offscreen { -5.0f32 } else { 2.0f32 };
+                let vert = |x: f32, y: f32, z: f32, nx: f32, ny: f32, nz: f32| {
+                    Some([
+                        x.to_bits(),
+                        y.to_bits(),
+                        z.to_bits(),
+                        nx.to_bits(),
+                        ny.to_bits(),
+                        nz.to_bits(),
+                        0,
+                        0,
+                        0,
+                    ])
+                };
+                let vertices = vec![
+                    vert(-0.5, -0.5, z, 0.0, 0.0, -1.0),
+                    if unset_vertex {
+                        None
+                    } else {
+                        vert(0.0, 0.5, z, 0.0, 1.0, 0.0)
+                    },
+                    vert(0.5, -0.5, z, 1.0, 0.0, 0.0),
+                ];
+                let indices = vec![0, 1, 2];
+                ctx.state.scene.meshes.insert(
+                    mesh_id,
+                    scene::Mesh {
+                        groups: vec![scene::Group {
+                            vertices,
+                            per_face: 3,
+                            indices,
+                            all_indices_in_bounds: true,
+                            colour: Some(0xffff_ffff),
+                            mapping: None,
+                            quality: Some(quality),
+                            material: 0,
+                            texture: 0,
+                        }],
+                    },
+                );
+
+                let view = scene::View::default();
+                let clip_from_world = view.perspective(w, h);
+                let mut scratch = scene::RenderScratch::default();
+                scratch.meshes.push((scene::IDENTITY, root, mesh_id));
+                scratch.lights.push((
+                    0,
+                    pipeline::Light::Directional {
+                        colour: [1.0, 0.8, 0.6],
+                        direction: [0.0, 0.0, 1.0],
+                    },
+                ));
+                super::draw_mesh_pass(
+                    ctx,
+                    device,
+                    immediate,
+                    (0, 0, w, h),
+                    clip_from_world,
+                    [0.0, 0.0, -1.0],
+                    &mut scratch,
+                )?;
+                Ok(ctx
+                    .mem
+                    .slice(surface_addr, (pitch * h) as usize)
+                    .unwrap()
+                    .to_vec())
+            })
+        };
+
+        // An off-screen group with an unset referenced vertex MUST still fire the exact wall.
+        let err = run_draw(true, true, true).unwrap_err();
+        match err {
+            crate::cpu::Stop::NotWritten { what, .. } => {
+                assert!(what.contains("a face's vertex 1, never set"), "{what}");
+            }
+            other => panic!("expected unset-vertex wall, got {other:?}"),
+        }
+        // An off-screen valid group draws nothing.
+        let off = run_draw(true, true, false).unwrap();
+        assert!(off.iter().all(|&b| b == 0));
+        // An on-screen flat group draws non-zero lit pixels using face[0]'s normal.
+        let on_flat = run_draw(true, false, false).unwrap();
+        assert!(on_flat.iter().any(|&b| b != 0));
+        // Gouraud shades smoothly across the distinct vertex normals.
+        let on_gouraud = run_draw(false, false, false).unwrap();
+        assert!(on_gouraud.iter().any(|&b| b != 0));
+        assert_ne!(on_flat, on_gouraud);
+    }
 }
