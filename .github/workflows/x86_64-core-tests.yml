@@ -21,14 +21,14 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal --no-self-update
           rustup default 1.98.0
           rustc --version
-      - name: Run lego-legacy-core unit and interpreter tests
+      - name: Run interpreter and determinism tests (native)
         shell: bash
-        run: |
-          cargo test -p lego-legacy-core --lib
-          cargo test -p lego-legacy-core --test interp --test arch_determinism
-      - name: Verify pure-Rust oracle parity toggle
+        run: cargo test -p lego-legacy-core --test interp --test arch_determinism
+      - name: Run interpreter and determinism tests (pure-Rust oracle)
         shell: bash
         env:
           LEGO_LEGACY_ARCH: rust
-        run: |
-          cargo test -p lego-legacy-core --test interp --test arch_determinism
+        run: cargo test -p lego-legacy-core --test interp --test arch_determinism
+      - name: Run lego-legacy-core unit tests
+        shell: bash
+        run: cargo test -p lego-legacy-core --lib
