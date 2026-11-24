@@ -281,3 +281,189 @@ pub struct Insn {
     pub rep: Option<Rep>,
     pub len: u8,
 }
+
+/// Sentinel register index meaning "no register in this addressing slot".
+///
+/// Bit 7 is set so presence is a single sign/bit test (`(reg as i8) >= 0`).
+pub const NO_REG: u8 = 0xff;
+
+/// Bit in [`FastInsn::scale`] indicating a memory operand adds `seg_base[FS]`.
+pub const FLAG_FS: u8 = 0x04;
+
+/// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::AluMemReg`] and
+/// [`FastOp::AluMemImm`].
+pub const ALU_ADD: u8 = 0;
+pub const ALU_SUB: u8 = 1;
+pub const ALU_CMP: u8 = 2;
+pub const ALU_AND: u8 = 3;
+pub const ALU_OR: u8 = 4;
+pub const ALU_XOR: u8 = 5;
+pub const ALU_TEST: u8 = 6;
+
+/// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::ShiftRegCl`] and
+/// [`FastOp::ShiftMem`].
+pub const SHIFT_SHL: u8 = 0;
+pub const SHIFT_SHR: u8 = 1;
+pub const SHIFT_SAR: u8 = 2;
+/// Bit in [`FastInsn::aux`] for [`FastOp::ShiftMem`] selecting `CL` count over immediate.
+pub const SHIFT_CL: u8 = 0x80;
+
+/// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::ExtendReg`] and
+/// [`FastOp::ExtendMem`].
+pub const EXTEND_ZX8: u8 = 0;
+pub const EXTEND_ZX16: u8 = 1;
+pub const EXTEND_SX8: u8 = 2;
+pub const EXTEND_SX16: u8 = 3;
+
+/// Operation tag for [`FastInsn`].
+///
+/// Non-terminal operations occupy `0..=47` and terminal control-transfer
+/// operations occupy `48..=55`, keeping both straight-line and terminal
+/// dispatch tables dense and ready for static `naked_asm!` dispatch (#253, #256).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FastOp {
+    /// Fallback to the cold [`Insn`] table indexed by [`FastInsn::disp`].
+    #[default]
+    Slow = 0,
+    Nop = 1,
+
+    // Data movement and address calculation.
+    MovRegReg = 2,
+    MovRegImm = 3,
+    MovRegMem = 4,
+    MovMemReg = 5,
+    MovMemImm = 6,
+    Lea = 7,
+    ExtendReg = 8,
+    ExtendMem = 9,
+
+    // Flat32 stack operations.
+    PushReg = 10,
+    PushImm = 11,
+    PushMem = 12,
+    PopReg = 13,
+    PopMem = 14,
+
+    // Flat32 register-destination ALU.
+    AddRegReg = 15,
+    AddRegImm = 16,
+    AddRegMem = 17,
+    SubRegReg = 18,
+    SubRegImm = 19,
+    SubRegMem = 20,
+    CmpRegReg = 21,
+    CmpRegImm = 22,
+    CmpRegMem = 23,
+    AndRegReg = 24,
+    AndRegImm = 25,
+    AndRegMem = 26,
+    OrRegReg = 27,
+    OrRegImm = 28,
+    OrRegMem = 29,
+    XorRegReg = 30,
+    XorRegImm = 31,
+    XorRegMem = 32,
+    TestRegReg = 33,
+    TestRegImm = 34,
+
+    // Flat32 memory-destination ALU (`aux` selects `ALU_*`).
+    AluMemReg = 35,
+    AluMemImm = 36,
+
+    // Flat32 increment / decrement.
+    IncReg = 37,
+    DecReg = 38,
+    IncMem = 39,
+    DecMem = 40,
+
+    // Flat32 shifts (`shl`/`sal`, `shr`, `sar`).
+    ShlRegImm = 41,
+    ShrRegImm = 42,
+    SarRegImm = 43,
+    ShiftRegCl = 44,
+    ShiftMem = 45,
+
+    // Pre-decoded x87 dispatch (`imm` indexes the compact `x87_ops` table).
+    X87Reg = 46,
+    X87Mem = 47,
+
+    // Terminal control transfers (only ever appear as the final op of a run).
+    JmpRel = 48,
+    JccRel = 49,
+    CallRel = 50,
+    Ret = 51,
+    JmpReg = 52,
+    JmpMem = 53,
+    CallReg = 54,
+    CallMem = 55,
+}
+
+impl FastOp {
+    /// Whether this op is one of the terminal control-transfer shapes.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_terminal(self) -> bool {
+        (self as u8) >= Self::JmpRel as u8
+    }
+}
+
+/// Compact 16-byte flat32 IR instruction for hot-path execution (#253).
+///
+/// Four instructions share one 64-byte cache line, and the fixed `#[repr(C)]`
+/// field offsets let Wave 2 `naked_asm!` (#256) consume the stream directly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FastInsn {
+    pub op: FastOp,
+    pub len: u8,
+    pub dst: u8,
+    pub src: u8,
+    pub base: u8,
+    pub index: u8,
+    pub scale: u8,
+    pub aux: u8,
+    pub disp: i32,
+    pub imm: u32,
+}
+
+impl FastInsn {
+    #[must_use]
+    pub const fn slow(len: u8, slow_idx: u32) -> Self {
+        Self {
+            op: FastOp::Slow,
+            len,
+            dst: NO_REG,
+            src: NO_REG,
+            base: NO_REG,
+            index: NO_REG,
+            scale: 0,
+            aux: 0,
+            disp: slow_idx as i32,
+            imm: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FastInsn, FastOp};
+    use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn fast_insn_layout_is_compact_16_byte_repr_c() {
+        assert_eq!(size_of::<FastOp>(), 1);
+        assert_eq!(size_of::<FastInsn>(), 16);
+        assert_eq!(align_of::<FastInsn>(), 4);
+        assert_eq!(offset_of!(FastInsn, op), 0);
+        assert_eq!(offset_of!(FastInsn, len), 1);
+        assert_eq!(offset_of!(FastInsn, dst), 2);
+        assert_eq!(offset_of!(FastInsn, src), 3);
+        assert_eq!(offset_of!(FastInsn, base), 4);
+        assert_eq!(offset_of!(FastInsn, index), 5);
+        assert_eq!(offset_of!(FastInsn, scale), 6);
+        assert_eq!(offset_of!(FastInsn, aux), 7);
+        assert_eq!(offset_of!(FastInsn, disp), 8);
+        assert_eq!(offset_of!(FastInsn, imm), 12);
+    }
+}

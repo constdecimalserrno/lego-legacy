@@ -4,8 +4,13 @@
 //! bytes were read: the decoder has already said what the operands are, and
 //! the cache means it said so once.
 
-use super::insn::{BcdOp, BitOp, FlagBit, Insn, Kind, MemRef, Op, Rep, ShiftOp, StringOp, Width};
-use super::{Cpu, Mode, Processor, Stop, EAX, EBX, ECX, EDI, EDX, ESI, ESP};
+use super::insn::{
+    BcdOp, BitOp, FastInsn, FastOp, FlagBit, Insn, Kind, MemRef, Op, Rep, Seg, ShiftOp, StringOp,
+    Width, ALU_ADD, ALU_AND, ALU_CMP, ALU_OR, ALU_SUB, ALU_TEST, ALU_XOR, EXTEND_SX16, EXTEND_SX8,
+    EXTEND_ZX16, EXTEND_ZX8, FLAG_FS, NO_REG, SHIFT_CL, SHIFT_SAR, SHIFT_SHL, SHIFT_SHR,
+};
+use super::x87::X87Op;
+use super::{Cpu, Mode, Processor, Stop, EAX, EBX, ECX, EDI, EDX, ESI, ESP, FS};
 use crate::guest::{Arena, GuestMem};
 
 /// Where a value comes from and goes back to.
@@ -213,51 +218,398 @@ fn branch(cpu: &mut Cpu, target: u32, w: Width) {
     };
 }
 
-/// The handful of instruction shapes that are most of every run, named once
-/// at decode time so that running one reads no description (#70).
-///
-/// Measured over Alpha Team's menu route: 324 distinct `(kind, operand
-/// shapes, width)` triples are executed in four hundred million instructions,
-/// and these five are **46%** of them — `mov r32, [mem]` alone is 16.6% and
-/// `push r32` 12.3%. Running one through [`execute`] costs a match on the
-/// kind, a match on each operand's shape, a match on the width inside
-/// `read_reg`/`write_reg`, and a match on the width again inside the memory
-/// access. A shape named here does none of them, and that is worth **11%** of
-/// the whole run: 106 to 118 million instructions a second, same cursor, same
-/// flips.
-///
-/// Naming more shapes was measured and is not worth it: the next seven, a
-/// further 23% of instructions, gave 117 — the wider dispatch costs what the
-/// narrower bodies save. The list stops where it stops paying.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Fast {
-    /// Anything not named here, which [`execute`] runs as it always has.
-    #[default]
-    Slow,
-    MovRegMem32,
-    MovMemReg32,
-    MovRegReg32,
-    PushReg32,
-    PopReg32,
+/// Encode a flat32 [`MemRef`] into `(base, index, scale_flags, disp)`, or
+/// return `None` when the operand needs the slow path (`addr16` or 386
+/// real-mode `base_shift`).
+fn encode_mem(m: MemRef) -> Option<(u8, u8, u8, i32)> {
+    if m.addr16 || m.base_shift != 0 {
+        return None;
+    }
+    let base = m.base.unwrap_or(NO_REG);
+    let (index, shift) = match m.index {
+        Some((r, s)) => (r, s & 3),
+        None => (NO_REG, 0),
+    };
+    let fs = if m.seg == Seg::Fs { FLAG_FS } else { 0 };
+    Some((base, index, shift | fs, m.disp))
 }
 
-/// Which shape an instruction is, worked out once when it is decoded.
+/// Compile one decoded [`Insn`] into a compact 16-byte flat32 [`FastInsn`].
 ///
-/// The stack shapes are only named when the stack is thirty-two bits wide, so
-/// that the fast path never has to ask.
+/// Real-mode execution (`mode.real`), `rep`-prefixed instructions, non-32-bit
+/// widths (other than `nop`, `movzx`/`movsx` into 32-bit, and `x87`), and
+/// `addr16`/`base_shift` operands spill into `slow_insns` and dispatch through
+/// [`execute`], keeping 80386 conformance exact (#253).
 #[must_use]
-pub fn shape_of(insn: &Insn, mode: Mode) -> Fast {
-    if insn.width != Width::B32 || insn.rep.is_some() {
-        return Fast::Slow;
+pub fn compile_fast(
+    insn: &Insn,
+    mode: Mode,
+    slow_insns: &mut Vec<Insn>,
+    x87_ops: &mut Vec<X87Op>,
+) -> FastInsn {
+    let mut make_slow = || {
+        let idx = u32::try_from(slow_insns.len()).unwrap_or(u32::MAX);
+        slow_insns.push(*insn);
+        FastInsn::slow(insn.len, idx)
+    };
+
+    if mode.real || insn.rep.is_some() {
+        return make_slow();
     }
+
+    let plain = |op: FastOp| FastInsn {
+        op,
+        len: insn.len,
+        dst: NO_REG,
+        src: NO_REG,
+        base: NO_REG,
+        index: NO_REG,
+        scale: 0,
+        aux: 0,
+        disp: 0,
+        imm: 0,
+    };
+
+    let mem_insn = |op: FastOp, (base, index, scale, disp): (u8, u8, u8, i32)| FastInsn {
+        op,
+        len: insn.len,
+        dst: NO_REG,
+        src: NO_REG,
+        base,
+        index,
+        scale,
+        aux: 0,
+        disp,
+        imm: 0,
+    };
+
+    if let Kind::Nop = insn.kind {
+        return plain(FastOp::Nop);
+    }
+
+    if let Kind::X87(xop) = insn.kind {
+        return match insn.dst {
+            None => {
+                let idx = u32::try_from(x87_ops.len()).unwrap_or(u32::MAX);
+                x87_ops.push(xop);
+                FastInsn {
+                    imm: idx,
+                    ..plain(FastOp::X87Reg)
+                }
+            }
+            Some(Op::Mem(m)) => match encode_mem(m) {
+                Some(enc) => {
+                    let idx = u32::try_from(x87_ops.len()).unwrap_or(u32::MAX);
+                    x87_ops.push(xop);
+                    FastInsn {
+                        imm: idx,
+                        ..mem_insn(FastOp::X87Mem, enc)
+                    }
+                }
+                None => make_slow(),
+            },
+            _ => make_slow(),
+        };
+    }
+
+    if insn.width != Width::B32 {
+        return make_slow();
+    }
+
     match (insn.kind, insn.dst, insn.src) {
-        (Kind::Mov, Some(Op::Reg(_)), Some(Op::Mem(_))) => Fast::MovRegMem32,
-        (Kind::Mov, Some(Op::Mem(_)), Some(Op::Reg(_))) => Fast::MovMemReg32,
-        (Kind::Mov, Some(Op::Reg(_)), Some(Op::Reg(_))) => Fast::MovRegReg32,
-        (Kind::Push, _, Some(Op::Reg(_))) if stack32(mode) => Fast::PushReg32,
-        (Kind::Pop, Some(Op::Reg(_)), _) if stack32(mode) => Fast::PopReg32,
-        _ => Fast::Slow,
+        (Kind::Mov, Some(Op::Reg(d)), Some(Op::Reg(s))) => FastInsn {
+            dst: d,
+            src: s,
+            ..plain(FastOp::MovRegReg)
+        },
+        (Kind::Mov, Some(Op::Reg(d)), Some(Op::Imm(imm))) => FastInsn {
+            dst: d,
+            imm,
+            ..plain(FastOp::MovRegImm)
+        },
+        (Kind::Mov, Some(Op::Reg(d)), Some(Op::Mem(m))) => match encode_mem(m) {
+            Some(enc) => FastInsn {
+                dst: d,
+                ..mem_insn(FastOp::MovRegMem, enc)
+            },
+            None => make_slow(),
+        },
+        (Kind::Mov, Some(Op::Mem(m)), Some(Op::Reg(s))) => match encode_mem(m) {
+            Some(enc) => FastInsn {
+                src: s,
+                ..mem_insn(FastOp::MovMemReg, enc)
+            },
+            None => make_slow(),
+        },
+        (Kind::Mov, Some(Op::Mem(m)), Some(Op::Imm(imm))) => match encode_mem(m) {
+            Some(enc) => FastInsn {
+                imm,
+                ..mem_insn(FastOp::MovMemImm, enc)
+            },
+            None => make_slow(),
+        },
+        (Kind::Lea, Some(Op::Reg(d)), Some(Op::Mem(m))) => match encode_mem(m) {
+            Some((base, index, scale, disp)) => FastInsn {
+                dst: d,
+                // `lea` computes an offset only and never adds a segment base.
+                ..mem_insn(FastOp::Lea, (base, index, scale & 3, disp))
+            },
+            None => make_slow(),
+        },
+        (Kind::Extend { signed, from }, Some(Op::Reg(d)), Some(src)) => {
+            let aux = match (signed, from) {
+                (false, Width::B8) => EXTEND_ZX8,
+                (false, Width::B16) => EXTEND_ZX16,
+                (true, Width::B8) => EXTEND_SX8,
+                (true, Width::B16) => EXTEND_SX16,
+                _ => return make_slow(),
+            };
+            match src {
+                Op::Reg(s) => FastInsn {
+                    dst: d,
+                    src: s,
+                    aux,
+                    ..plain(FastOp::ExtendReg)
+                },
+                Op::Mem(m) => match encode_mem(m) {
+                    Some(enc) => FastInsn {
+                        dst: d,
+                        aux,
+                        ..mem_insn(FastOp::ExtendMem, enc)
+                    },
+                    None => make_slow(),
+                },
+                Op::Imm(_) => make_slow(),
+            }
+        }
+        (Kind::Push, _, Some(Op::Reg(s))) => FastInsn {
+            src: s,
+            ..plain(FastOp::PushReg)
+        },
+        (Kind::Push, _, Some(Op::Imm(imm))) => FastInsn {
+            imm,
+            ..plain(FastOp::PushImm)
+        },
+        (Kind::Push, _, Some(Op::Mem(m))) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::PushMem, enc),
+            None => make_slow(),
+        },
+        (Kind::Pop, Some(Op::Reg(d)), _) => FastInsn {
+            dst: d,
+            ..plain(FastOp::PopReg)
+        },
+        (Kind::Pop, Some(Op::Mem(m)), _) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::PopMem, enc),
+            None => make_slow(),
+        },
+        (
+            Kind::Add | Kind::Sub | Kind::Cmp | Kind::And | Kind::Or | Kind::Xor | Kind::Test,
+            Some(dst),
+            Some(src),
+        ) => {
+            let alu = match insn.kind {
+                Kind::Add => ALU_ADD,
+                Kind::Sub => ALU_SUB,
+                Kind::Cmp => ALU_CMP,
+                Kind::And => ALU_AND,
+                Kind::Or => ALU_OR,
+                Kind::Xor => ALU_XOR,
+                _ => ALU_TEST,
+            };
+            match (dst, src) {
+                (Op::Reg(d), Op::Reg(s)) => {
+                    let op = match insn.kind {
+                        Kind::Add => FastOp::AddRegReg,
+                        Kind::Sub => FastOp::SubRegReg,
+                        Kind::Cmp => FastOp::CmpRegReg,
+                        Kind::And => FastOp::AndRegReg,
+                        Kind::Or => FastOp::OrRegReg,
+                        Kind::Xor => FastOp::XorRegReg,
+                        _ => FastOp::TestRegReg,
+                    };
+                    FastInsn {
+                        dst: d,
+                        src: s,
+                        ..plain(op)
+                    }
+                }
+                (Op::Reg(d), Op::Imm(imm)) => {
+                    let op = match insn.kind {
+                        Kind::Add => FastOp::AddRegImm,
+                        Kind::Sub => FastOp::SubRegImm,
+                        Kind::Cmp => FastOp::CmpRegImm,
+                        Kind::And => FastOp::AndRegImm,
+                        Kind::Or => FastOp::OrRegImm,
+                        Kind::Xor => FastOp::XorRegImm,
+                        _ => FastOp::TestRegImm,
+                    };
+                    FastInsn {
+                        dst: d,
+                        imm,
+                        ..plain(op)
+                    }
+                }
+                (Op::Reg(d), Op::Mem(m)) => {
+                    let op = match insn.kind {
+                        Kind::Add => FastOp::AddRegMem,
+                        Kind::Sub => FastOp::SubRegMem,
+                        Kind::Cmp => FastOp::CmpRegMem,
+                        Kind::And => FastOp::AndRegMem,
+                        Kind::Or => FastOp::OrRegMem,
+                        Kind::Xor => FastOp::XorRegMem,
+                        _ => return make_slow(),
+                    };
+                    match encode_mem(m) {
+                        Some(enc) => FastInsn {
+                            dst: d,
+                            ..mem_insn(op, enc)
+                        },
+                        None => make_slow(),
+                    }
+                }
+                (Op::Mem(m), Op::Reg(s)) => match encode_mem(m) {
+                    Some(enc) => FastInsn {
+                        src: s,
+                        aux: alu,
+                        ..mem_insn(FastOp::AluMemReg, enc)
+                    },
+                    None => make_slow(),
+                },
+                (Op::Mem(m), Op::Imm(imm)) => match encode_mem(m) {
+                    Some(enc) => FastInsn {
+                        aux: alu,
+                        imm,
+                        ..mem_insn(FastOp::AluMemImm, enc)
+                    },
+                    None => make_slow(),
+                },
+                _ => make_slow(),
+            }
+        }
+        (Kind::Inc, Some(Op::Reg(d)), _) => FastInsn {
+            dst: d,
+            ..plain(FastOp::IncReg)
+        },
+        (Kind::Dec, Some(Op::Reg(d)), _) => FastInsn {
+            dst: d,
+            ..plain(FastOp::DecReg)
+        },
+        (Kind::Inc, Some(Op::Mem(m)), _) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::IncMem, enc),
+            None => make_slow(),
+        },
+        (Kind::Dec, Some(Op::Mem(m)), _) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::DecMem, enc),
+            None => make_slow(),
+        },
+        (Kind::Shift(which), Some(dst), Some(src)) => {
+            let kind = match which {
+                ShiftOp::Shl | ShiftOp::Sal => SHIFT_SHL,
+                ShiftOp::Shr => SHIFT_SHR,
+                ShiftOp::Sar => SHIFT_SAR,
+                _ => return make_slow(),
+            };
+            match (dst, src) {
+                (Op::Reg(d), Op::Imm(c)) => {
+                    let count = (c & 0x1f) as u8;
+                    if count == 0 {
+                        plain(FastOp::Nop)
+                    } else {
+                        let op = match kind {
+                            SHIFT_SHL => FastOp::ShlRegImm,
+                            SHIFT_SHR => FastOp::ShrRegImm,
+                            _ => FastOp::SarRegImm,
+                        };
+                        FastInsn {
+                            dst: d,
+                            src: count,
+                            ..plain(op)
+                        }
+                    }
+                }
+                (Op::Reg(d), Op::Reg(r)) if usize::from(r) == ECX => FastInsn {
+                    dst: d,
+                    aux: kind,
+                    ..plain(FastOp::ShiftRegCl)
+                },
+                (Op::Mem(m), Op::Imm(c)) => {
+                    let count = (c & 0x1f) as u8;
+                    if count == 0 {
+                        plain(FastOp::Nop)
+                    } else {
+                        match encode_mem(m) {
+                            Some(enc) => FastInsn {
+                                src: count,
+                                aux: kind,
+                                ..mem_insn(FastOp::ShiftMem, enc)
+                            },
+                            None => make_slow(),
+                        }
+                    }
+                }
+                (Op::Mem(m), Op::Reg(r)) if usize::from(r) == ECX => match encode_mem(m) {
+                    Some(enc) => FastInsn {
+                        aux: kind | SHIFT_CL,
+                        ..mem_insn(FastOp::ShiftMem, enc)
+                    },
+                    None => make_slow(),
+                },
+                _ => make_slow(),
+            }
+        }
+        (Kind::Jmp, _, Some(Op::Imm(rel))) => FastInsn {
+            disp: rel as i32,
+            ..plain(FastOp::JmpRel)
+        },
+        (Kind::Jmp, _, Some(Op::Reg(s))) => FastInsn {
+            src: s,
+            ..plain(FastOp::JmpReg)
+        },
+        (Kind::Jmp, _, Some(Op::Mem(m))) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::JmpMem, enc),
+            None => make_slow(),
+        },
+        (Kind::Jcc(cc), _, Some(Op::Imm(rel))) => FastInsn {
+            dst: cc,
+            disp: rel as i32,
+            ..plain(FastOp::JccRel)
+        },
+        (Kind::Call, _, Some(Op::Imm(rel))) => FastInsn {
+            disp: rel as i32,
+            ..plain(FastOp::CallRel)
+        },
+        (Kind::Call, _, Some(Op::Reg(s))) => FastInsn {
+            src: s,
+            ..plain(FastOp::CallReg)
+        },
+        (Kind::Call, _, Some(Op::Mem(m))) => match encode_mem(m) {
+            Some(enc) => mem_insn(FastOp::CallMem, enc),
+            None => make_slow(),
+        },
+        (Kind::Ret, _, None) => plain(FastOp::Ret),
+        (Kind::Ret, _, Some(Op::Imm(n))) => FastInsn {
+            imm: n,
+            ..plain(FastOp::Ret)
+        },
+        _ => make_slow(),
     }
+}
+
+/// Effective address for a flat32 [`FastInsn`], skipping `addr16`/`base_shift`
+/// and adding `seg_base[FS]` only when `FLAG_FS` is set.
+#[inline(always)]
+fn effective_flat32(cpu: &Cpu, insn: &FastInsn) -> u32 {
+    let mut addr = insn.disp as u32;
+    if (insn.base as i8) >= 0 {
+        addr = addr.wrapping_add(cpu.r[(insn.base & 7) as usize]);
+    }
+    if (insn.index as i8) >= 0 {
+        addr = addr.wrapping_add(cpu.r[(insn.index & 7) as usize] << (insn.scale & 3));
+    }
+    if (insn.scale & FLAG_FS) != 0 {
+        addr = addr.wrapping_add(cpu.seg_base[FS]);
+    }
+    addr
 }
 
 #[inline(always)]
@@ -270,60 +622,471 @@ fn write32(mem: &mut Arena, addr: u32, value: u32) -> Result<(), Stop> {
     mem.write_u32(addr, value).map_err(Stop::Fault)
 }
 
-/// Run one instruction of a named shape, or hand it to [`execute`].
-///
-/// Every arm falls back to [`execute`] when the instruction is not the shape
-/// it was named as, so a shape worked out wrongly is slow rather than wrong.
 #[inline(always)]
-pub fn execute_fast(
-    fast: Fast,
+fn shift32(flags: &mut super::flags::Flags, kind: u8, a: u32, count: u32) -> u32 {
+    match kind {
+        SHIFT_SHL => {
+            let r = a << count;
+            flags.cf = (a >> (32 - count)) & 1 != 0;
+            flags.logic_keep_carry32(r);
+            flags.of = ((r as i32) < 0) != flags.cf;
+            r
+        }
+        SHIFT_SHR => {
+            let r = a >> count;
+            flags.cf = (a >> (count - 1)) & 1 != 0;
+            flags.logic_keep_carry32(r);
+            flags.of = (a as i32) < 0;
+            r
+        }
+        _ => {
+            let signed = a as i32;
+            let r = (signed >> count) as u32;
+            flags.cf = (signed >> (count - 1)) & 1 != 0;
+            flags.logic_keep_carry32(r);
+            flags.of = false;
+            r
+        }
+    }
+}
+
+#[inline(always)]
+fn alu_mem32(cpu: &mut Cpu, mem: &mut Arena, insn: &FastInsn, b: u32) -> Result<(), Stop> {
+    let ea = effective_flat32(cpu, insn);
+    let a = read32(mem, ea)?;
+    match insn.aux {
+        ALU_ADD => {
+            let r = cpu.flags.add32(a, b);
+            write32(mem, ea, r)
+        }
+        ALU_SUB => {
+            let r = cpu.flags.sub32(a, b);
+            write32(mem, ea, r)
+        }
+        ALU_CMP => {
+            cpu.flags.sub32(a, b);
+            Ok(())
+        }
+        ALU_AND => {
+            let r = a & b;
+            cpu.flags.logic32(r);
+            write32(mem, ea, r)
+        }
+        ALU_OR => {
+            let r = a | b;
+            cpu.flags.logic32(r);
+            write32(mem, ea, r)
+        }
+        ALU_XOR => {
+            let r = a ^ b;
+            cpu.flags.logic32(r);
+            write32(mem, ea, r)
+        }
+        _ => {
+            cpu.flags.logic32(a & b);
+            Ok(())
+        }
+    }
+}
+
+/// Out-of-line slow fallback so the hot flat32 dispatch loop stays compact and
+/// register-friendly.
+#[cold]
+#[inline(never)]
+fn execute_slow(
     cpu: &mut Cpu,
     mem: &mut Arena,
-    insn: &Insn,
+    slow_insns: &[Insn],
+    idx: u32,
     mode: Mode,
+    tsc: u64,
 ) -> Result<(), Stop> {
-    match fast {
-        Fast::MovRegMem32 => {
-            let (Some(Op::Reg(d)), Some(Op::Mem(m))) = (insn.dst, insn.src) else {
-                return execute(cpu, mem, insn, mode);
-            };
-            cpu.r[d as usize] = read32(mem, effective(cpu, &m))?;
+    cpu.tsc = tsc;
+    execute(cpu, mem, &slow_insns[idx as usize], mode)
+}
+
+/// Execute one non-terminal straight-line [`FastInsn`].
+#[inline(always)]
+pub fn execute_straight(
+    insn: &FastInsn,
+    cpu: &mut Cpu,
+    mem: &mut Arena,
+    slow_insns: &[Insn],
+    x87_ops: &[X87Op],
+    mode: Mode,
+    tsc: u64,
+) -> Result<(), Stop> {
+    match insn.op {
+        FastOp::Slow => execute_slow(cpu, mem, slow_insns, insn.disp as u32, mode, tsc),
+        FastOp::Nop => Ok(()),
+        FastOp::MovRegReg => {
+            cpu.r[(insn.dst & 7) as usize] = cpu.r[(insn.src & 7) as usize];
             Ok(())
         }
-        Fast::MovMemReg32 => {
-            let (Some(Op::Mem(m)), Some(Op::Reg(sr))) = (insn.dst, insn.src) else {
-                return execute(cpu, mem, insn, mode);
-            };
-            let value = cpu.r[sr as usize];
-            write32(mem, effective(cpu, &m), value)
-        }
-        Fast::MovRegReg32 => {
-            let (Some(Op::Reg(d)), Some(Op::Reg(sr))) = (insn.dst, insn.src) else {
-                return execute(cpu, mem, insn, mode);
-            };
-            cpu.r[d as usize] = cpu.r[sr as usize];
+        FastOp::MovRegImm => {
+            cpu.r[(insn.dst & 7) as usize] = insn.imm;
             Ok(())
         }
-        Fast::PushReg32 => {
-            let Some(Op::Reg(sr)) = insn.src else {
-                return execute(cpu, mem, insn, mode);
+        FastOp::MovRegMem => {
+            let ea = effective_flat32(cpu, insn);
+            cpu.r[(insn.dst & 7) as usize] = read32(mem, ea)?;
+            Ok(())
+        }
+        FastOp::MovMemReg => {
+            let ea = effective_flat32(cpu, insn);
+            let value = cpu.r[(insn.src & 7) as usize];
+            write32(mem, ea, value)
+        }
+        FastOp::MovMemImm => {
+            let ea = effective_flat32(cpu, insn);
+            write32(mem, ea, insn.imm)
+        }
+        FastOp::Lea => {
+            cpu.r[(insn.dst & 7) as usize] = effective_flat32(cpu, insn);
+            Ok(())
+        }
+        FastOp::ExtendReg => {
+            let d = (insn.dst & 7) as usize;
+            let s = insn.src & 7;
+            cpu.r[d] = match insn.aux {
+                EXTEND_ZX8 => read_reg(cpu, s, Width::B8),
+                EXTEND_ZX16 => cpu.r[s as usize] & 0xffff,
+                EXTEND_SX8 => i32::from(read_reg(cpu, s, Width::B8) as u8 as i8) as u32,
+                _ => i32::from(cpu.r[s as usize] as u16 as i16) as u32,
             };
-            let value = cpu.r[sr as usize];
+            Ok(())
+        }
+        FastOp::ExtendMem => {
+            let d = (insn.dst & 7) as usize;
+            let ea = effective_flat32(cpu, insn);
+            cpu.r[d] = match insn.aux {
+                EXTEND_ZX8 => u32::from(mem.read_u8(ea).map_err(Stop::Fault)?),
+                EXTEND_ZX16 => u32::from(mem.read_u16(ea).map_err(Stop::Fault)?),
+                EXTEND_SX8 => i32::from(mem.read_u8(ea).map_err(Stop::Fault)? as i8) as u32,
+                _ => i32::from(mem.read_u16(ea).map_err(Stop::Fault)? as i16) as u32,
+            };
+            Ok(())
+        }
+        FastOp::PushReg => {
+            let value = cpu.r[(insn.src & 7) as usize];
             let sp = cpu.r[ESP].wrapping_sub(4);
             cpu.r[ESP] = sp;
-            write32(mem, cpu.seg_base[super::SS].wrapping_add(sp), value)
+            write32(mem, sp, value)
         }
-        Fast::PopReg32 => {
-            let Some(Op::Reg(d)) = insn.dst else {
-                return execute(cpu, mem, insn, mode);
-            };
+        FastOp::PushImm => {
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, sp, insn.imm)
+        }
+        FastOp::PushMem => {
+            let ea = effective_flat32(cpu, insn);
+            let value = read32(mem, ea)?;
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, sp, value)
+        }
+        FastOp::PopReg => {
             let sp = cpu.r[ESP];
-            let value = read32(mem, cpu.seg_base[super::SS].wrapping_add(sp))?;
+            let value = read32(mem, sp)?;
             cpu.r[ESP] = sp.wrapping_add(4);
-            cpu.r[d as usize] = value;
+            cpu.r[(insn.dst & 7) as usize] = value;
             Ok(())
         }
-        Fast::Slow => execute(cpu, mem, insn, mode),
+        FastOp::PopMem => {
+            let sp = cpu.r[ESP];
+            let value = read32(mem, sp)?;
+            cpu.r[ESP] = sp.wrapping_add(4);
+            let ea = effective_flat32(cpu, insn);
+            write32(mem, ea, value)
+        }
+        FastOp::AddRegReg => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.add32(cpu.r[d], cpu.r[(insn.src & 7) as usize]);
+            Ok(())
+        }
+        FastOp::AddRegImm => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.add32(cpu.r[d], insn.imm);
+            Ok(())
+        }
+        FastOp::AddRegMem => {
+            let d = (insn.dst & 7) as usize;
+            let b = read32(mem, effective_flat32(cpu, insn))?;
+            cpu.r[d] = cpu.flags.add32(cpu.r[d], b);
+            Ok(())
+        }
+        FastOp::SubRegReg => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.sub32(cpu.r[d], cpu.r[(insn.src & 7) as usize]);
+            Ok(())
+        }
+        FastOp::SubRegImm => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.sub32(cpu.r[d], insn.imm);
+            Ok(())
+        }
+        FastOp::SubRegMem => {
+            let d = (insn.dst & 7) as usize;
+            let b = read32(mem, effective_flat32(cpu, insn))?;
+            cpu.r[d] = cpu.flags.sub32(cpu.r[d], b);
+            Ok(())
+        }
+        FastOp::CmpRegReg => {
+            cpu.flags.sub32(
+                cpu.r[(insn.dst & 7) as usize],
+                cpu.r[(insn.src & 7) as usize],
+            );
+            Ok(())
+        }
+        FastOp::CmpRegImm => {
+            cpu.flags.sub32(cpu.r[(insn.dst & 7) as usize], insn.imm);
+            Ok(())
+        }
+        FastOp::CmpRegMem => {
+            let b = read32(mem, effective_flat32(cpu, insn))?;
+            cpu.flags.sub32(cpu.r[(insn.dst & 7) as usize], b);
+            Ok(())
+        }
+        FastOp::AndRegReg => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] & cpu.r[(insn.src & 7) as usize];
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::AndRegImm => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] & insn.imm;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::AndRegMem => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] & read32(mem, effective_flat32(cpu, insn))?;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::OrRegReg => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] | cpu.r[(insn.src & 7) as usize];
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::OrRegImm => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] | insn.imm;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::OrRegMem => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] | read32(mem, effective_flat32(cpu, insn))?;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::XorRegReg => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] ^ cpu.r[(insn.src & 7) as usize];
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::XorRegImm => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] ^ insn.imm;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::XorRegMem => {
+            let d = (insn.dst & 7) as usize;
+            let r = cpu.r[d] ^ read32(mem, effective_flat32(cpu, insn))?;
+            cpu.flags.logic32(r);
+            cpu.r[d] = r;
+            Ok(())
+        }
+        FastOp::TestRegReg => {
+            let r = cpu.r[(insn.dst & 7) as usize] & cpu.r[(insn.src & 7) as usize];
+            cpu.flags.logic32(r);
+            Ok(())
+        }
+        FastOp::TestRegImm => {
+            let r = cpu.r[(insn.dst & 7) as usize] & insn.imm;
+            cpu.flags.logic32(r);
+            Ok(())
+        }
+        FastOp::AluMemReg => alu_mem32(cpu, mem, insn, cpu.r[(insn.src & 7) as usize]),
+        FastOp::AluMemImm => alu_mem32(cpu, mem, insn, insn.imm),
+        FastOp::IncReg => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.inc32(cpu.r[d]);
+            Ok(())
+        }
+        FastOp::DecReg => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = cpu.flags.dec32(cpu.r[d]);
+            Ok(())
+        }
+        FastOp::IncMem => {
+            let ea = effective_flat32(cpu, insn);
+            let before = read32(mem, ea)?;
+            let r = cpu.flags.inc32(before);
+            write32(mem, ea, r)
+        }
+        FastOp::DecMem => {
+            let ea = effective_flat32(cpu, insn);
+            let before = read32(mem, ea)?;
+            let r = cpu.flags.dec32(before);
+            write32(mem, ea, r)
+        }
+        FastOp::ShlRegImm => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SHL, cpu.r[d], u32::from(insn.src));
+            Ok(())
+        }
+        FastOp::ShrRegImm => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SHR, cpu.r[d], u32::from(insn.src));
+            Ok(())
+        }
+        FastOp::SarRegImm => {
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SAR, cpu.r[d], u32::from(insn.src));
+            Ok(())
+        }
+        FastOp::ShiftRegCl => {
+            let count = cpu.r[ECX] & 0x1f;
+            if count == 0 {
+                return Ok(());
+            }
+            let d = (insn.dst & 7) as usize;
+            cpu.r[d] = shift32(&mut cpu.flags, insn.aux, cpu.r[d], count);
+            Ok(())
+        }
+        FastOp::ShiftMem => {
+            let count = if insn.aux & SHIFT_CL != 0 {
+                cpu.r[ECX] & 0x1f
+            } else {
+                u32::from(insn.src)
+            };
+            if count == 0 {
+                return Ok(());
+            }
+            let ea = effective_flat32(cpu, insn);
+            let a = read32(mem, ea)?;
+            let r = shift32(&mut cpu.flags, insn.aux & 3, a, count);
+            write32(mem, ea, r)
+        }
+        FastOp::X87Reg => super::x87::execute(cpu, mem, x87_ops[insn.imm as usize], 0),
+        FastOp::X87Mem => {
+            let ea = effective_flat32(cpu, insn);
+            super::x87::execute(cpu, mem, x87_ops[insn.imm as usize], ea)
+        }
+        FastOp::JmpRel
+        | FastOp::JccRel
+        | FastOp::CallRel
+        | FastOp::Ret
+        | FastOp::JmpReg
+        | FastOp::JmpMem
+        | FastOp::CallReg
+        | FastOp::CallMem => {
+            debug_assert!(false, "terminal op reached execute_straight");
+            Ok(())
+        }
+    }
+}
+
+/// Execute one terminal control-transfer [`FastInsn`] with `cpu.eip` already
+/// pointing at the fallthrough instruction.
+#[inline(always)]
+pub fn execute_terminal(
+    insn: &FastInsn,
+    cpu: &mut Cpu,
+    mem: &mut Arena,
+    slow_insns: &[Insn],
+    mode: Mode,
+    tsc: u64,
+) -> Result<(), Stop> {
+    match insn.op {
+        FastOp::JmpRel => {
+            cpu.eip = cpu.eip.wrapping_add(insn.disp as u32);
+            Ok(())
+        }
+        FastOp::JccRel => {
+            if condition(insn.dst, cpu) {
+                cpu.eip = cpu.eip.wrapping_add(insn.disp as u32);
+            }
+            Ok(())
+        }
+        FastOp::CallRel => {
+            let ret = cpu.eip;
+            let target = ret.wrapping_add(insn.disp as u32);
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, sp, ret)?;
+            cpu.eip = target;
+            Ok(())
+        }
+        FastOp::Ret => {
+            let sp = cpu.r[ESP];
+            let target = read32(mem, sp)?;
+            cpu.r[ESP] = sp.wrapping_add(4).wrapping_add(insn.imm);
+            cpu.eip = target;
+            Ok(())
+        }
+        FastOp::JmpReg => {
+            cpu.eip = cpu.r[(insn.src & 7) as usize];
+            Ok(())
+        }
+        FastOp::JmpMem => {
+            cpu.eip = read32(mem, effective_flat32(cpu, insn))?;
+            Ok(())
+        }
+        FastOp::CallReg => {
+            let ret = cpu.eip;
+            let target = cpu.r[(insn.src & 7) as usize];
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, sp, ret)?;
+            cpu.eip = target;
+            Ok(())
+        }
+        FastOp::CallMem => {
+            let ret = cpu.eip;
+            let target = read32(mem, effective_flat32(cpu, insn))?;
+            let sp = cpu.r[ESP].wrapping_sub(4);
+            cpu.r[ESP] = sp;
+            write32(mem, sp, ret)?;
+            cpu.eip = target;
+            Ok(())
+        }
+        FastOp::Slow => execute_slow(cpu, mem, slow_insns, insn.disp as u32, mode, tsc),
+        _ => {
+            debug_assert!(false, "non-terminal op reached execute_terminal");
+            Ok(())
+        }
+    }
+}
+
+/// Execute any single [`FastInsn`] (used by [`super::CpuEngine::step`]).
+#[inline(always)]
+pub fn execute_one_fast(
+    insn: &FastInsn,
+    cpu: &mut Cpu,
+    mem: &mut Arena,
+    slow_insns: &[Insn],
+    x87_ops: &[X87Op],
+    mode: Mode,
+) -> Result<(), Stop> {
+    if insn.op.is_terminal() {
+        execute_terminal(insn, cpu, mem, slow_insns, mode, cpu.tsc)
+    } else {
+        execute_straight(insn, cpu, mem, slow_insns, x87_ops, mode, cpu.tsc)
     }
 }
 
@@ -1713,5 +2476,230 @@ mod tests {
         let (_, res) = Interp::new(Mode::FLAT).run(&mut cpu, &mut mem, 1, 0..0);
         assert_eq!(res, Ok(()));
         assert!(!mem.unchanged());
+    }
+
+    #[test]
+    fn flat32_fast_insn_matches_slow_execute_bit_for_bit() {
+        use super::super::decode::decode;
+        use super::super::flags::Flags;
+        use super::super::insn::FastOp;
+        use super::super::{EBP, EBX, EDX, ESP, FS};
+        use super::{compile_fast, execute, execute_one_fast};
+
+        let cases: &[(&str, &[u8], FastOp)] = &[
+            ("nop", &[0x90], FastOp::Nop),
+            ("mov eax, ecx", &[0x89, 0xc8], FastOp::MovRegReg),
+            (
+                "mov edx, imm32",
+                &[0xba, 0x78, 0x56, 0x34, 0x12],
+                FastOp::MovRegImm,
+            ),
+            ("mov eax, [ebx+4]", &[0x8b, 0x43, 0x04], FastOp::MovRegMem),
+            (
+                "mov [ebx+esi*4+8], ecx",
+                &[0x89, 0x4c, 0xb3, 0x08],
+                FastOp::MovMemReg,
+            ),
+            (
+                "mov dword [ebx], imm32",
+                &[0xc7, 0x03, 0xef, 0xbe, 0xad, 0xde],
+                FastOp::MovMemImm,
+            ),
+            (
+                "mov eax, fs:[0]",
+                &[0x64, 0xa1, 0x00, 0x00, 0x00, 0x00],
+                FastOp::MovRegMem,
+            ),
+            (
+                "lea eax, fs:[ebx+esi*2+12]",
+                &[0x64, 0x8d, 0x44, 0x73, 0x0c],
+                FastOp::Lea,
+            ),
+            ("movzx eax, ah", &[0x0f, 0xb6, 0xc4], FastOp::ExtendReg),
+            ("movsx eax, ch", &[0x0f, 0xbe, 0xc5], FastOp::ExtendReg),
+            ("movzx eax, dx", &[0x0f, 0xb7, 0xc2], FastOp::ExtendReg),
+            ("movsx eax, dx", &[0x0f, 0xbf, 0xc2], FastOp::ExtendReg),
+            (
+                "movzx eax, byte [ebx]",
+                &[0x0f, 0xb6, 0x03],
+                FastOp::ExtendMem,
+            ),
+            (
+                "movsx eax, byte [ebx]",
+                &[0x0f, 0xbe, 0x03],
+                FastOp::ExtendMem,
+            ),
+            (
+                "movzx eax, word [ebx]",
+                &[0x0f, 0xb7, 0x03],
+                FastOp::ExtendMem,
+            ),
+            (
+                "movsx eax, word [ebx]",
+                &[0x0f, 0xbf, 0x03],
+                FastOp::ExtendMem,
+            ),
+            ("push esp", &[0x54], FastOp::PushReg),
+            ("push imm8", &[0x6a, 0x80], FastOp::PushImm),
+            ("push dword [ebx]", &[0xff, 0x33], FastOp::PushMem),
+            ("pop eax", &[0x58], FastOp::PopReg),
+            ("pop esp", &[0x5c], FastOp::PopReg),
+            (
+                "pop dword [esp+4]",
+                &[0x8f, 0x44, 0x24, 0x04],
+                FastOp::PopMem,
+            ),
+            ("add eax, ecx", &[0x01, 0xc8], FastOp::AddRegReg),
+            (
+                "add eax, imm32",
+                &[0x05, 0x11, 0x22, 0x33, 0x44],
+                FastOp::AddRegImm,
+            ),
+            ("add eax, [ebx]", &[0x03, 0x03], FastOp::AddRegMem),
+            ("sub eax, ecx", &[0x29, 0xc8], FastOp::SubRegReg),
+            ("sub eax, imm8", &[0x83, 0xe8, 0x07], FastOp::SubRegImm),
+            ("sub eax, [ebx]", &[0x2b, 0x03], FastOp::SubRegMem),
+            ("cmp eax, ecx", &[0x39, 0xc8], FastOp::CmpRegReg),
+            ("cmp eax, imm8", &[0x83, 0xf8, 0x05], FastOp::CmpRegImm),
+            ("cmp eax, [ebx]", &[0x3b, 0x03], FastOp::CmpRegMem),
+            ("and eax, ecx", &[0x21, 0xc8], FastOp::AndRegReg),
+            (
+                "and eax, imm32",
+                &[0x25, 0xff, 0x0f, 0x00, 0x80],
+                FastOp::AndRegImm,
+            ),
+            ("and eax, [ebx]", &[0x23, 0x03], FastOp::AndRegMem),
+            ("or eax, ecx", &[0x09, 0xc8], FastOp::OrRegReg),
+            ("or eax, imm8", &[0x83, 0xc8, 0x12], FastOp::OrRegImm),
+            ("or eax, [ebx]", &[0x0b, 0x03], FastOp::OrRegMem),
+            ("xor eax, ecx", &[0x31, 0xc8], FastOp::XorRegReg),
+            ("xor eax, imm8", &[0x83, 0xf0, 0xff], FastOp::XorRegImm),
+            ("xor eax, [ebx]", &[0x33, 0x03], FastOp::XorRegMem),
+            ("test eax, ecx", &[0x85, 0xc8], FastOp::TestRegReg),
+            (
+                "test eax, imm32",
+                &[0xa9, 0x01, 0x00, 0x00, 0x80],
+                FastOp::TestRegImm,
+            ),
+            ("add [ebx], ecx", &[0x01, 0x0b], FastOp::AluMemReg),
+            ("sub [ebx], ecx", &[0x29, 0x0b], FastOp::AluMemReg),
+            ("cmp [ebx], ecx", &[0x39, 0x0b], FastOp::AluMemReg),
+            ("and [ebx], ecx", &[0x21, 0x0b], FastOp::AluMemReg),
+            ("or [ebx], ecx", &[0x09, 0x0b], FastOp::AluMemReg),
+            ("xor [ebx], ecx", &[0x31, 0x0b], FastOp::AluMemReg),
+            ("test [ebx], ecx", &[0x85, 0x0b], FastOp::AluMemReg),
+            ("add dword [ebx], 5", &[0x83, 0x03, 0x05], FastOp::AluMemImm),
+            ("cmp dword [ebx], 5", &[0x83, 0x3b, 0x05], FastOp::AluMemImm),
+            (
+                "test dword [ebx], 5",
+                &[0xf7, 0x03, 0x05, 0x00, 0x00, 0x00],
+                FastOp::AluMemImm,
+            ),
+            ("inc eax", &[0x40], FastOp::IncReg),
+            ("dec edx", &[0x4a], FastOp::DecReg),
+            ("inc dword [ebx]", &[0xff, 0x03], FastOp::IncMem),
+            ("dec dword [ebx]", &[0xff, 0x0b], FastOp::DecMem),
+            ("shl eax, 1", &[0xd1, 0xe0], FastOp::ShlRegImm),
+            ("shl eax, 31", &[0xc1, 0xe0, 0x1f], FastOp::ShlRegImm),
+            ("shl eax, 0", &[0xc1, 0xe0, 0x20], FastOp::Nop),
+            ("shr eax, 5", &[0xc1, 0xe8, 0x05], FastOp::ShrRegImm),
+            ("sar eax, 5", &[0xc1, 0xf8, 0x05], FastOp::SarRegImm),
+            ("shl eax, cl", &[0xd3, 0xe0], FastOp::ShiftRegCl),
+            ("shr eax, cl", &[0xd3, 0xe8], FastOp::ShiftRegCl),
+            ("sar eax, cl", &[0xd3, 0xf8], FastOp::ShiftRegCl),
+            ("shl dword [ebx], 3", &[0xc1, 0x23, 0x03], FastOp::ShiftMem),
+            ("sar dword [ebx], cl", &[0xd3, 0x3b], FastOp::ShiftMem),
+            ("fld dword [ebx]", &[0xd9, 0x03], FastOp::X87Mem),
+            ("fld1", &[0xd9, 0xe8], FastOp::X87Reg),
+            ("jmp rel8", &[0xeb, 0x10], FastOp::JmpRel),
+            ("jz rel8", &[0x74, 0xfe], FastOp::JccRel),
+            ("jnz rel8", &[0x75, 0x08], FastOp::JccRel),
+            (
+                "call rel32",
+                &[0xe8, 0x20, 0x00, 0x00, 0x00],
+                FastOp::CallRel,
+            ),
+            ("ret", &[0xc3], FastOp::Ret),
+            ("ret 8", &[0xc2, 0x08, 0x00], FastOp::Ret),
+            ("jmp ecx", &[0xff, 0xe1], FastOp::JmpReg),
+            ("jmp dword [ebx]", &[0xff, 0x23], FastOp::JmpMem),
+            ("call ecx", &[0xff, 0xd1], FastOp::CallReg),
+            ("call dword [ebx]", &[0xff, 0x13], FastOp::CallMem),
+            ("addr16 fallback", &[0x67, 0x8b, 0x07], FastOp::Slow),
+        ];
+
+        for &(label, bytes, expected_op) in cases {
+            let insn = decode(bytes, Mode::FLAT).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let mut slow = Vec::new();
+            let mut x87 = Vec::new();
+            let fast = compile_fast(&insn, Mode::FLAT, &mut slow, &mut x87);
+            assert_eq!(fast.op, expected_op, "{label}: unexpected FastOp");
+
+            // Real mode always routes through FastOp::Slow.
+            let mut real_slow = Vec::new();
+            let mut real_x87 = Vec::new();
+            assert_eq!(
+                compile_fast(&insn, Mode::REAL, &mut real_slow, &mut real_x87).op,
+                FastOp::Slow,
+                "{label}: Mode::REAL must stay on Slow"
+            );
+
+            for ecx_val in [0x0000_0000u32, 0x8000_8003, 0xffff_ff20] {
+                let mut mem_ref = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+                let mut mem_fast = Arena::new(&mut Headless::new(), 1 << 16).unwrap();
+                for mem in [&mut mem_ref, &mut mem_fast] {
+                    mem.write_u32(0x2000, 0x8000_7f85).unwrap();
+                    mem.write_u32(0x2004, 0x1234_5678).unwrap();
+                    mem.write_u32(0x2010, 0xdead_beef).unwrap();
+                    mem.write_u32(0x3000, 0x0040_1234).unwrap();
+                    mem.write_u32(0x4000, 0x0000_5000).unwrap();
+                    mem.write_u32(0x4004, 0xabcd_ef01).unwrap();
+                    mem.mark_code(0x2000);
+                }
+
+                let mut init = Cpu {
+                    eip: CODE + u32::from(insn.len),
+                    flags: Flags::from_eflags(0x0024_0643),
+                    ..Cpu::default()
+                };
+                init.r[EAX] = 0x8000_fe05;
+                init.r[ECX] = ecx_val;
+                init.r[EDX] = 0xffff_807f;
+                init.r[EBX] = 0x2000;
+                init.r[ESP] = 0x4000;
+                init.r[EBP] = 0x4020;
+                init.r[ESI] = 2;
+                init.r[EDI] = 0x2008;
+                init.seg_base[FS] = 0x3000;
+
+                let mut cpu_ref = init;
+                let mut cpu_fast = init;
+                let res_ref = execute(&mut cpu_ref, &mut mem_ref, &insn, Mode::FLAT);
+                let res_fast =
+                    execute_one_fast(&fast, &mut cpu_fast, &mut mem_fast, &slow, &x87, Mode::FLAT);
+
+                assert_eq!(res_fast, res_ref, "{label} (ecx={ecx_val:#x}): result");
+                assert_eq!(cpu_fast.r, cpu_ref.r, "{label} (ecx={ecx_val:#x}): GPRs");
+                assert_eq!(cpu_fast.eip, cpu_ref.eip, "{label} (ecx={ecx_val:#x}): eip");
+                assert_eq!(
+                    cpu_fast.flags.to_eflags(),
+                    cpu_ref.flags.to_eflags(),
+                    "{label} (ecx={ecx_val:#x}): eflags"
+                );
+                assert!(
+                    cpu_fast.fpu.same_bits(&cpu_ref.fpu),
+                    "{label} (ecx={ecx_val:#x}): fpu"
+                );
+                assert_eq!(
+                    mem_fast.code_written, mem_ref.code_written,
+                    "{label} (ecx={ecx_val:#x}): code_written"
+                );
+                assert_eq!(
+                    mem_fast.slice(0x2000, 0x2100).unwrap(),
+                    mem_ref.slice(0x2000, 0x2100).unwrap(),
+                    "{label} (ecx={ecx_val:#x}): memory"
+                );
+            }
+        }
     }
 }

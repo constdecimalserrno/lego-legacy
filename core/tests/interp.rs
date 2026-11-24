@@ -334,3 +334,150 @@ fn rdtsc_reads_the_declared_cycle_counter() {
     assert_eq!(regs.r[EDX], 1, "the top half of the count");
     assert_eq!(regs.r[EAX], 2, "and the bottom, two instructions on");
 }
+
+#[test]
+fn mid_run_fault_and_terminal_fault_roll_back_eip_and_counts() {
+    use lego_legacy_core::cpu::{EBX, ESP};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+
+    // Straight-line run: `inc eax; inc eax; mov ebx, [0xffff_fff0]; inc eax`
+    // Faults on the 3rd instruction (offset +2) after retiring 2 instructions.
+    mem.write(
+        code,
+        &[0x40, 0x40, 0x8b, 0x1d, 0xf0, 0xff, 0xff, 0xff, 0x40],
+    )
+    .unwrap();
+    let mut regs = Cpu {
+        eip: code,
+        tsc: 100,
+        ..Cpu::default()
+    };
+    let mut engine = Interp::new(Mode::FLAT);
+    let (retired, res) = engine.run(&mut regs, &mut mem, 10, 0..0);
+    assert_eq!(retired, 2);
+    assert!(matches!(res, Err(Stop::Fault(_))));
+    assert_eq!(regs.eip, code + 2, "eip rolls back to faulting mov");
+    assert_eq!(regs.tsc, 102);
+    assert_eq!(regs.r[EAX], 2);
+    assert_eq!(regs.r[EBX], 0);
+
+    // Terminal fault: `inc eax; ret` with unmapped ESP rolls back to `ret`.
+    let code2 = 0x0040_0100u32;
+    mem.write(code2, &[0x40, 0xc3]).unwrap();
+    let mut regs = Cpu {
+        eip: code2,
+        tsc: 50,
+        ..Cpu::default()
+    };
+    regs.r[ESP] = 0xffff_fff0;
+    let (retired, res) = engine.run(&mut regs, &mut mem, 10, 0..0);
+    assert_eq!(retired, 1);
+    assert!(matches!(res, Err(Stop::Fault(_))));
+    assert_eq!(regs.eip, code2 + 1, "eip rolls back to faulting ret");
+    assert_eq!(regs.tsc, 51);
+    assert_eq!(regs.r[EAX], 1);
+}
+
+#[test]
+fn mid_run_interrupt_and_halt_preserve_exact_retirement_and_eip() {
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+
+    // `inc eax; inc eax; int 0x2e` -> retires 3, eip after int, tsc += 2.
+    mem.write(code, &[0x40, 0x40, 0xcd, 0x2e]).unwrap();
+    let mut regs = Cpu {
+        eip: code,
+        tsc: 10,
+        ..Cpu::default()
+    };
+    let mut engine = Interp::new(Mode::FLAT);
+    let (retired, res) = engine.run(&mut regs, &mut mem, 10, 0..0);
+    assert_eq!(retired, 3);
+    assert_eq!(res, Err(Stop::Interrupt(0x2e)));
+    assert_eq!(regs.eip, code + 4);
+    assert_eq!(regs.tsc, 12);
+    assert_eq!(regs.r[EAX], 2);
+
+    // `inc eax; hlt` -> retires 1, eip after hlt, tsc += 1.
+    let code2 = 0x0040_0100u32;
+    mem.write(code2, &[0x40, 0xf4]).unwrap();
+    let mut regs = Cpu {
+        eip: code2,
+        tsc: 20,
+        ..Cpu::default()
+    };
+    let (retired, res) = engine.run(&mut regs, &mut mem, 10, 0..0);
+    assert_eq!(retired, 1);
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(regs.eip, code2 + 2);
+    assert_eq!(regs.tsc, 21);
+    assert_eq!(regs.r[EAX], 1);
+}
+
+#[test]
+fn rdtsc_mid_run_after_fast_ops_sees_exact_tsc() {
+    use lego_legacy_core::cpu::EDX;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+
+    // `inc ecx; inc ecx; inc ecx; rdtsc; inc ecx; hlt`
+    mem.write(code, &[0x41, 0x41, 0x41, 0x0f, 0x31, 0x41, 0xf4])
+        .unwrap();
+    let mut regs = Cpu {
+        eip: code,
+        tsc: 0x2_0000_0010,
+        ..Cpu::default()
+    };
+    let (retired, res) = Interp::new(Mode::FLAT).run(&mut regs, &mut mem, 10, 0..0);
+    assert_eq!(retired, 5);
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(regs.r[EDX], 2);
+    assert_eq!(
+        regs.r[EAX], 0x13,
+        "rdtsc observes the three preceding fast ops"
+    );
+    assert_eq!(regs.tsc, 0x2_0000_0015);
+}
+
+#[test]
+fn self_modifying_code_invalidates_cached_fast_runs() {
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let target = 0x0040_2000u32;
+
+    // Target initially: `mov eax, 1; ret`
+    mem.write(target, &[0xb8, 1, 0, 0, 0, 0xc3]).unwrap();
+    // Caller: `call target; mov dword ptr [target+1], 42; call target; hlt`
+    let rel1 = target.wrapping_sub(code + 5).to_le_bytes();
+    let imm_addr = (target + 1).to_le_bytes();
+    let val42 = 42u32.to_le_bytes();
+    let rel2 = target.wrapping_sub(code + 20).to_le_bytes();
+    let mut prog = Vec::new();
+    prog.push(0xe8);
+    prog.extend_from_slice(&rel1);
+    prog.extend_from_slice(&[0xc7, 0x05]);
+    prog.extend_from_slice(&imm_addr);
+    prog.extend_from_slice(&val42);
+    prog.push(0xe8);
+    prog.extend_from_slice(&rel2);
+    prog.push(0xf4);
+    mem.write(code, &prog).unwrap();
+
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[lego_legacy_core::cpu::ESP] = 0x0050_0000;
+    let mut engine = Interp::new(Mode::FLAT);
+    let (_, res) = engine.run(&mut regs, &mut mem, 100, 0..0);
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(
+        regs.r[EAX], 42,
+        "rewritten target page was invalidated and re-decoded"
+    );
+}
