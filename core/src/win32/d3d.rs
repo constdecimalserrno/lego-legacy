@@ -24,7 +24,7 @@ const D3DERR_SCENE_NOT_IN_SCENE: u32 = 0x8876_02f9;
 /// belongs to.
 #[derive(Default)]
 pub struct Immediate {
-    devices: BTreeMap<u32, Device>,
+    devices: Vec<(u32, Device)>,
     /// Materials' own bytes, a `D3DMATERIAL` each.
     materials: BTreeMap<u32, Vec<u8>>,
     /// Which material or texture a handle names: one table, as Wine's ddraw
@@ -37,7 +37,7 @@ pub struct Immediate {
 }
 
 /// Reusable per-draw buffers kept across immediate-mode and retained-mode
-/// draws so hot frames do not allocate on every draw call.
+/// draws so hot frames do not allocate or zero-initialise on every draw call.
 #[derive(Default)]
 struct DrawScratch {
     indices: Vec<u32>,
@@ -45,6 +45,9 @@ struct DrawScratch {
     prepared: Vec<super::pipeline::Clipped>,
     triangles: Vec<[super::pipeline::Clipped; 3]>,
     raster: Vec<[crate::raster::Vertex; 3]>,
+    clip_buf: [super::pipeline::Clipped; super::pipeline::CLIP_BUFFER],
+    clip_scratch: [super::pipeline::Clipped; super::pipeline::CLIP_BUFFER],
+    poly_buf: [crate::raster::Vertex; super::pipeline::CLIP_BUFFER],
 }
 
 /// Flat-table bounds for Direct3D 5/6/7 state indices; out-of-range states
@@ -70,6 +73,8 @@ struct Device {
     light_extra: BTreeMap<u32, u32>,
     transforms: [[u32; 16]; TRANSFORM_SLOTS],
     transforms_extra: BTreeMap<u32, [u32; 16]>,
+    /// Cached `VIEW * PROJECTION`, invalidated when either transform changes.
+    view_proj: Option<super::scene::Matrix>,
     textures: [u32; STAGE_SLOTS],
     textures_extra: BTreeMap<u32, u32>,
     stages: [[u32; STAGE_STATE_SLOTS]; STAGE_SLOTS],
@@ -99,6 +104,7 @@ impl Default for Device {
             light_extra: BTreeMap::new(),
             transforms: [IDENTITY_BITS; TRANSFORM_SLOTS],
             transforms_extra: BTreeMap::new(),
+            view_proj: None,
             textures: [0; STAGE_SLOTS],
             textures_extra: BTreeMap::new(),
             stages: std::array::from_fn(|stage| {
@@ -187,12 +193,25 @@ impl Device {
 
     #[inline]
     fn set_transform(&mut self, which: u32, bits: [u32; 16]) {
+        if which == VIEW || which == PROJECTION {
+            self.view_proj = None;
+        }
         let idx = which as usize;
         if idx < TRANSFORM_SLOTS {
             self.transforms[idx] = bits;
         } else {
             self.transforms_extra.insert(which, bits);
         }
+    }
+
+    #[inline]
+    fn view_proj(&mut self) -> super::scene::Matrix {
+        if let Some(vp) = self.view_proj {
+            return vp;
+        }
+        let vp = super::scene::multiply(&matrix_of(self, VIEW), &matrix_of(self, PROJECTION));
+        self.view_proj = Some(vp);
+        vp
     }
 
     #[inline]
@@ -1059,9 +1078,24 @@ fn device<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> &'a mut Device {
     device_of(ctx.state, this)
 }
 
-fn device_of(state: &mut State, this: u32) -> &mut Device {
+fn device_index_by_id(devices: &mut Vec<(u32, Device)>, identity: u32) -> usize {
+    devices
+        .iter()
+        .position(|(id, _)| *id == identity)
+        .unwrap_or_else(|| {
+            devices.push((identity, Device::default()));
+            devices.len() - 1
+        })
+}
+
+fn device_index(state: &mut State, this: u32) -> usize {
     let identity = state.identity(this);
-    state.immediate.devices.entry(identity).or_default()
+    device_index_by_id(&mut state.immediate.devices, identity)
+}
+
+fn device_of(state: &mut State, this: u32) -> &mut Device {
+    let idx = device_index(state, this);
+    &mut state.immediate.devices[idx].1
 }
 
 /// Set one of a device's transforms, as `SetTransform` would: what retained
@@ -1451,13 +1485,11 @@ fn set_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
         .read_u32(args[0])
         .map_err(Stop::Fault)?
         .clamp(4, 0x100);
-    let bytes = ctx
-        .mem
-        .slice(args[0], size as usize)
-        .map_err(Stop::Fault)?
-        .to_vec();
+    let bytes = ctx.mem.slice(args[0], size as usize).map_err(Stop::Fault)?;
     let identity = ctx.state.identity(this);
-    ctx.state.immediate.materials.insert(identity, bytes);
+    let entry = ctx.state.immediate.materials.entry(identity).or_default();
+    entry.clear();
+    entry.extend_from_slice(bytes);
     Ok(S_OK)
 }
 
@@ -1687,8 +1719,7 @@ fn clear_rects(
     colour: Option<u32>,
     depth_value: Option<f32>,
 ) -> Result<u32, Stop> {
-    let Some(ComState::Viewport { device, .. }) = ctx.state.com(this).map(|o| o.state.clone())
-    else {
+    let Some(&ComState::Viewport { device, .. }) = ctx.state.com(this).map(|o| &o.state) else {
         return Ok(DDERR_INVALIDPARAMS);
     };
     clear_on(ctx, method, device, count, rects, colour, depth_value)
@@ -1710,14 +1741,14 @@ fn clear_on(
         // D3DERR_VIEWPORTHASNODEVICE: never added to a device.
         _ => return Ok(0x8876_0306),
     };
-    let Some(ComState::Surface {
+    let Some(&ComState::Surface {
         pixels,
         width,
         height,
         pitch,
         format,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = ctx.state.com(surface).map(|o| &o.state)
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
@@ -1727,7 +1758,9 @@ fn clear_on(
             caller: 0,
         });
     }
-    let mut depth = depth_value.map(|_| take_depth(ctx.state, device, width, height));
+    let dev_idx = depth_value.map(|_| device_index(ctx.state, device));
+    let mut depth =
+        dev_idx.map(|idx| take_depth_at(&mut ctx.state.immediate.devices[idx].1, width, height));
     // No rectangles at all is the whole of it, which is how DirectX 7's own
     // call is usually made.
     for i in 0..count.max(1) {
@@ -1756,8 +1789,8 @@ fn clear_on(
             }
         }
     }
-    if let Some(buffer) = depth {
-        device_of(ctx.state, device).depth = buffer;
+    if let (Some(idx), Some(buffer)) = (dev_idx, depth) {
+        ctx.state.immediate.devices[idx].1.depth = buffer;
     }
     Ok(S_OK)
 }
@@ -1863,6 +1896,9 @@ fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<
     )
 }
 
+/// `D3DFVF_TLVERTEX`: `XYZRHW | DIFFUSE | SPECULAR | TEX1` (32 bytes).
+const D3DFVF_TLVERTEX: u32 = 0x1c4;
+
 /// DirectX 5's, which names its vertices by a `D3DVERTEXTYPE` where DirectX 6
 /// has a flexible format. `D3DVT_TLVERTEX` is laid out as
 /// `D3DFVF_TLVERTEX` is (d3dtypes.h): on the screen already, with both
@@ -1870,7 +1906,6 @@ fn draw_indexed_primitive(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<
 /// draws all it draws in them (#210); the other two types are walls.
 fn draw_indexed_primitive2(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     const D3DVT_TLVERTEX: u32 = 3;
-    const D3DFVF_TLVERTEX: u32 = 0x1c4;
     let method = "IDirect3DDevice2::DrawIndexedPrimitive";
     if args[1] != D3DVT_TLVERTEX {
         return Err(unwritten(format!("{method}: vertex type {}", args[1])));
@@ -2037,6 +2072,46 @@ fn clamps(address: u32) -> Option<bool> {
     }
 }
 
+/// Exact `f32::from(c) / 255.0` lookup table for 8-bit `D3DCOLOR` channels.
+const U8_TO_F32: [f32; 256] = {
+    let mut table = [0.0; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    table
+};
+
+#[inline(always)]
+fn colour_lut(bytes: [u8; 4]) -> [f32; 4] {
+    [
+        U8_TO_F32[bytes[2] as usize],
+        U8_TO_F32[bytes[1] as usize],
+        U8_TO_F32[bytes[0] as usize],
+        U8_TO_F32[bytes[3] as usize],
+    ]
+}
+
+#[inline(always)]
+fn decode_tlvertex(raw: &[u8; 32], need_specular: bool, has_fog: bool) -> super::pipeline::Clipped {
+    let f = |at: usize| f32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+    let diffuse = colour_lut([raw[16], raw[17], raw[18], raw[19]]);
+    let (specular, fog) = if need_specular || has_fog {
+        let [sr, sg, sb, sa] = colour_lut([raw[20], raw[21], raw[22], raw[23]]);
+        ([sr, sg, sb], if has_fog { sa } else { 1.0 })
+    } else {
+        ([0.0; 3], 1.0)
+    };
+    super::pipeline::Clipped {
+        clip: [f(0), f(4), f(8), f(12)],
+        diffuse,
+        specular,
+        uv: [f(24), f(28)],
+        fog,
+    }
+}
+
 /// Draw primitives through a device: every vertex through the pipeline, and
 /// every triangle into the device's surface.
 #[allow(clippy::too_many_arguments)]
@@ -2057,17 +2132,17 @@ fn draw(
     let Some(size) = pipeline::vertex_size(format) else {
         return Err(unwritten(format!("{method}: vertex format {format:#x}")));
     };
-    let Some(ComState::Device3D { surface }) = ctx.state.com(this).map(|o| o.state.clone()) else {
+    let Some(&ComState::Device3D { surface }) = ctx.state.com(this).map(|o| &o.state) else {
         return Ok(DDERR_INVALIDPARAMS);
     };
-    let Some(ComState::Surface {
+    let Some(&ComState::Surface {
         pixels,
         width,
         height,
         pitch,
         format: pixel_format,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = ctx.state.com(surface).map(|o| &o.state)
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
@@ -2087,7 +2162,10 @@ fn draw(
     // is one state, `D3DRENDERSTATE_TEXTUREMAPBLEND` (#210). On a later
     // device either is a wall, as it was.
     let dx5 = ctx.state.interface_of(this) == Some(DEVICE2.name);
-    let by_handle = device_of(ctx.state, this).render_value(rs::TEXTUREHANDLE);
+    let dev_idx = device_index(ctx.state, this);
+    let by_handle = ctx.state.immediate.devices[dev_idx]
+        .1
+        .render_value(rs::TEXTUREHANDLE);
     let named = match ctx.state.immediate.handles.get(&by_handle) {
         _ if !dx5 || by_handle == 0 => 0,
         Some(&t)
@@ -2107,20 +2185,23 @@ fn draw(
 
     // What the device draws them with. A state this pipeline does not honour
     // is a wall once a title turns it on, not a frame drawn as if it had not.
-    let device = device_of(ctx.state, this);
-    let state = |s: u32| device.render_value(s);
-    let stage = |s: u32| device.stage0_value(s);
+    let device = &mut ctx.state.immediate.devices[dev_idx].1;
     for (what, on) in [
         ("a texture by handle", !dx5 && by_handle != 0),
         (
             "wrapping across texture edges",
-            state(rs::WRAPU) != 0 || state(rs::WRAPV) != 0 || state(rs::WRAP0) != 0,
+            device.render_value(rs::WRAPU) != 0
+                || device.render_value(rs::WRAPV) != 0
+                || device.render_value(rs::WRAP0) != 0,
         ),
         (
             "a texture map blend",
             !dx5 && device.render_is_set(rs::TEXTUREMAPBLEND),
         ),
-        ("a fill that is not solid", state(rs::FILLMODE) != 3),
+        (
+            "a fill that is not solid",
+            device.render_value(rs::FILLMODE) != 3,
+        ),
     ] {
         if on {
             return Err(unwritten(format!("{method}: {what}")));
@@ -2129,20 +2210,22 @@ fn draw(
     let untransformed = format & fvf::POSITION_MASK == fvf::XYZ;
     let (world, clip_from_model) = if untransformed {
         let world = matrix_of(device, WORLD);
-        let clip_from_world =
-            super::scene::multiply(&matrix_of(device, VIEW), &matrix_of(device, PROJECTION));
+        let clip_from_world = device.view_proj();
         let clip_from_model = super::scene::multiply(&world, &clip_from_world);
         (world, clip_from_model)
     } else {
         (super::scene::IDENTITY, super::scene::IDENTITY)
     };
+    let device = &*device;
+    let state = |s: u32| device.render_value(s);
+    let stage = |s: u32| device.stage0_value(s);
     let viewport = device.current_viewport;
     // DirectX 7 keeps the viewport on the device itself, so there is no object
     // to ask (#57).
     let viewport7 = device.viewport7;
     let texture = if dx5 { named } else { device.textures[0] };
     let material_handle = device.light[LIGHT_MATERIAL as usize];
-    let ambient = pipeline::colour(device.light[LIGHT_AMBIENT as usize]);
+    let ambient = colour_lut(device.light[LIGHT_AMBIENT as usize].to_le_bytes());
     let compare = |value: u32| {
         Compare::from_d3d(value).ok_or_else(|| unwritten(format!("{method}: comparison {value}")))
     };
@@ -2159,7 +2242,7 @@ fn draw(
                 "{method}: fog, table mode {table}, vertex mode {vertex}, vertex format {format:#x}"
             )));
         }
-        let [r, g, b, _] = pipeline::colour(state(rs::FOGCOLOR));
+        let [r, g, b, _] = colour_lut(state(rs::FOGCOLOR).to_le_bytes());
         Some([r, g, b])
     } else {
         None
@@ -2259,8 +2342,8 @@ fn draw(
     let place = if viewport7[2] != 0 {
         pipeline::Viewport::whole(viewport7[0], viewport7[1], viewport7[2], viewport7[3])
     } else {
-        match ctx.state.com(viewport).map(|o| o.state.clone()) {
-            Some(ComState::Viewport {
+        match ctx.state.com(viewport).map(|o| &o.state) {
+            Some(&ComState::Viewport {
                 x,
                 y,
                 width: w,
@@ -2336,35 +2419,52 @@ fn draw(
     // stays where it is.
     let mut prepared = std::mem::take(&mut ctx.state.immediate.scratch.prepared);
     prepared.clear();
-    prepared.extend(bytes.chunks_exact(size).map(|raw| {
-        let v = pipeline::read_vertex(format, raw);
-        let diffuse = match (&material, v.normal) {
-            (Some(material), Some(normal)) => {
-                let at = pipeline::project(&world, v.position);
-                let [r, g, b, _] = ambient;
-                pipeline::light(
-                    [at[0], at[1], at[2]],
-                    super::scene::direct(&world, normal),
-                    material,
-                    [r, g, b],
-                    &lights,
-                )
-            }
-            _ => v.diffuse.map_or([1.0; 4], pipeline::colour),
-        };
-        let [sr, sg, sb, sa] = v.specular.map_or([0.0; 4], pipeline::colour);
-        Clipped {
-            fog: if fog.is_some() { sa } else { 1.0 },
-            clip: if untransformed {
-                pipeline::project(&clip_from_model, v.position)
+    let need_specular = states.specular;
+    let has_fog = fog.is_some();
+    if format == D3DFVF_TLVERTEX {
+        prepared.extend(
+            bytes
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .map(|raw| decode_tlvertex(raw, need_specular, has_fog)),
+        );
+    } else {
+        prepared.extend(bytes.chunks_exact(size).map(|raw| {
+            let v = pipeline::read_vertex(format, raw);
+            let diffuse = match (&material, v.normal) {
+                (Some(material), Some(normal)) => {
+                    let at = pipeline::project(&world, v.position);
+                    let [r, g, b, _] = ambient;
+                    pipeline::light(
+                        [at[0], at[1], at[2]],
+                        super::scene::direct(&world, normal),
+                        material,
+                        [r, g, b],
+                        &lights,
+                    )
+                }
+                _ => v.diffuse.map_or([1.0; 4], |c| colour_lut(c.to_le_bytes())),
+            };
+            let (specular, vertex_fog) = if need_specular || has_fog {
+                let [sr, sg, sb, sa] = v.specular.map_or([0.0; 4], |c| colour_lut(c.to_le_bytes()));
+                ([sr, sg, sb], if has_fog { sa } else { 1.0 })
             } else {
-                v.position
-            },
-            diffuse,
-            specular: [sr, sg, sb],
-            uv: v.uv,
-        }
-    }));
+                ([0.0; 3], 1.0)
+            };
+            Clipped {
+                fog: vertex_fog,
+                clip: if untransformed {
+                    pipeline::project(&clip_from_model, v.position)
+                } else {
+                    v.position
+                },
+                diffuse,
+                specular,
+                uv: v.uv,
+            }
+        }));
+    }
 
     // The triangles, by the primitive's kind, wound as the title wound them.
     let mut triangles = std::mem::take(&mut ctx.state.immediate.scratch.triangles);
@@ -2446,8 +2546,10 @@ pub fn rasterise(
     (texture, clamp): (u32, [bool; 2]),
     mut states: crate::raster::States,
 ) -> Result<(), Stop> {
-    use super::pipeline;
     use crate::raster::{self, Combine};
+    if triangles.is_empty() {
+        return Ok(());
+    }
     let Canvas {
         pixels,
         width,
@@ -2457,10 +2559,54 @@ pub fn rasterise(
         place,
     } = *canvas;
 
+    // Clip and cull into the reusable triangle buffer before touching texture
+    // palettes, depth buffer, or guest arena borrows so fully culled/clipped
+    // batches return immediately.
+    let scratch = &mut ctx.state.immediate.scratch;
+    scratch.raster.clear();
+    for &[a, mut b, mut c] in triangles {
+        if states.flat {
+            // A flat triangle is the first vertex's colour throughout, which
+            // clipping must not blend away.
+            for v in [&mut b, &mut c] {
+                v.diffuse = a.diffuse;
+                v.specular = a.specular;
+            }
+        }
+        if !untransformed {
+            let poly = [a.on_screen(), b.on_screen(), c.on_screen()];
+            emit_polygon(&poly, cull, &mut scratch.raster);
+        } else {
+            let (oa, ob, oc) = (
+                frustum_outcode(&a),
+                frustum_outcode(&b),
+                frustum_outcode(&c),
+            );
+            let or = oa | ob | oc;
+            if or == 0 {
+                let poly = [place.place(&a), place.place(&b), place.place(&c)];
+                emit_polygon(&poly, cull, &mut scratch.raster);
+            } else {
+                let and = oa & ob & oc;
+                if and != 0
+                    && (or & (and.isolate_lowest_one() - 1)) == 0
+                    && finite_positive_w(&a)
+                    && finite_positive_w(&b)
+                    && finite_positive_w(&c)
+                {
+                    continue;
+                }
+                emit_clipped([a, b, c], &place, cull, scratch);
+            }
+        }
+    }
+    if scratch.raster.is_empty() {
+        return Ok(());
+    }
+
     // The texture the first stage samples, in its own format.
-    let texture_state = ctx.state.com(texture).map(|o| o.state.clone());
-    let texture_info = match texture_state {
-        Some(ComState::Surface {
+    let texture_info = match ctx.state.com(texture).map(|o| &o.state) {
+        Some(&ComState::Surface {
             pixels: at,
             width: tw,
             height: th,
@@ -2504,7 +2650,8 @@ pub fn rasterise(
     }
     // Into the surface, through the depth buffer, reading the texture where
     // it lies unless it is the surface being drawn into.
-    let mut depth = take_depth(ctx.state, this, width, height);
+    let dev_idx = device_index(ctx.state, this);
+    let mut depth = take_depth_at(&mut ctx.state.immediate.devices[dev_idx].1, width, height);
     let into = (pixels, (pitch * height) as usize);
     let from = texture_info.map_or((0, 0), |(at, _, th, tp, ..)| (at, (tp * th) as usize));
     let apart =
@@ -2544,34 +2691,122 @@ pub fn rasterise(
         ],
         first_row: 0,
     };
-    let mut list = std::mem::take(&mut ctx.state.immediate.scratch.raster);
-    list.clear();
-    for &[a, mut b, mut c] in triangles {
-        if states.flat {
-            // A flat triangle is the first vertex's colour throughout, which
-            // clipping must not blend away.
-            for v in [&mut b, &mut c] {
-                v.diffuse = a.diffuse;
-                v.specular = a.specular;
-            }
-        }
-        if !untransformed {
-            let poly = [a.on_screen(), b.on_screen(), c.on_screen()];
-            emit_polygon(&poly, cull, &mut list);
-        } else if pipeline::inside_frustum(&a)
-            && pipeline::inside_frustum(&b)
-            && pipeline::inside_frustum(&c)
-        {
-            let poly = [place.place(&a), place.place(&b), place.place(&c)];
-            emit_polygon(&poly, cull, &mut list);
-        } else {
-            emit_clipped([a, b, c], &place, cull, &mut list);
-        }
-    }
-    raster::triangles(&mut target, &list, texture.as_ref(), &states);
-    ctx.state.immediate.scratch.raster = list;
-    device_of(ctx.state, this).depth = depth;
+    raster::triangles(
+        &mut target,
+        &ctx.state.immediate.scratch.raster,
+        texture.as_ref(),
+        &states,
+    );
+    ctx.state.immediate.devices[dev_idx].1.depth = depth;
     Ok(())
+}
+
+/// Exact 6-bit frustum outcode matching `pipeline::inside_frustum` and the six
+/// clipping planes in order: `-w <= x`, `x <= w`, `-w <= y`, `y <= w`,
+/// `0 <= z`, `z <= w`. Bit `p` is set whenever the inequality is false
+/// (including `NaN`), so `oa | ob | oc == 0` is bit-identical to
+/// `inside_frustum(&a) && inside_frustum(&b) && inside_frustum(&c)`.
+#[inline(always)]
+fn frustum_outcode(v: &super::pipeline::Clipped) -> u8 {
+    let [x, y, z, w] = v.clip;
+    let inside = u8::from(x >= -w)
+        | (u8::from(x <= w) << 1)
+        | (u8::from(y >= -w) << 2)
+        | (u8::from(y <= w) << 3)
+        | (u8::from(z >= 0.0) << 4)
+        | (u8::from(z <= w) << 5);
+    inside ^ 0x3f
+}
+
+/// Finite clip coordinates with strictly positive `w`, under which each
+/// outcode bit matches `plane_dist::<P>(clip) < 0.0` exactly without `NaN`,
+/// `±inf`, or negative-`w` anomalies.
+#[inline(always)]
+fn finite_positive_w(v: &super::pipeline::Clipped) -> bool {
+    let [x, y, z, w] = v.clip;
+    w > 0.0 && w.is_finite() && x.is_finite() && y.is_finite() && z.is_finite()
+}
+
+#[inline(always)]
+fn plane_dist<const PLANE: u8>(c: &[f32; 4]) -> f32 {
+    match PLANE {
+        0 => c[3] + c[0],
+        1 => c[3] - c[0],
+        2 => c[3] + c[1],
+        3 => c[3] - c[1],
+        4 => c[2],
+        5 => c[3] - c[2],
+        _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn lerp_clipped(
+    a: &super::pipeline::Clipped,
+    b: &super::pipeline::Clipped,
+    t: f32,
+) -> super::pipeline::Clipped {
+    let mix = |x: f32, y: f32| x + (y - x) * t;
+    super::pipeline::Clipped {
+        clip: std::array::from_fn(|i| mix(a.clip[i], b.clip[i])),
+        diffuse: std::array::from_fn(|i| mix(a.diffuse[i], b.diffuse[i])),
+        specular: std::array::from_fn(|i| mix(a.specular[i], b.specular[i])),
+        uv: std::array::from_fn(|i| mix(a.uv[i], b.uv[i])),
+        fog: mix(a.fog, b.fog),
+    }
+}
+
+#[inline(always)]
+fn clip_plane<const PLANE: u8>(
+    input: &[super::pipeline::Clipped],
+    output: &mut [super::pipeline::Clipped; super::pipeline::CLIP_BUFFER],
+) -> Option<usize> {
+    if input.is_empty() {
+        return Some(0);
+    }
+    let mut out_len = 0;
+    let mut previous = &input[input.len() - 1];
+    let mut dp = plane_dist::<PLANE>(&previous.clip);
+    let mut dp_in = dp >= 0.0;
+    for current in input {
+        let dc = plane_dist::<PLANE>(&current.clip);
+        let dc_in = dc >= 0.0;
+        if dc_in != dp_in {
+            if out_len == super::pipeline::CLIP_BUFFER {
+                return None;
+            }
+            output[out_len] = lerp_clipped(previous, current, dp / (dp - dc));
+            out_len += 1;
+        }
+        if dc_in {
+            if out_len == super::pipeline::CLIP_BUFFER {
+                return None;
+            }
+            output[out_len] = *current;
+            out_len += 1;
+        }
+        previous = current;
+        dp = dc;
+        dp_in = dc_in;
+    }
+    Some(out_len)
+}
+
+/// Monomorphized six-plane Sutherland-Hodgman clip of a triangle into
+/// caller-owned buffers (`out` receives the final polygon after the even
+/// 6-plane ping-pong: `tri -> scratch -> out -> scratch -> out -> scratch -> out`).
+#[inline]
+fn clip_triangle_into(
+    tri: &[super::pipeline::Clipped; 3],
+    out: &mut [super::pipeline::Clipped; super::pipeline::CLIP_BUFFER],
+    scratch: &mut [super::pipeline::Clipped; super::pipeline::CLIP_BUFFER],
+) -> Option<usize> {
+    let len = clip_plane::<0>(tri, scratch)?;
+    let len = clip_plane::<1>(&scratch[..len], out)?;
+    let len = clip_plane::<2>(&out[..len], scratch)?;
+    let len = clip_plane::<3>(&scratch[..len], out)?;
+    let len = clip_plane::<4>(&out[..len], scratch)?;
+    clip_plane::<5>(&scratch[..len], out)
 }
 
 #[inline]
@@ -2637,21 +2872,23 @@ fn emit_polygon(
     }
 }
 
+#[inline]
 fn emit_clipped(
     tri: [super::pipeline::Clipped; 3],
     place: &super::pipeline::Viewport,
     cull: u32,
-    list: &mut Vec<[crate::raster::Vertex; 3]>,
+    scratch: &mut DrawScratch,
 ) {
-    let mut clip_buf = [super::pipeline::Clipped::default(); super::pipeline::CLIP_BUFFER];
-    if let Some(len) = super::pipeline::clip_into(&tri, &mut clip_buf) {
-        let mut poly_buf = [crate::raster::Vertex::default(); super::pipeline::CLIP_BUFFER];
-        for (dst, src) in poly_buf.iter_mut().zip(&clip_buf[..len]) {
+    if let Some(len) = clip_triangle_into(&tri, &mut scratch.clip_buf, &mut scratch.clip_scratch) {
+        if len < 3 {
+            return;
+        }
+        for (dst, src) in scratch.poly_buf.iter_mut().zip(&scratch.clip_buf[..len]) {
             *dst = place.place(src);
         }
-        emit_polygon(&poly_buf[..len], cull, list);
+        emit_polygon(&scratch.poly_buf[..len], cull, &mut scratch.raster);
     } else {
-        emit_clipped_overflow(&tri, place, cull, list);
+        emit_clipped_overflow(&tri, place, cull, &mut scratch.raster);
     }
 }
 
@@ -2675,18 +2912,19 @@ fn emit_clipped_overflow(
 pub fn clear_depth(state: &mut State, device: u32, edges: [u32; 4], (width, height): (u32, u32)) {
     let [left, top, right, bottom] = edges;
     let (right, bottom) = (right.min(width), bottom.min(height));
-    let mut depth = take_depth(state, device, width, height);
+    let dev_idx = device_index(state, device);
+    let mut depth = take_depth_at(&mut state.immediate.devices[dev_idx].1, width, height);
     for y in top..bottom {
         let row = (y * width) as usize;
         depth[row + left.min(right) as usize..row + right as usize].fill(1.0);
     }
-    device_of(state, device).depth = depth;
+    state.immediate.devices[dev_idx].1.depth = depth;
 }
 
 /// A device's depth buffer, taken out of the device for a draw to use and
 /// hand back: the size of its surface, made far the first time it is needed.
-fn take_depth(state: &mut State, device: u32, width: u32, height: u32) -> Vec<f32> {
-    let buffer = std::mem::take(&mut device_of(state, device).depth);
+fn take_depth_at(device: &mut Device, width: u32, height: u32) -> Vec<f32> {
+    let buffer = std::mem::take(&mut device.depth);
     let len = (width * height) as usize;
     if buffer.len() == len {
         buffer
@@ -2698,9 +2936,13 @@ fn take_depth(state: &mut State, device: u32, width: u32, height: u32) -> Vec<f3
 #[cfg(test)]
 mod tests {
     use super::{
-        render_state_at_start, rs, stage_state_at_start, tss, Device, IDENTITY_BITS,
-        LIGHT_STATE_SLOTS, RENDER_STATE_SLOTS, STAGE_SLOTS, STAGE_STATE_SLOTS, TRANSFORM_SLOTS,
+        clip_triangle_into, decode_tlvertex, device_index_by_id, finite_positive_w,
+        frustum_outcode, matrix_of, render_state_at_start, rs, stage_state_at_start, tss, Device,
+        D3DFVF_TLVERTEX, IDENTITY_BITS, LIGHT_STATE_SLOTS, PROJECTION, RENDER_STATE_SLOTS,
+        STAGE_SLOTS, STAGE_STATE_SLOTS, TRANSFORM_SLOTS, U8_TO_F32, VIEW, WORLD,
     };
+    use crate::win32::pipeline::{self, Clipped, CLIP_BUFFER};
+    use crate::win32::scene;
 
     #[test]
     fn every_draw_render_and_stage_state_fits_flat_tables_with_declared_defaults() {
@@ -2816,5 +3058,370 @@ mod tests {
         assert_eq!(d.set_texture(0, 0x2000), 0x1000);
         assert_eq!(d.set_texture(hi_tex, 0x3000), 0);
         assert_eq!(d.get_texture(hi_tex), 0x3000);
+    }
+
+    #[test]
+    fn u8_to_f32_lut_and_tlvertex_decode_match_pipeline_bit_for_bit() {
+        for c in 0u8..=255 {
+            assert_eq!(
+                U8_TO_F32[c as usize].to_bits(),
+                (f32::from(c) / 255.0).to_bits(),
+                "channel {c}"
+            );
+        }
+        let samples: [([f32; 4], u32, u32, [f32; 2]); 3] = [
+            (
+                [12.5, -0.0, 0.25, 0.5],
+                0x80ff_4020,
+                0xc012_3456,
+                [0.125, 0.875],
+            ),
+            (
+                [640.0, 480.0, 1.0, 1.0],
+                0xffff_ffff,
+                0x0000_0000,
+                [-2.5, 3.25],
+            ),
+            ([0.0, 0.0, 0.0, 2.0], 0x0000_0000, 0xffab_cdef, [0.0, 1.0]),
+        ];
+        for (pos, diff, spec, uv) in samples {
+            let mut raw = [0u8; 32];
+            for (i, f) in pos.iter().enumerate() {
+                raw[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            raw[16..20].copy_from_slice(&diff.to_le_bytes());
+            raw[20..24].copy_from_slice(&spec.to_le_bytes());
+            raw[24..28].copy_from_slice(&uv[0].to_le_bytes());
+            raw[28..32].copy_from_slice(&uv[1].to_le_bytes());
+
+            let v = pipeline::read_vertex(D3DFVF_TLVERTEX, &raw);
+            let want_diffuse = pipeline::colour(v.diffuse.unwrap());
+            let [sr, sg, sb, sa] = pipeline::colour(v.specular.unwrap());
+
+            for (need_specular, has_fog) in
+                [(true, true), (true, false), (false, true), (false, false)]
+            {
+                let got = decode_tlvertex(&raw, need_specular, has_fog);
+                assert_eq!(got.clip.map(f32::to_bits), v.position.map(f32::to_bits));
+                assert_eq!(
+                    got.diffuse.map(f32::to_bits),
+                    want_diffuse.map(f32::to_bits)
+                );
+                assert_eq!(got.uv.map(f32::to_bits), v.uv.map(f32::to_bits));
+                let want_fog = if has_fog { sa } else { 1.0 };
+                assert_eq!(got.fog.to_bits(), want_fog.to_bits());
+                if need_specular || has_fog {
+                    assert_eq!(
+                        got.specular.map(f32::to_bits),
+                        [sr, sg, sb].map(f32::to_bits)
+                    );
+                } else {
+                    assert_eq!(got.specular, [0.0; 3]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frustum_outcode_and_monomorphized_clip_match_pipeline_bit_for_bit() {
+        let v = |clip: [f32; 4], u: f32, t: f32| Clipped {
+            clip,
+            diffuse: [u, t, 0.5, 1.0],
+            specular: [0.1, 0.2, 0.3],
+            uv: [u, t],
+            fog: 0.75,
+        };
+        let assert_f32_eq = |a: f32, b: f32, label: &str| {
+            if a.is_nan() && b.is_nan() {
+                return;
+            }
+            assert_eq!(a.to_bits(), b.to_bits(), "{label}: {a} vs {b}");
+        };
+        let assert_same_poly = |got: &[Clipped], want: &[Clipped], label: &str| {
+            assert_eq!(got.len(), want.len(), "{label}: vertex count");
+            for (g, w) in got.iter().zip(want) {
+                for i in 0..4 {
+                    assert_f32_eq(g.clip[i], w.clip[i], label);
+                    assert_f32_eq(g.diffuse[i], w.diffuse[i], label);
+                }
+                for i in 0..3 {
+                    assert_f32_eq(g.specular[i], w.specular[i], label);
+                }
+                for i in 0..2 {
+                    assert_f32_eq(g.uv[i], w.uv[i], label);
+                }
+                assert_f32_eq(g.fog, w.fog, label);
+            }
+        };
+        // Reuse dirty clip buffers across calls to verify stale tail entries are never read.
+        let mut out = [Clipped::default(); CLIP_BUFFER];
+        let mut scratch = [Clipped::default(); CLIP_BUFFER];
+        let mut run_fast = |tri: [Clipped; 3]| -> (Vec<Clipped>, &'static str) {
+            let (oa, ob, oc) = (
+                frustum_outcode(&tri[0]),
+                frustum_outcode(&tri[1]),
+                frustum_outcode(&tri[2]),
+            );
+            let or = oa | ob | oc;
+            if or == 0 {
+                return (tri.to_vec(), "accept");
+            }
+            let and = oa & ob & oc;
+            if and != 0
+                && (or & (and.isolate_lowest_one() - 1)) == 0
+                && finite_positive_w(&tri[0])
+                && finite_positive_w(&tri[1])
+                && finite_positive_w(&tri[2])
+            {
+                return (Vec::new(), "reject");
+            }
+            let poly = match clip_triangle_into(&tri, &mut out, &mut scratch) {
+                Some(len) => out[..len].to_vec(),
+                None => pipeline::clip(&tri),
+            };
+            (poly, "clip")
+        };
+
+        // 1. Wholly inside -> trivial accept.
+        let inside = [
+            v([0.0, 0.0, 0.5, 1.0], 0.0, 0.0),
+            v([0.5, 0.0, 0.5, 1.0], 1.0, 0.0),
+            v([0.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+        ];
+        let (got, path) = run_fast(inside);
+        assert_eq!(path, "accept");
+        assert_same_poly(&got, &pipeline::clip(&inside), "inside");
+
+        // 2. Wholly outside each of the 6 planes without straddling prior planes -> trivial reject.
+        let outside_cases: [(&str, [Clipped; 3]); 6] = [
+            (
+                "outside-left",
+                [
+                    v([-2.0, 0.0, 0.5, 1.0], 0.0, 0.0),
+                    v([-3.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-2.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "outside-right",
+                [
+                    v([2.0, 0.0, 0.5, 1.0], 0.0, 0.0),
+                    v([3.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([2.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "outside-bottom",
+                [
+                    v([0.0, -2.0, 0.5, 1.0], 0.0, 0.0),
+                    v([0.5, -3.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-0.5, -2.0, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "outside-top",
+                [
+                    v([0.0, 2.0, 0.5, 1.0], 0.0, 0.0),
+                    v([0.5, 3.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-0.5, 2.0, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "outside-near",
+                [
+                    v([0.0, 0.0, -0.5, 1.0], 0.0, 0.0),
+                    v([0.5, 0.0, -0.2, 1.0], 1.0, 0.0),
+                    v([0.0, 0.5, -0.1, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "outside-far",
+                [
+                    v([0.0, 0.0, 1.5, 1.0], 0.0, 0.0),
+                    v([0.5, 0.0, 2.0, 1.0], 1.0, 0.0),
+                    v([0.0, 0.5, 1.2, 1.0], 0.0, 1.0),
+                ],
+            ),
+        ];
+        for (label, tri) in outside_cases {
+            let (got, path) = run_fast(tri);
+            assert_eq!(path, "reject", "{label}");
+            assert_same_poly(&got, &pipeline::clip(&tri), label);
+        }
+
+        // 3. Prior-straddling-plane edge case: all z < 0, but straddling plane 0
+        //    must bail out of trivial-reject to the full clipper so FP rounding matches.
+        let prior_straddle = [
+            v([-2.0, 0.0, -1.0, 1.0], 0.0, 0.0),
+            v([0.0, 0.0, -1e-30, 1.0], 1.0, 0.0),
+            v([0.0, 0.5, -1e-30, 1.0], 0.0, 1.0),
+        ];
+        let (got, path) = run_fast(prior_straddle);
+        assert_eq!(path, "clip", "prior straddle must bail to full clipper");
+        assert_same_poly(&got, &pipeline::clip(&prior_straddle), "prior-straddle");
+
+        // 4. w <= 0 vertices (including all-outside w == 0) must bail to full clipper and match bit-for-bit.
+        let w_edge_cases: [(&str, [Clipped; 3]); 4] = [
+            (
+                "w-zero",
+                [
+                    v([0.0, 0.0, 0.0, 0.0], 0.0, 0.0),
+                    v([1.0, 0.0, 0.5, 0.0], 1.0, 0.0),
+                    v([0.0, 1.0, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "w-zero-all-outside-left",
+                [
+                    v([-1.0, 0.0, 0.5, 0.0], 0.0, 0.0),
+                    v([-2.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-3.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "w-negative-all",
+                [
+                    v([0.0, 0.0, -0.5, -1.0], 0.0, 0.0),
+                    v([0.5, 0.0, -0.5, -1.0], 1.0, 0.0),
+                    v([0.0, 0.5, -0.5, -1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "w-mixed-sign",
+                [
+                    v([-0.5, 0.0, -0.5, -1.0], 0.0, 0.0),
+                    v([0.5, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([0.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+        ];
+        for (label, tri) in w_edge_cases {
+            let (got, path) = run_fast(tri);
+            assert_eq!(path, "clip", "{label} must bail to full clipper");
+            assert_same_poly(&got, &pipeline::clip(&tri), label);
+        }
+
+        // 5. NaN and +/-inf vertices must never trivially reject and must match pipeline::clip.
+        let nan_inf_cases: [(&str, [Clipped; 3]); 4] = [
+            (
+                "nan-x",
+                [
+                    v([f32::NAN, 0.0, 0.5, 1.0], 0.0, 0.0),
+                    v([-2.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-3.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "nan-w",
+                [
+                    v([0.0, 0.0, 0.5, f32::NAN], 0.0, 0.0),
+                    v([0.5, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([0.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "inf-coords",
+                [
+                    v([f32::INFINITY, 0.0, 0.5, f32::INFINITY], 0.0, 0.0),
+                    v([0.5, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([0.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+            (
+                "neg-inf-all-outside-left",
+                [
+                    v([f32::NEG_INFINITY, 0.0, 0.5, 1.0], 0.0, 0.0),
+                    v([-2.0, 0.0, 0.5, 1.0], 1.0, 0.0),
+                    v([-3.0, 0.5, 0.5, 1.0], 0.0, 1.0),
+                ],
+            ),
+        ];
+        for (label, tri) in nan_inf_cases {
+            let (got, path) = run_fast(tri);
+            assert_ne!(path, "reject", "{label} must not trivially reject");
+            assert_same_poly(&got, &pipeline::clip(&tri), label);
+        }
+
+        // 6. Large oblique triangle crossing all 6 frustum planes.
+        let six_planes = [
+            v([-3.0, -2.5, -1.5, 1.0], 0.0, 0.0),
+            v([3.5, -1.5, 2.5, 1.0], 1.0, 0.0),
+            v([0.2, 3.5, 0.5, 1.0], 0.5, 1.0),
+        ];
+        let (got, path) = run_fast(six_planes);
+        assert_eq!(path, "clip");
+        assert!(got.len() >= 3 && got.len() <= 9);
+        assert_same_poly(&got, &pipeline::clip(&six_planes), "six-planes");
+    }
+
+    #[test]
+    fn view_proj_cache_hits_on_world_and_invalidates_on_view_or_projection() {
+        let bits = |m: scene::Matrix| std::array::from_fn(|i| m[i / 4][i % 4].to_bits());
+        let view1: scene::Matrix = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [2.0, -3.0, 5.0, 1.0],
+        ];
+        let proj1: scene::Matrix = [
+            [1.5, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 1.01, 1.0],
+            [0.0, 0.0, -0.5, 0.0],
+        ];
+        let world1: scene::Matrix = [
+            [0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.0],
+            [1.0, 2.0, 3.0, 1.0],
+        ];
+        let mut d = Device::default();
+        assert!(d.view_proj.is_none());
+        d.set_transform(VIEW, bits(view1));
+        d.set_transform(PROJECTION, bits(proj1));
+        let vp1 = d.view_proj();
+        assert_eq!(
+            vp1,
+            scene::multiply(&matrix_of(&d, VIEW), &matrix_of(&d, PROJECTION))
+        );
+        assert!(d.view_proj.is_some());
+
+        // Changing WORLD keeps cached view_proj intact.
+        d.set_transform(WORLD, bits(world1));
+        assert_eq!(d.view_proj, Some(vp1));
+        assert_eq!(d.view_proj(), vp1);
+
+        // Changing VIEW invalidates and recomputes.
+        let mut view2 = view1;
+        view2[3][0] = -7.0;
+        d.set_transform(VIEW, bits(view2));
+        assert!(d.view_proj.is_none());
+        let vp2 = d.view_proj();
+        assert_eq!(vp2, scene::multiply(&view2, &proj1));
+        assert_ne!(vp2, vp1);
+
+        // Changing PROJECTION invalidates and recomputes.
+        let mut proj2 = proj1;
+        proj2[0][0] = 3.0;
+        d.set_transform(PROJECTION, bits(proj2));
+        assert!(d.view_proj.is_none());
+        let vp3 = d.view_proj();
+        assert_eq!(vp3, scene::multiply(&view2, &proj2));
+        assert_ne!(vp3, vp2);
+    }
+
+    #[test]
+    fn immediate_devices_vec_reuses_slots_by_identity() {
+        let mut devices = Vec::new();
+        let a0 = device_index_by_id(&mut devices, 0x1000);
+        let b0 = device_index_by_id(&mut devices, 0x2000);
+        assert_eq!((a0, b0), (0, 1));
+        assert_eq!(devices.len(), 2);
+        devices[a0].1.set_render(rs::CULLMODE, 1);
+        assert_eq!(device_index_by_id(&mut devices, 0x1000), a0);
+        assert_eq!(device_index_by_id(&mut devices, 0x2000), b0);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[a0].1.render_value(rs::CULLMODE), 1);
+        assert_eq!(devices[b0].1.render_value(rs::CULLMODE), 3);
     }
 }
