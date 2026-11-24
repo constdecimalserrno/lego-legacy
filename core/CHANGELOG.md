@@ -5,6 +5,35 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+The software rasteriser specialises its covered scanline spans behind a co-located interior-span
+seam (`core/src/raster/{mod.rs, span.rs}`, #254), leaving every frame and every run's digest
+unchanged:
+
+- Each scanline trims its left and right edges to the exact covered interval `[cov_from..=cov_to]`
+  (preserving top-left edge coverage and sequential plane stepping), verifies target depth and
+  pixel row bounds once per row, and hands the whole covered span to `span::draw_interior` with no
+  per-pixel edge tests or slice bounds checks.
+- Power-of-two textures without clamping wrap with a bitmask (`c & (dim - 1)`) instead of
+  `rem_euclid`, and eight-bit paletted texels map through an exact `c as f32 / 255.0` lookup table.
+- `DrawPlan::new` classifies the target format, texture format and addressing, and render states
+  once per draw (`triangles()` shares one plan across all triangles and all four `BANDS`),
+  resolving a single monomorphised span function pointer for the hot RGB565 paths (untextured flat
+  and Gouraud opaque/blended, and textured `Modulate`/`Texture` nearest and `bilinear16` across
+  RGB565, ARGB1555, ARGB4444 and 8-bit paletted, opaque and `SourceAlpha`/`InverseSourceAlpha`,
+  plus DirectX 5 specular and vertex fog) with compile-time channel shifts and fallbacks to a fast
+  RGB565 loop and an arbitrary-format loop.
+- Exact plane setup order, the constant-depth shortcut (#210), sequential `value[k] += step[k]`,
+  IEEE-754 `1.0 / rhw`, `bilinear16` Q16 integer weights, non-FMA blending, RGB565 rounding, and
+  four-band multithreading (`BANDS = 4`) are unchanged. Differential unit tests prove every
+  specialised path bit-for-bit identical to the general reference loop across formats, wrap/clamp
+  modes, alpha modes, NaN/non-positive `rhw`, and span widths `0..=65`, and verify 4-band vs 1-band
+  equivalence.
+- Measured headless on the Mac mini against the baseline profile, all four Direct3D titles end on
+  the exact baseline `cursor`, `flips`, and `declared_ms`: `lego-chess` `checkmate.route` drops
+  from 81.41 s to 71.25 s (-12.5%), `lego-rock-raiders` `first-mission.route` from 118.38 s to
+  109.70 s (-7.3%), `lego-island` `pizza-delivery.route` from 126.45 s to 106.62 s (-15.7%), and
+  `lego-alpha-team` `first-mission.route` from 197.15 s to 177.64 s (-9.9%).
+
 Direct3D and Retained Mode drop per-triangle heap allocations, reuse draw scratch buffers, flat-index device state tables, and sink scene NaN scanning behind a cold path (#259):
 
 - `pipeline::clip_into` clips polygons into a fixed 12-vertex stack buffer (a convex triangle clipped against six frustum planes yields at most 9 vertices), with `#[cold]` heap fallback for oversized or pathological inputs; `d3d::rasterise` and `d3drm::nearest_face` clip and project on the stack without per-triangle `Vec` allocations, and wholly-inside or already-transformed triangles skip the clip buffers altogether.
