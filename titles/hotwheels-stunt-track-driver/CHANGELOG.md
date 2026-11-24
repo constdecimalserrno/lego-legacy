@@ -5,6 +5,21 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Added `routes/secret-track.route` (#285): a deterministic route from a clean `--data-root` that
+completes Championship Tracks 1–6 on the unmodified retail binary to unlock `saves\onoff.dat` (28
+bytes, `01 00 00 00` × 6 + `00 00 00 00`), right-clicks the invisible Mattel "TT" logo hotspot on
+Track Select at flip 17,889 to arm Secret Track 7 (`WIRE.JAM`, neon-green wireframe grid), drives
+and stunts through `WIRE` to a 1:16 Bronze Medal finish (04 stunts, 0 crashes, writing
+`saves\times.dat` at flip 20,756), and quits cleanly on Escape at flip 20,977 (`exited 1`, cursor
+77,377,021,811, 20,980 flips, 656,816 declared ms, digest `4c032fc7…`, 309,495,794 clock-spin
+instructions passed; persists `SAVES/ONOFF.DAT` 28 B, `SAVES/TIMES.DAT` 480 B, and
+`SAVES/WHEEL.DAT` 240 B). Regression and side-by-side determinism
+tests in `tests/hotwheels.rs` pin the `saves\onoff.dat` unlock bytes, all seven `saves\times.dat`
+writes, non-uniform pairwise-distinct `WIRE` gameplay frames (including wireframe terrain checks),
+clean exit, and bit-exact replay across independent data roots. Adding a committed route is a minor
+reach per ADR-0007 (making this title's next release 1.1.0; the crate is already past its `v1.0.0`
+tag and stays at `1.0.1` until release).
+
 Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems. No route moved.
 
 Core's `GetVersion` answers as Windows 98 SE did, with the top bit that says it is not NT (#129).

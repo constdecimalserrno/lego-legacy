@@ -266,3 +266,258 @@ fn the_first_race_route_replays_to_the_same_machine_every_time() {
     };
     first.assert_same_machine(second);
 }
+
+/// The flip `secret-track.route` right-clicks the invisible Mattel "TT"
+/// hotspot on Track Select, arming Secret Track 7 (`WIRE.JAM`).
+const SECRET_RIGHT_CLICK: u64 = 17_889;
+
+/// Track Select after right-clicking the Mattel "TT" hotspot.
+const SECRET_TRACK_SELECT: u64 = 17_919;
+
+/// `WIRE` starting grid: yellow starting lights and neon-green wireframe hills.
+const WIRE_GRID: u64 = 18_125;
+
+/// Mid-air upside-down barrel roll over `WIRE`'s wireframe valley.
+const WIRE_STUNT: u64 = 18_460;
+
+/// High-speed run through `WIRE`'s wireframe tunnel.
+const WIRE_TUNNEL: u64 = 19_750;
+
+/// `WIRE` results screen: 1:16 Bronze Medal, 04 stunts, 0 crashes, fireworks.
+const WIRE_RESULTS: u64 = 20_976;
+
+/// The flip `secret-track.route` presses Escape at, quitting from `WIRE`'s
+/// results screen three flips later.
+const SECRET_ESCAPE: u64 = 20_977;
+
+const SECRET_TRACK_KEPT: [u64; 5] = [
+    SECRET_TRACK_SELECT,
+    WIRE_GRID,
+    WIRE_STUNT,
+    WIRE_TUNNEL,
+    WIRE_RESULTS,
+];
+
+/// Enough instructions for `secret-track.route` to complete Championship
+/// Tracks 1-6, unlock and finish `WIRE`, and quit on Escape: 77.38 billion
+/// retired by exit at flip 20,980.
+const SECRET_TRACK_BUDGET: u64 = 78_000_000_000;
+
+struct SecretTrackRun {
+    ran: testkit::Ran,
+    onoff_path: std::path::PathBuf,
+    onoff_dat: Vec<u8>,
+    times_dat: Vec<u8>,
+    wheel_dat: Vec<u8>,
+}
+
+/// The host path logged by the last `file written` line matching `suffix`.
+fn last_written(ran: &testkit::Ran, suffix: &str) -> std::path::PathBuf {
+    let path = ran
+        .log
+        .lines()
+        .filter(|l| l.starts_with("file written ") && l.contains(suffix))
+        .filter_map(|l| l.split_once(", to ").map(|(_, p)| p))
+        .next_back()
+        .unwrap_or_else(|| panic!("no `file written` line for {suffix}"));
+    std::path::PathBuf::from(path)
+}
+
+/// Count bright neon-green pixels (`WIRE`'s wireframe colour) in a BGRA frame.
+fn neon_green_pixels(frame: &lego_legacy_core::host::headless::Presented) -> usize {
+    frame
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[1] > 180 && px[2] < 60 && px[0] < 60)
+        .count()
+}
+
+/// Replay `routes/secret-track.route` from a fresh `--data-root` once into
+/// `slot`, reading back the save files the title persisted before cleaning up
+/// the scratch root.
+fn secret_track(
+    slot: &'static std::sync::OnceLock<Option<SecretTrackRun>>,
+    tag: &str,
+) -> Option<&'static SecretTrackRun> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "hotwheels-secret-track-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/secret-track.route"),
+            ),
+            data_root: Some(root.clone()),
+            ..Cli::default()
+        };
+        let ran = testkit::run_on(
+            lego_legacy_core::host::headless::Headless::new().keeping(&SECRET_TRACK_KEPT),
+            &HOT_WHEELS,
+            &cli,
+            SECRET_TRACK_BUDGET,
+        );
+        let onoff_path = last_written(&ran, r"saves\onoff.dat");
+        let times_path = last_written(&ran, r"saves\times.dat");
+        let wheel_path = last_written(&ran, r"saves\wheel.dat");
+        let onoff_dat = std::fs::read(&onoff_path).expect("saves/onoff.dat reads");
+        let times_dat = std::fs::read(&times_path).expect("saves/times.dat reads");
+        let wheel_dat = std::fs::read(&wheel_path).expect("saves/wheel.dat reads");
+        let _ = std::fs::remove_dir_all(&root);
+        Some(SecretTrackRun {
+            ran,
+            onoff_path,
+            onoff_dat,
+            times_dat,
+            wheel_dat,
+        })
+    })
+    .as_ref()
+}
+
+static SECRET_FIRST: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+static SECRET_SECOND: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+
+/// `routes/secret-track.route` completes Championship Tracks 1-6 from a clean
+/// profile to write `saves\onoff.dat` (all 6 tracks unlocked), right-clicks the
+/// Mattel "TT" hotspot on Track Select to enter Secret Track 7 (`WIRE.JAM`),
+/// drives and stunts through `WIRE` to its Bronze Medal finish (writing
+/// `saves\times.dat`), and quits cleanly on Escape (#285).
+#[test]
+fn the_secret_track_route_unlocks_and_finishes_wire() {
+    let Some(run) = secret_track(&SECRET_FIRST, "first") else {
+        return;
+    };
+    let ran = &run.ran;
+
+    // Championship Tracks 1-6 unlock saves\onoff.dat: 6 unlocked track dwords
+    // followed by a trailing zero dword (28 bytes total).
+    const ONOFF_LINE: &str =
+        r"file written C:\Program Files\Mattel\Stunt Track Driver\saves\onoff.dat, 28 bytes";
+    const TIMES_LINE: &str =
+        r"file written C:\Program Files\Mattel\Stunt Track Driver\saves\times.dat, 480 bytes";
+    ran.assert_logged(ONOFF_LINE).assert_logged(TIMES_LINE);
+    assert_eq!(
+        ran.log.lines().filter(|l| l.contains(ONOFF_LINE)).count(),
+        2,
+        "saves\\onoff.dat is written after Track 3 and Track 6"
+    );
+    let mut expected_onoff = Vec::with_capacity(28);
+    for _ in 0..6 {
+        expected_onoff.extend_from_slice(&1u32.to_le_bytes());
+    }
+    expected_onoff.extend_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        run.onoff_dat, expected_onoff,
+        "all 6 Championship tracks unlocked in saves\\onoff.dat"
+    );
+    assert_eq!(run.times_dat.len(), 480, "saves\\times.dat is 480 bytes");
+    assert_eq!(run.wheel_dat.len(), 240, "saves\\wheel.dat is 240 bytes");
+
+    // 7 race finishes total: Championship Tracks 1-6 plus Secret Track 7 (WIRE)
+    // after the right-click on Track Select at flip 17,889.
+    assert_eq!(
+        ran.log.lines().filter(|l| l.contains(TIMES_LINE)).count(),
+        7,
+        "saves\\times.dat is written once per finished race (6 Championship + WIRE)"
+    );
+    let (_, after_right_click) = ran
+        .log
+        .split_once(&format!("input flip {SECRET_RIGHT_CLICK} Down(Right)"))
+        .expect("the route right-clicks the Mattel TT hotspot on Track Select");
+    assert!(
+        after_right_click.contains(TIMES_LINE),
+        "WIRE finishes and writes saves\\times.dat after the right-click unlock"
+    );
+
+    // Every kept landmark frame is 640x480, non-uniform, and pairwise distinct
+    // — proving live moving gameplay through WIRE to its results screen.
+    let frames: Vec<_> = SECRET_TRACK_KEPT
+        .iter()
+        .map(|&flip| {
+            let frame = ran
+                .host
+                .frame(flip)
+                .unwrap_or_else(|| panic!("flip {flip} is kept"));
+            assert_eq!((frame.width, frame.height), (640, 480));
+            assert!(!frame.is_uniform(), "flip {flip} is not a uniform screen");
+            frame
+        })
+        .collect();
+    for (i, a) in frames.iter().enumerate() {
+        for b in &frames[i + 1..] {
+            assert_ne!(
+                a.pixels, b.pixels,
+                "flips {} and {} must show distinct pictures",
+                a.flip, b.flip
+            );
+        }
+    }
+
+    // Track Select has none of WIRE's neon-green wireframe terrain; the WIRE
+    // starting grid (2,937 px) and mid-air barrel roll (30,907 px) carry it.
+    assert_eq!(
+        neon_green_pixels(frames[0]),
+        0,
+        "Track Select has no WIRE neon-green terrain"
+    );
+    assert!(
+        neon_green_pixels(frames[1]) > 1_000,
+        "WIRE starting grid shows neon-green wireframe hills: {} px",
+        neon_green_pixels(frames[1])
+    );
+    assert!(
+        neon_green_pixels(frames[2]) > 20_000,
+        "WIRE stunt frame shows neon-green wireframe valley: {} px",
+        neon_green_pixels(frames[2])
+    );
+
+    // Clean Escape quit three flips after flip 20,977, matching first-race.route.
+    ran.assert_exited(1).assert_flips(SECRET_ESCAPE + 3);
+}
+
+/// `routes/secret-track.route` replays bit-for-bit across two independent
+/// clean data roots (#285).
+#[test]
+fn the_secret_track_route_replays_to_the_same_machine_every_time() {
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| secret_track(&SECRET_SECOND, "second"));
+        (
+            secret_track(&SECRET_FIRST, "first"),
+            second.join().expect("the second secret-track replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.ran.assert_same_machine(&second.ran);
+    for flip in SECRET_TRACK_KEPT {
+        assert_eq!(
+            first.ran.host.frame(flip).map(|f| &f.pixels),
+            second.ran.host.frame(flip).map(|f| &f.pixels),
+            "flip {flip} presented identically on both replays"
+        );
+    }
+    assert_ne!(
+        first.onoff_path, second.onoff_path,
+        "two replays, two data roots"
+    );
+    assert_eq!(
+        first.onoff_dat, second.onoff_dat,
+        "identical saves\\onoff.dat"
+    );
+    assert_eq!(
+        first.times_dat, second.times_dat,
+        "identical saves\\times.dat"
+    );
+    assert_eq!(
+        first.wheel_dat, second.wheel_dat,
+        "identical saves\\wheel.dat"
+    );
+}
