@@ -292,6 +292,7 @@ pub(super) fn resolve_span_fn(kernel: InteriorKernel) -> SpanFn {
     }
 }
 
+#[inline(always)]
 pub(super) fn span_untextured_flat_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     _plan: &DrawPlan<'_>,
     depth: &mut [f32],
@@ -332,6 +333,7 @@ pub(super) fn span_untextured_flat_opaque<const Z_TEST: bool, const SPECULAR: bo
     }
 }
 
+#[inline(always)]
 pub(super) fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     _plan: &DrawPlan<'_>,
     depth: &mut [f32],
@@ -383,6 +385,7 @@ pub(super) fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR:
     }
 }
 
+#[inline(always)]
 pub(super) fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
     _plan: &DrawPlan<'_>,
     depth: &mut [f32],
@@ -468,6 +471,7 @@ pub(super) fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
     }
 }
 
+#[inline(always)]
 pub(super) fn span_textured_copy_opaque<S: TexSample, const Z_TEST: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
@@ -538,6 +542,7 @@ fn resolve_textured_copy_opaque(
     }
 }
 
+#[inline(always)]
 pub(super) fn span_textured_modulate_opaque<
     S: TexSample,
     const Z_TEST: bool,
@@ -707,6 +712,7 @@ fn resolve_textured_modulate_opaque(
     }
 }
 
+#[inline(always)]
 pub(super) fn span_textured_modulate_blend<
     S: TexSample,
     const Z_LE: bool,
@@ -1191,6 +1197,54 @@ pub(super) fn span_general_in_bounds(
         }
         if states.depth_write {
             *d = z;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::span::U8_TO_F32;
+
+    #[test]
+    fn rgb565_unpack_pack_round_trips_all_65536_values() {
+        for v in 0u32..=0xffff {
+            let bytes = (v as u16).to_le_bytes();
+            let c = unpack_rgb565(bytes[0], bytes[1]);
+            assert_eq!(
+                pack_rgb565_rgb(c[0], c[1], c[2]),
+                bytes,
+                "RGB565 round-trip mismatch at {v:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_range_texel_scales_stay_strictly_within_0_to_1() {
+        for r in 0u32..=31 {
+            let f = r as f32 * INV_31;
+            assert!((0.0..=1.0).contains(&f), "r={r} f={f}");
+        }
+        for g in 0u32..=63 {
+            let f = g as f32 * INV_63;
+            assert!((0.0..=1.0).contains(&f), "g={g} f={f}");
+        }
+        for c in 0u32..=15 {
+            let f = c as f32 * INV_15;
+            assert!((0.0..=1.0).contains(&f), "c={c} f={f}");
+        }
+        for &(inv, max_sum) in &[
+            (INV_31 / 65_536.0, 31u32 * 65_536),
+            (INV_63 / 65_536.0, 63u32 * 65_536),
+            (INV_15 / 65_536.0, 15u32 * 65_536),
+        ] {
+            let lo = 0.0f32 * inv;
+            let hi = (max_sum as f32) * inv;
+            assert!((0.0..=1.0).contains(&lo), "lo={lo}");
+            assert!((0.0..=1.0).contains(&hi), "hi={hi}");
+        }
+        for (i, &f) in U8_TO_F32.iter().enumerate() {
+            assert!((0.0..=1.0).contains(&f), "u8={i} f={f}");
         }
     }
 }

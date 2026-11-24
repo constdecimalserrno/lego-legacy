@@ -1,23 +1,28 @@
-//! 4-pixel `aarch64` NEON interior-span kernels (ADR-0009, #255, #278).
+//! 4-pixel `aarch64` NEON interior-span kernels (ADR-0009, #255, #278, #281).
 //!
 //! Preserves Golden Rule 1 bit-for-bit against [`super::rust`]:
 //! - Sequential plane stepping (`v += step`) per pixel via 4-lane vector adds + 4×4 transpose;
 //! - Exact IEEE-754 `vdivq_f32` (no approximate reciprocal);
 //! - Separate rounded `vmulq_f32` and `vaddq_f32` (no FMA);
-//! - Exact Q16 integer bilinear weights (`bilinear16`);
+//! - Algebraically exact separable 16-bit integer bilinear (`vmlaq_s16` / `vmlal_s16`) with
+//!   paired 32-bit non-seam loads;
 //! - Exact IEEE-754 `vrndaq_f32` round-half-away-from-zero for `alpha_test == Greater`;
-//! - Clamped float-to-int RGB565 packing matching `(c.clamp(0.0, 1.0) * 255.0 + 0.5) as u32`;
-//! - Tail pixels `0..3` delegated to the canonical pure-Rust oracle.
+//! - Exact float RGB565 packing matching `(c.clamp(0.0, 1.0) * 255.0 + 0.5) as u32`;
+//! - Early `n < 4` exit and `#[inline(always)]` `0..3` pixel scalar tails delegated to `rust.rs`.
 
 use core::arch::aarch64::{
-    float32x4_t, int32x4_t, uint16x4_t, uint32x4_t, vaddq_f32, vaddq_s32, vaddq_u32, vandq_s32,
-    vandq_u32, vbsl_u16, vbslq_f32, vcgtq_f32, vcgtq_u32, vcleq_f32, vcltq_f32, vcvtq_f32_u32,
+    float32x4_t, int16x4_t, int16x8_t, int32x4_t, uint16x4_t, uint16x8_t, uint32x4_t, vaddq_f32,
+    vaddq_s32, vandq_s32, vandq_u16, vandq_u32, vbsl_u16, vbslq_f32, vceqq_f32, vceqq_s32,
+    vcgtq_f32, vcgtq_u32, vcleq_f32, vcltq_f32, vcombine_s16, vcvtq_f32_s32, vcvtq_f32_u32,
     vcvtq_s32_f32, vcvtq_u32_f32, vdivq_f32, vdup_n_u16, vdup_n_u64, vdupq_n_f32, vdupq_n_s32,
-    vdupq_n_u32, vget_lane_u64, vld1q_f32, vld1q_u32, vmaxnmq_f32, vmaxvq_u32, vminnmq_f32,
-    vmovl_u16, vmovn_u32, vmulq_f32, vmulq_u32, vorrq_u32, vreinterpret_u16_u64,
-    vreinterpret_u64_u16, vreinterpretq_f32_f64, vreinterpretq_f64_f32, vrndaq_f32, vrndmq_f32,
-    vshlq_n_u32, vshrq_n_u32, vst1q_f32, vst1q_s32, vsubq_f32, vsubq_u32, vtrn1q_f32, vtrn1q_f64,
-    vtrn2q_f32, vtrn2q_f64,
+    vdupq_n_u16, vdupq_n_u32, vget_high_s16, vget_lane_u64, vget_low_s16, vgetq_lane_f32,
+    vgetq_lane_s32, vgetq_lane_u32, vld1q_f32, vmaxnmq_f32, vmaxvq_u32, vminnmq_f32, vminvq_u32,
+    vmlal_s16, vmlaq_s16, vmovl_u16, vmovn_u32, vmulq_f32, vorrq_u32, vreinterpret_s16_u16,
+    vreinterpret_u16_u64, vreinterpret_u64_u16, vreinterpretq_f32_f64, vreinterpretq_f64_f32,
+    vreinterpretq_s16_u16, vreinterpretq_u16_u32, vreinterpretq_u32_s32, vrndaq_f32, vrndmq_f32,
+    vset_lane_u16, vsetq_lane_f32, vsetq_lane_u16, vsetq_lane_u32, vshll_n_s16, vshlq_n_s16,
+    vshlq_n_u32, vshrq_n_u16, vshrq_n_u32, vst1q_f32, vsub_s16, vsubq_f32, vsubq_s16, vtrn1q_f32,
+    vtrn1q_f64, vtrn2q_f32, vtrn2q_f64, vuzp1q_u16, vuzp2q_u16,
 };
 
 use super::rust::{self, TexSample, BLEND_ADDITIVE_ALPHA, BLEND_ALPHA, BLEND_INV_SRC_COLOUR};
@@ -245,6 +250,45 @@ unsafe fn pack_rgb565_4(r: float32x4_t, g: float32x4_t, b: float32x4_t) -> uint1
 }
 
 #[inline(always)]
+unsafe fn pack_rgb565_4_unclamped(r: float32x4_t, g: float32x4_t, b: float32x4_t) -> uint16x4_t {
+    let v255 = vdupq_n_f32(255.0);
+    let half = vdupq_n_f32(0.5);
+
+    // Separate mul then add (ADR-0009: no FMA). Caller guarantees finite inputs in [0.0, 1.0].
+    let ri = vcvtq_u32_f32(vaddq_f32(vmulq_f32(r, v255), half));
+    let gi = vcvtq_u32_f32(vaddq_f32(vmulq_f32(g, v255), half));
+    let bi = vcvtq_u32_f32(vaddq_f32(vmulq_f32(b, v255), half));
+
+    let packed = vorrq_u32(
+        vorrq_u32(
+            vshlq_n_u32::<11>(vshrq_n_u32::<3>(ri)),
+            vshlq_n_u32::<5>(vshrq_n_u32::<2>(gi)),
+        ),
+        vshrq_n_u32::<3>(bi),
+    );
+    vmovn_u32(packed)
+}
+
+#[inline(always)]
+unsafe fn pack_f32x4(a: f32, b: f32, c: f32, d: f32) -> float32x4_t {
+    let v = vdupq_n_f32(a);
+    let v = vsetq_lane_f32::<1>(b, v);
+    let v = vsetq_lane_f32::<2>(c, v);
+    vsetq_lane_f32::<3>(d, v)
+}
+
+#[inline(always)]
+unsafe fn all_zero_f32(v: float32x4_t) -> bool {
+    vminvq_u32(vceqq_f32(v, vdupq_n_f32(0.0))) != 0
+}
+
+#[inline(always)]
+unsafe fn all_finite3(r: float32x4_t, g: float32x4_t, b: float32x4_t) -> bool {
+    let s = vaddq_f32(vaddq_f32(vsubq_f32(r, r), vsubq_f32(g, g)), vsubq_f32(b, b));
+    vminvq_u32(vceqq_f32(s, vdupq_n_f32(0.0))) != 0
+}
+
+#[inline(always)]
 unsafe fn clamp_nan_preserving_01(x: float32x4_t) -> float32x4_t {
     let zero = vdupq_n_f32(0.0);
     let one = vdupq_n_f32(1.0);
@@ -263,48 +307,42 @@ unsafe fn combine_4(how: Combine, t: float32x4_t, d: float32x4_t) -> float32x4_t
 }
 
 #[inline(always)]
+unsafe fn extract_u32x4_as_usize(v: uint32x4_t) -> [usize; 4] {
+    [
+        vgetq_lane_u32::<0>(v) as usize,
+        vgetq_lane_u32::<1>(v) as usize,
+        vgetq_lane_u32::<2>(v) as usize,
+        vgetq_lane_u32::<3>(v) as usize,
+    ]
+}
+
+#[inline(always)]
 unsafe fn resolve_xy4<const POT: bool>(
     tex: &PreparedTexture<'_>,
     xv: int32x4_t,
     yv: int32x4_t,
 ) -> ([usize; 4], [usize; 4]) {
-    let mut xs = [0i32; 4];
-    let mut ys = [0i32; 4];
     if POT {
-        let xm = vandq_s32(xv, vdupq_n_s32(tex.pot_x_mask));
-        let ym = vandq_s32(yv, vdupq_n_s32(tex.pot_y_mask));
-        vst1q_s32(xs.as_mut_ptr(), xm);
-        vst1q_s32(ys.as_mut_ptr(), ym);
-        (
-            [
-                xs[0] as usize,
-                xs[1] as usize,
-                xs[2] as usize,
-                xs[3] as usize,
-            ],
-            [
-                ys[0] as usize,
-                ys[1] as usize,
-                ys[2] as usize,
-                ys[3] as usize,
-            ],
-        )
+        let xm = vreinterpretq_u32_s32(vandq_s32(xv, vdupq_n_s32(tex.pot_x_mask)));
+        let ym = vreinterpretq_u32_s32(vandq_s32(yv, vdupq_n_s32(tex.pot_y_mask)));
+        (extract_u32x4_as_usize(xm), extract_u32x4_as_usize(ym))
     } else {
-        vst1q_s32(xs.as_mut_ptr(), xv);
-        vst1q_s32(ys.as_mut_ptr(), yv);
-        let (x0, y0) = resolve_xy::<false>(tex, xs[0], ys[0]);
-        let (x1, y1) = resolve_xy::<false>(tex, xs[1], ys[1]);
-        let (x2, y2) = resolve_xy::<false>(tex, xs[2], ys[2]);
-        let (x3, y3) = resolve_xy::<false>(tex, xs[3], ys[3]);
+        let (x0, y0) = resolve_xy::<false>(tex, vgetq_lane_s32::<0>(xv), vgetq_lane_s32::<0>(yv));
+        let (x1, y1) = resolve_xy::<false>(tex, vgetq_lane_s32::<1>(xv), vgetq_lane_s32::<1>(yv));
+        let (x2, y2) = resolve_xy::<false>(tex, vgetq_lane_s32::<2>(xv), vgetq_lane_s32::<2>(yv));
+        let (x3, y3) = resolve_xy::<false>(tex, vgetq_lane_s32::<3>(xv), vgetq_lane_s32::<3>(yv));
         ([x0, x1, x2, x3], [y0, y1, y2, y3])
     }
 }
 
 #[inline(always)]
-unsafe fn read_u16_unchecked(base: *const u8, offset: usize) -> u32 {
-    u32::from(u16::from_le(core::ptr::read_unaligned(
-        base.add(offset).cast::<u16>(),
-    )))
+unsafe fn read_u16_le(base: *const u8, offset: usize) -> u16 {
+    u16::from_le(core::ptr::read_unaligned(base.add(offset).cast::<u16>()))
+}
+
+#[inline(always)]
+unsafe fn read_u32_le(base: *const u8, offset: usize) -> u32 {
+    u32::from_le(core::ptr::read_unaligned(base.add(offset).cast::<u32>()))
 }
 
 #[inline(always)]
@@ -312,53 +350,44 @@ unsafe fn gather_u16_4(tex: &PreparedTexture<'_>, xs: [usize; 4], ys: [usize; 4]
     debug_assert!(tex.in_bounds);
     let base = tex.bytes.as_ptr();
     let pitch = tex.pitch;
-    let raw = [
-        read_u16_unchecked(base, ys[0] * pitch + xs[0] * 2),
-        read_u16_unchecked(base, ys[1] * pitch + xs[1] * 2),
-        read_u16_unchecked(base, ys[2] * pitch + xs[2] * 2),
-        read_u16_unchecked(base, ys[3] * pitch + xs[3] * 2),
-    ];
-    vld1q_u32(raw.as_ptr())
+    let v = vdup_n_u16(read_u16_le(base, ys[0] * pitch + xs[0] * 2));
+    let v = vset_lane_u16::<1>(read_u16_le(base, ys[1] * pitch + xs[1] * 2), v);
+    let v = vset_lane_u16::<2>(read_u16_le(base, ys[2] * pitch + xs[2] * 2), v);
+    let v = vset_lane_u16::<3>(read_u16_le(base, ys[3] * pitch + xs[3] * 2), v);
+    vmovl_u16(v)
 }
 
 #[inline(always)]
-unsafe fn bilinear16_setup<const POT: bool>(
+unsafe fn load_bilinear16_pairs(
+    base: *const u8,
+    up_rows: [usize; 4],
+    lo_rows: [usize; 4],
+    left: [usize; 4],
+) -> (uint16x8_t, uint16x8_t) {
+    let up = vdupq_n_u32(read_u32_le(base, up_rows[0] + left[0] * 2));
+    let up = vsetq_lane_u32::<1>(read_u32_le(base, up_rows[1] + left[1] * 2), up);
+    let up = vsetq_lane_u32::<2>(read_u32_le(base, up_rows[2] + left[2] * 2), up);
+    let up = vsetq_lane_u32::<3>(read_u32_le(base, up_rows[3] + left[3] * 2), up);
+
+    let lo = vdupq_n_u32(read_u32_le(base, lo_rows[0] + left[0] * 2));
+    let lo = vsetq_lane_u32::<1>(read_u32_le(base, lo_rows[1] + left[1] * 2), lo);
+    let lo = vsetq_lane_u32::<2>(read_u32_le(base, lo_rows[2] + left[2] * 2), lo);
+    let lo = vsetq_lane_u32::<3>(read_u32_le(base, lo_rows[3] + left[3] * 2), lo);
+
+    let up16 = vreinterpretq_u16_u32(up);
+    let lo16 = vreinterpretq_u16_u32(lo);
+    (vuzp1q_u16(up16, lo16), vuzp2q_u16(up16, lo16))
+}
+
+#[inline(always)]
+unsafe fn load_bilinear16_seam<const POT: bool>(
     tex: &PreparedTexture<'_>,
-    u: float32x4_t,
-    v: float32x4_t,
-) -> (
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-    uint32x4_t,
-) {
-    debug_assert!(tex.in_bounds);
-    let half = vdupq_n_f32(0.5);
-    let x = vsubq_f32(vmulq_f32(u, vdupq_n_f32(tex.width_f)), half);
-    let y = vsubq_f32(vmulq_f32(v, vdupq_n_f32(tex.height_f)), half);
-    let x0_f = vrndmq_f32(x);
-    let y0_f = vrndmq_f32(y);
-    let v256_f = vdupq_n_f32(256.0);
-    let fx = vcvtq_u32_f32(vmulq_f32(vsubq_f32(x, x0_f), v256_f));
-    let fy = vcvtq_u32_f32(vmulq_f32(vsubq_f32(y, y0_f), v256_f));
-    let x0 = vcvtq_s32_f32(x0_f);
-    let y0 = vcvtq_s32_f32(y0_f);
+    x0: int32x4_t,
+    y0: int32x4_t,
+) -> (uint16x8_t, uint16x8_t) {
     let one_i = vdupq_n_s32(1);
     let (left, upper) = resolve_xy4::<POT>(tex, x0, y0);
     let (right, lower) = resolve_xy4::<POT>(tex, vaddq_s32(x0, one_i), vaddq_s32(y0, one_i));
-
-    let v256_u = vdupq_n_u32(256);
-    let ifx = vsubq_u32(v256_u, fx);
-    let ify = vsubq_u32(v256_u, fy);
-    let w00 = vmulq_u32(ifx, ify);
-    let w10 = vmulq_u32(fx, ify);
-    let w01 = vmulq_u32(ifx, fy);
-    let w11 = vmulq_u32(fx, fy);
-
     let base = tex.bytes.as_ptr();
     let pitch = tex.pitch;
     let u0 = upper[0] * pitch;
@@ -369,55 +398,141 @@ unsafe fn bilinear16_setup<const POT: bool>(
     let l1 = lower[1] * pitch;
     let l2 = lower[2] * pitch;
     let l3 = lower[3] * pitch;
-    let t00 = vld1q_u32(
-        [
-            read_u16_unchecked(base, u0 + left[0] * 2),
-            read_u16_unchecked(base, u1 + left[1] * 2),
-            read_u16_unchecked(base, u2 + left[2] * 2),
-            read_u16_unchecked(base, u3 + left[3] * 2),
-        ]
-        .as_ptr(),
-    );
-    let t10 = vld1q_u32(
-        [
-            read_u16_unchecked(base, u0 + right[0] * 2),
-            read_u16_unchecked(base, u1 + right[1] * 2),
-            read_u16_unchecked(base, u2 + right[2] * 2),
-            read_u16_unchecked(base, u3 + right[3] * 2),
-        ]
-        .as_ptr(),
-    );
-    let t01 = vld1q_u32(
-        [
-            read_u16_unchecked(base, l0 + left[0] * 2),
-            read_u16_unchecked(base, l1 + left[1] * 2),
-            read_u16_unchecked(base, l2 + left[2] * 2),
-            read_u16_unchecked(base, l3 + left[3] * 2),
-        ]
-        .as_ptr(),
-    );
-    let t11 = vld1q_u32(
-        [
-            read_u16_unchecked(base, l0 + right[0] * 2),
-            read_u16_unchecked(base, l1 + right[1] * 2),
-            read_u16_unchecked(base, l2 + right[2] * 2),
-            read_u16_unchecked(base, l3 + right[3] * 2),
-        ]
-        .as_ptr(),
-    );
-    (t00, t10, t01, t11, w00, w10, w01, w11)
+
+    let l = vdupq_n_u16(read_u16_le(base, u0 + left[0] * 2));
+    let l = vsetq_lane_u16::<1>(read_u16_le(base, u1 + left[1] * 2), l);
+    let l = vsetq_lane_u16::<2>(read_u16_le(base, u2 + left[2] * 2), l);
+    let l = vsetq_lane_u16::<3>(read_u16_le(base, u3 + left[3] * 2), l);
+    let l = vsetq_lane_u16::<4>(read_u16_le(base, l0 + left[0] * 2), l);
+    let l = vsetq_lane_u16::<5>(read_u16_le(base, l1 + left[1] * 2), l);
+    let l = vsetq_lane_u16::<6>(read_u16_le(base, l2 + left[2] * 2), l);
+    let l = vsetq_lane_u16::<7>(read_u16_le(base, l3 + left[3] * 2), l);
+
+    let r = vdupq_n_u16(read_u16_le(base, u0 + right[0] * 2));
+    let r = vsetq_lane_u16::<1>(read_u16_le(base, u1 + right[1] * 2), r);
+    let r = vsetq_lane_u16::<2>(read_u16_le(base, u2 + right[2] * 2), r);
+    let r = vsetq_lane_u16::<3>(read_u16_le(base, u3 + right[3] * 2), r);
+    let r = vsetq_lane_u16::<4>(read_u16_le(base, l0 + right[0] * 2), r);
+    let r = vsetq_lane_u16::<5>(read_u16_le(base, l1 + right[1] * 2), r);
+    let r = vsetq_lane_u16::<6>(read_u16_le(base, l2 + right[2] * 2), r);
+    let r = vsetq_lane_u16::<7>(read_u16_le(base, l3 + right[3] * 2), r);
+
+    (l, r)
 }
 
+/// Load the 4×(2×2) bilinear corners packed as `left8 = [t00; t01]` and
+/// `right8 = [t10; t11]`, plus exact integer weights `fx8 = [fx; fx]` and `fy4`.
+/// Non-seam quads (`left != mask_x` / `right == left + 1`) issue 8 paired `u32`
+/// loads and deinterleave via `vuzp1q_u16`/`vuzp2q_u16`.
 #[inline(always)]
-unsafe fn blend4_u32(c: [uint32x4_t; 4], w: [uint32x4_t; 4]) -> uint32x4_t {
-    vaddq_u32(
-        vaddq_u32(vmulq_u32(c[0], w[0]), vmulq_u32(c[1], w[1])),
-        vaddq_u32(vmulq_u32(c[2], w[2]), vmulq_u32(c[3], w[3])),
-    )
+unsafe fn bilinear16_load_pairs<const POT: bool>(
+    tex: &PreparedTexture<'_>,
+    u: float32x4_t,
+    v: float32x4_t,
+) -> (uint16x8_t, uint16x8_t, int16x8_t, int16x4_t) {
+    debug_assert!(tex.in_bounds);
+    let half = vdupq_n_f32(0.5);
+    let x = vsubq_f32(vmulq_f32(u, vdupq_n_f32(tex.width_f)), half);
+    let y = vsubq_f32(vmulq_f32(v, vdupq_n_f32(tex.height_f)), half);
+    let x0_f = vrndmq_f32(x);
+    let y0_f = vrndmq_f32(y);
+    let v256_f = vdupq_n_f32(256.0);
+    let fx_u32 = vcvtq_u32_f32(vmulq_f32(vsubq_f32(x, x0_f), v256_f));
+    let fy_u32 = vcvtq_u32_f32(vmulq_f32(vsubq_f32(y, y0_f), v256_f));
+    let fx4 = vreinterpret_s16_u16(vmovn_u32(fx_u32));
+    let fy4 = vreinterpret_s16_u16(vmovn_u32(fy_u32));
+    let fx8 = vcombine_s16(fx4, fx4);
+    let x0 = vcvtq_s32_f32(x0_f);
+    let y0 = vcvtq_s32_f32(y0_f);
+
+    let (left8, right8) = if POT {
+        let mask_x_v = vdupq_n_s32(tex.pot_x_mask);
+        let left_v = vandq_s32(x0, mask_x_v);
+        if vmaxvq_u32(vceqq_s32(left_v, mask_x_v)) == 0 {
+            let mask_y_v = vdupq_n_s32(tex.pot_y_mask);
+            let upper_v = vandq_s32(y0, mask_y_v);
+            let lower_v = vandq_s32(vaddq_s32(y0, vdupq_n_s32(1)), mask_y_v);
+            let left = extract_u32x4_as_usize(vreinterpretq_u32_s32(left_v));
+            let upper = extract_u32x4_as_usize(vreinterpretq_u32_s32(upper_v));
+            let lower = extract_u32x4_as_usize(vreinterpretq_u32_s32(lower_v));
+            let pitch = tex.pitch;
+            load_bilinear16_pairs(
+                tex.bytes.as_ptr(),
+                [
+                    upper[0] * pitch,
+                    upper[1] * pitch,
+                    upper[2] * pitch,
+                    upper[3] * pitch,
+                ],
+                [
+                    lower[0] * pitch,
+                    lower[1] * pitch,
+                    lower[2] * pitch,
+                    lower[3] * pitch,
+                ],
+                left,
+            )
+        } else {
+            load_bilinear16_seam::<true>(tex, x0, y0)
+        }
+    } else {
+        let one_i = vdupq_n_s32(1);
+        let (left, upper) = resolve_xy4::<false>(tex, x0, y0);
+        let (right, lower) = resolve_xy4::<false>(tex, vaddq_s32(x0, one_i), vaddq_s32(y0, one_i));
+        let non_seam = (left[0] + 1 == right[0])
+            & (left[1] + 1 == right[1])
+            & (left[2] + 1 == right[2])
+            & (left[3] + 1 == right[3]);
+        if non_seam {
+            let pitch = tex.pitch;
+            load_bilinear16_pairs(
+                tex.bytes.as_ptr(),
+                [
+                    upper[0] * pitch,
+                    upper[1] * pitch,
+                    upper[2] * pitch,
+                    upper[3] * pitch,
+                ],
+                [
+                    lower[0] * pitch,
+                    lower[1] * pitch,
+                    lower[2] * pitch,
+                    lower[3] * pitch,
+                ],
+                left,
+            )
+        } else {
+            load_bilinear16_seam::<false>(tex, x0, y0)
+        }
+    };
+    (left8, right8, fx8, fy4)
+}
+
+/// Algebraically bit-exact separable 16-bit integer bilinear interpolation for
+/// channels in `0..=63` and weights `fx, fy` in `0..=256`:
+/// `top = (c00 << 8) + (c10 - c00) * fx`, `bot = (c01 << 8) + (c11 - c01) * fx`,
+/// `res = (top << 8) + (bot - top) * fy` (`0..=4_128_768`).
+#[inline(always)]
+unsafe fn bilinear_channel_s16(
+    c_left: uint16x8_t,
+    c_right: uint16x8_t,
+    fx8: int16x8_t,
+    fy4: int16x4_t,
+) -> float32x4_t {
+    let cl = vreinterpretq_s16_u16(c_left);
+    let cr = vreinterpretq_s16_u16(c_right);
+    let tb = vmlaq_s16(vshlq_n_s16::<8>(cl), vsubq_s16(cr, cl), fx8);
+    let top = vget_low_s16(tb);
+    let bot = vget_high_s16(tb);
+    let res = vmlal_s16(vshll_n_s16::<8>(top), vsub_s16(bot, top), fy4);
+    vcvtq_f32_s32(res)
 }
 
 trait TexSample4 {
     type Scalar: TexSample;
+    /// True when `sample4` always returns finite RGB values strictly in `[0.0, 1.0]`
+    /// for all UV inputs (including `NaN` / `±inf`), permitting unclamped RGB565 pack.
+    const UNIT_RANGE: bool;
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
@@ -429,6 +544,7 @@ trait TexSample4 {
 struct NearestRgb565<const POT: bool>;
 impl<const POT: bool> TexSample4 for NearestRgb565<POT> {
     type Scalar = rust::NearestRgb565<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -456,6 +572,7 @@ impl<const POT: bool> TexSample4 for NearestRgb565<POT> {
 struct BilinearRgb565<const POT: bool>;
 impl<const POT: bool> TexSample4 for BilinearRgb565<POT> {
     type Scalar = rust::BilinearRgb565<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -463,40 +580,27 @@ impl<const POT: bool> TexSample4 for BilinearRgb565<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
-        let (t00, t10, t01, t11, w00, w10, w01, w11) = bilinear16_setup::<POT>(tex, u, v);
-        let m3f = vdupq_n_u32(0x3f);
-        let m1f = vdupq_n_u32(0x1f);
-        let r = blend4_u32(
-            [
-                vshrq_n_u32::<11>(t00),
-                vshrq_n_u32::<11>(t10),
-                vshrq_n_u32::<11>(t01),
-                vshrq_n_u32::<11>(t11),
-            ],
-            [w00, w10, w01, w11],
+        let (left8, right8, fx8, fy4) = bilinear16_load_pairs::<POT>(tex, u, v);
+        let m3f = vdupq_n_u16(0x3f);
+        let m1f = vdupq_n_u16(0x1f);
+        let r = bilinear_channel_s16(
+            vshrq_n_u16::<11>(left8),
+            vshrq_n_u16::<11>(right8),
+            fx8,
+            fy4,
         );
-        let g = blend4_u32(
-            [
-                vandq_u32(vshrq_n_u32::<5>(t00), m3f),
-                vandq_u32(vshrq_n_u32::<5>(t10), m3f),
-                vandq_u32(vshrq_n_u32::<5>(t01), m3f),
-                vandq_u32(vshrq_n_u32::<5>(t11), m3f),
-            ],
-            [w00, w10, w01, w11],
+        let g = bilinear_channel_s16(
+            vandq_u16(vshrq_n_u16::<5>(left8), m3f),
+            vandq_u16(vshrq_n_u16::<5>(right8), m3f),
+            fx8,
+            fy4,
         );
-        let b = blend4_u32(
-            [
-                vandq_u32(t00, m1f),
-                vandq_u32(t10, m1f),
-                vandq_u32(t01, m1f),
-                vandq_u32(t11, m1f),
-            ],
-            [w00, w10, w01, w11],
-        );
+        let b = bilinear_channel_s16(vandq_u16(left8, m1f), vandq_u16(right8, m1f), fx8, fy4);
+        let inv31 = vdupq_n_f32(INV_31_Q16);
         (
-            vmulq_f32(vcvtq_f32_u32(r), vdupq_n_f32(INV_31_Q16)),
-            vmulq_f32(vcvtq_f32_u32(g), vdupq_n_f32(INV_63_Q16)),
-            vmulq_f32(vcvtq_f32_u32(b), vdupq_n_f32(INV_31_Q16)),
+            vmulq_f32(r, inv31),
+            vmulq_f32(g, vdupq_n_f32(INV_63_Q16)),
+            vmulq_f32(b, inv31),
             vdupq_n_f32(1.0),
         )
     }
@@ -505,6 +609,7 @@ impl<const POT: bool> TexSample4 for BilinearRgb565<POT> {
 struct NearestArgb1555<const POT: bool>;
 impl<const POT: bool> TexSample4 for NearestArgb1555<POT> {
     type Scalar = rust::NearestArgb1555<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -529,6 +634,7 @@ impl<const POT: bool> TexSample4 for NearestArgb1555<POT> {
 struct BilinearArgb1555<const POT: bool>;
 impl<const POT: bool> TexSample4 for BilinearArgb1555<POT> {
     type Scalar = rust::BilinearArgb1555<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -536,50 +642,33 @@ impl<const POT: bool> TexSample4 for BilinearArgb1555<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
-        let (t00, t10, t01, t11, w00, w10, w01, w11) = bilinear16_setup::<POT>(tex, u, v);
-        let m1f = vdupq_n_u32(0x1f);
-        let r = blend4_u32(
-            [
-                vandq_u32(vshrq_n_u32::<10>(t00), m1f),
-                vandq_u32(vshrq_n_u32::<10>(t10), m1f),
-                vandq_u32(vshrq_n_u32::<10>(t01), m1f),
-                vandq_u32(vshrq_n_u32::<10>(t11), m1f),
-            ],
-            [w00, w10, w01, w11],
+        let (left8, right8, fx8, fy4) = bilinear16_load_pairs::<POT>(tex, u, v);
+        let m1f = vdupq_n_u16(0x1f);
+        let r = bilinear_channel_s16(
+            vandq_u16(vshrq_n_u16::<10>(left8), m1f),
+            vandq_u16(vshrq_n_u16::<10>(right8), m1f),
+            fx8,
+            fy4,
         );
-        let g = blend4_u32(
-            [
-                vandq_u32(vshrq_n_u32::<5>(t00), m1f),
-                vandq_u32(vshrq_n_u32::<5>(t10), m1f),
-                vandq_u32(vshrq_n_u32::<5>(t01), m1f),
-                vandq_u32(vshrq_n_u32::<5>(t11), m1f),
-            ],
-            [w00, w10, w01, w11],
+        let g = bilinear_channel_s16(
+            vandq_u16(vshrq_n_u16::<5>(left8), m1f),
+            vandq_u16(vshrq_n_u16::<5>(right8), m1f),
+            fx8,
+            fy4,
         );
-        let b = blend4_u32(
-            [
-                vandq_u32(t00, m1f),
-                vandq_u32(t10, m1f),
-                vandq_u32(t01, m1f),
-                vandq_u32(t11, m1f),
-            ],
-            [w00, w10, w01, w11],
-        );
-        let a = blend4_u32(
-            [
-                vshrq_n_u32::<15>(t00),
-                vshrq_n_u32::<15>(t10),
-                vshrq_n_u32::<15>(t01),
-                vshrq_n_u32::<15>(t11),
-            ],
-            [w00, w10, w01, w11],
+        let b = bilinear_channel_s16(vandq_u16(left8, m1f), vandq_u16(right8, m1f), fx8, fy4);
+        let a = bilinear_channel_s16(
+            vshrq_n_u16::<15>(left8),
+            vshrq_n_u16::<15>(right8),
+            fx8,
+            fy4,
         );
         let inv31 = vdupq_n_f32(INV_31_Q16);
         (
-            vmulq_f32(vcvtq_f32_u32(r), inv31),
-            vmulq_f32(vcvtq_f32_u32(g), inv31),
-            vmulq_f32(vcvtq_f32_u32(b), inv31),
-            vmulq_f32(vcvtq_f32_u32(a), vdupq_n_f32(INV_65536)),
+            vmulq_f32(r, inv31),
+            vmulq_f32(g, inv31),
+            vmulq_f32(b, inv31),
+            vmulq_f32(a, vdupq_n_f32(INV_65536)),
         )
     }
 }
@@ -587,6 +676,7 @@ impl<const POT: bool> TexSample4 for BilinearArgb1555<POT> {
 struct NearestArgb4444<const POT: bool>;
 impl<const POT: bool> TexSample4 for NearestArgb4444<POT> {
     type Scalar = rust::NearestArgb4444<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -611,6 +701,7 @@ impl<const POT: bool> TexSample4 for NearestArgb4444<POT> {
 struct BilinearArgb4444<const POT: bool>;
 impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
     type Scalar = rust::BilinearArgb4444<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         _plan: &DrawPlan<'_>,
@@ -618,50 +709,33 @@ impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
-        let (t00, t10, t01, t11, w00, w10, w01, w11) = bilinear16_setup::<POT>(tex, u, v);
-        let mf = vdupq_n_u32(0xf);
-        let r = blend4_u32(
-            [
-                vandq_u32(vshrq_n_u32::<8>(t00), mf),
-                vandq_u32(vshrq_n_u32::<8>(t10), mf),
-                vandq_u32(vshrq_n_u32::<8>(t01), mf),
-                vandq_u32(vshrq_n_u32::<8>(t11), mf),
-            ],
-            [w00, w10, w01, w11],
+        let (left8, right8, fx8, fy4) = bilinear16_load_pairs::<POT>(tex, u, v);
+        let mf = vdupq_n_u16(0xf);
+        let r = bilinear_channel_s16(
+            vandq_u16(vshrq_n_u16::<8>(left8), mf),
+            vandq_u16(vshrq_n_u16::<8>(right8), mf),
+            fx8,
+            fy4,
         );
-        let g = blend4_u32(
-            [
-                vandq_u32(vshrq_n_u32::<4>(t00), mf),
-                vandq_u32(vshrq_n_u32::<4>(t10), mf),
-                vandq_u32(vshrq_n_u32::<4>(t01), mf),
-                vandq_u32(vshrq_n_u32::<4>(t11), mf),
-            ],
-            [w00, w10, w01, w11],
+        let g = bilinear_channel_s16(
+            vandq_u16(vshrq_n_u16::<4>(left8), mf),
+            vandq_u16(vshrq_n_u16::<4>(right8), mf),
+            fx8,
+            fy4,
         );
-        let b = blend4_u32(
-            [
-                vandq_u32(t00, mf),
-                vandq_u32(t10, mf),
-                vandq_u32(t01, mf),
-                vandq_u32(t11, mf),
-            ],
-            [w00, w10, w01, w11],
-        );
-        let a = blend4_u32(
-            [
-                vshrq_n_u32::<12>(t00),
-                vshrq_n_u32::<12>(t10),
-                vshrq_n_u32::<12>(t01),
-                vshrq_n_u32::<12>(t11),
-            ],
-            [w00, w10, w01, w11],
+        let b = bilinear_channel_s16(vandq_u16(left8, mf), vandq_u16(right8, mf), fx8, fy4);
+        let a = bilinear_channel_s16(
+            vshrq_n_u16::<12>(left8),
+            vshrq_n_u16::<12>(right8),
+            fx8,
+            fy4,
         );
         let inv15 = vdupq_n_f32(INV_15_Q16);
         (
-            vmulq_f32(vcvtq_f32_u32(r), inv15),
-            vmulq_f32(vcvtq_f32_u32(g), inv15),
-            vmulq_f32(vcvtq_f32_u32(b), inv15),
-            vmulq_f32(vcvtq_f32_u32(a), inv15),
+            vmulq_f32(r, inv15),
+            vmulq_f32(g, inv15),
+            vmulq_f32(b, inv15),
+            vmulq_f32(a, inv15),
         )
     }
 }
@@ -669,6 +743,7 @@ impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
 struct NearestPaletted8<const POT: bool>;
 impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
     type Scalar = rust::NearestPaletted8<POT>;
+    const UNIT_RANGE: bool = true;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -694,6 +769,7 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
 struct BilinearPaletted8<const POT: bool>;
 impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
     type Scalar = rust::BilinearPaletted8<POT>;
+    const UNIT_RANGE: bool = false;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -701,14 +777,30 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
-        let mut us = [0.0f32; 4];
-        let mut vs = [0.0f32; 4];
-        vst1q_f32(us.as_mut_ptr(), u);
-        vst1q_f32(vs.as_mut_ptr(), v);
-        let c0 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[0], vs[0]);
-        let c1 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[1], vs[1]);
-        let c2 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[2], vs[2]);
-        let c3 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[3], vs[3]);
+        let c0 = rust::BilinearPaletted8::<POT>::sample(
+            plan,
+            tex,
+            vgetq_lane_f32::<0>(u),
+            vgetq_lane_f32::<0>(v),
+        );
+        let c1 = rust::BilinearPaletted8::<POT>::sample(
+            plan,
+            tex,
+            vgetq_lane_f32::<1>(u),
+            vgetq_lane_f32::<1>(v),
+        );
+        let c2 = rust::BilinearPaletted8::<POT>::sample(
+            plan,
+            tex,
+            vgetq_lane_f32::<2>(u),
+            vgetq_lane_f32::<2>(v),
+        );
+        let c3 = rust::BilinearPaletted8::<POT>::sample(
+            plan,
+            tex,
+            vgetq_lane_f32::<3>(u),
+            vgetq_lane_f32::<3>(v),
+        );
         transpose4(
             vld1q_f32(c0.as_ptr()),
             vld1q_f32(c1.as_ptr()),
@@ -727,6 +819,21 @@ fn span_untextured_flat_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_untextured_flat_opaque::<Z_TEST, SPECULAR>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_untextured_flat_opaque_neon::<Z_TEST, SPECULAR>(
             plan, depth, pixels, value, step, flat, states,
@@ -734,6 +841,7 @@ fn span_untextured_flat_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_untextured_flat_opaque_neon<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
@@ -764,58 +872,58 @@ unsafe fn span_untextured_flat_opaque_neon<const Z_TEST: bool, const SPECULAR: b
             store_u16x4(p_ptr.add(i * 2), packed4);
             i += 4;
         }
-        if n4 < n {
-            rust::span_untextured_flat_opaque::<false, SPECULAR>(
-                plan,
-                &mut depth[n4..n],
-                &mut pixels[n4 * 2..n * 2],
-                value,
-                step,
-                flat,
-                states,
-            );
+        if n4 == n {
+            return;
         }
-        return;
-    }
-    let depth_write = states.depth_write;
-    let mut z_val = value[0];
-    let z_step = step[0];
-    let d_ptr = depth.as_mut_ptr();
-    let mut i = 0;
-    while i < n4 {
-        let z0 = z_val;
-        z_val += z_step;
-        let z1 = z_val;
-        z_val += z_step;
-        let z2 = z_val;
-        z_val += z_step;
-        let z3 = z_val;
-        z_val += z_step;
-        let zv = vld1q_f32([z0, z1, z2, z3].as_ptr());
-        let dv = vld1q_f32(d_ptr.add(i));
-        let z_mask = vcleq_f32(zv, dv);
-        if vmaxvq_u32(z_mask) != 0 {
-            if depth_write {
-                vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+    } else {
+        let depth_write = states.depth_write;
+        let mut z_val = value[0];
+        let z_step = step[0];
+        let d_ptr = depth.as_mut_ptr();
+        let mut i = 0;
+        while i < n4 {
+            let z0 = z_val;
+            z_val += z_step;
+            let z1 = z_val;
+            z_val += z_step;
+            let z2 = z_val;
+            z_val += z_step;
+            let z3 = z_val;
+            z_val += z_step;
+            let zv = pack_f32x4(z0, z1, z2, z3);
+            let dv = vld1q_f32(d_ptr.add(i));
+            let z_mask = vcleq_f32(zv, dv);
+            if vmaxvq_u32(z_mask) != 0 {
+                if vminvq_u32(z_mask) != 0 {
+                    if depth_write {
+                        vst1q_f32(d_ptr.add(i), zv);
+                    }
+                    store_u16x4(p_ptr.add(i * 2), packed4);
+                } else {
+                    if depth_write {
+                        vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                    }
+                    let old_px = load_u16x4(p_ptr.add(i * 2));
+                    let mask16 = vmovn_u32(z_mask);
+                    store_u16x4(p_ptr.add(i * 2), vbsl_u16(mask16, packed4, old_px));
+                }
             }
-            let old_px = load_u16x4(p_ptr.add(i * 2));
-            let mask16 = vmovn_u32(z_mask);
-            store_u16x4(p_ptr.add(i * 2), vbsl_u16(mask16, packed4, old_px));
+            i += 4;
         }
-        i += 4;
-    }
-    if n4 < n {
+        if n4 == n {
+            return;
+        }
         value[0] = z_val;
-        rust::span_untextured_flat_opaque::<true, SPECULAR>(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
-        );
     }
+    rust::span_untextured_flat_opaque::<Z_TEST, SPECULAR>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR: bool>(
@@ -827,6 +935,21 @@ fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_untextured_gouraud_opaque::<Z_TEST, SPECULAR>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_untextured_gouraud_opaque_neon::<Z_TEST, SPECULAR>(
             plan, depth, pixels, value, step, flat, states,
@@ -834,6 +957,7 @@ fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_untextured_gouraud_opaque_neon<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
@@ -902,35 +1026,43 @@ unsafe fn span_untextured_gouraud_opaque_neon<const Z_TEST: bool, const SPECULAR
         }
         let new_px = pack_rgb565_4(r, g, b);
         if Z_TEST {
-            if depth_write {
-                vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+            if vminvq_u32(z_mask) != 0 {
+                if depth_write {
+                    vst1q_f32(d_ptr.add(i), zv);
+                }
+                store_u16x4(p_ptr.add(i * 2), new_px);
+            } else {
+                if depth_write {
+                    vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                }
+                let old_px = load_u16x4(p_ptr.add(i * 2));
+                store_u16x4(
+                    p_ptr.add(i * 2),
+                    vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
+                );
             }
-            let old_px = load_u16x4(p_ptr.add(i * 2));
-            store_u16x4(
-                p_ptr.add(i * 2),
-                vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
-            );
         } else {
             store_u16x4(p_ptr.add(i * 2), new_px);
         }
         i += 4;
     }
-    if n4 < n {
-        vst1q_f32(value.as_mut_ptr(), s0);
-        vst1q_f32(value.as_mut_ptr().add(4), s1);
-        if SPECULAR {
-            vst1q_f32(value.as_mut_ptr().add(8), s2);
-        }
-        rust::span_untextured_gouraud_opaque::<Z_TEST, SPECULAR>(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
-        );
+    if n4 == n {
+        return;
     }
+    vst1q_f32(value.as_mut_ptr(), s0);
+    vst1q_f32(value.as_mut_ptr().add(4), s1);
+    if SPECULAR {
+        vst1q_f32(value.as_mut_ptr().add(8), s2);
+    }
+    rust::span_untextured_gouraud_opaque::<Z_TEST, SPECULAR>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
@@ -942,6 +1074,21 @@ fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_untextured_alpha_neon::<Z_LE, ALPHA_GT>(
             plan, depth, pixels, value, step, flat, states,
@@ -949,6 +1096,7 @@ fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
     plan: &DrawPlan<'_>,
@@ -973,6 +1121,15 @@ unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
                 return;
             }
         }
+        if !ALPHA_GT
+            && !depth_write
+            && sa == 0.0
+            && flat.0[0].is_finite()
+            && flat.0[1].is_finite()
+            && flat.0[2].is_finite()
+        {
+            return;
+        }
         let isa = vdupq_n_f32(1.0 - sa);
         let sr_sa = vdupq_n_f32(flat.0[0] * sa);
         let sg_sa = vdupq_n_f32(flat.0[1] * sa);
@@ -990,7 +1147,7 @@ unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
                 z_val += z_step;
                 let z3 = z_val;
                 z_val += z_step;
-                let zv = vld1q_f32([z0, z1, z2, z3].as_ptr());
+                let zv = pack_f32x4(z0, z1, z2, z3);
                 let dv = vld1q_f32(d_ptr.add(i));
                 let z_mask = vcleq_f32(zv, dv);
                 if vmaxvq_u32(z_mask) != 0 {
@@ -1018,19 +1175,11 @@ unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
             }
             i += 4;
         }
-        if n4 < n {
-            if Z_LE {
-                value[0] = z_val;
-            }
-            rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
-                plan,
-                &mut depth[n4..n],
-                &mut pixels[n4 * 2..n * 2],
-                value,
-                step,
-                flat,
-                states,
-            );
+        if n4 == n {
+            return;
+        }
+        if Z_LE {
+            value[0] = z_val;
         }
     } else {
         let one = vdupq_n_f32(1.0);
@@ -1083,6 +1232,10 @@ unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
             let r = vmulq_f32(cr, near);
             let g = vmulq_f32(cg, near);
             let b = vmulq_f32(cb, near);
+            if !ALPHA_GT && !depth_write && all_zero_f32(sa) && all_finite3(r, g, b) {
+                i += 4;
+                continue;
+            }
             let isa = vsubq_f32(one, sa);
             let old_px = load_u16x4(p_ptr.add(i * 2));
             let (ur, ug, ub) = unpack_rgb565_4(old_px);
@@ -1103,20 +1256,21 @@ unsafe fn span_untextured_alpha_neon<const Z_LE: bool, const ALPHA_GT: bool>(
             }
             i += 4;
         }
-        if n4 < n {
-            vst1q_f32(value.as_mut_ptr(), s0);
-            vst1q_f32(value.as_mut_ptr().add(4), s1);
-            rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
-                plan,
-                &mut depth[n4..n],
-                &mut pixels[n4 * 2..n * 2],
-                value,
-                step,
-                flat,
-                states,
-            );
+        if n4 == n {
+            return;
         }
+        vst1q_f32(value.as_mut_ptr(), s0);
+        vst1q_f32(value.as_mut_ptr().add(4), s1);
     }
+    rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 fn span_textured_copy_opaque<S: TexSample4, const Z_TEST: bool>(
@@ -1128,11 +1282,27 @@ fn span_textured_copy_opaque<S: TexSample4, const Z_TEST: bool>(
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_textured_copy_opaque::<S::Scalar, Z_TEST>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_textured_copy_opaque_neon::<S, Z_TEST>(plan, depth, pixels, value, step, flat, states);
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_textured_copy_opaque_neon<S: TexSample4, const Z_TEST: bool>(
     plan: &DrawPlan<'_>,
@@ -1143,10 +1313,10 @@ unsafe fn span_textured_copy_opaque_neon<S: TexSample4, const Z_TEST: bool>(
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
-    let tex = plan.texture.as_ref().unwrap();
-    let depth_write = states.depth_write;
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
+    let tex = plan.texture.as_ref().unwrap();
+    let depth_write = states.depth_write;
     let mut s0 = vld1q_f32(value.as_ptr());
     let d0 = vld1q_f32(step.as_ptr());
     let d_ptr = depth.as_mut_ptr();
@@ -1181,37 +1351,53 @@ unsafe fn span_textured_copy_opaque_neon<S: TexSample4, const Z_TEST: bool>(
                 let near = persp4(wv);
                 let (tr, tg, tb, _) =
                     S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
-                let new_px = pack_rgb565_4(tr, tg, tb);
-                if depth_write {
-                    vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                let new_px = if S::UNIT_RANGE {
+                    pack_rgb565_4_unclamped(tr, tg, tb)
+                } else {
+                    pack_rgb565_4(tr, tg, tb)
+                };
+                if vminvq_u32(z_mask) != 0 {
+                    if depth_write {
+                        vst1q_f32(d_ptr.add(i), zv);
+                    }
+                    store_u16x4(p_ptr.add(i * 2), new_px);
+                } else {
+                    if depth_write {
+                        vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                    }
+                    let old_px = load_u16x4(p_ptr.add(i * 2));
+                    store_u16x4(
+                        p_ptr.add(i * 2),
+                        vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
+                    );
                 }
-                let old_px = load_u16x4(p_ptr.add(i * 2));
-                store_u16x4(
-                    p_ptr.add(i * 2),
-                    vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
-                );
             }
         } else {
             let (_, wv, uv, vv) = step4_transpose(&mut s0, d0);
             let near = persp4(wv);
             let (tr, tg, tb, _) = S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
-            let new_px = pack_rgb565_4(tr, tg, tb);
+            let new_px = if S::UNIT_RANGE {
+                pack_rgb565_4_unclamped(tr, tg, tb)
+            } else {
+                pack_rgb565_4(tr, tg, tb)
+            };
             store_u16x4(p_ptr.add(i * 2), new_px);
         }
         i += 4;
     }
-    if n4 < n {
-        vst1q_f32(value.as_mut_ptr(), s0);
-        rust::span_textured_copy_opaque::<S::Scalar, Z_TEST>(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
-        );
+    if n4 == n {
+        return;
     }
+    vst1q_f32(value.as_mut_ptr(), s0);
+    rust::span_textured_copy_opaque::<S::Scalar, Z_TEST>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 fn resolve_textured_copy_opaque(
@@ -1265,6 +1451,21 @@ fn span_textured_modulate_opaque<
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_textured_modulate_opaque::<S::Scalar, Z_TEST, FLAT, SPECULAR, FOG>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_textured_modulate_opaque_neon::<S, Z_TEST, FLAT, SPECULAR, FOG>(
             plan, depth, pixels, value, step, flat, states,
@@ -1272,6 +1473,7 @@ fn span_textured_modulate_opaque<
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_textured_modulate_opaque_neon<
     S: TexSample4,
@@ -1288,10 +1490,10 @@ unsafe fn span_textured_modulate_opaque_neon<
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
-    let tex = plan.texture.as_ref().unwrap();
-    let depth_write = states.depth_write;
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
+    let tex = plan.texture.as_ref().unwrap();
+    let depth_write = states.depth_write;
     let flat_r = vdupq_n_f32(flat.0[0]);
     let flat_g = vdupq_n_f32(flat.0[1]);
     let flat_b = vdupq_n_f32(flat.0[2]);
@@ -1404,38 +1606,46 @@ unsafe fn span_textured_modulate_opaque_neon<
 
         let new_px = pack_rgb565_4(r, g, b);
         if Z_TEST {
-            if depth_write {
-                vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+            if vminvq_u32(z_mask) != 0 {
+                if depth_write {
+                    vst1q_f32(d_ptr.add(i), zv);
+                }
+                store_u16x4(p_ptr.add(i * 2), new_px);
+            } else {
+                if depth_write {
+                    vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                }
+                let old_px = load_u16x4(p_ptr.add(i * 2));
+                store_u16x4(
+                    p_ptr.add(i * 2),
+                    vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
+                );
             }
-            let old_px = load_u16x4(p_ptr.add(i * 2));
-            store_u16x4(
-                p_ptr.add(i * 2),
-                vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
-            );
         } else {
             store_u16x4(p_ptr.add(i * 2), new_px);
         }
         i += 4;
     }
 
-    if n4 < n {
-        vst1q_f32(value.as_mut_ptr(), s0);
-        if !FLAT {
-            vst1q_f32(value.as_mut_ptr().add(4), s1);
-        }
-        if (!FLAT && SPECULAR) || FOG {
-            vst1q_f32(value.as_mut_ptr().add(8), s2);
-        }
-        rust::span_textured_modulate_opaque::<S::Scalar, Z_TEST, FLAT, SPECULAR, FOG>(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
-        );
+    if n4 == n {
+        return;
     }
+    vst1q_f32(value.as_mut_ptr(), s0);
+    if !FLAT {
+        vst1q_f32(value.as_mut_ptr().add(4), s1);
+    }
+    if (!FLAT && SPECULAR) || FOG {
+        vst1q_f32(value.as_mut_ptr().add(8), s2);
+    }
+    rust::span_textured_modulate_opaque::<S::Scalar, Z_TEST, FLAT, SPECULAR, FOG>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 fn resolve_opaque_pot_sampler<S: TexSample4>(
@@ -1525,6 +1735,21 @@ fn span_textured_modulate_blend<
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
+    let n = depth.len().min(pixels.len() / 2);
+    if n < 4 {
+        if n != 0 {
+            rust::span_textured_modulate_blend::<S::Scalar, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
+                plan,
+                &mut depth[..n],
+                &mut pixels[..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
     unsafe {
         span_textured_modulate_blend_neon::<S, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
             plan, depth, pixels, value, step, flat, states,
@@ -1532,6 +1757,7 @@ fn span_textured_modulate_blend<
     }
 }
 
+#[inline(never)]
 #[target_feature(enable = "neon")]
 unsafe fn span_textured_modulate_blend_neon<
     S: TexSample4,
@@ -1549,9 +1775,9 @@ unsafe fn span_textured_modulate_blend_neon<
     flat: ([f32; 4], [f32; 3]),
     states: &States,
 ) {
-    let tex = plan.texture.as_ref().unwrap();
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
+    let tex = plan.texture.as_ref().unwrap();
     let flat_r = vdupq_n_f32(flat.0[0]);
     let flat_g = vdupq_n_f32(flat.0[1]);
     let flat_b = vdupq_n_f32(flat.0[2]);
@@ -1564,6 +1790,14 @@ unsafe fn span_textured_modulate_blend_neon<
     let alpha_combine = states.alpha;
     let alpha_ref = states.alpha_test.map_or(0, |(_, r)| r);
     let depth_write = states.depth_write;
+    let can_skip_transparent =
+        !ALPHA_GT && !depth_write && (BLEND == BLEND_ALPHA || BLEND == BLEND_ADDITIVE_ALPHA);
+    let flat_rgb_always_finite = FLAT
+        && S::UNIT_RANGE
+        && flat.0[0].is_finite()
+        && flat.0[1].is_finite()
+        && flat.0[2].is_finite()
+        && (!SPECULAR || (flat.1[0].is_finite() && flat.1[1].is_finite() && flat.1[2].is_finite()));
 
     let mut s0 = vld1q_f32(value.as_ptr());
     let d0 = vld1q_f32(step.as_ptr());
@@ -1675,6 +1909,11 @@ unsafe fn span_textured_modulate_blend_neon<
             (sa, Some((cr, cg, cb)))
         };
 
+        if can_skip_transparent && flat_rgb_always_finite && all_zero_f32(sa) {
+            i += 4;
+            continue;
+        }
+
         let (mut r, mut g, mut b) = if FLAT {
             (
                 vmulq_f32(tr, flat_r),
@@ -1709,6 +1948,15 @@ unsafe fn span_textured_modulate_blend_neon<
                 g = vminnmq_f32(vaddq_f32(g, vmulq_f32(sg, near)), one);
                 b = vminnmq_f32(vaddq_f32(b, vmulq_f32(sb, near)), one);
             }
+        }
+
+        if can_skip_transparent
+            && !flat_rgb_always_finite
+            && all_zero_f32(sa)
+            && all_finite3(r, g, b)
+        {
+            i += 4;
+            continue;
         }
 
         let old_px = load_u16x4(p_ptr.add(i * 2));
@@ -1749,24 +1997,25 @@ unsafe fn span_textured_modulate_blend_neon<
         i += 4;
     }
 
-    if n4 < n {
-        vst1q_f32(value.as_mut_ptr(), s0);
-        if !FLAT {
-            vst1q_f32(value.as_mut_ptr().add(4), s1);
-        }
-        if !FLAT && SPECULAR {
-            vst1q_f32(value.as_mut_ptr().add(8), s2);
-        }
-        rust::span_textured_modulate_blend::<S::Scalar, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
-        );
+    if n4 == n {
+        return;
     }
+    vst1q_f32(value.as_mut_ptr(), s0);
+    if !FLAT {
+        vst1q_f32(value.as_mut_ptr().add(4), s1);
+    }
+    if !FLAT && SPECULAR {
+        vst1q_f32(value.as_mut_ptr().add(8), s2);
+    }
+    rust::span_textured_modulate_blend::<S::Scalar, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
+        plan,
+        &mut depth[n4..n],
+        &mut pixels[n4 * 2..n * 2],
+        value,
+        step,
+        flat,
+        states,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1853,6 +2102,676 @@ fn resolve_textured_modulate_blend(
             (TexFormat::Paletted8, false) => go_gen!(NearestPaletted8<false>),
             (TexFormat::Paletted8, true) => go_gen!(BilinearPaletted8<false>),
             _ => unreachable!("select_kernel only emits specialized texture formats"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::{Blend, Compare, PixelFormat, Texture};
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_neon_matches_rust(
+        plan: &DrawPlan<'_>,
+        init_depth: &[f32],
+        init_pixels: &[u8],
+        byte_offset: usize,
+        value: [f32; PLANES],
+        step: [f32; PLANES],
+        flat: ([f32; 4], [f32; 3]),
+        states: &States,
+        label: &str,
+    ) {
+        let rust_fn = rust::resolve_span_fn(plan.kernel);
+        let neon_fn = resolve_span_fn(plan.kernel);
+
+        let mut dr = init_depth.to_vec();
+        let mut dn = init_depth.to_vec();
+        let mut pr = vec![0x5a; byte_offset + init_pixels.len() + 3];
+        let mut pn = vec![0x5a; byte_offset + init_pixels.len() + 3];
+        pr[byte_offset..byte_offset + init_pixels.len()].copy_from_slice(init_pixels);
+        pn[byte_offset..byte_offset + init_pixels.len()].copy_from_slice(init_pixels);
+
+        let mut vr = value;
+        let mut vn = value;
+        rust_fn(
+            plan,
+            &mut dr,
+            &mut pr[byte_offset..byte_offset + init_pixels.len()],
+            &mut vr,
+            &step,
+            flat,
+            states,
+        );
+        neon_fn(
+            plan,
+            &mut dn,
+            &mut pn[byte_offset..byte_offset + init_pixels.len()],
+            &mut vn,
+            &step,
+            flat,
+            states,
+        );
+        assert_eq!(pr, pn, "pixel mismatch ({label})");
+        let br: Vec<u32> = dr.iter().map(|d| d.to_bits()).collect();
+        let bn: Vec<u32> = dn.iter().map(|d| d.to_bits()).collect();
+        assert_eq!(br, bn, "depth mismatch ({label})");
+    }
+
+    #[test]
+    fn separable_bilinear_s16_and_unclamped_pack_match_oracle_bit_for_bit() {
+        #[target_feature(enable = "neon")]
+        unsafe fn run() {
+            // 1. Exhaustive horizontal sweep across all (c00, c10, fx) in 0..=63 x 0..=63 x 0..=256.
+            let fys: [i16; 5] = [0, 1, 128, 255, 256];
+            for c00 in 0u16..=63 {
+                let c01 = 63 - c00;
+                for c10 in 0u16..=63 {
+                    let c11 = 63 - c10;
+                    let cl = vsetq_lane_u16::<4>(
+                        c01,
+                        vsetq_lane_u16::<5>(
+                            c01,
+                            vsetq_lane_u16::<6>(c01, vsetq_lane_u16::<7>(c01, vdupq_n_u16(c00))),
+                        ),
+                    );
+                    let cr = vsetq_lane_u16::<4>(
+                        c11,
+                        vsetq_lane_u16::<5>(
+                            c11,
+                            vsetq_lane_u16::<6>(c11, vsetq_lane_u16::<7>(c11, vdupq_n_u16(c10))),
+                        ),
+                    );
+                    for fx_base in (0i16..=256).step_by(4) {
+                        let fxs = [
+                            fx_base,
+                            (fx_base + 1).min(256),
+                            (fx_base + 2).min(256),
+                            (fx_base + 3).min(256),
+                        ];
+                        let mut fx4 = vdup_n_u16(fxs[0] as u16);
+                        fx4 = vset_lane_u16::<1>(fxs[1] as u16, fx4);
+                        fx4 = vset_lane_u16::<2>(fxs[2] as u16, fx4);
+                        fx4 = vset_lane_u16::<3>(fxs[3] as u16, fx4);
+                        let fx4 = vreinterpret_s16_u16(fx4);
+                        let fx8 = vcombine_s16(fx4, fx4);
+                        for &fy in &fys {
+                            let fy4 = vreinterpret_s16_u16(vdup_n_u16(fy as u16));
+                            let got = bilinear_channel_s16(cl, cr, fx8, fy4);
+                            let lanes = [
+                                vgetq_lane_f32::<0>(got),
+                                vgetq_lane_f32::<1>(got),
+                                vgetq_lane_f32::<2>(got),
+                                vgetq_lane_f32::<3>(got),
+                            ];
+                            for k in 0..4 {
+                                let fx = fxs[k] as u32;
+                                let fyu = fy as u32;
+                                let expected = (u32::from(c00) * (256 - fx) * (256 - fyu)
+                                    + u32::from(c10) * fx * (256 - fyu)
+                                    + u32::from(c01) * (256 - fx) * fyu
+                                    + u32::from(c11) * fx * fyu)
+                                    as f32;
+                                assert_eq!(
+                                    lanes[k].to_bits(),
+                                    expected.to_bits(),
+                                    "c=({c00},{c10},{c01},{c11}) fx={fx} fy={fyu}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Full 4-corner boundary grid across all (c00, c10, c01, c11, fx, fy) corners.
+            let cs: &[u16] = &[0, 1, 15, 16, 31, 32, 62, 63];
+            let ws: &[i16] = &[0, 1, 127, 128, 255, 256];
+            for &c00 in cs {
+                for &c10 in cs {
+                    for &c01 in cs {
+                        for &c11 in cs {
+                            let cl = vsetq_lane_u16::<4>(c01, vdupq_n_u16(c00));
+                            let cr = vsetq_lane_u16::<4>(c11, vdupq_n_u16(c10));
+                            for &fx in ws {
+                                let fx4 = vreinterpret_s16_u16(vdup_n_u16(fx as u16));
+                                let fx8 = vcombine_s16(fx4, fx4);
+                                for &fy in ws {
+                                    let fy4 = vreinterpret_s16_u16(vdup_n_u16(fy as u16));
+                                    let got =
+                                        vgetq_lane_f32::<0>(bilinear_channel_s16(cl, cr, fx8, fy4));
+                                    let fxu = fx as u32;
+                                    let fyu = fy as u32;
+                                    let expected = (u32::from(c00) * (256 - fxu) * (256 - fyu)
+                                        + u32::from(c10) * fxu * (256 - fyu)
+                                        + u32::from(c01) * (256 - fxu) * fyu
+                                        + u32::from(c11) * fxu * fyu)
+                                        as f32;
+                                    assert_eq!(got.to_bits(), expected.to_bits());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Exact float RGB565 pack (unclamped vs clamped vs scalar) across all green Q16 values.
+            let max_g = 63u32 * 65_536;
+            for g_base in (0..=max_g).step_by(4) {
+                let gs = [
+                    g_base,
+                    (g_base + 1).min(max_g),
+                    (g_base + 2).min(max_g),
+                    (g_base + 3).min(max_g),
+                ];
+                let gf = pack_f32x4(
+                    gs[0] as f32 * INV_63_Q16,
+                    gs[1] as f32 * INV_63_Q16,
+                    gs[2] as f32 * INV_63_Q16,
+                    gs[3] as f32 * INV_63_Q16,
+                );
+                let rf = pack_f32x4(
+                    (gs[0] & 31) as f32 * INV_31,
+                    (gs[1] & 31) as f32 * INV_31,
+                    (gs[2] & 31) as f32 * INV_31,
+                    (gs[3] & 31) as f32 * INV_31,
+                );
+                let bf = pack_f32x4(
+                    ((gs[0] >> 5) & 31) as f32 * INV_31,
+                    ((gs[1] >> 5) & 31) as f32 * INV_31,
+                    ((gs[2] >> 5) & 31) as f32 * INV_31,
+                    ((gs[3] >> 5) & 31) as f32 * INV_31,
+                );
+                let unclamped = pack_rgb565_4_unclamped(rf, gf, bf);
+                let clamped = pack_rgb565_4(rf, gf, bf);
+                assert_eq!(
+                    vget_lane_u64::<0>(vreinterpret_u64_u16(unclamped)),
+                    vget_lane_u64::<0>(vreinterpret_u64_u16(clamped)),
+                    "unclamped pack mismatch at g_base={g_base}"
+                );
+                let mut out = [0u8; 8];
+                store_u16x4(out.as_mut_ptr(), unclamped);
+                for k in 0..4 {
+                    let expected = pack_rgb565_rgb(
+                        (gs[k] & 31) as f32 * INV_31,
+                        gs[k] as f32 * INV_63 / 65_536.0,
+                        ((gs[k] >> 5) & 31) as f32 * INV_31,
+                    );
+                    assert_eq!(&out[k * 2..k * 2 + 2], &expected, "g={}", gs[k]);
+                }
+            }
+        }
+        unsafe { run() };
+    }
+
+    #[test]
+    fn bilinear_seams_1x1_unaligned_and_special_uv_match_rust() {
+        #[target_feature(enable = "neon")]
+        unsafe fn check_sampler<S: TexSample4>(
+            plan: &DrawPlan<'_>,
+            tex: &PreparedTexture<'_>,
+            us: [f32; 4],
+            vs: [f32; 4],
+            label: &str,
+        ) {
+            let uv = pack_f32x4(us[0], us[1], us[2], us[3]);
+            let vv = pack_f32x4(vs[0], vs[1], vs[2], vs[3]);
+            let (r, g, b, a) = S::sample4(plan, tex, uv, vv);
+            let rs = [
+                vgetq_lane_f32::<0>(r),
+                vgetq_lane_f32::<1>(r),
+                vgetq_lane_f32::<2>(r),
+                vgetq_lane_f32::<3>(r),
+            ];
+            let gs = [
+                vgetq_lane_f32::<0>(g),
+                vgetq_lane_f32::<1>(g),
+                vgetq_lane_f32::<2>(g),
+                vgetq_lane_f32::<3>(g),
+            ];
+            let bs = [
+                vgetq_lane_f32::<0>(b),
+                vgetq_lane_f32::<1>(b),
+                vgetq_lane_f32::<2>(b),
+                vgetq_lane_f32::<3>(b),
+            ];
+            let as_ = [
+                vgetq_lane_f32::<0>(a),
+                vgetq_lane_f32::<1>(a),
+                vgetq_lane_f32::<2>(a),
+                vgetq_lane_f32::<3>(a),
+            ];
+            for k in 0..4 {
+                let exp = S::Scalar::sample(plan, tex, us[k], vs[k]);
+                assert_eq!(rs[k].to_bits(), exp[0].to_bits(), "{label} r lane {k}");
+                assert_eq!(gs[k].to_bits(), exp[1].to_bits(), "{label} g lane {k}");
+                assert_eq!(bs[k].to_bits(), exp[2].to_bits(), "{label} b lane {k}");
+                assert_eq!(as_[k].to_bits(), exp[3].to_bits(), "{label} a lane {k}");
+            }
+        }
+
+        const ARGB1555: PixelFormat = PixelFormat {
+            bits: 16,
+            masks: [0x7c00, 0x03e0, 0x001f, 0x8000],
+        };
+        const ARGB4444: PixelFormat = PixelFormat {
+            bits: 16,
+            masks: [0x0f00, 0x00f0, 0x000f, 0xf000],
+        };
+        // Backing buffer with 1-byte leading pad to prove unaligned texture slices work.
+        let backing: Vec<u8> = (0..1 + 16 * 36)
+            .map(|i| ((i * 97 + 13) & 0xff) as u8)
+            .collect();
+        let unaligned = &backing[1..];
+
+        let uv_cases: &[(&str, [f32; 4], [f32; 4])] = &[
+            ("all_non_seam", [0.1, 0.25, 0.4, 0.6], [0.2, 0.35, 0.5, 0.7]),
+            ("one_seam", [0.1, 0.99, 0.4, 0.6], [0.2, 0.99, 0.5, 0.7]),
+            (
+                "all_seam",
+                [0.99, -0.01, 1.99, -1.01],
+                [0.99, -0.01, 0.5, 1.99],
+            ),
+            (
+                "fx_eq_256_tiny_neg",
+                [0.5 / 16.0 - 1.0e-8, 0.5 / 16.0 - 1.0e-9, -1.0e-8, -0.0],
+                [0.5 / 16.0 - 1.0e-8, 0.25, -1.0e-8, 0.9999999],
+            ),
+            (
+                "nan_inf_huge",
+                [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 3.0e9],
+                [f32::NEG_INFINITY, f32::NAN, -3.0e9, f32::INFINITY],
+            ),
+        ];
+
+        for &(label, w, h, clamp, fmt) in &[
+            (
+                "1x1_pot_565",
+                1u32,
+                1u32,
+                [false, false],
+                PixelFormat::RGB565,
+            ),
+            ("2x2_pot_565", 2, 2, [false, false], PixelFormat::RGB565),
+            ("16x16_pot_565", 16, 16, [false, false], PixelFormat::RGB565),
+            ("7x5_npot_565", 7, 5, [false, false], PixelFormat::RGB565),
+            ("7x5_clamp_565", 7, 5, [true, true], PixelFormat::RGB565),
+            ("16x16_pot_1555", 16, 16, [false, false], ARGB1555),
+            ("7x5_clamp_1555", 7, 5, [true, false], ARGB1555),
+            ("16x16_pot_4444", 16, 16, [false, false], ARGB4444),
+            ("5x7_npot_4444", 5, 7, [false, true], ARGB4444),
+        ] {
+            let pitch = w * 2 + if w == 1 { 0 } else { 3 };
+            let need_bytes = ((h - 1) * pitch + w * 2) as usize;
+            let tex = Texture {
+                bytes: &unaligned[..need_bytes],
+                width: w,
+                height: h,
+                pitch,
+                format: fmt,
+                palette: None,
+                colour_key: None,
+                clamp,
+            };
+            let states = States {
+                linear: true,
+                colour: Combine::Texture,
+                alpha: Combine::Texture,
+                ..States::default()
+            };
+            let plan = DrawPlan::new(PixelFormat::RGB565, Some(&tex), &states);
+            let prep = plan.texture.as_ref().unwrap();
+            for &(uv_name, us, vs) in uv_cases {
+                let tag = format!("{label}/{uv_name}");
+                unsafe {
+                    match (prep.format, prep.both_pot_wrap) {
+                        (TexFormat::Rgb565, true) => {
+                            check_sampler::<BilinearRgb565<true>>(&plan, prep, us, vs, &tag)
+                        }
+                        (TexFormat::Rgb565, false) => {
+                            check_sampler::<BilinearRgb565<false>>(&plan, prep, us, vs, &tag)
+                        }
+                        (TexFormat::Argb1555, true) => {
+                            check_sampler::<BilinearArgb1555<true>>(&plan, prep, us, vs, &tag)
+                        }
+                        (TexFormat::Argb1555, false) => {
+                            check_sampler::<BilinearArgb1555<false>>(&plan, prep, us, vs, &tag)
+                        }
+                        (TexFormat::Argb4444, true) => {
+                            check_sampler::<BilinearArgb4444<true>>(&plan, prep, us, vs, &tag)
+                        }
+                        (TexFormat::Argb4444, false) => {
+                            check_sampler::<BilinearArgb4444<false>>(&plan, prep, us, vs, &tag)
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transparent_alpha_quad_skip_and_nonfinite_rgb_guard_match_rust() {
+        const ARGB4444: PixelFormat = PixelFormat {
+            bits: 16,
+            masks: [0x0f00, 0x00f0, 0x000f, 0xf000],
+        };
+        const PAL8: PixelFormat = PixelFormat {
+            bits: 8,
+            masks: [0; 4],
+        };
+        let tex_zero_alpha: Vec<u8> = (0..8 * 8 * 2)
+            .map(|i| if i % 2 == 1 { 0x07 } else { 0x55 })
+            .collect();
+        let tex4444 = Texture {
+            bytes: &tex_zero_alpha,
+            width: 8,
+            height: 8,
+            pitch: 16,
+            format: ARGB4444,
+            palette: None,
+            colour_key: None,
+            clamp: [false, false],
+        };
+        let palette: [[u8; 4]; 256] = std::array::from_fn(|i| [(i as u8), 128, 255, 0]);
+        let pal_bytes = vec![7u8; 64];
+        let tex_pal = Texture {
+            bytes: &pal_bytes,
+            width: 8,
+            height: 8,
+            pitch: 8,
+            format: PAL8,
+            palette: Some(&palette),
+            colour_key: None,
+            clamp: [false, false],
+        };
+
+        let init_depth = [1.0f32; 9];
+        let init_pixels: Vec<u8> = (0..18).map(|i| (i * 41 + 3) as u8).collect();
+        let zero_step = [0.0f32; PLANES];
+
+        type RgbCase = (&'static str, [f32; PLANES], ([f32; 4], [f32; 3]));
+        let rgb_cases: &[RgbCase] = &[
+            (
+                "finite_pos_zero_alpha",
+                [0.2, 1.0, 0.3, 0.4, 0.8, 0.5, 0.2, 0.0, 0.1, 0.2, 0.3, 0.0],
+                ([0.8, 0.5, 0.2, 0.0], [0.1, 0.2, 0.3]),
+            ),
+            (
+                "finite_neg_zero_alpha",
+                [0.2, 1.0, 0.3, 0.4, 0.8, 0.5, 0.2, -0.0, 0.1, 0.2, 0.3, 0.0],
+                ([0.8, 0.5, 0.2, -0.0], [0.1, 0.2, 0.3]),
+            ),
+            (
+                "inf_rgb_zero_alpha",
+                [
+                    0.2,
+                    1.0,
+                    0.3,
+                    0.4,
+                    f32::INFINITY,
+                    0.5,
+                    0.2,
+                    0.0,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.0,
+                ],
+                ([f32::INFINITY, 0.5, 0.2, 0.0], [0.1, 0.2, 0.3]),
+            ),
+            (
+                "neginf_rgb_zero_alpha",
+                [
+                    0.2,
+                    1.0,
+                    0.3,
+                    0.4,
+                    0.8,
+                    f32::NEG_INFINITY,
+                    0.2,
+                    0.0,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.0,
+                ],
+                ([0.8, f32::NEG_INFINITY, 0.2, 0.0], [0.1, 0.2, 0.3]),
+            ),
+            (
+                "nan_rgb_zero_alpha",
+                [
+                    0.2,
+                    1.0,
+                    0.3,
+                    0.4,
+                    0.8,
+                    0.5,
+                    f32::NAN,
+                    0.0,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.0,
+                ],
+                ([0.8, 0.5, f32::NAN, 0.0], [0.1, 0.2, 0.3]),
+            ),
+            (
+                "inf_uv_pal8_zero_alpha",
+                [
+                    0.2,
+                    1.0,
+                    f32::INFINITY,
+                    0.4,
+                    0.8,
+                    0.5,
+                    0.2,
+                    0.0,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.0,
+                ],
+                ([0.8, 0.5, 0.2, 0.0], [0.1, 0.2, 0.3]),
+            ),
+        ];
+
+        for depth_write in [false, true] {
+            for flat_mode in [false, true] {
+                let state_cases: &[(&str, Option<&Texture<'_>>, States)] = &[
+                    (
+                        "untex_alpha",
+                        None,
+                        States {
+                            flat: flat_mode,
+                            colour: Combine::Diffuse,
+                            alpha: Combine::Diffuse,
+                            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                            depth_write,
+                            ..States::default()
+                        },
+                    ),
+                    (
+                        "tex4444_alpha_tex",
+                        Some(&tex4444),
+                        States {
+                            flat: flat_mode,
+                            alpha: Combine::Texture,
+                            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                            depth_write,
+                            ..States::default()
+                        },
+                    ),
+                    (
+                        "tex4444_alpha_mod",
+                        Some(&tex4444),
+                        States {
+                            flat: flat_mode,
+                            alpha: Combine::Modulate,
+                            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                            depth_write,
+                            ..States::default()
+                        },
+                    ),
+                    (
+                        "tex4444_additive",
+                        Some(&tex4444),
+                        States {
+                            flat: false,
+                            alpha: Combine::Texture,
+                            blend: Some((Blend::SourceAlpha, Blend::One)),
+                            depth_write,
+                            ..States::default()
+                        },
+                    ),
+                    (
+                        "pal8_lin_alpha",
+                        Some(&tex_pal),
+                        States {
+                            flat: flat_mode,
+                            linear: true,
+                            alpha: Combine::Texture,
+                            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                            depth_write,
+                            ..States::default()
+                        },
+                    ),
+                ];
+                for (sname, t, states) in state_cases {
+                    let plan = DrawPlan::new(PixelFormat::RGB565, *t, states);
+                    for &(rname, val, fl) in rgb_cases {
+                        assert_neon_matches_rust(
+                            &plan,
+                            &init_depth,
+                            &init_pixels,
+                            1,
+                            val,
+                            zero_step,
+                            fl,
+                            states,
+                            &format!("{sname}/dw={depth_write}/flat={flat_mode}/{rname}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_z_all_pass_masks_and_inlined_tails_match_rust() {
+        let tex_bytes: Vec<u8> = (0..16 * 16 * 2)
+            .map(|i| ((i * 59 + 11) & 0xff) as u8)
+            .collect();
+        let tex = Texture {
+            bytes: &tex_bytes,
+            width: 16,
+            height: 16,
+            pitch: 32,
+            format: PixelFormat::RGB565,
+            palette: None,
+            colour_key: None,
+            clamp: [false, false],
+        };
+        let val: [f32; PLANES] = [0.5, 1.0, 0.15, 0.25, 0.7, 0.6, 0.5, 0.4, 0.1, 0.2, 0.3, 0.5];
+        let step: [f32; PLANES] = [
+            0.0, 0.01, 0.09, 0.07, -0.01, 0.01, -0.005, 0.0, 0.005, -0.005, 0.005, 0.0,
+        ];
+        let flat = ([0.75, 0.45, 0.85, 1.0], [0.2, 0.1, 0.3]);
+
+        for depth_write in [false, true] {
+            let kernels: &[(&str, Option<&Texture<'_>>, States)] = &[
+                (
+                    "untex_flat_z",
+                    None,
+                    States {
+                        flat: true,
+                        colour: Combine::Diffuse,
+                        alpha: Combine::Diffuse,
+                        depth_test: Some(Compare::LessEqual),
+                        depth_write,
+                        ..States::default()
+                    },
+                ),
+                (
+                    "untex_gouraud_z",
+                    None,
+                    States {
+                        colour: Combine::Diffuse,
+                        alpha: Combine::Diffuse,
+                        depth_test: Some(Compare::LessEqual),
+                        depth_write,
+                        ..States::default()
+                    },
+                ),
+                (
+                    "tex_copy_bilin_z",
+                    Some(&tex),
+                    States {
+                        linear: true,
+                        colour: Combine::Texture,
+                        alpha: Combine::Texture,
+                        depth_test: Some(Compare::LessEqual),
+                        depth_write,
+                        ..States::default()
+                    },
+                ),
+                (
+                    "tex_mod_bilin_z",
+                    Some(&tex),
+                    States {
+                        linear: true,
+                        depth_test: Some(Compare::LessEqual),
+                        depth_write,
+                        ..States::default()
+                    },
+                ),
+            ];
+            for (kname, t, states) in kernels {
+                let plan = DrawPlan::new(PixelFormat::RGB565, *t, states);
+                // Every 4-bit Z mask 0..=15 (all-fail, partial, all-pass) with tail lengths 0..=3.
+                for mask in 0u8..=15 {
+                    for extra in 0..=3 {
+                        let len = 4 + extra;
+                        let depth: Vec<f32> = (0..len)
+                            .map(|i| {
+                                if ((mask >> (i & 3)) & 1) != 0 {
+                                    0.5
+                                } else {
+                                    0.1
+                                }
+                            })
+                            .collect();
+                        let pixels: Vec<u8> = (0..len * 2).map(|i| (i * 37 + 5) as u8).collect();
+                        assert_neon_matches_rust(
+                            &plan,
+                            &depth,
+                            &pixels,
+                            usize::from(mask & 7),
+                            val,
+                            step,
+                            flat,
+                            states,
+                            &format!("{kname}/dw={depth_write}/mask={mask}/len={len}"),
+                        );
+                    }
+                }
+                // Widths 0..=65 and odd byte offsets 0..=7 on all-pass depths.
+                for len in 0..=65 {
+                    let depth = vec![1.0f32; len];
+                    let pixels: Vec<u8> = (0..len * 2).map(|i| (i * 23 + 9) as u8).collect();
+                    assert_neon_matches_rust(
+                        &plan,
+                        &depth,
+                        &pixels,
+                        len % 8,
+                        val,
+                        step,
+                        flat,
+                        states,
+                        &format!("{kname}/dw={depth_write}/all_pass/len={len}"),
+                    );
+                }
+            }
         }
     }
 }
