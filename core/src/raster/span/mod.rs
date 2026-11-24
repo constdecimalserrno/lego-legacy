@@ -548,17 +548,37 @@ fn resolve_xy<const POT: bool>(tex: &PreparedTexture<'_>, x: i32, y: i32) -> (us
     }
 }
 
+/// Blend formula specialized inside `TexturedModulateBlend`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BlendMode {
+    /// `(SourceAlpha, InverseSourceAlpha)`: `src * sa + dst * (1 - sa)`.
+    Alpha,
+    /// `(SourceAlpha, One)`: `src * sa + dst`.
+    AdditiveAlpha,
+    /// `(Zero, InverseSourceColour)`: `src * 0.0 + dst * (1 - src)`.
+    InvSrcColour,
+}
+
 /// Which interior-span kernel handles a draw. Selected once per draw call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InteriorKernel {
     UntexturedFlatOpaqueZ,
     UntexturedGouraudOpaqueZ,
     UntexturedAlphaZ,
+    UntexturedOpaque {
+        flat: bool,
+        specular: bool,
+        z_test: bool,
+    },
+    UntexturedAlpha {
+        z_le: bool,
+        alpha_gt: bool,
+    },
     TexturedModulateOpaque {
         format: TexFormat,
         linear: bool,
         pot_wrap: bool,
-        z_test_write: bool,
+        z_test: bool,
         flat: bool,
         specular: bool,
         fog: bool,
@@ -567,12 +587,15 @@ pub(super) enum InteriorKernel {
         format: TexFormat,
         linear: bool,
         pot_wrap: bool,
-        z_test_write: bool,
+        z_test: bool,
     },
-    TexturedModulateAlphaZ {
+    TexturedModulateBlend {
         format: TexFormat,
         linear: bool,
         pot_wrap: bool,
+        z_le: bool,
+        alpha_gt: bool,
+        blend: BlendMode,
         flat: bool,
         specular: bool,
     },
@@ -581,7 +604,6 @@ pub(super) enum InteriorKernel {
 }
 
 /// Per-draw precomputed state shared across every triangle in `triangles()`.
-#[derive(Clone, Copy)]
 pub(super) struct DrawPlan<'a> {
     pub pixel_channels: Channels,
     pub texture: Option<PreparedTexture<'a>>,
@@ -596,9 +618,12 @@ pub(super) struct DrawPlan<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub kernel: InteriorKernel,
     draw_span: SpanFn,
+    has_palette_f32: bool,
+    palette_f32: core::mem::MaybeUninit<[[f32; 4]; 256]>,
 }
 
 impl<'a> DrawPlan<'a> {
+    #[inline]
     pub(super) fn new(
         target_format: PixelFormat,
         texture: Option<&'a Texture<'a>>,
@@ -608,7 +633,16 @@ impl<'a> DrawPlan<'a> {
         let target_rgb565 = target_format == PixelFormat::RGB565;
         let prepared_tex = texture.map(|t| PreparedTexture::new(t, states.colour_key));
 
-        let need_z = states.depth_test.is_some() || states.depth_write;
+        let effective_depth_test = match states.depth_test {
+            Some(Compare::Always) => None,
+            other => other,
+        };
+        let effective_alpha_test = match states.alpha_test {
+            Some((Compare::Always, _)) => None,
+            other => other,
+        };
+
+        let need_z = effective_depth_test.is_some() || states.depth_write;
         let need_uv = texture.is_some();
         let need_diffuse_rgb = !states.flat && states.colour != Combine::Texture;
         let blend_uses_src_alpha = states.blend.is_some_and(|(s, d)| {
@@ -616,7 +650,7 @@ impl<'a> DrawPlan<'a> {
                 || matches!(d, Blend::SourceAlpha | Blend::InverseSourceAlpha)
         });
         let need_alpha_out =
-            states.alpha_test.is_some() || target_format.masks[3] != 0 || blend_uses_src_alpha;
+            effective_alpha_test.is_some() || target_format.masks[3] != 0 || blend_uses_src_alpha;
         let need_diffuse_a = !states.flat && states.alpha != Combine::Texture && need_alpha_out;
         let need_specular = !states.flat && states.specular;
         let need_fog = states.fog.is_some();
@@ -642,6 +676,34 @@ impl<'a> DrawPlan<'a> {
 
         let kernel = select_kernel(target_rgb565, prepared_tex.as_ref(), states);
         let draw_span = resolve_span_fn(kernel);
+
+        let mut palette_f32 = core::mem::MaybeUninit::<[[f32; 4]; 256]>::uninit();
+        let has_palette_f32 = if let Some(ref t) = prepared_tex {
+            if t.format == TexFormat::Paletted8 {
+                if let Some(pal) = t.palette {
+                    let dst = palette_f32.as_mut_ptr().cast::<[f32; 4]>();
+                    for (i, entry) in pal.iter().enumerate() {
+                        // SAFETY: `dst` points to 256 contiguous `[f32; 4]` slots inside `palette_f32`.
+                        unsafe {
+                            dst.add(i).write([
+                                U8_TO_F32[usize::from(entry[0])],
+                                U8_TO_F32[usize::from(entry[1])],
+                                U8_TO_F32[usize::from(entry[2])],
+                                U8_TO_F32[usize::from(entry[3])],
+                            ]);
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         Self {
             pixel_channels,
             texture: prepared_tex,
@@ -655,7 +717,63 @@ impl<'a> DrawPlan<'a> {
             need_fog,
             kernel,
             draw_span,
+            has_palette_f32,
+            palette_f32,
         }
+    }
+
+    #[inline(always)]
+    pub(super) fn palette_f32(&self) -> &[[f32; 4]; 256] {
+        debug_assert!(self.has_palette_f32);
+        // SAFETY: `palette_f32` is completely initialized whenever `has_palette_f32` is true
+        // (every `TexFormat::Paletted8` draw).
+        unsafe { self.palette_f32.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    pub(super) fn sample_fast_tex(
+        &self,
+        tex: &PreparedTexture<'_>,
+        u: f32,
+        v: f32,
+        linear: bool,
+    ) -> ([f32; 4], bool) {
+        if self.has_palette_f32 && tex.in_bounds {
+            let pal = self.palette_f32();
+            if !linear {
+                let x = tex.x_wrap.resolve((u * tex.width_f).floor() as i32);
+                let y = tex.y_wrap.resolve((v * tex.height_f).floor() as i32);
+                let idx = tex.bytes[y * tex.pitch + x];
+                let keyed = tex.active_key == Some(u32::from(idx));
+                return (pal[usize::from(idx)], keyed);
+            }
+            let (x, y) = (u * tex.width_f - 0.5, v * tex.height_f - 0.5);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let (x0, y0) = (x0 as i32, y0 as i32);
+            let (left, right) = (tex.x_wrap.resolve(x0), tex.x_wrap.resolve(x0 + 1));
+            let (upper, lower) = (tex.y_wrap.resolve(y0), tex.y_wrap.resolve(y0 + 1));
+            let mut out = [0.0f32; 4];
+            let mut keyed = 0.0f32;
+            for (tx, ty, weight) in [
+                (left, upper, (1.0 - fx) * (1.0 - fy)),
+                (right, upper, fx * (1.0 - fy)),
+                (left, lower, (1.0 - fx) * fy),
+                (right, lower, fx * fy),
+            ] {
+                let idx = tex.bytes[ty * tex.pitch + tx];
+                let t = pal[usize::from(idx)];
+                out[0] += weight * t[0];
+                out[1] += weight * t[1];
+                out[2] += weight * t[2];
+                out[3] += weight * t[3];
+                if tex.active_key == Some(u32::from(idx)) {
+                    keyed += weight;
+                }
+            }
+            return (out, keyed > 0.5);
+        }
+        tex.sample_fast(u, v, linear)
     }
 }
 
@@ -674,56 +792,98 @@ fn select_kernel(
     if !target_rgb565 {
         return InteriorKernel::General;
     }
-    let z_le = states.depth_test == Some(Compare::LessEqual);
+    let effective_depth_test = match states.depth_test {
+        Some(Compare::Always) => None,
+        other => other,
+    };
+    let z_le = effective_depth_test == Some(Compare::LessEqual);
     let z_le_write = z_le && states.depth_write;
-    let z_none = states.depth_test.is_none() && !states.depth_write;
-    let no_alpha_test = states.alpha_test.is_none();
+    let z_none = effective_depth_test.is_none() && !states.depth_write;
+    let z_supported = z_le || z_none;
+
+    let mut effective_alpha_test = match states.alpha_test {
+        Some((Compare::Always, _)) => None,
+        other => other,
+    };
+    let mut effective_blend = states.blend;
+
+    // An in-bounds opaque texture with `alpha == Combine::Texture` guarantees `colour[3] == 1.0`
+    // (`alpha_u8 == 255`) on every pixel: any alpha test satisfied by 255 is a no-op, and
+    // `(SourceAlpha, InverseSourceAlpha)` simplifies to opaque (`r * 1.0 + under * 0.0` packs
+    // bit-identically to `r` because RGB565 `under` is always finite in `[0.0, 1.0]`).
+    if let Some(t) = tex {
+        if t.in_bounds
+            && matches!(
+                t.format,
+                TexFormat::Rgb565 | TexFormat::Rgb555 | TexFormat::Xrgb8888
+            )
+            && states.alpha == Combine::Texture
+        {
+            if let Some((test, reference)) = effective_alpha_test {
+                if test.passes(255, reference) {
+                    effective_alpha_test = None;
+                }
+            }
+            if effective_blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)) {
+                effective_blend = None;
+            }
+        }
+    }
+
+    let no_alpha_test = effective_alpha_test.is_none();
+    let alpha_gt = matches!(effective_alpha_test, Some((Compare::Greater, _)));
     let has_fog = states.fog.is_some();
 
     match tex {
         None => {
-            if z_le
-                && no_alpha_test
-                && !states.specular
-                && !has_fog
-                && states.colour == Combine::Diffuse
-            {
-                if states.blend.is_none() && states.depth_write {
-                    return if states.flat {
-                        InteriorKernel::UntexturedFlatOpaqueZ
-                    } else {
-                        InteriorKernel::UntexturedGouraudOpaqueZ
+            if z_supported && !has_fog && states.colour == Combine::Diffuse {
+                if effective_blend.is_none() && no_alpha_test {
+                    if z_le_write && !states.specular {
+                        return if states.flat {
+                            InteriorKernel::UntexturedFlatOpaqueZ
+                        } else {
+                            InteriorKernel::UntexturedGouraudOpaqueZ
+                        };
+                    }
+                    return InteriorKernel::UntexturedOpaque {
+                        flat: states.flat,
+                        specular: states.specular,
+                        z_test: z_le,
                     };
                 }
-                if states.blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha))
+                if effective_blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha))
                     && states.alpha == Combine::Diffuse
+                    && !states.specular
+                    && (no_alpha_test || alpha_gt)
                 {
-                    return InteriorKernel::UntexturedAlphaZ;
+                    if z_le && no_alpha_test {
+                        return InteriorKernel::UntexturedAlphaZ;
+                    }
+                    return InteriorKernel::UntexturedAlpha { z_le, alpha_gt };
                 }
             }
             InteriorKernel::FastRgb565
         }
         Some(t) => {
-            if !no_alpha_test
+            if !(no_alpha_test || alpha_gt)
                 || !t.in_bounds
                 || t.active_key.is_some()
                 || !is_specialized_tex_format(t.format)
             {
                 return InteriorKernel::FastRgb565;
             }
-            if states.blend.is_none() && (z_le_write || z_none) {
+            if effective_blend.is_none() && no_alpha_test && z_supported {
                 if states.colour == Combine::Texture && !states.specular && !has_fog {
                     return InteriorKernel::TexturedCopyOpaque {
                         format: t.format,
                         linear: states.linear,
                         pot_wrap: t.both_pot_wrap,
-                        z_test_write: z_le_write,
+                        z_test: z_le,
                     };
                 }
                 if states.colour == Combine::Modulate {
-                    let supported_shade = if t.both_pot_wrap && z_le_write {
-                        (!states.flat && !(states.specular && has_fog))
-                            || (states.flat && !states.specular && !has_fog)
+                    let supported_shade = if t.both_pot_wrap && z_le {
+                        !(states.specular && has_fog) && !(states.flat && has_fog)
                     } else {
                         !states.flat && !states.specular && !has_fog
                     };
@@ -732,31 +892,62 @@ fn select_kernel(
                             format: t.format,
                             linear: states.linear,
                             pot_wrap: t.both_pot_wrap,
-                            z_test_write: z_le_write,
+                            z_test: z_le,
                             flat: states.flat,
                             specular: states.specular,
                             fog: has_fog,
                         };
                     }
                 }
-            } else if z_le
-                && states.colour == Combine::Modulate
-                && states.blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha))
-                && !has_fog
-            {
-                let supported_shade = if t.both_pot_wrap {
-                    !(states.flat && states.specular)
-                } else {
-                    !states.flat && !states.specular
-                };
-                if supported_shade {
-                    return InteriorKernel::TexturedModulateAlphaZ {
-                        format: t.format,
-                        linear: states.linear,
-                        pot_wrap: t.both_pot_wrap,
-                        flat: states.flat,
-                        specular: states.specular,
+            } else if z_supported && states.colour == Combine::Modulate && !has_fog {
+                if effective_blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)) {
+                    let supported = if t.both_pot_wrap {
+                        (z_le && no_alpha_test) || (!states.flat && !states.specular)
+                    } else {
+                        z_le && no_alpha_test && !states.flat && !states.specular
                     };
+                    if supported {
+                        return InteriorKernel::TexturedModulateBlend {
+                            format: t.format,
+                            linear: states.linear,
+                            pot_wrap: t.both_pot_wrap,
+                            z_le,
+                            alpha_gt,
+                            blend: BlendMode::Alpha,
+                            flat: states.flat,
+                            specular: states.specular,
+                        };
+                    }
+                } else if t.both_pot_wrap
+                    && z_le
+                    && no_alpha_test
+                    && !states.flat
+                    && !states.specular
+                {
+                    if effective_blend == Some((Blend::SourceAlpha, Blend::One)) {
+                        return InteriorKernel::TexturedModulateBlend {
+                            format: t.format,
+                            linear: states.linear,
+                            pot_wrap: true,
+                            z_le: true,
+                            alpha_gt: false,
+                            blend: BlendMode::AdditiveAlpha,
+                            flat: false,
+                            specular: false,
+                        };
+                    }
+                    if effective_blend == Some((Blend::Zero, Blend::InverseSourceColour)) {
+                        return InteriorKernel::TexturedModulateBlend {
+                            format: t.format,
+                            linear: states.linear,
+                            pot_wrap: true,
+                            z_le: true,
+                            alpha_gt: false,
+                            blend: BlendMode::InvSrcColour,
+                            flat: false,
+                            specular: false,
+                        };
+                    }
                 }
             }
             InteriorKernel::FastRgb565
@@ -1429,6 +1620,660 @@ mod tests {
                         &format!("{sname}/{ename}/{dname}"),
                     );
                 }
+            }
+        }
+    }
+
+    /// Layer 1 differential oracle for every #278 kernel extension, canonicalization,
+    /// and pure-Rust fallback path:
+    /// - untextured opaque specular (flat folded & Gouraud), `z_none`, `Compare::Always`,
+    ///   and read-only Z (`z_le && !depth_write`);
+    /// - untextured alpha `z_none` and `alpha_test == Greater` (flat & Gouraud);
+    /// - textured opaque `flat && specular`, `z_le && !depth_write`, opaque-tex alpha
+    ///   canonicalization (`Rgb565` + `Combine::Texture` + `Greater` + `(SA, ISA)`),
+    ///   and `alpha_test == Always`;
+    /// - textured blend `alpha_test == Greater` (`z_le` & `z_none`, `Combine::Texture`
+    ///   & `Combine::Modulate`/`Diffuse`/`Add`), `flat && specular`, `(SourceAlpha, One)`
+    ///   additive, and `(Zero, InverseSourceColour)` multiplicative shadows;
+    /// - `Paletted8` float palette LUT exactness and `span_fast_rgb565` vs `span_general_in_bounds`.
+    #[test]
+    fn simd_and_canonicalized_kernels_match_rust_and_general_oracle() {
+        const ARGB1555: PixelFormat = PixelFormat {
+            bits: 16,
+            masks: [0x7c00, 0x03e0, 0x001f, 0x8000],
+        };
+        const ARGB4444: PixelFormat = PixelFormat {
+            bits: 16,
+            masks: [0x0f00, 0x00f0, 0x000f, 0xf000],
+        };
+        const PAL8: PixelFormat = PixelFormat {
+            bits: 8,
+            masks: [0; 4],
+        };
+
+        let mut seed = 0x51a7_9e33u32;
+        let mut next_u32 = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let palette: [[u8; 4]; 256] = std::array::from_fn(|i| {
+            [
+                (i as u8).wrapping_mul(37),
+                (i as u8).wrapping_mul(71).wrapping_add(11),
+                (i as u8).wrapping_mul(131).wrapping_add(23),
+                if i % 5 == 0 { 0 } else { (i as u8) ^ 0x5a },
+            ]
+        });
+        let tex16_bytes: Vec<u8> = (0..16 * (16 * 2 + 4)).map(|_| next_u32() as u8).collect();
+        let tex8_bytes: Vec<u8> = (0..16 * (16 + 4)).map(|_| next_u32() as u8).collect();
+        let tex_rgb565 = Texture {
+            bytes: &tex16_bytes,
+            width: 16,
+            height: 16,
+            pitch: 36,
+            format: PixelFormat::RGB565,
+            palette: None,
+            colour_key: Some(u32::from(u16::from_le_bytes([
+                tex16_bytes[0],
+                tex16_bytes[1],
+            ]))),
+            clamp: [false, false],
+        };
+        let tex_argb4444 = Texture {
+            format: ARGB4444,
+            ..tex_rgb565
+        };
+        let tex_argb1555 = Texture {
+            format: ARGB1555,
+            ..tex_rgb565
+        };
+        let tex_pal8 = Texture {
+            bytes: &tex8_bytes,
+            width: 16,
+            height: 16,
+            pitch: 20,
+            format: PAL8,
+            palette: Some(&palette),
+            colour_key: Some(u32::from(tex8_bytes[0])),
+            clamp: [false, false],
+        };
+
+        // 1. Verify `Paletted8` float LUT matches `U8_TO_F32` bit-for-bit.
+        let pal_plan = DrawPlan::new(PixelFormat::RGB565, Some(&tex_pal8), &States::default());
+        let lut = pal_plan.palette_f32();
+        for (i, entry) in palette.iter().enumerate() {
+            for c in 0..4 {
+                assert_eq!(
+                    lut[i][c].to_bits(),
+                    U8_TO_F32[usize::from(entry[c])].to_bits()
+                );
+            }
+        }
+
+        // 2. Verify canonicalizations select the intended SIMD kernels.
+        let alpha_team_rgb565_ui = States {
+            depth_test: Some(Compare::Always),
+            depth_write: false,
+            alpha_test: Some((Compare::Greater, 1)),
+            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+            alpha: Combine::Texture,
+            ..States::default()
+        };
+        assert_eq!(
+            DrawPlan::new(
+                PixelFormat::RGB565,
+                Some(&tex_rgb565),
+                &alpha_team_rgb565_ui
+            )
+            .kernel,
+            InteriorKernel::TexturedModulateOpaque {
+                format: TexFormat::Rgb565,
+                linear: false,
+                pot_wrap: true,
+                z_test: false,
+                flat: false,
+                specular: false,
+                fog: false,
+            }
+        );
+        let alpha_team_always_fail_ref255 = States {
+            alpha_test: Some((Compare::Greater, 255)),
+            ..alpha_team_rgb565_ui
+        };
+        assert_eq!(
+            DrawPlan::new(
+                PixelFormat::RGB565,
+                Some(&tex_rgb565),
+                &alpha_team_always_fail_ref255
+            )
+            .kernel,
+            InteriorKernel::FastRgb565
+        );
+        let alpha_always_canon = States {
+            depth_test: Some(Compare::Always),
+            depth_write: false,
+            alpha_test: Some((Compare::Always, 200)),
+            ..States::default()
+        };
+        let plan_always = DrawPlan::new(
+            PixelFormat::RGB565,
+            Some(&tex_argb4444),
+            &alpha_always_canon,
+        );
+        assert!(!plan_always.need_z);
+        assert_eq!(
+            plan_always.kernel,
+            InteriorKernel::TexturedModulateOpaque {
+                format: TexFormat::Argb4444,
+                linear: false,
+                pot_wrap: true,
+                z_test: false,
+                flat: false,
+                specular: false,
+                fog: false,
+            }
+        );
+
+        let base_value: [f32; PLANES] = [
+            0.35, 0.85, -0.37, 1.13, 0.72, 0.31, 0.58, 0.42, 0.14, 0.29, 0.08, 0.41,
+        ];
+        let base_step: [f32; PLANES] = [
+            0.004, 0.011, 0.063, -0.047, -0.009, 0.013, 0.007, -0.015, 0.006, -0.004, 0.011, 0.017,
+        ];
+        let flat = ([0.83, 0.47, 0.61, 0.54], [0.25, 0.63, 0.17]);
+
+        let make_buffers = |len: usize| -> (Vec<f32>, Vec<u8>) {
+            let depth: Vec<f32> = (0..len)
+                .map(|i| match i % 7 {
+                    0 => 0.1,
+                    1 => f32::NAN,
+                    2 => 0.35,
+                    3 => -0.0,
+                    _ => 0.9,
+                })
+                .collect();
+            let pixels: Vec<u8> = (0..len * 2)
+                .map(|i| ((i * 53 + len * 17 + 9) & 0xff) as u8)
+                .collect();
+            (depth, pixels)
+        };
+
+        let assert_matches_general_and_simd =
+            |label: &str, tex: Option<&Texture<'_>>, states: &States, widths: &[usize]| {
+                let plan = DrawPlan::new(PixelFormat::RGB565, tex, states);
+                for &len in widths {
+                    let (depth, pixels) = make_buffers(len);
+                    let off = len % 8;
+                    assert_span_parity(
+                        &plan,
+                        &depth,
+                        &pixels,
+                        off,
+                        base_value,
+                        base_step,
+                        flat,
+                        states,
+                        &format!("{label}/simd/len={len}/off={off}"),
+                    );
+                    // Also check native kernel against `span_general_in_bounds` oracle.
+                    let mut d_gen = depth.clone();
+                    let mut d_nat = depth;
+                    let mut p_gen = pixels.clone();
+                    let mut p_nat = pixels;
+                    let mut v_gen = base_value;
+                    let mut v_nat = base_value;
+                    rust::span_general_in_bounds(
+                        &plan, &mut d_gen, &mut p_gen, &mut v_gen, &base_step, flat, states,
+                    );
+                    native_span_fn(plan.kernel)(
+                        &plan, &mut d_nat, &mut p_nat, &mut v_nat, &base_step, flat, states,
+                    );
+                    assert_eq!(p_gen, p_nat, "general pixel mismatch ({label}/len={len})");
+                    let bg: Vec<u32> = d_gen.iter().map(|d| d.to_bits()).collect();
+                    let bn: Vec<u32> = d_nat.iter().map(|d| d.to_bits()).collect();
+                    assert_eq!(bg, bn, "general depth mismatch ({label}/len={len})");
+                }
+            };
+
+        let full_widths: Vec<usize> = (0..=65).collect();
+        let rep_widths: &[usize] = &[0, 1, 2, 3, 4, 5, 7, 8, 11, 16, 19, 33, 65];
+
+        // 3. New untextured kernels across 0..=65.
+        let untex_new: &[(&str, States)] = &[
+            (
+                "untex_gouraud_spec_z",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    specular: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_gouraud_spec_noz",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    specular: true,
+                    depth_test: Some(Compare::Always),
+                    depth_write: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_gouraud_z_nodw",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_write: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_flat_spec_z",
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    specular: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_flat_spec_noz",
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    specular: true,
+                    depth_test: None,
+                    depth_write: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_flat_z_nodw",
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_write: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_alpha_noz_gt",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: Some(Compare::Always),
+                    depth_write: false,
+                    alpha_test: Some((Compare::Greater, 64)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_alpha_z_gt_dw",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    alpha_test: Some((Compare::Greater, 128)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_alpha_flat_noz_gt_pass",
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: None,
+                    depth_write: false,
+                    alpha_test: Some((Compare::Greater, 100)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "untex_alpha_flat_noz_gt_fail",
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: None,
+                    depth_write: false,
+                    alpha_test: Some((Compare::Greater, 200)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+        ];
+        for (name, states) in untex_new {
+            assert_matches_general_and_simd(name, None, states, &full_widths);
+        }
+
+        // 4. New textured kernels across formats & widths.
+        let tex_cases: &[(&str, &Texture<'_>, States, bool)] = &[
+            (
+                "argb4444_alpha_z_gt_texalpha",
+                &tex_argb4444,
+                States {
+                    alpha: Combine::Texture,
+                    alpha_test: Some((Compare::Greater, 1)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                true,
+            ),
+            (
+                "argb4444_alpha_noz_gt_texalpha",
+                &tex_argb4444,
+                States {
+                    depth_test: Some(Compare::Always),
+                    depth_write: false,
+                    alpha: Combine::Texture,
+                    alpha_test: Some((Compare::Greater, 128)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                true,
+            ),
+            (
+                "argb4444_alpha_z_gt_modalpha",
+                &tex_argb4444,
+                States {
+                    alpha: Combine::Modulate,
+                    alpha_test: Some((Compare::Greater, 64)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                false,
+            ),
+            (
+                "rgb565_opaque_canon_ui",
+                &tex_rgb565,
+                alpha_team_rgb565_ui,
+                true,
+            ),
+            (
+                "rgb565_alpha_ref255_fail",
+                &tex_rgb565,
+                alpha_team_always_fail_ref255,
+                false,
+            ),
+            (
+                "rgb565_additive_alpha_lin",
+                &tex_rgb565,
+                States {
+                    linear: true,
+                    depth_write: false,
+                    blend: Some((Blend::SourceAlpha, Blend::One)),
+                    ..States::default()
+                },
+                true,
+            ),
+            (
+                "rgb565_inv_src_colour",
+                &tex_rgb565,
+                States {
+                    depth_write: false,
+                    alpha: Combine::Diffuse,
+                    blend: Some((Blend::Zero, Blend::InverseSourceColour)),
+                    ..States::default()
+                },
+                true,
+            ),
+            (
+                "rgb565_opaque_flat_spec",
+                &tex_rgb565,
+                States {
+                    flat: true,
+                    specular: true,
+                    ..States::default()
+                },
+                false,
+            ),
+            (
+                "argb1555_opaque_z_nodw",
+                &tex_argb1555,
+                States {
+                    depth_write: false,
+                    ..States::default()
+                },
+                false,
+            ),
+            (
+                "argb1555_copy_z_nodw",
+                &tex_argb1555,
+                States {
+                    colour: Combine::Texture,
+                    alpha: Combine::Texture,
+                    depth_write: false,
+                    ..States::default()
+                },
+                false,
+            ),
+            (
+                "argb4444_alpha_flat_spec",
+                &tex_argb4444,
+                States {
+                    flat: true,
+                    specular: true,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                false,
+            ),
+            ("pal8_nearest_opaque", &tex_pal8, States::default(), true),
+            (
+                "pal8_bilinear_alpha_gt",
+                &tex_pal8,
+                States {
+                    linear: true,
+                    alpha_test: Some((Compare::Greater, 32)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                false,
+            ),
+            // FastRgb565 fallback cases (colour key, non-standard blend, fog+blend).
+            (
+                "fast_rgb565_keyed_copy",
+                &tex_rgb565,
+                States {
+                    colour: Combine::Texture,
+                    colour_key: true,
+                    ..States::default()
+                },
+                false,
+            ),
+            (
+                "fast_rgb565_pal8_keyed_lin",
+                &tex_pal8,
+                States {
+                    linear: true,
+                    colour_key: true,
+                    ..States::default()
+                },
+                false,
+            ),
+        ];
+        for (name, tex, states, sweep_all) in tex_cases {
+            let widths = if *sweep_all {
+                &full_widths[..]
+            } else {
+                rep_widths
+            };
+            assert_matches_general_and_simd(name, Some(tex), states, widths);
+        }
+
+        // 5. Exhaustive alpha-rounding boundary check (`0.49999997` / half-away-from-zero
+        //    + NaN / ±inf / -0.0) on `alpha_test == Greater` for every threshold `0..=255`.
+        let edge_alphas: Vec<f32> = {
+            let mut v = vec![
+                f32::NAN,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+                -0.0,
+                0.0,
+                1.0,
+                -0.5,
+                1.5,
+                0.49999997 / 255.0,
+                0.5 / 255.0,
+            ];
+            for k in 0..255u32 {
+                let half = (k as f32) + 0.5;
+                v.push(half.next_down() / 255.0);
+                v.push(half / 255.0);
+                v.push(half.next_up() / 255.0);
+            }
+            v
+        };
+        let mut states_alpha_edge = States {
+            colour: Combine::Diffuse,
+            alpha: Combine::Diffuse,
+            depth_test: None,
+            depth_write: false,
+            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+            alpha_test: Some((Compare::Greater, 0)),
+            ..States::default()
+        };
+        let zero_step = [0.0f32; PLANES];
+        for reference in [0u8, 1, 63, 127, 128, 254, 255] {
+            states_alpha_edge.alpha_test = Some((Compare::Greater, reference));
+            let plan = DrawPlan::new(PixelFormat::RGB565, None, &states_alpha_edge);
+            for chunk in edge_alphas.chunks(4) {
+                // Pack 4 edge alpha values by stepping via constant rhw=1.0: test each
+                // value directly in a 4-pixel span where every lane takes the exact alpha.
+                for &a in chunk {
+                    let val = [0.2, 1.0, 0.0, 0.0, 0.6, 0.4, 0.8, a, 0.0, 0.0, 0.0, 0.0];
+                    let depth = [1.0f32; 5];
+                    let pixels = [0x34u8, 0x12, 0x78, 0x56, 0xbc, 0x9a, 0xf0, 0xde, 0x11, 0x22];
+                    assert_span_parity(
+                        &plan,
+                        &depth,
+                        &pixels,
+                        1,
+                        val,
+                        zero_step,
+                        flat,
+                        &states_alpha_edge,
+                        &format!("alpha_round/ref={reference}/a={a:?}"),
+                    );
+                }
+            }
+        }
+
+        // 6. Edge-value parity (`NaN`, `±inf`, `-inf` for InvSrcColour, `0`/`neg` rhw)
+        //    on all new SIMD kernels.
+        let edge_states: &[(&str, Option<&Texture<'_>>, States)] = &[
+            (
+                "edge_untex_gouraud_spec",
+                None,
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    specular: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "edge_untex_alpha_noz_gt",
+                None,
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: None,
+                    depth_write: false,
+                    alpha_test: Some((Compare::Greater, 1)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "edge_tex_alpha_z_gt",
+                Some(&tex_argb4444),
+                States {
+                    alpha: Combine::Texture,
+                    alpha_test: Some((Compare::Greater, 1)),
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "edge_tex_additive",
+                Some(&tex_rgb565),
+                States {
+                    linear: true,
+                    depth_write: false,
+                    blend: Some((Blend::SourceAlpha, Blend::One)),
+                    ..States::default()
+                },
+            ),
+            (
+                "edge_tex_inv_src_colour",
+                Some(&tex_rgb565),
+                States {
+                    depth_write: false,
+                    alpha: Combine::Diffuse,
+                    blend: Some((Blend::Zero, Blend::InverseSourceColour)),
+                    ..States::default()
+                },
+            ),
+            (
+                "edge_tex_flat_spec",
+                Some(&tex_rgb565),
+                States {
+                    flat: true,
+                    specular: true,
+                    ..States::default()
+                },
+            ),
+        ];
+        let edge_vals: &[(&str, [f32; PLANES])] = &[
+            (
+                "neg_inf_colour",
+                [
+                    0.2,
+                    1.0,
+                    0.3,
+                    0.7,
+                    f32::NEG_INFINITY,
+                    f32::INFINITY,
+                    f32::NAN,
+                    f32::NAN,
+                    f32::NEG_INFINITY,
+                    f32::INFINITY,
+                    f32::NAN,
+                    0.5,
+                ],
+            ),
+            (
+                "zero_neg_rhw",
+                [
+                    0.2, -0.5, -1.25, 2.75, -0.5, 1.5, 0.5, 1.2, 0.5, -0.2, 1.1, 1.5,
+                ],
+            ),
+        ];
+        let edge_depth = [0.0, 1.0, f32::NAN, 0.2, -0.0, 0.5, 1.0, 0.1, 1.0];
+        let edge_pix: Vec<u8> = (0..18).map(|i| (i * 31 + 7) as u8).collect();
+        for (sname, t, states) in edge_states {
+            let plan = DrawPlan::new(PixelFormat::RGB565, *t, states);
+            for (ename, val) in edge_vals {
+                assert_span_parity(
+                    &plan,
+                    &edge_depth,
+                    &edge_pix,
+                    3,
+                    *val,
+                    base_step,
+                    ([1.2, -0.1, f32::NAN, 0.5], [f32::NAN, 0.8, -0.2]),
+                    states,
+                    &format!("{sname}/{ename}"),
+                );
             }
         }
     }

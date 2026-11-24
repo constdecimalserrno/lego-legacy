@@ -1,4 +1,4 @@
-//! 4-pixel `x86_64` baseline SSE2 interior-span kernels (ADR-0009, #255).
+//! 4-pixel `x86_64` baseline SSE2 interior-span kernels (ADR-0009, #255, #278).
 //!
 //! Mirrors [`super::aarch64`] with an identical 4-lane algorithm using only
 //! baseline SSE2 (zero runtime feature dispatch, 100% `x86_64` desktop
@@ -7,26 +7,27 @@
 //! - Exact IEEE-754 `_mm_div_ps` (no approximate reciprocal);
 //! - Separate rounded `_mm_mul_ps` and `_mm_add_ps` (no FMA);
 //! - Exact Q16 integer bilinear weights (`bilinear16`) via baseline `_mm_mul_epu32`;
+//! - Exact round-half-away-from-zero (`t + (frac >= 0.5)`) for `alpha_test == Greater`;
 //! - Clamped float-to-int RGB565 packing (`_mm_cvttps_epi32` on `[0.0, 1.0]`,
 //!   matching saturating `as u32` on every input including `NaN`);
 //! - Tail pixels `0..3` delegated to the canonical pure-Rust oracle.
 
 use core::arch::x86_64::{
     __m128, __m128i, _mm_add_epi32, _mm_add_ps, _mm_and_ps, _mm_and_si128, _mm_andnot_ps,
-    _mm_andnot_si128, _mm_castps_si128, _mm_castsi128_ps, _mm_cmpge_ps, _mm_cmpgt_ps, _mm_cmple_ps,
-    _mm_cmplt_ps, _mm_cvtepi32_ps, _mm_cvtsi128_si64, _mm_cvtsi64_si128, _mm_cvttps_epi32,
-    _mm_div_ps, _mm_loadu_ps, _mm_loadu_si128, _mm_max_ps, _mm_min_ps, _mm_movehl_ps,
-    _mm_movelh_ps, _mm_movemask_ps, _mm_mul_epu32, _mm_mul_ps, _mm_or_ps, _mm_or_si128,
-    _mm_packs_epi32, _mm_set1_epi16, _mm_set1_epi32, _mm_set1_ps, _mm_setzero_ps,
-    _mm_setzero_si128, _mm_shuffle_epi32, _mm_slli_epi32, _mm_srai_epi32, _mm_srli_epi32,
-    _mm_srli_epi64, _mm_storeu_ps, _mm_storeu_si128, _mm_sub_epi32, _mm_sub_ps, _mm_unpackhi_ps,
-    _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_ps,
+    _mm_andnot_si128, _mm_castps_si128, _mm_castsi128_ps, _mm_cmpge_ps, _mm_cmpgt_epi32,
+    _mm_cmpgt_ps, _mm_cmple_ps, _mm_cmplt_ps, _mm_cvtepi32_ps, _mm_cvtsi128_si64,
+    _mm_cvtsi64_si128, _mm_cvttps_epi32, _mm_div_ps, _mm_loadu_ps, _mm_loadu_si128, _mm_max_ps,
+    _mm_min_ps, _mm_movehl_ps, _mm_movelh_ps, _mm_movemask_ps, _mm_mul_epu32, _mm_mul_ps,
+    _mm_or_ps, _mm_or_si128, _mm_packs_epi32, _mm_set1_epi16, _mm_set1_epi32, _mm_set1_ps,
+    _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_epi32, _mm_slli_epi32, _mm_srai_epi32,
+    _mm_srli_epi32, _mm_srli_epi64, _mm_storeu_ps, _mm_storeu_si128, _mm_sub_epi32, _mm_sub_ps,
+    _mm_unpackhi_ps, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_ps,
 };
 
-use super::rust::{self, TexSample};
+use super::rust::{self, TexSample, BLEND_ADDITIVE_ALPHA, BLEND_ALPHA, BLEND_INV_SRC_COLOUR};
 use super::{
-    pack_rgb565_rgb, resolve_xy, DrawPlan, InteriorKernel, PreparedTexture, SpanFn, TexFormat,
-    INV_15, INV_31, INV_63, U8_TO_F32,
+    pack_rgb565_rgb, resolve_xy, BlendMode, DrawPlan, InteriorKernel, PreparedTexture, SpanFn,
+    TexFormat, INV_15, INV_31, INV_63,
 };
 use crate::raster::{Combine, States, PLANES};
 
@@ -37,39 +38,58 @@ const INV_65536: f32 = 1.0 / 65_536.0;
 
 pub(super) fn resolve_span_fn(kernel: InteriorKernel) -> SpanFn {
     match kernel {
-        InteriorKernel::UntexturedFlatOpaqueZ => span_untextured_flat_opaque_z,
-        InteriorKernel::UntexturedGouraudOpaqueZ => span_untextured_gouraud_opaque_z,
-        InteriorKernel::UntexturedAlphaZ => span_untextured_alpha_z,
+        InteriorKernel::UntexturedFlatOpaqueZ => span_untextured_flat_opaque::<true, false>,
+        InteriorKernel::UntexturedGouraudOpaqueZ => span_untextured_gouraud_opaque::<true, false>,
+        InteriorKernel::UntexturedAlphaZ => span_untextured_alpha::<true, false>,
+        InteriorKernel::UntexturedOpaque {
+            flat,
+            specular,
+            z_test,
+        } => match (flat, z_test, specular) {
+            (true, true, false) => span_untextured_flat_opaque::<true, false>,
+            (true, true, true) => span_untextured_flat_opaque::<true, true>,
+            (true, false, false) => span_untextured_flat_opaque::<false, false>,
+            (true, false, true) => span_untextured_flat_opaque::<false, true>,
+            (false, true, false) => span_untextured_gouraud_opaque::<true, false>,
+            (false, true, true) => span_untextured_gouraud_opaque::<true, true>,
+            (false, false, false) => span_untextured_gouraud_opaque::<false, false>,
+            (false, false, true) => span_untextured_gouraud_opaque::<false, true>,
+        },
+        InteriorKernel::UntexturedAlpha { z_le, alpha_gt } => match (z_le, alpha_gt) {
+            (true, false) => span_untextured_alpha::<true, false>,
+            (true, true) => span_untextured_alpha::<true, true>,
+            (false, false) => span_untextured_alpha::<false, false>,
+            (false, true) => span_untextured_alpha::<false, true>,
+        },
         InteriorKernel::TexturedModulateOpaque {
             format,
             linear,
             pot_wrap,
-            z_test_write,
+            z_test,
             flat,
             specular,
             fog,
-        } => resolve_textured_modulate_opaque(
-            format,
-            linear,
-            pot_wrap,
-            z_test_write,
-            flat,
-            specular,
-            fog,
-        ),
+        } => {
+            resolve_textured_modulate_opaque(format, linear, pot_wrap, z_test, flat, specular, fog)
+        }
         InteriorKernel::TexturedCopyOpaque {
             format,
             linear,
             pot_wrap,
-            z_test_write,
-        } => resolve_textured_copy_opaque(format, linear, pot_wrap, z_test_write),
-        InteriorKernel::TexturedModulateAlphaZ {
+            z_test,
+        } => resolve_textured_copy_opaque(format, linear, pot_wrap, z_test),
+        InteriorKernel::TexturedModulateBlend {
             format,
             linear,
             pot_wrap,
+            z_le,
+            alpha_gt,
+            blend,
             flat,
             specular,
-        } => resolve_textured_modulate_alpha_z(format, linear, pot_wrap, flat, specular),
+        } => resolve_textured_modulate_blend(
+            format, linear, pot_wrap, z_le, alpha_gt, blend, flat, specular,
+        ),
         InteriorKernel::FastRgb565 => rust::span_fast_rgb565,
         InteriorKernel::General => rust::span_general_in_bounds,
     }
@@ -138,6 +158,27 @@ unsafe fn persp4(wv: __m128) -> __m128 {
     let pos = _mm_cmpgt_ps(wv, zero);
     let inv = _mm_div_ps(one, wv);
     _mm_and_ps(pos, inv)
+}
+
+/// Exact `(sa.clamp(0.0, 1.0) * 255.0).round() as u8 > reference` across 4 lanes
+/// using baseline SSE2. `_mm_max_ps(NaN, 0.0) == 0.0` maps `NaN` to `0`, and
+/// `t + (frac >= 0.5)` matches `f32::round()` bit-for-bit on `[0.0, 255.0]`
+/// including `0.49999997` (where `(x + 0.5).floor()` would round up).
+#[inline(always)]
+unsafe fn alpha_gt_mask4(sa: __m128, reference: u8) -> __m128 {
+    let zero = _mm_setzero_ps();
+    let one = _mm_set1_ps(1.0);
+    let v255 = _mm_set1_ps(255.0);
+    let half = _mm_set1_ps(0.5);
+    let x = _mm_mul_ps(_mm_min_ps(_mm_max_ps(sa, zero), one), v255);
+    let t = _mm_cvttps_epi32(x);
+    let frac = _mm_sub_ps(x, _mm_cvtepi32_ps(t));
+    let ge_half = _mm_castps_si128(_mm_cmpge_ps(frac, half));
+    let alpha_i32 = _mm_sub_epi32(t, ge_half);
+    _mm_castsi128_ps(_mm_cmpgt_epi32(
+        alpha_i32,
+        _mm_set1_epi32(i32::from(reference)),
+    ))
 }
 
 #[inline(always)]
@@ -439,6 +480,7 @@ unsafe fn blend4_u32(c: [__m128i; 4], w: [__m128i; 4]) -> __m128i {
 trait TexSample4 {
     type Scalar: TexSample;
     unsafe fn sample4(
+        plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -450,6 +492,7 @@ impl<const POT: bool> TexSample4 for NearestRgb565<POT> {
     type Scalar = rust::NearestRgb565<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -482,6 +525,7 @@ impl<const POT: bool> TexSample4 for BilinearRgb565<POT> {
     type Scalar = rust::BilinearRgb565<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -530,6 +574,7 @@ impl<const POT: bool> TexSample4 for NearestArgb1555<POT> {
     type Scalar = rust::NearestArgb1555<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -559,6 +604,7 @@ impl<const POT: bool> TexSample4 for BilinearArgb1555<POT> {
     type Scalar = rust::BilinearArgb1555<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -616,6 +662,7 @@ impl<const POT: bool> TexSample4 for NearestArgb4444<POT> {
     type Scalar = rust::NearestArgb4444<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -645,6 +692,7 @@ impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
     type Scalar = rust::BilinearArgb4444<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        _plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -702,6 +750,7 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
     type Scalar = rust::NearestPaletted8<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -710,43 +759,14 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
         let xi = floor_to_i32(_mm_mul_ps(u, _mm_set1_ps(tex.width_f)));
         let yi = floor_to_i32(_mm_mul_ps(v, _mm_set1_ps(tex.height_f)));
         let (xs, ys) = resolve_xy4::<POT>(tex, xi, yi);
-        let pal = tex.palette.unwrap();
+        let pal = plan.palette_f32();
         let base = tex.bytes.as_ptr();
         let pitch = tex.pitch;
-        let e0 = pal[usize::from(*base.add(ys[0] * pitch + xs[0]))];
-        let e1 = pal[usize::from(*base.add(ys[1] * pitch + xs[1]))];
-        let e2 = pal[usize::from(*base.add(ys[2] * pitch + xs[2]))];
-        let e3 = pal[usize::from(*base.add(ys[3] * pitch + xs[3]))];
-        let rs = [
-            U8_TO_F32[usize::from(e0[0])],
-            U8_TO_F32[usize::from(e1[0])],
-            U8_TO_F32[usize::from(e2[0])],
-            U8_TO_F32[usize::from(e3[0])],
-        ];
-        let gs = [
-            U8_TO_F32[usize::from(e0[1])],
-            U8_TO_F32[usize::from(e1[1])],
-            U8_TO_F32[usize::from(e2[1])],
-            U8_TO_F32[usize::from(e3[1])],
-        ];
-        let bs = [
-            U8_TO_F32[usize::from(e0[2])],
-            U8_TO_F32[usize::from(e1[2])],
-            U8_TO_F32[usize::from(e2[2])],
-            U8_TO_F32[usize::from(e3[2])],
-        ];
-        let a_s = [
-            U8_TO_F32[usize::from(e0[3])],
-            U8_TO_F32[usize::from(e1[3])],
-            U8_TO_F32[usize::from(e2[3])],
-            U8_TO_F32[usize::from(e3[3])],
-        ];
-        (
-            _mm_loadu_ps(rs.as_ptr()),
-            _mm_loadu_ps(gs.as_ptr()),
-            _mm_loadu_ps(bs.as_ptr()),
-            _mm_loadu_ps(a_s.as_ptr()),
-        )
+        let c0 = _mm_loadu_ps(pal[usize::from(*base.add(ys[0] * pitch + xs[0]))].as_ptr());
+        let c1 = _mm_loadu_ps(pal[usize::from(*base.add(ys[1] * pitch + xs[1]))].as_ptr());
+        let c2 = _mm_loadu_ps(pal[usize::from(*base.add(ys[2] * pitch + xs[2]))].as_ptr());
+        let c3 = _mm_loadu_ps(pal[usize::from(*base.add(ys[3] * pitch + xs[3]))].as_ptr());
+        transpose4(c0, c1, c2, c3)
     }
 }
 
@@ -755,6 +775,7 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
     type Scalar = rust::BilinearPaletted8<POT>;
     #[inline(always)]
     unsafe fn sample4(
+        plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
@@ -763,10 +784,10 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
         let mut vs = [0.0f32; 4];
         _mm_storeu_ps(us.as_mut_ptr(), u);
         _mm_storeu_ps(vs.as_mut_ptr(), v);
-        let c0 = rust::BilinearPaletted8::<POT>::sample(tex, us[0], vs[0]);
-        let c1 = rust::BilinearPaletted8::<POT>::sample(tex, us[1], vs[1]);
-        let c2 = rust::BilinearPaletted8::<POT>::sample(tex, us[2], vs[2]);
-        let c3 = rust::BilinearPaletted8::<POT>::sample(tex, us[3], vs[3]);
+        let c0 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[0], vs[0]);
+        let c1 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[1], vs[1]);
+        let c2 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[2], vs[2]);
+        let c3 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[3], vs[3]);
         transpose4(
             _mm_loadu_ps(c0.as_ptr()),
             _mm_loadu_ps(c1.as_ptr()),
@@ -776,7 +797,7 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
     }
 }
 
-fn span_untextured_flat_opaque_z(
+fn span_untextured_flat_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -786,12 +807,14 @@ fn span_untextured_flat_opaque_z(
     states: &States,
 ) {
     unsafe {
-        span_untextured_flat_opaque_z_sse2(plan, depth, pixels, value, step, flat, states);
+        span_untextured_flat_opaque_sse2::<Z_TEST, SPECULAR>(
+            plan, depth, pixels, value, step, flat, states,
+        );
     }
 }
 
 #[target_feature(enable = "sse2")]
-unsafe fn span_untextured_flat_opaque_z_sse2(
+unsafe fn span_untextured_flat_opaque_sse2<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -802,12 +825,41 @@ unsafe fn span_untextured_flat_opaque_z_sse2(
 ) {
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
-    let packed_i16 = u16::from_le_bytes(pack_rgb565_rgb(flat.0[0], flat.0[1], flat.0[2])) as i16;
+    let (r, g, b) = if SPECULAR {
+        (
+            (flat.0[0] + flat.1[0]).min(1.0),
+            (flat.0[1] + flat.1[1]).min(1.0),
+            (flat.0[2] + flat.1[2]).min(1.0),
+        )
+    } else {
+        (flat.0[0], flat.0[1], flat.0[2])
+    };
+    let packed_i16 = u16::from_le_bytes(pack_rgb565_rgb(r, g, b)) as i16;
     let packed4 = _mm_set1_epi16(packed_i16);
+    let p_ptr = pixels.as_mut_ptr();
+    if !Z_TEST {
+        let mut i = 0;
+        while i < n4 {
+            store_u16x4(p_ptr.add(i * 2), packed4);
+            i += 4;
+        }
+        if n4 < n {
+            rust::span_untextured_flat_opaque::<false, SPECULAR>(
+                plan,
+                &mut depth[n4..n],
+                &mut pixels[n4 * 2..n * 2],
+                value,
+                step,
+                flat,
+                states,
+            );
+        }
+        return;
+    }
+    let depth_write = states.depth_write;
     let mut z_val = value[0];
     let z_step = step[0];
     let d_ptr = depth.as_mut_ptr();
-    let p_ptr = pixels.as_mut_ptr();
     let mut i = 0;
     while i < n4 {
         let z0 = z_val;
@@ -822,7 +874,9 @@ unsafe fn span_untextured_flat_opaque_z_sse2(
         let dv = _mm_loadu_ps(d_ptr.add(i));
         let z_mask = _mm_cmple_ps(zv, dv);
         if _mm_movemask_ps(z_mask) != 0 {
-            _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+            if depth_write {
+                _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+            }
             let old_px = load_u16x4(p_ptr.add(i * 2));
             let z_mask_i = _mm_castps_si128(z_mask);
             let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
@@ -832,7 +886,7 @@ unsafe fn span_untextured_flat_opaque_z_sse2(
     }
     if n4 < n {
         value[0] = z_val;
-        rust::span_untextured_flat_opaque_z(
+        rust::span_untextured_flat_opaque::<true, SPECULAR>(
             plan,
             &mut depth[n4..n],
             &mut pixels[n4 * 2..n * 2],
@@ -844,7 +898,7 @@ unsafe fn span_untextured_flat_opaque_z_sse2(
     }
 }
 
-fn span_untextured_gouraud_opaque_z(
+fn span_untextured_gouraud_opaque<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -854,85 +908,14 @@ fn span_untextured_gouraud_opaque_z(
     states: &States,
 ) {
     unsafe {
-        span_untextured_gouraud_opaque_z_sse2(plan, depth, pixels, value, step, flat, states);
-    }
-}
-
-#[target_feature(enable = "sse2")]
-unsafe fn span_untextured_gouraud_opaque_z_sse2(
-    plan: &DrawPlan<'_>,
-    depth: &mut [f32],
-    pixels: &mut [u8],
-    value: &mut [f32; PLANES],
-    step: &[f32; PLANES],
-    flat: ([f32; 4], [f32; 3]),
-    states: &States,
-) {
-    let n = depth.len().min(pixels.len() / 2);
-    let n4 = n & !3;
-    let mut s0 = _mm_loadu_ps(value.as_ptr());
-    let d0 = _mm_loadu_ps(step.as_ptr());
-    let mut s1 = _mm_loadu_ps(value.as_ptr().add(4));
-    let d1 = _mm_loadu_ps(step.as_ptr().add(4));
-    let d_ptr = depth.as_mut_ptr();
-    let p_ptr = pixels.as_mut_ptr();
-    let mut i = 0;
-    while i < n4 {
-        let (p0, p1, p2, p3) = step4_raw(&mut s0, d0);
-        let (q0, q1, q2, q3) = step4_raw(&mut s1, d1);
-        let t0 = _mm_unpacklo_ps(p0, p1);
-        let t2 = _mm_unpacklo_ps(p2, p3);
-        let zv = _mm_movelh_ps(t0, t2);
-        let dv = _mm_loadu_ps(d_ptr.add(i));
-        let z_mask = _mm_cmple_ps(zv, dv);
-        if _mm_movemask_ps(z_mask) != 0 {
-            let wv = _mm_movehl_ps(t2, t0);
-            let (rv, gv, bv, _) = transpose4(q0, q1, q2, q3);
-            let near = persp4(wv);
-            let new_px = pack_rgb565_4(
-                _mm_mul_ps(rv, near),
-                _mm_mul_ps(gv, near),
-                _mm_mul_ps(bv, near),
-            );
-            _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
-            let old_px = load_u16x4(p_ptr.add(i * 2));
-            let z_mask_i = _mm_castps_si128(z_mask);
-            let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
-            store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
-        }
-        i += 4;
-    }
-    if n4 < n {
-        _mm_storeu_ps(value.as_mut_ptr(), s0);
-        _mm_storeu_ps(value.as_mut_ptr().add(4), s1);
-        rust::span_untextured_gouraud_opaque_z(
-            plan,
-            &mut depth[n4..n],
-            &mut pixels[n4 * 2..n * 2],
-            value,
-            step,
-            flat,
-            states,
+        span_untextured_gouraud_opaque_sse2::<Z_TEST, SPECULAR>(
+            plan, depth, pixels, value, step, flat, states,
         );
     }
 }
 
-fn span_untextured_alpha_z(
-    plan: &DrawPlan<'_>,
-    depth: &mut [f32],
-    pixels: &mut [u8],
-    value: &mut [f32; PLANES],
-    step: &[f32; PLANES],
-    flat: ([f32; 4], [f32; 3]),
-    states: &States,
-) {
-    unsafe {
-        span_untextured_alpha_z_sse2(plan, depth, pixels, value, step, flat, states);
-    }
-}
-
 #[target_feature(enable = "sse2")]
-unsafe fn span_untextured_alpha_z_sse2(
+unsafe fn span_untextured_gouraud_opaque_sse2<const Z_TEST: bool, const SPECULAR: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -944,10 +927,123 @@ unsafe fn span_untextured_alpha_z_sse2(
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
     let depth_write = states.depth_write;
+    let one = _mm_set1_ps(1.0);
+    let mut s0 = _mm_loadu_ps(value.as_ptr());
+    let d0 = _mm_loadu_ps(step.as_ptr());
+    let mut s1 = _mm_loadu_ps(value.as_ptr().add(4));
+    let d1 = _mm_loadu_ps(step.as_ptr().add(4));
+    let mut s2 = _mm_loadu_ps(value.as_ptr().add(8));
+    let d2 = _mm_loadu_ps(step.as_ptr().add(8));
+    let d_ptr = depth.as_mut_ptr();
+    let p_ptr = pixels.as_mut_ptr();
+    let mut i = 0;
+    while i < n4 {
+        let (p0, p1, p2, p3) = step4_raw(&mut s0, d0);
+        let (q0, q1, q2, q3) = step4_raw(&mut s1, d1);
+        let r2 = if SPECULAR {
+            Some(step4_raw(&mut s2, d2))
+        } else {
+            None
+        };
+        let t0 = _mm_unpacklo_ps(p0, p1);
+        let t2 = _mm_unpacklo_ps(p2, p3);
+        let (zv, dv, z_mask) = if Z_TEST {
+            let zv = _mm_movelh_ps(t0, t2);
+            let dv = _mm_loadu_ps(d_ptr.add(i));
+            let z_mask = _mm_cmple_ps(zv, dv);
+            if _mm_movemask_ps(z_mask) == 0 {
+                i += 4;
+                continue;
+            }
+            (zv, dv, z_mask)
+        } else {
+            (p0, p0, _mm_castsi128_ps(_mm_set1_epi32(-1)))
+        };
+        let wv = _mm_movehl_ps(t2, t0);
+        let (rv, gv, bv, _) = transpose4(q0, q1, q2, q3);
+        let near = persp4(wv);
+        let mut r = _mm_mul_ps(rv, near);
+        let mut g = _mm_mul_ps(gv, near);
+        let mut b = _mm_mul_ps(bv, near);
+        if SPECULAR {
+            let (m0, m1, m2, m3) = r2.unwrap();
+            let (sr, sg, sb, _) = transpose4(m0, m1, m2, m3);
+            r = _mm_min_ps(_mm_add_ps(r, _mm_mul_ps(sr, near)), one);
+            g = _mm_min_ps(_mm_add_ps(g, _mm_mul_ps(sg, near)), one);
+            b = _mm_min_ps(_mm_add_ps(b, _mm_mul_ps(sb, near)), one);
+        }
+        let new_px = pack_rgb565_4(r, g, b);
+        if Z_TEST {
+            if depth_write {
+                _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+            }
+            let old_px = load_u16x4(p_ptr.add(i * 2));
+            let z_mask_i = _mm_castps_si128(z_mask);
+            let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
+            store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
+        } else {
+            store_u16x4(p_ptr.add(i * 2), new_px);
+        }
+        i += 4;
+    }
+    if n4 < n {
+        _mm_storeu_ps(value.as_mut_ptr(), s0);
+        _mm_storeu_ps(value.as_mut_ptr().add(4), s1);
+        if SPECULAR {
+            _mm_storeu_ps(value.as_mut_ptr().add(8), s2);
+        }
+        rust::span_untextured_gouraud_opaque::<Z_TEST, SPECULAR>(
+            plan,
+            &mut depth[n4..n],
+            &mut pixels[n4 * 2..n * 2],
+            value,
+            step,
+            flat,
+            states,
+        );
+    }
+}
+
+fn span_untextured_alpha<const Z_LE: bool, const ALPHA_GT: bool>(
+    plan: &DrawPlan<'_>,
+    depth: &mut [f32],
+    pixels: &mut [u8],
+    value: &mut [f32; PLANES],
+    step: &[f32; PLANES],
+    flat: ([f32; 4], [f32; 3]),
+    states: &States,
+) {
+    unsafe {
+        span_untextured_alpha_sse2::<Z_LE, ALPHA_GT>(
+            plan, depth, pixels, value, step, flat, states,
+        );
+    }
+}
+
+#[target_feature(enable = "sse2")]
+unsafe fn span_untextured_alpha_sse2<const Z_LE: bool, const ALPHA_GT: bool>(
+    plan: &DrawPlan<'_>,
+    depth: &mut [f32],
+    pixels: &mut [u8],
+    value: &mut [f32; PLANES],
+    step: &[f32; PLANES],
+    flat: ([f32; 4], [f32; 3]),
+    states: &States,
+) {
+    let n = depth.len().min(pixels.len() / 2);
+    let n4 = n & !3;
+    let depth_write = states.depth_write;
+    let alpha_ref = states.alpha_test.map_or(0, |(_, r)| r);
     let d_ptr = depth.as_mut_ptr();
     let p_ptr = pixels.as_mut_ptr();
     if states.flat {
         let sa = flat.0[3];
+        if ALPHA_GT {
+            let alpha = (sa.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if alpha <= alpha_ref {
+                return;
+            }
+        }
         let isa = _mm_set1_ps(1.0 - sa);
         let sr_sa = _mm_set1_ps(flat.0[0] * sa);
         let sg_sa = _mm_set1_ps(flat.0[1] * sa);
@@ -956,36 +1052,47 @@ unsafe fn span_untextured_alpha_z_sse2(
         let z_step = step[0];
         let mut i = 0;
         while i < n4 {
-            let z0 = z_val;
-            z_val += z_step;
-            let z1 = z_val;
-            z_val += z_step;
-            let z2 = z_val;
-            z_val += z_step;
-            let z3 = z_val;
-            z_val += z_step;
-            let zv = _mm_loadu_ps([z0, z1, z2, z3].as_ptr());
-            let dv = _mm_loadu_ps(d_ptr.add(i));
-            let z_mask = _mm_cmple_ps(zv, dv);
-            if _mm_movemask_ps(z_mask) != 0 {
+            if Z_LE {
+                let z0 = z_val;
+                z_val += z_step;
+                let z1 = z_val;
+                z_val += z_step;
+                let z2 = z_val;
+                z_val += z_step;
+                let z3 = z_val;
+                z_val += z_step;
+                let zv = _mm_loadu_ps([z0, z1, z2, z3].as_ptr());
+                let dv = _mm_loadu_ps(d_ptr.add(i));
+                let z_mask = _mm_cmple_ps(zv, dv);
+                if _mm_movemask_ps(z_mask) != 0 {
+                    let old_px = load_u16x4(p_ptr.add(i * 2));
+                    let (ur, ug, ub) = unpack_rgb565_4(old_px);
+                    let out_r = _mm_add_ps(sr_sa, _mm_mul_ps(ur, isa));
+                    let out_g = _mm_add_ps(sg_sa, _mm_mul_ps(ug, isa));
+                    let out_b = _mm_add_ps(sb_sa, _mm_mul_ps(ub, isa));
+                    let new_px = pack_rgb565_4(out_r, out_g, out_b);
+                    let z_mask_i = _mm_castps_si128(z_mask);
+                    let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
+                    store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
+                    if depth_write {
+                        _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+                    }
+                }
+            } else {
                 let old_px = load_u16x4(p_ptr.add(i * 2));
                 let (ur, ug, ub) = unpack_rgb565_4(old_px);
                 let out_r = _mm_add_ps(sr_sa, _mm_mul_ps(ur, isa));
                 let out_g = _mm_add_ps(sg_sa, _mm_mul_ps(ug, isa));
                 let out_b = _mm_add_ps(sb_sa, _mm_mul_ps(ub, isa));
-                let new_px = pack_rgb565_4(out_r, out_g, out_b);
-                let z_mask_i = _mm_castps_si128(z_mask);
-                let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
-                store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
-                if depth_write {
-                    _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
-                }
+                store_u16x4(p_ptr.add(i * 2), pack_rgb565_4(out_r, out_g, out_b));
             }
             i += 4;
         }
         if n4 < n {
-            value[0] = z_val;
-            rust::span_untextured_alpha_z(
+            if Z_LE {
+                value[0] = z_val;
+            }
+            rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
                 plan,
                 &mut depth[n4..n],
                 &mut pixels[n4 * 2..n * 2],
@@ -1007,37 +1114,60 @@ unsafe fn span_untextured_alpha_z_sse2(
             let (q0, q1, q2, q3) = step4_raw(&mut s1, d1);
             let t0 = _mm_unpacklo_ps(p0, p1);
             let t2 = _mm_unpacklo_ps(p2, p3);
-            let zv = _mm_movelh_ps(t0, t2);
-            let dv = _mm_loadu_ps(d_ptr.add(i));
-            let z_mask = _mm_cmple_ps(zv, dv);
-            if _mm_movemask_ps(z_mask) != 0 {
-                let wv = _mm_movehl_ps(t2, t0);
-                let (cr, cg, cb, ca) = transpose4(q0, q1, q2, q3);
-                let near = persp4(wv);
-                let r = _mm_mul_ps(cr, near);
-                let g = _mm_mul_ps(cg, near);
-                let b = _mm_mul_ps(cb, near);
-                let sa = _mm_mul_ps(ca, near);
-                let isa = _mm_sub_ps(one, sa);
-                let old_px = load_u16x4(p_ptr.add(i * 2));
-                let (ur, ug, ub) = unpack_rgb565_4(old_px);
-                let out_r = _mm_add_ps(_mm_mul_ps(r, sa), _mm_mul_ps(ur, isa));
-                let out_g = _mm_add_ps(_mm_mul_ps(g, sa), _mm_mul_ps(ug, isa));
-                let out_b = _mm_add_ps(_mm_mul_ps(b, sa), _mm_mul_ps(ub, isa));
-                let new_px = pack_rgb565_4(out_r, out_g, out_b);
-                let z_mask_i = _mm_castps_si128(z_mask);
-                let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
-                store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
-                if depth_write {
-                    _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+            let (zv, dv, mut write_mask) = if Z_LE {
+                let zv = _mm_movelh_ps(t0, t2);
+                let dv = _mm_loadu_ps(d_ptr.add(i));
+                let z_mask = _mm_cmple_ps(zv, dv);
+                if _mm_movemask_ps(z_mask) == 0 {
+                    i += 4;
+                    continue;
                 }
+                (zv, dv, z_mask)
+            } else {
+                (p0, p0, _mm_castsi128_ps(_mm_set1_epi32(-1)))
+            };
+            let wv = _mm_movehl_ps(t2, t0);
+            let (cr, cg, cb, ca) = transpose4(q0, q1, q2, q3);
+            let near = persp4(wv);
+            let sa = _mm_mul_ps(ca, near);
+            if ALPHA_GT {
+                let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
+                write_mask = if Z_LE {
+                    _mm_and_ps(write_mask, alpha_mask)
+                } else {
+                    alpha_mask
+                };
+                if _mm_movemask_ps(write_mask) == 0 {
+                    i += 4;
+                    continue;
+                }
+            }
+            let r = _mm_mul_ps(cr, near);
+            let g = _mm_mul_ps(cg, near);
+            let b = _mm_mul_ps(cb, near);
+            let isa = _mm_sub_ps(one, sa);
+            let old_px = load_u16x4(p_ptr.add(i * 2));
+            let (ur, ug, ub) = unpack_rgb565_4(old_px);
+            let out_r = _mm_add_ps(_mm_mul_ps(r, sa), _mm_mul_ps(ur, isa));
+            let out_g = _mm_add_ps(_mm_mul_ps(g, sa), _mm_mul_ps(ug, isa));
+            let out_b = _mm_add_ps(_mm_mul_ps(b, sa), _mm_mul_ps(ub, isa));
+            let new_px = pack_rgb565_4(out_r, out_g, out_b);
+            if Z_LE || ALPHA_GT {
+                let wm_i = _mm_castps_si128(write_mask);
+                let mask16 = _mm_packs_epi32(wm_i, wm_i);
+                store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
+                if Z_LE && depth_write {
+                    _mm_storeu_ps(d_ptr.add(i), select_ps(write_mask, zv, dv));
+                }
+            } else {
+                store_u16x4(p_ptr.add(i * 2), new_px);
             }
             i += 4;
         }
         if n4 < n {
             _mm_storeu_ps(value.as_mut_ptr(), s0);
             _mm_storeu_ps(value.as_mut_ptr().add(4), s1);
-            rust::span_untextured_alpha_z(
+            rust::span_untextured_alpha::<Z_LE, ALPHA_GT>(
                 plan,
                 &mut depth[n4..n],
                 &mut pixels[n4 * 2..n * 2],
@@ -1050,7 +1180,7 @@ unsafe fn span_untextured_alpha_z_sse2(
     }
 }
 
-fn span_textured_copy_opaque<S: TexSample4, const Z_TEST_WRITE: bool>(
+fn span_textured_copy_opaque<S: TexSample4, const Z_TEST: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -1060,14 +1190,12 @@ fn span_textured_copy_opaque<S: TexSample4, const Z_TEST_WRITE: bool>(
     states: &States,
 ) {
     unsafe {
-        span_textured_copy_opaque_sse2::<S, Z_TEST_WRITE>(
-            plan, depth, pixels, value, step, flat, states,
-        );
+        span_textured_copy_opaque_sse2::<S, Z_TEST>(plan, depth, pixels, value, step, flat, states);
     }
 }
 
 #[target_feature(enable = "sse2")]
-unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool>(
+unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST: bool>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -1077,6 +1205,7 @@ unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool
     states: &States,
 ) {
     let tex = plan.texture.as_ref().unwrap();
+    let depth_write = states.depth_write;
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
     let mut s0 = _mm_loadu_ps(value.as_ptr());
@@ -1085,7 +1214,7 @@ unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool
     let p_ptr = pixels.as_mut_ptr();
     let mut i = 0;
     while i < n4 {
-        if Z_TEST_WRITE {
+        if Z_TEST {
             let (p0, p1, p2, p3) = step4_raw(&mut s0, d0);
             let t0 = _mm_unpacklo_ps(p0, p1);
             let t2 = _mm_unpacklo_ps(p2, p3);
@@ -1099,9 +1228,12 @@ unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool
                 let uv = _mm_movelh_ps(t1, t3);
                 let vv = _mm_movehl_ps(t3, t1);
                 let near = persp4(wv);
-                let (tr, tg, tb, _) = S::sample4(tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+                let (tr, tg, tb, _) =
+                    S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
                 let new_px = pack_rgb565_4(tr, tg, tb);
-                _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+                if depth_write {
+                    _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+                }
                 let old_px = load_u16x4(p_ptr.add(i * 2));
                 let z_mask_i = _mm_castps_si128(z_mask);
                 let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
@@ -1110,7 +1242,7 @@ unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool
         } else {
             let (_, wv, uv, vv) = step4_transpose(&mut s0, d0);
             let near = persp4(wv);
-            let (tr, tg, tb, _) = S::sample4(tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+            let (tr, tg, tb, _) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
             let new_px = pack_rgb565_4(tr, tg, tb);
             store_u16x4(p_ptr.add(i * 2), new_px);
         }
@@ -1118,7 +1250,7 @@ unsafe fn span_textured_copy_opaque_sse2<S: TexSample4, const Z_TEST_WRITE: bool
     }
     if n4 < n {
         _mm_storeu_ps(value.as_mut_ptr(), s0);
-        rust::span_textured_copy_opaque::<S::Scalar, Z_TEST_WRITE>(
+        rust::span_textured_copy_opaque::<S::Scalar, Z_TEST>(
             plan,
             &mut depth[n4..n],
             &mut pixels[n4 * 2..n * 2],
@@ -1134,11 +1266,11 @@ fn resolve_textured_copy_opaque(
     format: TexFormat,
     linear: bool,
     pot_wrap: bool,
-    z_test_write: bool,
+    z_test: bool,
 ) -> SpanFn {
     macro_rules! go {
         ($sampler:ty) => {
-            if z_test_write {
+            if z_test {
                 span_textured_copy_opaque::<$sampler, true>
             } else {
                 span_textured_copy_opaque::<$sampler, false>
@@ -1168,7 +1300,7 @@ fn resolve_textured_copy_opaque(
 
 fn span_textured_modulate_opaque<
     S: TexSample4,
-    const Z_TEST_WRITE: bool,
+    const Z_TEST: bool,
     const FLAT: bool,
     const SPECULAR: bool,
     const FOG: bool,
@@ -1182,7 +1314,7 @@ fn span_textured_modulate_opaque<
     states: &States,
 ) {
     unsafe {
-        span_textured_modulate_opaque_sse2::<S, Z_TEST_WRITE, FLAT, SPECULAR, FOG>(
+        span_textured_modulate_opaque_sse2::<S, Z_TEST, FLAT, SPECULAR, FOG>(
             plan, depth, pixels, value, step, flat, states,
         );
     }
@@ -1191,7 +1323,7 @@ fn span_textured_modulate_opaque<
 #[target_feature(enable = "sse2")]
 unsafe fn span_textured_modulate_opaque_sse2<
     S: TexSample4,
-    const Z_TEST_WRITE: bool,
+    const Z_TEST: bool,
     const FLAT: bool,
     const SPECULAR: bool,
     const FOG: bool,
@@ -1205,11 +1337,15 @@ unsafe fn span_textured_modulate_opaque_sse2<
     states: &States,
 ) {
     let tex = plan.texture.as_ref().unwrap();
+    let depth_write = states.depth_write;
     let n = depth.len().min(pixels.len() / 2);
     let n4 = n & !3;
     let flat_r = _mm_set1_ps(flat.0[0]);
     let flat_g = _mm_set1_ps(flat.0[1]);
     let flat_b = _mm_set1_ps(flat.0[2]);
+    let flat_sr = _mm_set1_ps(flat.1[0]);
+    let flat_sg = _mm_set1_ps(flat.1[1]);
+    let flat_sb = _mm_set1_ps(flat.1[2]);
     let fog_colour = states.fog.unwrap_or([0.0; 3]);
     let fog_r = _mm_set1_ps(fog_colour[0]);
     let fog_g = _mm_set1_ps(fog_colour[1]);
@@ -1233,7 +1369,7 @@ unsafe fn span_textured_modulate_opaque_sse2<
         } else {
             None
         };
-        let r2 = if SPECULAR || FOG {
+        let r2 = if (!FLAT && SPECULAR) || FOG {
             Some(step4_raw(&mut s2, d2))
         } else {
             None
@@ -1242,7 +1378,7 @@ unsafe fn span_textured_modulate_opaque_sse2<
         let t0 = _mm_unpacklo_ps(p0, p1);
         let t2 = _mm_unpacklo_ps(p2, p3);
         let zv = _mm_movelh_ps(t0, t2);
-        let (dv, z_mask) = if Z_TEST_WRITE {
+        let (dv, z_mask) = if Z_TEST {
             let dv = _mm_loadu_ps(d_ptr.add(i));
             let z_mask = _mm_cmple_ps(zv, dv);
             if _mm_movemask_ps(z_mask) == 0 {
@@ -1261,7 +1397,7 @@ unsafe fn span_textured_modulate_opaque_sse2<
         let vv = _mm_movehl_ps(t3, t1);
 
         let near = persp4(wv);
-        let (tr, tg, tb, _) = S::sample4(tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+        let (tr, tg, tb, _) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
 
         let (mut r, mut g, mut b) = if FLAT {
             (
@@ -1279,10 +1415,16 @@ unsafe fn span_textured_modulate_opaque_sse2<
             )
         };
 
-        if SPECULAR || FOG {
+        if FLAT && SPECULAR {
+            r = _mm_min_ps(_mm_add_ps(r, flat_sr), one);
+            g = _mm_min_ps(_mm_add_ps(g, flat_sg), one);
+            b = _mm_min_ps(_mm_add_ps(b, flat_sb), one);
+        }
+
+        if (!FLAT && SPECULAR) || FOG {
             let (m0, m1, m2, m3) = r2.unwrap();
             let (sr, sg, sb, fw) = transpose4(m0, m1, m2, m3);
-            if SPECULAR {
+            if !FLAT && SPECULAR {
                 r = _mm_min_ps(_mm_add_ps(r, _mm_mul_ps(sr, near)), one);
                 g = _mm_min_ps(_mm_add_ps(g, _mm_mul_ps(sg, near)), one);
                 b = _mm_min_ps(_mm_add_ps(b, _mm_mul_ps(sb, near)), one);
@@ -1297,8 +1439,10 @@ unsafe fn span_textured_modulate_opaque_sse2<
         }
 
         let new_px = pack_rgb565_4(r, g, b);
-        if Z_TEST_WRITE {
-            _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+        if Z_TEST {
+            if depth_write {
+                _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+            }
             let old_px = load_u16x4(p_ptr.add(i * 2));
             let z_mask_i = _mm_castps_si128(z_mask);
             let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
@@ -1314,10 +1458,10 @@ unsafe fn span_textured_modulate_opaque_sse2<
         if !FLAT {
             _mm_storeu_ps(value.as_mut_ptr().add(4), s1);
         }
-        if SPECULAR || FOG {
+        if (!FLAT && SPECULAR) || FOG {
             _mm_storeu_ps(value.as_mut_ptr().add(8), s2);
         }
-        rust::span_textured_modulate_opaque::<S::Scalar, Z_TEST_WRITE, FLAT, SPECULAR, FOG>(
+        rust::span_textured_modulate_opaque::<S::Scalar, Z_TEST, FLAT, SPECULAR, FOG>(
             plan,
             &mut depth[n4..n],
             &mut pixels[n4 * 2..n * 2],
@@ -1330,17 +1474,18 @@ unsafe fn span_textured_modulate_opaque_sse2<
 }
 
 fn resolve_opaque_pot_sampler<S: TexSample4>(
-    z_test_write: bool,
+    z_test: bool,
     flat: bool,
     specular: bool,
     fog: bool,
 ) -> SpanFn {
-    match (z_test_write, flat, specular, fog) {
+    match (z_test, flat, specular, fog) {
         (true, false, false, false) => {
             span_textured_modulate_opaque::<S, true, false, false, false>
         }
         (true, true, false, false) => span_textured_modulate_opaque::<S, true, true, false, false>,
         (true, false, true, false) => span_textured_modulate_opaque::<S, true, false, true, false>,
+        (true, true, true, false) => span_textured_modulate_opaque::<S, true, true, true, false>,
         (true, false, false, true) => span_textured_modulate_opaque::<S, true, false, false, true>,
         (false, false, false, false) => {
             span_textured_modulate_opaque::<S, false, false, false, false>
@@ -1353,7 +1498,7 @@ fn resolve_textured_modulate_opaque(
     format: TexFormat,
     linear: bool,
     pot_wrap: bool,
-    z_test_write: bool,
+    z_test: bool,
     flat: bool,
     specular: bool,
     fog: bool,
@@ -1361,7 +1506,7 @@ fn resolve_textured_modulate_opaque(
     if pot_wrap {
         macro_rules! go_pot {
             ($sampler:ty) => {
-                resolve_opaque_pot_sampler::<$sampler>(z_test_write, flat, specular, fog)
+                resolve_opaque_pot_sampler::<$sampler>(z_test, flat, specular, fog)
             };
         }
         match (format, linear) {
@@ -1378,7 +1523,7 @@ fn resolve_textured_modulate_opaque(
     } else {
         macro_rules! go_gen {
             ($sampler:ty) => {
-                if z_test_write {
+                if z_test {
                     span_textured_modulate_opaque::<$sampler, true, false, false, false>
                 } else {
                     span_textured_modulate_opaque::<$sampler, false, false, false, false>
@@ -1399,7 +1544,14 @@ fn resolve_textured_modulate_opaque(
     }
 }
 
-fn span_textured_modulate_alpha_z<S: TexSample4, const FLAT: bool, const SPECULAR: bool>(
+fn span_textured_modulate_blend<
+    S: TexSample4,
+    const Z_LE: bool,
+    const ALPHA_GT: bool,
+    const BLEND: u8,
+    const FLAT: bool,
+    const SPECULAR: bool,
+>(
     plan: &DrawPlan<'_>,
     depth: &mut [f32],
     pixels: &mut [u8],
@@ -1409,15 +1561,18 @@ fn span_textured_modulate_alpha_z<S: TexSample4, const FLAT: bool, const SPECULA
     states: &States,
 ) {
     unsafe {
-        span_textured_modulate_alpha_z_sse2::<S, FLAT, SPECULAR>(
+        span_textured_modulate_blend_sse2::<S, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
             plan, depth, pixels, value, step, flat, states,
         );
     }
 }
 
 #[target_feature(enable = "sse2")]
-unsafe fn span_textured_modulate_alpha_z_sse2<
+unsafe fn span_textured_modulate_blend_sse2<
     S: TexSample4,
+    const Z_LE: bool,
+    const ALPHA_GT: bool,
+    const BLEND: u8,
     const FLAT: bool,
     const SPECULAR: bool,
 >(
@@ -1436,8 +1591,13 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
     let flat_g = _mm_set1_ps(flat.0[1]);
     let flat_b = _mm_set1_ps(flat.0[2]);
     let flat_a = _mm_set1_ps(flat.0[3]);
+    let flat_sr = _mm_set1_ps(flat.1[0]);
+    let flat_sg = _mm_set1_ps(flat.1[1]);
+    let flat_sb = _mm_set1_ps(flat.1[2]);
+    let zero = _mm_setzero_ps();
     let one = _mm_set1_ps(1.0);
     let alpha_combine = states.alpha;
+    let alpha_ref = states.alpha_test.map_or(0, |(_, r)| r);
     let depth_write = states.depth_write;
 
     let mut s0 = _mm_loadu_ps(value.as_ptr());
@@ -1457,7 +1617,7 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
         } else {
             None
         };
-        let r2 = if SPECULAR {
+        let r2 = if !FLAT && SPECULAR {
             Some(step4_raw(&mut s2, d2))
         } else {
             None
@@ -1465,13 +1625,18 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
 
         let t0 = _mm_unpacklo_ps(p0, p1);
         let t2 = _mm_unpacklo_ps(p2, p3);
-        let zv = _mm_movelh_ps(t0, t2);
-        let dv = _mm_loadu_ps(d_ptr.add(i));
-        let z_mask = _mm_cmple_ps(zv, dv);
-        if _mm_movemask_ps(z_mask) == 0 {
-            i += 4;
-            continue;
-        }
+        let (zv, dv, mut write_mask) = if Z_LE {
+            let zv = _mm_movelh_ps(t0, t2);
+            let dv = _mm_loadu_ps(d_ptr.add(i));
+            let z_mask = _mm_cmple_ps(zv, dv);
+            if _mm_movemask_ps(z_mask) == 0 {
+                i += 4;
+                continue;
+            }
+            (zv, dv, z_mask)
+        } else {
+            (p0, p0, _mm_castsi128_ps(_mm_set1_epi32(-1)))
+        };
 
         let wv = _mm_movehl_ps(t2, t0);
         let t1 = _mm_unpackhi_ps(p0, p1);
@@ -1480,47 +1645,125 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
         let vv = _mm_movehl_ps(t3, t1);
 
         let near = persp4(wv);
-        let (tr, tg, tb, ta) = S::sample4(tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+        let (tr, tg, tb, ta) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
 
-        let (mut r, mut g, mut b, da) = if FLAT {
+        let (sa, diffuse_opt) = if alpha_combine == Combine::Texture {
+            if ALPHA_GT {
+                let alpha_mask = alpha_gt_mask4(ta, alpha_ref);
+                write_mask = if Z_LE {
+                    _mm_and_ps(write_mask, alpha_mask)
+                } else {
+                    alpha_mask
+                };
+                if _mm_movemask_ps(write_mask) == 0 {
+                    i += 4;
+                    continue;
+                }
+            }
+            (ta, None)
+        } else if FLAT {
+            let sa = combine_4(alpha_combine, ta, flat_a);
+            if ALPHA_GT {
+                let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
+                write_mask = if Z_LE {
+                    _mm_and_ps(write_mask, alpha_mask)
+                } else {
+                    alpha_mask
+                };
+                if _mm_movemask_ps(write_mask) == 0 {
+                    i += 4;
+                    continue;
+                }
+            }
+            (sa, None)
+        } else {
+            let (q0, q1, q2, q3) = q.unwrap();
+            let (cr, cg, cb, ca) = transpose4(q0, q1, q2, q3);
+            let sa = combine_4(alpha_combine, ta, _mm_mul_ps(ca, near));
+            if ALPHA_GT {
+                let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
+                write_mask = if Z_LE {
+                    _mm_and_ps(write_mask, alpha_mask)
+                } else {
+                    alpha_mask
+                };
+                if _mm_movemask_ps(write_mask) == 0 {
+                    i += 4;
+                    continue;
+                }
+            }
+            (sa, Some((cr, cg, cb)))
+        };
+
+        let (mut r, mut g, mut b) = if FLAT {
             (
                 _mm_mul_ps(tr, flat_r),
                 _mm_mul_ps(tg, flat_g),
                 _mm_mul_ps(tb, flat_b),
-                flat_a,
             )
         } else {
-            let (q0, q1, q2, q3) = q.unwrap();
-            let (cr, cg, cb, ca) = transpose4(q0, q1, q2, q3);
+            let (cr, cg, cb) = match diffuse_opt {
+                Some(rgb) => rgb,
+                None => {
+                    let (q0, q1, q2, q3) = q.unwrap();
+                    let (cr, cg, cb, _) = transpose4(q0, q1, q2, q3);
+                    (cr, cg, cb)
+                }
+            };
             (
                 _mm_mul_ps(tr, _mm_mul_ps(cr, near)),
                 _mm_mul_ps(tg, _mm_mul_ps(cg, near)),
                 _mm_mul_ps(tb, _mm_mul_ps(cb, near)),
-                _mm_mul_ps(ca, near),
             )
         };
 
         if SPECULAR {
-            let (m0, m1, m2, m3) = r2.unwrap();
-            let (sr, sg, sb, _) = transpose4(m0, m1, m2, m3);
-            r = _mm_min_ps(_mm_add_ps(r, _mm_mul_ps(sr, near)), one);
-            g = _mm_min_ps(_mm_add_ps(g, _mm_mul_ps(sg, near)), one);
-            b = _mm_min_ps(_mm_add_ps(b, _mm_mul_ps(sb, near)), one);
+            if FLAT {
+                r = _mm_min_ps(_mm_add_ps(r, flat_sr), one);
+                g = _mm_min_ps(_mm_add_ps(g, flat_sg), one);
+                b = _mm_min_ps(_mm_add_ps(b, flat_sb), one);
+            } else {
+                let (m0, m1, m2, m3) = r2.unwrap();
+                let (sr, sg, sb, _) = transpose4(m0, m1, m2, m3);
+                r = _mm_min_ps(_mm_add_ps(r, _mm_mul_ps(sr, near)), one);
+                g = _mm_min_ps(_mm_add_ps(g, _mm_mul_ps(sg, near)), one);
+                b = _mm_min_ps(_mm_add_ps(b, _mm_mul_ps(sb, near)), one);
+            }
         }
 
-        let sa = combine_4(alpha_combine, ta, da);
-        let isa = _mm_sub_ps(one, sa);
         let old_px = load_u16x4(p_ptr.add(i * 2));
         let (ur, ug, ub) = unpack_rgb565_4(old_px);
-        let out_r = _mm_add_ps(_mm_mul_ps(r, sa), _mm_mul_ps(ur, isa));
-        let out_g = _mm_add_ps(_mm_mul_ps(g, sa), _mm_mul_ps(ug, isa));
-        let out_b = _mm_add_ps(_mm_mul_ps(b, sa), _mm_mul_ps(ub, isa));
+        let (out_r, out_g, out_b) = match BLEND {
+            BLEND_ALPHA => {
+                let isa = _mm_sub_ps(one, sa);
+                (
+                    _mm_add_ps(_mm_mul_ps(r, sa), _mm_mul_ps(ur, isa)),
+                    _mm_add_ps(_mm_mul_ps(g, sa), _mm_mul_ps(ug, isa)),
+                    _mm_add_ps(_mm_mul_ps(b, sa), _mm_mul_ps(ub, isa)),
+                )
+            }
+            BLEND_ADDITIVE_ALPHA => (
+                _mm_add_ps(_mm_mul_ps(r, sa), ur),
+                _mm_add_ps(_mm_mul_ps(g, sa), ug),
+                _mm_add_ps(_mm_mul_ps(b, sa), ub),
+            ),
+            BLEND_INV_SRC_COLOUR => (
+                _mm_add_ps(_mm_mul_ps(r, zero), _mm_mul_ps(ur, _mm_sub_ps(one, r))),
+                _mm_add_ps(_mm_mul_ps(g, zero), _mm_mul_ps(ug, _mm_sub_ps(one, g))),
+                _mm_add_ps(_mm_mul_ps(b, zero), _mm_mul_ps(ub, _mm_sub_ps(one, b))),
+            ),
+            _ => unreachable!(),
+        };
         let new_px = pack_rgb565_4(out_r, out_g, out_b);
-        let z_mask_i = _mm_castps_si128(z_mask);
-        let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
-        store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
-        if depth_write {
-            _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+        if Z_LE || ALPHA_GT {
+            let wm_i = _mm_castps_si128(write_mask);
+            let mask16 = _mm_packs_epi32(wm_i, wm_i);
+            store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
+            if Z_LE && depth_write {
+                _mm_storeu_ps(d_ptr.add(i), select_ps(write_mask, zv, dv));
+            }
+        } else {
+            store_u16x4(p_ptr.add(i * 2), new_px);
         }
         i += 4;
     }
@@ -1530,10 +1773,10 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
         if !FLAT {
             _mm_storeu_ps(value.as_mut_ptr().add(4), s1);
         }
-        if SPECULAR {
+        if !FLAT && SPECULAR {
             _mm_storeu_ps(value.as_mut_ptr().add(8), s2);
         }
-        rust::span_textured_modulate_alpha_z::<S::Scalar, FLAT, SPECULAR>(
+        rust::span_textured_modulate_blend::<S::Scalar, Z_LE, ALPHA_GT, BLEND, FLAT, SPECULAR>(
             plan,
             &mut depth[n4..n],
             &mut pixels[n4 * 2..n * 2],
@@ -1545,26 +1788,61 @@ unsafe fn span_textured_modulate_alpha_z_sse2<
     }
 }
 
-fn resolve_alpha_pot_sampler<S: TexSample4>(flat: bool, specular: bool) -> SpanFn {
-    match (flat, specular) {
-        (false, false) => span_textured_modulate_alpha_z::<S, false, false>,
-        (true, false) => span_textured_modulate_alpha_z::<S, true, false>,
-        (false, true) => span_textured_modulate_alpha_z::<S, false, true>,
-        _ => unreachable!("select_kernel only emits supported alpha shade combinations"),
+#[allow(clippy::too_many_arguments)]
+fn resolve_blend_pot_sampler<S: TexSample4>(
+    z_le: bool,
+    alpha_gt: bool,
+    blend: BlendMode,
+    flat: bool,
+    specular: bool,
+) -> SpanFn {
+    match (blend, z_le, alpha_gt, flat, specular) {
+        (BlendMode::Alpha, true, false, false, false) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_ALPHA, false, false>
+        }
+        (BlendMode::Alpha, true, false, true, false) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_ALPHA, true, false>
+        }
+        (BlendMode::Alpha, true, false, false, true) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_ALPHA, false, true>
+        }
+        (BlendMode::Alpha, true, false, true, true) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_ALPHA, true, true>
+        }
+        (BlendMode::Alpha, true, true, false, false) => {
+            span_textured_modulate_blend::<S, true, true, BLEND_ALPHA, false, false>
+        }
+        (BlendMode::Alpha, false, true, false, false) => {
+            span_textured_modulate_blend::<S, false, true, BLEND_ALPHA, false, false>
+        }
+        (BlendMode::Alpha, false, false, false, false) => {
+            span_textured_modulate_blend::<S, false, false, BLEND_ALPHA, false, false>
+        }
+        (BlendMode::AdditiveAlpha, true, false, false, false) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_ADDITIVE_ALPHA, false, false>
+        }
+        (BlendMode::InvSrcColour, true, false, false, false) => {
+            span_textured_modulate_blend::<S, true, false, BLEND_INV_SRC_COLOUR, false, false>
+        }
+        _ => unreachable!("select_kernel only emits supported blend combinations"),
     }
 }
 
-fn resolve_textured_modulate_alpha_z(
+#[allow(clippy::too_many_arguments)]
+fn resolve_textured_modulate_blend(
     format: TexFormat,
     linear: bool,
     pot_wrap: bool,
+    z_le: bool,
+    alpha_gt: bool,
+    blend: BlendMode,
     flat: bool,
     specular: bool,
 ) -> SpanFn {
     if pot_wrap {
         macro_rules! go_pot {
             ($sampler:ty) => {
-                resolve_alpha_pot_sampler::<$sampler>(flat, specular)
+                resolve_blend_pot_sampler::<$sampler>(z_le, alpha_gt, blend, flat, specular)
             };
         }
         match (format, linear) {
@@ -1581,7 +1859,7 @@ fn resolve_textured_modulate_alpha_z(
     } else {
         macro_rules! go_gen {
             ($sampler:ty) => {
-                span_textured_modulate_alpha_z::<$sampler, false, false>
+                span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, false, false>
             };
         }
         match (format, linear) {
