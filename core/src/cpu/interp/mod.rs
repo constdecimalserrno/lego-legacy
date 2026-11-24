@@ -2462,4 +2462,679 @@ mod tests {
             }
         }
     }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn differential_promoted_integer_ops_and_split_alu8_match_rust_bit_for_bit() {
+        let code_at = 0x0018_0000u32;
+        let data = 0x0020_0000u32;
+        let stack = 0x0030_0000u32;
+
+        // 1. All 14 split Alu8RegReg/RegImm + Sbb8RegReg/RegImm across low & high regs (AL..BH).
+        const EDGE8: &[u8] = &[0x00, 0x01, 0x0f, 0x10, 0x7f, 0x80, 0xfe, 0xff];
+        for &a in EDGE8 {
+            for &b in EDGE8 {
+                for cf in [false, true] {
+                    // Exercise all 8 byte registers AL(0), CL(1), DL(2), BL(3), AH(4), CH(5), DH(6), BH(7)
+                    // and every split Alu8 + Sbb8 opcode without disturbing neighboring bytes.
+                    let prog = [
+                        0x00, 0xe0, // add al, ah
+                        0x80, 0xc1, b, // add cl, b
+                        0x28, 0xfa, // sub dl, bh
+                        0x80, 0xec, b, // sub ah, b
+                        0x38, 0xfb, // cmp bl, bh
+                        0x80, 0xfd, b, // cmp ch, b
+                        0x20, 0xf0, // and al, dh
+                        0x80, 0xe7, b, // and bh, b
+                        0x08, 0xea, // or dl, ch
+                        0x80, 0xc9, b, // or cl, b
+                        0x30, 0xdc, // xor ah, bl
+                        0x80, 0xf6, b, // xor dh, b
+                        0x84, 0xc3, // test bl, al
+                        0xf6, 0xc5, b, // test ch, b
+                        0x18, 0xe0, // sbb al, ah
+                        0x80, 0xdc, b,    // sbb ah, b
+                        0xf4, // hlt
+                    ];
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(if cf { CF | OF } else { OF }),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = 0xa1b2_0000 | (u32::from(b) << 8) | u32::from(a);
+                    cpu.r[ECX] = 0xc3d4_0000 | (u32::from(a) << 8) | u32::from(b);
+                    cpu.r[EDX] = 0xe5f6_0000 | (u32::from(b) << 8) | u32::from(a);
+                    cpu.r[EBX] = 0x1234_0000 | (u32::from(a) << 8) | u32::from(b);
+                    assert_native_matches_rust(
+                        "split_alu8_sbb8",
+                        &prog,
+                        cpu,
+                        &[],
+                        &[],
+                        100,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                }
+            }
+        }
+
+        // Dedicated exhaustive edge check for Sbb8 (all 16x16x2 boundary pairs incl. 0-0xff-1, 0x80-0xff-1, 0-0x7f-1).
+        for &a in &[0u8, 1, 0x0f, 0x10, 0x7e, 0x7f, 0x80, 0x81, 0xfe, 0xff] {
+            for &b in &[0u8, 1, 0x0f, 0x10, 0x7e, 0x7f, 0x80, 0x81, 0xfe, 0xff] {
+                for cf in [false, true] {
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(if cf { CF } else { 0 }),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = 0x55aa_0000 | (u32::from(b) << 8) | u32::from(a);
+                    assert_native_matches_rust(
+                        "sbb8_rr_edges",
+                        &[0x18, 0xe0, 0xf4], // sbb al, ah; hlt
+                        cpu,
+                        &[],
+                        &[],
+                        10,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                    assert_native_matches_rust(
+                        "sbb8_ri_edges",
+                        &[0x80, 0xd8, b, 0xf4], // sbb al, b; hlt
+                        cpu,
+                        &[],
+                        &[],
+                        10,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                }
+            }
+        }
+
+        // 2. Adc32 & Sbb32 across all 5 operand shapes (RegReg, RegImm, RegMem, MemReg, MemImm), CF=0/1.
+        const EDGE32: &[u32] = &[
+            0,
+            1,
+            0x0f,
+            0x10,
+            0x7fff_ffff,
+            0x8000_0000,
+            0xffff_fffe,
+            0xffff_ffff,
+        ];
+        for &a in EDGE32 {
+            for &b in EDGE32 {
+                for cf in [false, true] {
+                    let mut prog = Vec::new();
+                    prog.extend_from_slice(&[0x11, 0xd8]); // adc eax, ebx
+                    prog.extend_from_slice(&[0x81, 0xd1]);
+                    prog.extend_from_slice(&b.to_le_bytes()); // adc ecx, b
+                    prog.extend_from_slice(&[0x13, 0x16]); // adc edx, [esi]
+                    prog.extend_from_slice(&[0x11, 0x46, 0x04]); // adc [esi+4], eax
+                    prog.extend_from_slice(&[0x81, 0x56, 0x08]);
+                    prog.extend_from_slice(&a.to_le_bytes()); // adc dword [esi+8], a
+                    prog.extend_from_slice(&[0x19, 0xd8]); // sbb eax, ebx
+                    prog.extend_from_slice(&[0x81, 0xd9]);
+                    prog.extend_from_slice(&b.to_le_bytes()); // sbb ecx, b
+                    prog.extend_from_slice(&[0x1b, 0x16]); // sbb edx, [esi]
+                    prog.extend_from_slice(&[0x19, 0x46, 0x0c]); // sbb [esi+12], eax
+                    prog.extend_from_slice(&[0x81, 0x5e, 0x10]);
+                    prog.extend_from_slice(&b.to_le_bytes()); // sbb dword [esi+16], b
+                    prog.push(0xf4);
+
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(if cf { CF } else { 0 }),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = a;
+                    cpu.r[EBX] = b;
+                    cpu.r[ECX] = a;
+                    cpu.r[EDX] = b;
+                    cpu.r[ESI] = data;
+                    let mut mem_init = [0u8; 20];
+                    mem_init[0..4].copy_from_slice(&a.to_le_bytes());
+                    mem_init[4..8].copy_from_slice(&b.to_le_bytes());
+                    mem_init[8..12].copy_from_slice(&b.to_le_bytes());
+                    mem_init[12..16].copy_from_slice(&a.to_le_bytes());
+                    mem_init[16..20].copy_from_slice(&a.to_le_bytes());
+                    assert_native_matches_rust(
+                        "adc32_sbb32",
+                        &prog,
+                        cpu,
+                        &[(data, &mem_init)],
+                        &[(data, 20)],
+                        100,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                }
+            }
+        }
+
+        // 3. Sahf & Lahf across all 64 flag combinations + lazy aarch64 ALU flags.
+        for bits in 0u32..64 {
+            let mut eflags = 0x0002u32;
+            if bits & 1 != 0 {
+                eflags |= CF;
+            }
+            if bits & 2 != 0 {
+                eflags |= PF;
+            }
+            if bits & 4 != 0 {
+                eflags |= AF;
+            }
+            if bits & 8 != 0 {
+                eflags |= ZF;
+            }
+            if bits & 16 != 0 {
+                eflags |= SF;
+            }
+            if bits & 32 != 0 {
+                eflags |= OF;
+            }
+            let mut cpu = Cpu {
+                eip: code_at,
+                flags: Flags::from_eflags(eflags),
+                ..Cpu::default()
+            };
+            cpu.r[EAX] = 0xdead_beef;
+            // lahf; mov bl, ah; mov ah, cl; sahf; lahf; hlt
+            cpu.r[ECX] = (bits << 1) ^ 0xff;
+            assert_native_matches_rust(
+                "sahf_lahf_all64",
+                &[0x9f, 0x88, 0xe3, 0x88, 0xcc, 0x9e, 0x9f, 0xf4],
+                cpu,
+                &[],
+                &[],
+                20,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+        // Lazy flags -> lahf, and sahf -> jcc/setcc
+        for &(a, b) in &[(0x0fu32, 1u32), (0x01, 2), (0x8000_0000, 0x8000_0000)] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                ..Cpu::default()
+            };
+            cpu.r[EAX] = a;
+            cpu.r[EBX] = b;
+            assert_native_matches_rust(
+                "lazy_add_lahf_sahf",
+                &[0x01, 0xd8, 0x9f, 0x80, 0xf4, 0xd5, 0x9e, 0x9f, 0xf4],
+                cpu,
+                &[],
+                &[],
+                20,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+
+        // 4. Leave (normal + fault pre-mutation), Cdq, Cwde, Neg32/8 (reg/mem), Not32/8 (reg/mem), Xchg32/8, Extend16Reg.
+        let mut cpu = Cpu {
+            eip: code_at,
+            ..Cpu::default()
+        };
+        cpu.r[EBP] = stack - 8;
+        cpu.r[ESP] = stack - 32;
+        assert_native_matches_rust(
+            "leave_normal",
+            &[0xc9, 0xf4], // leave; hlt
+            cpu,
+            &[(stack - 8, &0x1122_3344u32.to_le_bytes())],
+            &[],
+            10,
+            0..0,
+            DOS_MEMORY,
+        );
+        let mut cpu_fault = Cpu {
+            eip: code_at,
+            ..Cpu::default()
+        };
+        cpu_fault.r[EBP] = DOS_MEMORY - 4;
+        cpu_fault.r[ESP] = stack;
+        assert_native_matches_rust(
+            "leave_fault",
+            &[0x40, 0xc9, 0xf4], // inc eax; leave; hlt
+            cpu_fault,
+            &[],
+            &[],
+            10,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        for &v in &[
+            0u32,
+            1,
+            0x7fff,
+            0x8000,
+            0xffff,
+            0x1234_7fff,
+            0x1234_8000,
+            0x7fff_ffff,
+            0x8000_0000,
+            0xffff_ffff,
+        ] {
+            let mut cpu = Cpu {
+                eip: code_at,
+                flags: Flags::from_eflags(CF | PF | AF | ZF | SF | OF),
+                ..Cpu::default()
+            };
+            cpu.r[EAX] = v;
+            cpu.r[EBX] = !v;
+            cpu.r[ECX] = v.rotate_left(7);
+            cpu.r[EDX] = 0x5555_5555;
+            cpu.r[ESI] = data;
+            let prog = [
+                0x98, // cwde
+                0x99, // cdq
+                0xf7, 0xd0, // not eax
+                0xf7, 0x16, // not dword [esi]
+                0xf6, 0xd4, // not ah
+                0x91, // xchg eax, ecx
+                0x86, 0xe3, // xchg bl, ah
+                0x86, 0xe4, // xchg ah, ah (self)
+                0x66, 0x0f, 0xb6, 0xc5, // movzx ax, ch
+                0x66, 0x0f, 0xbe, 0xd7, // movsx dx, bh
+                0xf7, 0xd8, // neg eax
+                0xf7, 0x1e, // neg dword [esi]
+                0xf6, 0xdc, // neg ah
+                0xf4, // hlt
+            ];
+            assert_native_matches_rust(
+                "cdq_cwde_neg_not_xchg_ext16",
+                &prog,
+                cpu,
+                &[(data, &v.to_le_bytes())],
+                &[(data, 4)],
+                100,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+
+        // 5. Inc8/Dec8/Inc16/Dec16 (reg & mem) preserving CF=0 and CF=1 across edges + page-crossing 16-bit write.
+        for &v in &[
+            0u32, 1, 0x0f, 0x10, 0x7f, 0x80, 0xff, 0x7fff, 0x8000, 0xffff,
+        ] {
+            for cf in [false, true] {
+                for &(name, prog) in &[
+                    ("inc8_ah", &[0xfeu8, 0xc4, 0xf4][..]),
+                    ("dec8_bl", &[0xfe, 0xcb, 0xf4][..]),
+                    ("inc8_mem", &[0xfe, 0x06, 0xf4][..]),
+                    ("dec8_mem", &[0xfe, 0x0e, 0xf4][..]),
+                    ("inc16_ax", &[0x66, 0x40, 0xf4][..]),
+                    ("dec16_dx", &[0x66, 0x4a, 0xf4][..]),
+                    ("inc16_mem", &[0x66, 0xff, 0x06, 0xf4][..]),
+                    ("dec16_mem", &[0x66, 0xff, 0x0e, 0xf4][..]),
+                ] {
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(if cf { CF } else { 0 }),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = 0xabcd_0000 | ((v & 0xff) << 8) | (v & 0xffff);
+                    cpu.r[EBX] = 0x1234_5600 | (v & 0xff);
+                    cpu.r[EDX] = 0x9876_0000 | (v & 0xffff);
+                    cpu.r[ESI] = data;
+                    assert_native_matches_rust(
+                        name,
+                        prog,
+                        cpu,
+                        &[(data, &v.to_le_bytes())],
+                        &[(data, 4)],
+                        10,
+                        0..0,
+                        DOS_MEMORY,
+                    );
+                }
+            }
+        }
+        // Page-crossing 16-bit inc mem (at offset 0xfff)
+        let mut cpu_cross = Cpu {
+            eip: code_at,
+            ..Cpu::default()
+        };
+        cpu_cross.r[ESI] = data + 0xfff;
+        assert_native_matches_rust(
+            "inc16_mem_page_cross",
+            &[0x66, 0xff, 0x06, 0xf4],
+            cpu_cross,
+            &[(data + 0xfff, &0x7fffu16.to_le_bytes())],
+            &[(data + 0xfff, 2)],
+            10,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        // 6. Shift8Reg (SHL/SHR/SAR/ROL/ROR), Shift16Reg (SHL/SHR/SAR), Rot32Reg (ROL/ROR)
+        //    covering count=0 (preserves ALL flags!), 1, 7, 8, 9, 15, 16, 17, 24, 31, 32!
+        for &a in &[
+            0u32,
+            1,
+            0x7f,
+            0x80,
+            0x81,
+            0xff,
+            0x7fff,
+            0x8000,
+            0xffff,
+            0x8000_0001,
+            0x7fff_ffff,
+            0xffff_ffff,
+        ] {
+            for &c in &[0u32, 1, 2, 7, 8, 9, 15, 16, 17, 24, 31, 32] {
+                let cb = c as u8;
+                for &(name, prog) in &[
+                    ("shl8_cl", &[0xd2u8, 0xe4, 0xf4][..]),      // shl ah, cl
+                    ("shr8_cl", &[0xd2, 0xec, 0xf4][..]),        // shr ah, cl
+                    ("sar8_cl", &[0xd2, 0xfc, 0xf4][..]),        // sar ah, cl
+                    ("rol8_cl", &[0xd2, 0xc4, 0xf4][..]),        // rol ah, cl
+                    ("ror8_cl", &[0xd2, 0xcc, 0xf4][..]),        // ror ah, cl
+                    ("shl16_cl", &[0x66, 0xd3, 0xe0, 0xf4][..]), // shl ax, cl
+                    ("shr16_cl", &[0x66, 0xd3, 0xe8, 0xf4][..]), // shr ax, cl
+                    ("sar16_cl", &[0x66, 0xd3, 0xf8, 0xf4][..]), // sar ax, cl
+                    ("rol32_cl", &[0xd3, 0xc0, 0xf4][..]),       // rol eax, cl
+                    ("ror32_cl", &[0xd3, 0xc8, 0xf4][..]),       // ror eax, cl
+                    // Prefix with lazy `add edx, ebx` to prove Rol/Ror & count==0 preserve lazy PF/AF!
+                    ("lazy_rol32_cl", &[0x01, 0xda, 0xd3, 0xc0, 0xf4][..]),
+                    ("lazy_ror8_cl", &[0x01, 0xda, 0xd2, 0xcc, 0xf4][..]),
+                ] {
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(CF | PF | AF | ZF | SF | OF),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = a;
+                    cpu.r[ECX] = c;
+                    cpu.r[EDX] = 0x0f;
+                    cpu.r[EBX] = 1;
+                    assert_native_matches_rust(name, prog, cpu, &[], &[], 20, 0..0, DOS_MEMORY);
+                }
+                for (name, prog) in [
+                    ("shl8_imm", vec![0xc0u8, 0xe4, cb, 0xf4]),
+                    ("shr8_imm", vec![0xc0, 0xec, cb, 0xf4]),
+                    ("sar8_imm", vec![0xc0, 0xfc, cb, 0xf4]),
+                    ("rol8_imm", vec![0xc0, 0xc4, cb, 0xf4]),
+                    ("ror8_imm", vec![0xc0, 0xcc, cb, 0xf4]),
+                    ("shl16_imm", vec![0x66, 0xc1, 0xe0, cb, 0xf4]),
+                    ("shr16_imm", vec![0x66, 0xc1, 0xe8, cb, 0xf4]),
+                    ("sar16_imm", vec![0x66, 0xc1, 0xf8, cb, 0xf4]),
+                    ("rol32_imm", vec![0xc1, 0xc0, cb, 0xf4]),
+                    ("ror32_imm", vec![0xc1, 0xc8, cb, 0xf4]),
+                ] {
+                    let mut cpu = Cpu {
+                        eip: code_at,
+                        flags: Flags::from_eflags(CF | PF | AF | ZF | SF | OF),
+                        ..Cpu::default()
+                    };
+                    cpu.r[EAX] = a;
+                    assert_native_matches_rust(name, &prog, cpu, &[], &[], 20, 0..0, DOS_MEMORY);
+                }
+            }
+        }
+
+        // 7. Mul32 / Imul32 (reg & mem), preserving lazy & materialized SF/ZF/PF/AF.
+        for &(a, b) in &[
+            (0u32, 0u32),
+            (1, 0xffff_ffff),
+            (0x1_0000, 0x1_0000),
+            (0x7fff_ffff, 2),
+            (0x8000_0000, 0xffff_ffff),
+            (0xffff_ffff, 0xffff_ffff),
+            (0xffff_fffe, 3),
+        ] {
+            for &(name, prog) in &[
+                ("mul32_reg", &[0x01u8, 0xd9, 0xf7, 0xe3, 0xf4][..]), // add ecx, ebx; mul ebx; hlt
+                ("imul32_reg", &[0x01, 0xd9, 0xf7, 0xeb, 0xf4][..]),  // add ecx, ebx; imul ebx; hlt
+                ("mul32_mem", &[0xf7, 0x26, 0xf4][..]),               // mul dword [esi]; hlt
+                ("imul32_mem", &[0xf7, 0x2e, 0xf4][..]),              // imul dword [esi]; hlt
+            ] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    flags: Flags::from_eflags(PF | AF | ZF | SF),
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = a;
+                cpu.r[EBX] = b;
+                cpu.r[ECX] = 0x0f;
+                cpu.r[EDX] = 0xdead_beef;
+                cpu.r[ESI] = data;
+                assert_native_matches_rust(
+                    name,
+                    prog,
+                    cpu,
+                    &[(data, &b.to_le_bytes())],
+                    &[],
+                    20,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+        }
+
+        // 8. Div32 / Idiv32 (reg & mem) including normal, 64-bit dividends, AND #DE div0 / overflow pre-mutation bail!
+        let div_cases: &[(u32, u32, u32)] = &[
+            // (edx, eax, divisor)
+            (0, 100, 7),
+            (0, 0xffff_ffff, 1),
+            (1, 0, 2),                     // 2^32 / 2 = 2^31 (fits u32, overflows i32!)
+            (0, 0x8000_0000, 1),           // +2^31 / 1 (fits u32, overflows i32!)
+            (0xffff_ffff, 0x8000_0000, 1), // i32::MIN / 1 (fits i32!)
+            (0xffff_ffff, 0x8000_0000, 0xffff_ffff), // i32::MIN / -1 (#DE signed overflow!)
+            (0xffff_ffff, 0xffff_fff9, 2), // -7 / 2 = -3 rem -1
+            (0x8000_0000, 0, 0xffff_ffff), // i64::MIN / -1 (#DE!)
+            (0x8000_0000, 0, 0x8000_0000), // i64::MIN / i32::MIN (#DE!)
+            (5, 0, 5),                     // EDX == divisor (#DE unsigned!)
+            (6, 0, 5),                     // EDX > divisor (#DE unsigned!)
+            (0, 42, 0),                    // div-by-0 (#DE!)
+        ];
+        for &(hi, lo, div) in div_cases {
+            for &(name, prog) in &[
+                ("div32_reg", &[0x41u8, 0xf7, 0xf3, 0xf4][..]), // inc ecx; div ebx; hlt
+                ("idiv32_reg", &[0x41, 0xf7, 0xfb, 0xf4][..]),  // inc ecx; idiv ebx; hlt
+                ("div32_mem", &[0x41, 0xf7, 0x36, 0xf4][..]),   // inc ecx; div dword [esi]; hlt
+                ("idiv32_mem", &[0x41, 0xf7, 0x3e, 0xf4][..]),  // inc ecx; idiv dword [esi]; hlt
+            ] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = lo;
+                cpu.r[EDX] = hi;
+                cpu.r[EBX] = div;
+                cpu.r[ESI] = data;
+                assert_native_matches_rust(
+                    name,
+                    prog,
+                    cpu,
+                    &[(data, &div.to_le_bytes())],
+                    &[],
+                    20,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+        }
+
+        // 9. All 16 Cmovcc32Reg & Cmovcc32Mem across all 64 flag combinations + lazy ALU flags + unmapped mem when false!
+        for cc in 0u8..16 {
+            let prog_reg = [0x0f, 0x40 + cc, 0xc3, 0xf4]; // cmovcc eax, ebx; hlt
+            let prog_mem = [0x0f, 0x40 + cc, 0x06, 0xf4]; // cmovcc eax, [esi]; hlt
+            for bits in 0u32..64 {
+                let mut eflags = 0x0002u32;
+                if bits & 1 != 0 {
+                    eflags |= CF;
+                }
+                if bits & 2 != 0 {
+                    eflags |= PF;
+                }
+                if bits & 4 != 0 {
+                    eflags |= AF;
+                }
+                if bits & 8 != 0 {
+                    eflags |= ZF;
+                }
+                if bits & 16 != 0 {
+                    eflags |= SF;
+                }
+                if bits & 32 != 0 {
+                    eflags |= OF;
+                }
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    flags: Flags::from_eflags(eflags),
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = 0x1111_1111;
+                cpu.r[EBX] = 0x2222_2222;
+                // Deliberately test unmapped ESI too: must NOT fault when condition is false, MUST fault identically when true!
+                cpu.r[ESI] = DOS_MEMORY - 4;
+                assert_native_matches_rust(
+                    "cmovcc32_reg",
+                    &prog_reg,
+                    cpu,
+                    &[],
+                    &[],
+                    10,
+                    0..0,
+                    DOS_MEMORY,
+                );
+                assert_native_matches_rust(
+                    "cmovcc32_mem_unmapped",
+                    &prog_mem,
+                    cpu,
+                    &[],
+                    &[],
+                    10,
+                    0..0,
+                    DOS_MEMORY,
+                );
+                cpu.r[ESI] = data;
+                assert_native_matches_rust(
+                    "cmovcc32_mem_mapped",
+                    &prog_mem,
+                    cpu,
+                    &[(data, &0x3333_3333u32.to_le_bytes())],
+                    &[],
+                    10,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+            // Lazy flags -> cmovcc (especially JP/JNP!)
+            let lazy_prog = [0x01, 0xda, 0x0f, 0x40 + cc, 0xc3, 0xf4]; // add edx, ebx; cmovcc eax, ebx; hlt
+            for &(d, b) in &[(0u32, 0u32), (0, 1), (0, 3), (0x7fff_ffff, 1)] {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = 0xaaaa_aaaa;
+                cpu.r[EBX] = b;
+                cpu.r[EDX] = d;
+                assert_native_matches_rust(
+                    "cmovcc32_lazy",
+                    &lazy_prog,
+                    cpu,
+                    &[],
+                    &[],
+                    20,
+                    0..0,
+                    DOS_MEMORY,
+                );
+            }
+        }
+
+        // 10. Prove a loop containing EVERY promoted integer op runs inside run_fast_block with ZERO STATUS_FALLBACK!
+        {
+            let mut h = Headless::new();
+            let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+            let mut loop_prog = Vec::new();
+            loop_prog.extend_from_slice(&[0x00, 0xe0]); // add al, ah
+            loop_prog.extend_from_slice(&[0x18, 0xe0]); // sbb al, ah
+            loop_prog.extend_from_slice(&[0x80, 0xdf, 0x01]); // sbb bh, 1
+            loop_prog.extend_from_slice(&[0x86, 0xe0]); // xchg al, ah
+            loop_prog.extend_from_slice(&[0x93]); // xchg eax, ebx
+            loop_prog.extend_from_slice(&[0x66, 0x0f, 0xb6, 0xc4]); // movzx ax, ah
+            loop_prog.extend_from_slice(&[0x98]); // cwde
+            loop_prog.extend_from_slice(&[0x99]); // cdq
+            loop_prog.extend_from_slice(&[0xf7, 0xd0]); // not eax
+            loop_prog.extend_from_slice(&[0xf7, 0xd8]); // neg eax
+            loop_prog.extend_from_slice(&[0x11, 0xd8]); // adc eax, ebx
+            loop_prog.extend_from_slice(&[0x19, 0x1e]); // sbb ebx, [esi]
+            loop_prog.extend_from_slice(&[0x9f]); // lahf
+            loop_prog.extend_from_slice(&[0x9e]); // sahf
+            loop_prog.extend_from_slice(&[0x66, 0xff, 0x06]); // inc word [esi]
+            loop_prog.extend_from_slice(&[0xfe, 0xc4]); // inc ah
+            loop_prog.extend_from_slice(&[0xd2, 0xec]); // shr ah, cl
+            loop_prog.extend_from_slice(&[0x66, 0xd3, 0xf8]); // sar ax, cl
+            loop_prog.extend_from_slice(&[0xc1, 0xc0, 0x03]); // rol eax, 3
+            loop_prog.extend_from_slice(&[0xf7, 0xe3]); // mul ebx
+            loop_prog.extend_from_slice(&[0x31, 0xd2]); // xor edx, edx
+            loop_prog.extend_from_slice(&[0xf7, 0x76, 0x04]); // div dword [esi+4]
+            loop_prog.extend_from_slice(&[0x0f, 0x45, 0xc3]); // cmovne eax, ebx
+            loop_prog.push(0x49); // dec ecx
+            let back = -(loop_prog.len() as i8 + 2);
+            loop_prog.extend_from_slice(&[0x75, back as u8]); // jnz loop_prog
+            mem.write(code_at, &loop_prog).unwrap();
+            mem.write_u32(data, 7).unwrap();
+            mem.write_u32(data + 4, 3).unwrap();
+
+            let mut interp = Interp::new(Mode::FLAT);
+            let _ = interp.run_at(code_at, &mut mem).unwrap();
+
+            let mut cpu = Cpu {
+                eip: code_at,
+                ..Cpu::default()
+            };
+            cpu.r[EAX] = 0x1234_5678;
+            cpu.r[EBX] = 0x0000_0011;
+            cpu.r[ECX] = 20;
+            cpu.r[ESI] = data;
+
+            let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+            let mut ctx = FastCtx {
+                regs: cpu.r.as_mut_ptr(),
+                arena_base,
+                code_bitmap,
+                arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
+                remaining: 20 * 25,
+                retired: 0,
+                fast_insns: interp.fast_insns.as_mut_ptr(),
+                runs: interp.runs.as_ptr(),
+                directory: interp.directory.as_ptr(),
+                region_ptrs: interp.region_ptrs.as_ptr(),
+                page_ptrs: interp.page_ptrs.as_ptr(),
+                fault_pc: core::ptr::null(),
+                run_first_pc: core::ptr::null(),
+                eip: cpu.eip,
+                flags: native::pack_flags(&cpu.flags),
+                fs_base: 0,
+                arena_floor,
+                outside_start: 0,
+                outside_end: 0,
+                outside_len: 0,
+                run_start_eip: 0,
+                run_bytes: 0,
+                run_len: 0,
+                l1_cache: interp.l1.as_mut_ptr(),
+                outside_danger_len: 0,
+                outside_danger_start: 0,
+                _pad: 0,
+                fpu: &raw mut cpu.fpu,
+            };
+            let status = unsafe { native::run_fast_block(&mut ctx) };
+            assert_eq!(
+                status, STATUS_DONE,
+                "promoted integer ops loop fell back (status={status})"
+            );
+            assert_eq!(ctx.retired, 20 * 25);
+            assert_eq!(cpu.r[ECX], 0);
+        }
+    }
 }

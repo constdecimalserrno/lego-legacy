@@ -300,13 +300,23 @@ pub const ALU_OR: u8 = 4;
 pub const ALU_XOR: u8 = 5;
 pub const ALU_TEST: u8 = 6;
 
-/// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::ShiftRegCl`] and
-/// [`FastOp::ShiftMem`].
+/// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::ShiftRegCl`],
+/// [`FastOp::ShiftMem`], [`FastOp::Shift8Reg`], and [`FastOp::Shift16Reg`].
 pub const SHIFT_SHL: u8 = 0;
 pub const SHIFT_SHR: u8 = 1;
 pub const SHIFT_SAR: u8 = 2;
-/// Bit in [`FastInsn::aux`] for [`FastOp::ShiftMem`] selecting `CL` count over immediate.
+pub const SHIFT_ROL: u8 = 3;
+pub const SHIFT_ROR: u8 = 4;
+/// Bit in [`FastInsn::aux`] selecting `CL` count over immediate.
 pub const SHIFT_CL: u8 = 0x80;
+
+/// Pre-decoded byte offset in `Cpu::r: [u32; 8]` (little-endian) for an 8-bit
+/// x86 register (`AL, CL, DL, BL, AH, CH, DH, BH` -> `0, 4, 8, 12, 1, 5, 9, 13`).
+#[must_use]
+#[inline(always)]
+pub const fn r8_off(reg: u8) -> u8 {
+    ((reg & 3) << 2) | ((reg >> 2) & 1)
+}
 
 /// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::ExtendReg`] and
 /// [`FastOp::ExtendMem`].
@@ -398,7 +408,8 @@ pub enum FastOp {
     CallReg = 54,
     CallMem = 55,
 
-    // Flat32 8-bit and 16-bit data movement, 8/16-bit ALU/test/cmp, imul2, setcc (#256).
+    // Flat32 8-bit and 16-bit data movement, 8/16-bit ALU/test/cmp, imul2, setcc (#256, #282).
+    // All 8-bit register operands (`dst`/`src`) carry pre-decoded byte offsets (`r8_off`).
     Mov8RegReg = 56,
     Mov8RegImm = 57,
     Mov8RegMem = 58,
@@ -409,8 +420,8 @@ pub enum FastOp {
     Mov16RegMem = 63,
     Mov16MemReg = 64,
     Mov16MemImm = 65,
-    Alu8RegImm = 66,
-    Alu8RegReg = 67,
+    Add8RegReg = 66,
+    Add8RegImm = 67,
     Alu8RegMem = 68,
     Alu8MemImm = 69,
     Alu8MemReg = 70,
@@ -426,6 +437,75 @@ pub enum FastOp {
     /// Sentinel appended after a non-transfer run so direct-threaded
     /// `naked_asm!` dispatch needs no per-instruction loop counter (#256).
     EndRun = 79,
+
+    // Split 8-bit register ALU and 8-bit SBB (#282; `dst`/`src` = pre-decoded `r8_off`).
+    Sub8RegReg = 80,
+    Sub8RegImm = 81,
+    Cmp8RegReg = 82,
+    Cmp8RegImm = 83,
+    And8RegReg = 84,
+    And8RegImm = 85,
+    Or8RegReg = 86,
+    Or8RegImm = 87,
+    Xor8RegReg = 88,
+    Xor8RegImm = 89,
+    Test8RegReg = 90,
+    Test8RegImm = 91,
+    Sbb8RegReg = 92,
+    Sbb8RegImm = 93,
+
+    // Promoted 32-bit ADC / SBB (#282).
+    AdcRegReg = 94,
+    AdcRegImm = 95,
+    AdcRegMem = 96,
+    AdcMemReg = 97,
+    AdcMemImm = 98,
+    SbbRegReg = 99,
+    SbbRegImm = 100,
+    SbbRegMem = 101,
+    SbbMemReg = 102,
+    SbbMemImm = 103,
+
+    // Promoted flat32 stack, flag, sign-extension, unary, exchange, and extend ops (#282).
+    Leave = 104,
+    Sahf = 105,
+    Lahf = 106,
+    Cdq = 107,
+    Cwde = 108,
+    Neg32Reg = 109,
+    Neg32Mem = 110,
+    Neg8Reg = 111,
+    Not32Reg = 112,
+    Not32Mem = 113,
+    Not8Reg = 114,
+    Xchg32RegReg = 115,
+    Xchg8RegReg = 116,
+    /// `movzx`/`movsx r16, r8` (`src` = `r8_off`, `aux`: 0=ZX, 1=SX).
+    Extend16Reg = 117,
+
+    // Promoted 8-bit / 16-bit inc/dec (`aux`: 0=inc, 1=dec, #282).
+    IncDec8Reg = 118,
+    IncDec8Mem = 119,
+    IncDec16Reg = 120,
+    IncDec16Mem = 121,
+
+    // Promoted 8-bit / 16-bit shifts & 32-bit rotates (#282).
+    /// `aux` = (`SHIFT_SHL`..=`SHIFT_ROR`) | optional `SHIFT_CL`; `dst` = `r8_off`.
+    Shift8Reg = 122,
+    /// `aux` = (`SHIFT_SHL`..=`SHIFT_SAR`) | optional `SHIFT_CL`.
+    Shift16Reg = 123,
+    /// `aux` = (0=ROL, 1=ROR) | optional `SHIFT_CL`.
+    Rot32Reg = 124,
+
+    // Promoted 32-bit widening mul/imul and div/idiv (`aux`: 0=unsigned, 1=signed, #282).
+    Mul32Reg = 125,
+    Mul32Mem = 126,
+    Div32Reg = 127,
+    Div32Mem = 128,
+
+    // Promoted 32-bit conditional move (`aux` = condition code `0..=15`, #282).
+    Cmovcc32Reg = 129,
+    Cmovcc32Mem = 130,
 }
 
 impl FastOp {

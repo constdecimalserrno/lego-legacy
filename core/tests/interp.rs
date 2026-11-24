@@ -632,6 +632,63 @@ fn inline_x87_dot_product_and_ftol_match_exact_ieee754_and_preserve_cold_ops() {
 }
 
 #[test]
+fn promoted_integer_ops_leave_div_idiv_fault_and_cmovcc_preserve_exact_state() {
+    use lego_legacy_core::cpu::{EBP, EBX, EDX, ESP};
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+    let callee = 0x0040_0100u32;
+    let stack = 0x0050_0000u32;
+
+    // Caller: `call callee; cmp eax, 10; cmovge ebx, eax; mov edx, 0xffffffff; mov eax, 0x80000000; mov ecx, 0xffffffff; idiv ecx; hlt`
+    let mut caller = Vec::new();
+    caller.push(0xe8);
+    caller.extend_from_slice(&callee.wrapping_sub(code + 5).to_le_bytes()); // call callee
+    caller.extend_from_slice(&[0x83, 0xf8, 0x0a]); // cmp eax, 10
+    caller.extend_from_slice(&[0x0f, 0x4d, 0xd8]); // cmovge ebx, eax
+    caller.extend_from_slice(&[0xba, 0xff, 0xff, 0xff, 0xff]); // mov edx, -1
+    caller.extend_from_slice(&[0xb8, 0x00, 0x00, 0x00, 0x80]); // mov eax, i32::MIN
+    caller.extend_from_slice(&[0xb9, 0xff, 0xff, 0xff, 0xff]); // mov ecx, -1
+    let idiv_off = caller.len() as u32;
+    caller.extend_from_slice(&[0xf7, 0xf9]); // idiv ecx -> #DE (must NOT mutate eax/edx!)
+    caller.push(0xf4); // hlt
+
+    // Callee: `push ebp; mov ebp, esp; mov eax, 0xffff8005; cwde; cdq; neg eax; mov eax, 42; leave; ret`
+    let sub: &[u8] = &[
+        0x55, // push ebp
+        0x89, 0xe5, // mov ebp, esp
+        0xb8, 0x05, 0x80, 0xff, 0xff, // mov eax, 0xffff8005
+        0x98, // cwde -> 0xffff8005
+        0x99, // cdq -> edx = -1
+        0xf7, 0xd8, // neg eax -> 0x00007ffb
+        0xb8, 0x2a, 0x00, 0x00, 0x00, // mov eax, 42
+        0xc9, // leave
+        0xc3, // ret
+    ];
+
+    mem.write(code, &caller).unwrap();
+    mem.write(callee, sub).unwrap();
+
+    let mut regs = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    regs.r[ESP] = stack;
+    regs.r[EBP] = 0x1234_5678;
+    regs.r[EBX] = 99;
+
+    let mut engine = Interp::new(Mode::FLAT);
+    let (_, res) = engine.run(&mut regs, &mut mem, 1_000, 0..0);
+    assert_eq!(res, Err(Stop::DivideError));
+    assert_eq!(regs.eip, code + idiv_off, "eip rolls back to faulting idiv");
+    assert_eq!(regs.r[EBP], 0x1234_5678, "leave restored caller ebp");
+    assert_eq!(regs.r[ESP], stack, "leave+ret restored caller esp");
+    assert_eq!(regs.r[EBX], 42, "cmovge copied callee result 42");
+    assert_eq!(regs.r[EAX], 0x8000_0000, "idiv #DE did not mutate eax");
+    assert_eq!(regs.r[EDX], 0xffff_ffff, "idiv #DE did not mutate edx");
+}
+
+#[test]
 #[ignore]
 fn bench_flat32_tight_loop() {
     use lego_legacy_core::cpu::{EBX, ECX, ESI, ESP};
