@@ -586,6 +586,13 @@ pub(super) struct DrawPlan<'a> {
     pub pixel_channels: Channels,
     pub texture: Option<PreparedTexture<'a>>,
     pub carried: usize,
+    pub need_z: bool,
+    pub need_rhw: bool,
+    pub need_uv: bool,
+    pub need_diffuse_rgb: bool,
+    pub need_diffuse_a: bool,
+    pub need_specular: bool,
+    pub need_fog: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub kernel: InteriorKernel,
     draw_span: SpanFn,
@@ -600,21 +607,52 @@ impl<'a> DrawPlan<'a> {
         let pixel_channels = Channels::of(target_format);
         let target_rgb565 = target_format == PixelFormat::RGB565;
         let prepared_tex = texture.map(|t| PreparedTexture::new(t, states.colour_key));
-        let carried = if states.specular || states.fog.is_some() {
+
+        let need_z = states.depth_test.is_some() || states.depth_write;
+        let need_uv = texture.is_some();
+        let need_diffuse_rgb = !states.flat && states.colour != Combine::Texture;
+        let blend_uses_src_alpha = states.blend.is_some_and(|(s, d)| {
+            matches!(s, Blend::SourceAlpha | Blend::InverseSourceAlpha)
+                || matches!(d, Blend::SourceAlpha | Blend::InverseSourceAlpha)
+        });
+        let need_alpha_out =
+            states.alpha_test.is_some() || target_format.masks[3] != 0 || blend_uses_src_alpha;
+        let need_diffuse_a = !states.flat && states.alpha != Combine::Texture && need_alpha_out;
+        let need_specular = !states.flat && states.specular;
+        let need_fog = states.fog.is_some();
+        let need_rhw = need_uv || need_diffuse_rgb || need_diffuse_a || need_specular || need_fog;
+
+        let carried = if need_fog {
             PLANES
-        } else if !states.flat {
+        } else if need_specular {
+            11
+        } else if need_diffuse_a {
             8
-        } else if texture.is_some() {
+        } else if need_diffuse_rgb {
+            7
+        } else if need_uv {
             4
-        } else {
+        } else if need_rhw {
             2
+        } else if need_z {
+            1
+        } else {
+            0
         };
+
         let kernel = select_kernel(target_rgb565, prepared_tex.as_ref(), states);
         let draw_span = resolve_span_fn(kernel);
         Self {
             pixel_channels,
             texture: prepared_tex,
             carried,
+            need_z,
+            need_rhw,
+            need_uv,
+            need_diffuse_rgb,
+            need_diffuse_a,
+            need_specular,
+            need_fog,
             kernel,
             draw_span,
         }

@@ -10,6 +10,10 @@
 mod span;
 
 use span::DrawPlan;
+use std::any::Any;
+use std::cell::UnsafeCell;
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 const PLANES: usize = 12;
 
@@ -343,6 +347,34 @@ pub fn triangle(
     triangle_with_plan(target, v, &plan, states);
 }
 
+#[inline(always)]
+fn eval_plane(p: (f32, f32, f32), start: f32, y: f32) -> f32 {
+    p.0 * start + p.1 * y + p.2
+}
+
+#[inline(always)]
+fn step_planes_once(value: &mut [f32; PLANES], step: &[f32; PLANES], carried: usize) {
+    if carried == 0 {
+        return;
+    }
+    if carried == 1 {
+        value[0] += step[0];
+        return;
+    }
+    let lanes = carried.div_ceil(4) * 4;
+    for (vc, sc) in value[..lanes]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(step[..lanes].as_chunks::<4>().0)
+    {
+        vc[0] += sc[0];
+        vc[1] += sc[1];
+        vc[2] += sc[2];
+        vc[3] += sc[3];
+    }
+}
+
 fn triangle_with_plan(
     target: &mut Target<'_>,
     v: [Vertex; 3],
@@ -376,14 +408,20 @@ fn triangle_with_plan(
         return;
     }
 
-    // Each vertex's weight is the edge opposite it, over the area: a plane in
-    // x and y. What is interpolated is a sum of those planes.
-    let edges = [(b, c), (c, a), (a, b)];
-    let coefficient = |(p, q): (Vertex, Vertex)| {
-        let (dx, dy) = (q.x - p.x, q.y - p.y);
-        (-dy, dx, -dx * p.y + dy * p.x)
-    };
-    let weights = edges.map(coefficient);
+    // Hoist edge deltas, top-left tie-breaker flags, and plane weights once per
+    // triangle. Each vertex's weight is the edge opposite it, over the area:
+    // edges are `(b, c)`, `(c, a)`, `(a, b)`.
+    let (dx0, dy0) = (c.x - b.x, c.y - b.y);
+    let (dx1, dy1) = (a.x - c.x, a.y - c.y);
+    let (dx2, dy2) = (b.x - a.x, b.y - a.y);
+    let tl0 = (dy0 == 0.0 && dx0 > 0.0) || dy0 < 0.0;
+    let tl1 = (dy1 == 0.0 && dx1 > 0.0) || dy1 < 0.0;
+    let tl2 = (dy2 == 0.0 && dx2 > 0.0) || dy2 < 0.0;
+    let weights = [
+        (-dy0, dx0, -dx0 * b.y + dy0 * b.x),
+        (-dy1, dx1, -dx1 * c.y + dy1 * c.x),
+        (-dy2, dx2, -dx2 * a.y + dy2 * a.x),
+    ];
     let plane = |values: [f32; 3]| -> (f32, f32, f32) {
         let mut out = (0.0, 0.0, 0.0);
         for ((ex, ey, ek), value) in weights.iter().zip(values) {
@@ -393,38 +431,92 @@ fn triangle_with_plan(
         }
         out
     };
-    let over_w = |f: fn(&Vertex) -> f32| plane([f(&a) * a.rhw, f(&b) * b.rhw, f(&c) * c.rhw]);
-    // A triangle at one depth, its three depths equal bit for bit, has that
-    // depth at every pixel: the steps of its depth are differences of equal
-    // floats, which are exactly zero. These planes would carry an ulp of noise
-    // across it, enough for a quad to fail `LESSEQUAL` against one under it at
-    // the same depth: LEGO Chess draws its glyphs so (#210).
-    // ponytail: exact for bit-equal depths only; depths equal to within
-    // rounding, and sloped triangles sharing a plane, keep the noise. Planes
-    // from the vertices' differences for every triangle would mend them, and
-    // move every released title's frames, so that waits on a blessing.
-    let depth = if a.z == b.z && b.z == c.z && a.z.is_finite() {
-        (0.0, 0.0, a.z)
-    } else {
-        plane([a.z, b.z, c.z])
-    };
-    // Depth, the reciprocal of distance, texture coordinates, diffuse and
-    // specular colour, and fog factor.
-    let planes = [
-        depth,
-        plane([a.rhw, b.rhw, c.rhw]),
-        over_w(|v| v.uv[0]),
-        over_w(|v| v.uv[1]),
-        over_w(|v| v.diffuse[0]),
-        over_w(|v| v.diffuse[1]),
-        over_w(|v| v.diffuse[2]),
-        over_w(|v| v.diffuse[3]),
-        over_w(|v| v.specular[0]),
-        over_w(|v| v.specular[1]),
-        over_w(|v| v.specular[2]),
-        over_w(|v| v.fog),
-    ];
-    let step: [f32; PLANES] = planes.map(|p| p.0);
+
+    // Demand-driven plane setup: compute only the attribute planes the active
+    // render state actually reads (#275). Depth, the reciprocal of distance,
+    // texture coordinates, diffuse and specular colour, and fog factor.
+    let mut planes = [(0.0f32, 0.0f32, 0.0f32); PLANES];
+    let mut step = [0.0f32; PLANES];
+    if plan.need_z {
+        // A triangle at one depth, its three depths equal bit for bit, has that
+        // depth at every pixel: the steps of its depth are differences of equal
+        // floats, which are exactly zero. These planes would carry an ulp of noise
+        // across it, enough for a quad to fail `LESSEQUAL` against one under it at
+        // the same depth: LEGO Chess draws its glyphs so (#210).
+        // ponytail: exact for bit-equal depths only; depths equal to within
+        // rounding, and sloped triangles sharing a plane, keep the noise. Planes
+        // from the vertices' differences for every triangle would mend them, and
+        // move every released title's frames, so that waits on a blessing.
+        planes[0] = if a.z == b.z && b.z == c.z && a.z.is_finite() {
+            (0.0, 0.0, a.z)
+        } else {
+            plane([a.z, b.z, c.z])
+        };
+        step[0] = planes[0].0;
+    }
+    if plan.need_rhw {
+        planes[1] = plane([a.rhw, b.rhw, c.rhw]);
+        step[1] = planes[1].0;
+    }
+    if plan.need_uv {
+        planes[2] = plane([a.uv[0] * a.rhw, b.uv[0] * b.rhw, c.uv[0] * c.rhw]);
+        planes[3] = plane([a.uv[1] * a.rhw, b.uv[1] * b.rhw, c.uv[1] * c.rhw]);
+        step[2] = planes[2].0;
+        step[3] = planes[3].0;
+    }
+    if plan.need_diffuse_rgb {
+        planes[4] = plane([
+            a.diffuse[0] * a.rhw,
+            b.diffuse[0] * b.rhw,
+            c.diffuse[0] * c.rhw,
+        ]);
+        planes[5] = plane([
+            a.diffuse[1] * a.rhw,
+            b.diffuse[1] * b.rhw,
+            c.diffuse[1] * c.rhw,
+        ]);
+        planes[6] = plane([
+            a.diffuse[2] * a.rhw,
+            b.diffuse[2] * b.rhw,
+            c.diffuse[2] * c.rhw,
+        ]);
+        step[4] = planes[4].0;
+        step[5] = planes[5].0;
+        step[6] = planes[6].0;
+    }
+    if plan.need_diffuse_a {
+        planes[7] = plane([
+            a.diffuse[3] * a.rhw,
+            b.diffuse[3] * b.rhw,
+            c.diffuse[3] * c.rhw,
+        ]);
+        step[7] = planes[7].0;
+    }
+    if plan.need_specular {
+        planes[8] = plane([
+            a.specular[0] * a.rhw,
+            b.specular[0] * b.rhw,
+            c.specular[0] * c.rhw,
+        ]);
+        planes[9] = plane([
+            a.specular[1] * a.rhw,
+            b.specular[1] * b.rhw,
+            c.specular[1] * c.rhw,
+        ]);
+        planes[10] = plane([
+            a.specular[2] * a.rhw,
+            b.specular[2] * b.rhw,
+            c.specular[2] * c.rhw,
+        ]);
+        step[8] = planes[8].0;
+        step[9] = planes[9].0;
+        step[10] = planes[10].0;
+    }
+    if plan.need_fog {
+        planes[11] = plane([a.fog * a.rhw, b.fog * b.rhw, c.fog * c.rhw]);
+        step[11] = planes[11].0;
+    }
+
     let carried = plan.carried;
     let bytes = plan.pixel_channels.bytes;
     let flat = (a.diffuse, a.specular);
@@ -467,28 +559,30 @@ fn triangle_with_plan(
         } else {
             (from + 3, to - 3)
         };
-        let start = from as f32;
-        let mut value: [f32; PLANES] = planes.map(|(px, py_, k)| px * start + py_ * y + k);
-        let row = (py as u32 - target.first_row) as usize;
-        let row_depth = row * target.width as usize;
-        let row_pixels = row * target.pitch as usize;
 
         // Every edge function is monotonic in `x`, so covered pixels on a row
-        // form one contiguous interval `[cov_from..=cov_to]`. Trimming the left
-        // and right edge pixels (only testing the three end pixels when an
-        // interior exists) sends the entire covered span into `span::draw_interior`
-        // with zero per-pixel edge tests.
+        // form one contiguous interval `[cov_from..=cov_to]`. Hoist each edge's
+        // row Y term once and trim the ends before initializing any attribute
+        // planes so empty rows skip plane evaluation altogether (#275).
+        let ey0 = dx0 * (y - b.y);
+        let ey1 = dx1 * (y - c.y);
+        let ey2 = dx2 * (y - a.y);
         let is_covered = |px: i32| {
             let x = px as f32;
-            let (w0, w1, w2) = (edge(b, c, x, y), edge(c, a, x, y), edge(a, b, x, y));
-            covers(w0, b, c) && covers(w1, c, a) && covers(w2, a, b)
+            let w0 = ey0 - dy0 * (x - b.x);
+            if !(w0 > 0.0 || (w0 == 0.0 && tl0)) {
+                return false;
+            }
+            let w1 = ey1 - dy1 * (x - c.x);
+            if !(w1 > 0.0 || (w1 == 0.0 && tl1)) {
+                return false;
+            }
+            let w2 = ey2 - dy2 * (x - a.x);
+            w2 > 0.0 || (w2 == 0.0 && tl2)
         };
         let (cov_from, cov_to) = if inside_from <= inside_to {
             let mut l = from;
             while l < inside_from && !is_covered(l) {
-                for (v, s) in value.iter_mut().zip(step).take(carried) {
-                    *v += s;
-                }
                 l += 1;
             }
             let mut r = to;
@@ -499,9 +593,6 @@ fn triangle_with_plan(
         } else {
             let mut l = from;
             while l <= to && !is_covered(l) {
-                for (v, s) in value.iter_mut().zip(step).take(carried) {
-                    *v += s;
-                }
                 l += 1;
             }
             if l > to {
@@ -514,6 +605,43 @@ fn triangle_with_plan(
             (l, r)
         };
 
+        let start = from as f32;
+        let mut value = [0.0f32; PLANES];
+        if plan.need_z {
+            value[0] = eval_plane(planes[0], start, y);
+        }
+        if plan.need_rhw {
+            value[1] = eval_plane(planes[1], start, y);
+        }
+        if plan.need_uv {
+            value[2] = eval_plane(planes[2], start, y);
+            value[3] = eval_plane(planes[3], start, y);
+        }
+        if plan.need_diffuse_rgb {
+            value[4] = eval_plane(planes[4], start, y);
+            value[5] = eval_plane(planes[5], start, y);
+            value[6] = eval_plane(planes[6], start, y);
+        }
+        if plan.need_diffuse_a {
+            value[7] = eval_plane(planes[7], start, y);
+        }
+        if plan.need_specular {
+            value[8] = eval_plane(planes[8], start, y);
+            value[9] = eval_plane(planes[9], start, y);
+            value[10] = eval_plane(planes[10], start, y);
+        }
+        if plan.need_fog {
+            value[11] = eval_plane(planes[11], start, y);
+        }
+        // Step sequentially from `from` to `cov_from` to preserve exact
+        // Golden Rule 1 IEEE-754 rounding.
+        for _ in from..cov_from {
+            step_planes_once(&mut value, &step, carried);
+        }
+
+        let row = (py as u32 - target.first_row) as usize;
+        let row_depth = row * target.width as usize;
+        let row_pixels = row * target.pitch as usize;
         let u_from = cov_from as usize;
         let u_to = cov_to as usize;
         let depth_start = row_depth + u_from;
@@ -650,22 +778,351 @@ fn draw_checked_scanline(
 /// Raiders' rockfall, 1.2 million pixels a frame of filtered, blended
 /// texture at 26 ms on one thread, back under a 60 Hz frame.
 ///
-/// #72 asked for two changes here and both were built and measured, and
-/// neither is worth having. A pool of workers that outlive the draw, with
-/// this thread drawing the first band itself, moves the spawn and the wait
-/// off this thread exactly as predicted — `_pthread_create` and
-/// `_dispatch_semaphore_wait_slow` go from 371 of 6755 main-thread samples
-/// to 2 — and changes no wall clock at all, because the wait was never
-/// waste: it was this thread waiting for band work that still has to happen,
-/// on the same four cores either way. Eight bands is the same story: at
-/// Alpha Team's menu 106 against 105 M instructions a second, and Rock
-/// Raiders' rockfall 5.5 ms a flip against 5.6, both inside the noise of
-/// this host. The time at that menu is the interpreter's (#69, #70, #71).
+/// Band 0 runs directly on the calling thread while Bands `1..BANDS` run on
+/// a lazy persistent pool of `BANDS - 1` worker threads (#275), avoiding
+/// per-draw OS thread spawn and teardown overhead once spans and the CPU
+/// interpreter stopped masking it (#254, #255, #256).
 pub const BANDS: u32 = 4;
+
+const WORKERS: usize = (BANDS - 1) as usize;
+const WORKER_SPIN_ITERS: u32 = 64;
+const MAIN_SPIN_ITERS: u32 = 128;
 
 /// The pixels a draw has to cover before it is worth splitting into bands:
 /// about a fifth of a 640x480 screen.
 const WORTH_BANDS: f32 = 64_000.0;
+
+#[derive(Clone, Copy)]
+struct BandSlice {
+    pixels_ptr: *mut u8,
+    pixels_len: usize,
+    depth_ptr: *mut f32,
+    depth_len: usize,
+    first_row: u32,
+    rows: u32,
+}
+
+impl BandSlice {
+    const EMPTY: Self = Self {
+        pixels_ptr: std::ptr::NonNull::dangling().as_ptr(),
+        pixels_len: 0,
+        depth_ptr: std::ptr::NonNull::dangling().as_ptr(),
+        depth_len: 0,
+        first_row: 0,
+        rows: 0,
+    };
+}
+
+struct BatchJob {
+    list_ptr: *const [Vertex; 3],
+    list_len: usize,
+    plan_ptr: *const DrawPlan<'static>,
+    states_ptr: *const States,
+    width: u32,
+    pitch: u32,
+    format: PixelFormat,
+    clip_left: i32,
+    clip_right: i32,
+    bands: [BandSlice; WORKERS],
+}
+
+impl BatchJob {
+    const EMPTY: Self = Self {
+        list_ptr: std::ptr::NonNull::dangling().as_ptr(),
+        list_len: 0,
+        plan_ptr: std::ptr::NonNull::dangling().as_ptr(),
+        states_ptr: std::ptr::NonNull::dangling().as_ptr(),
+        width: 0,
+        pitch: 0,
+        format: PixelFormat::RGB565,
+        clip_left: 0,
+        clip_right: 0,
+        bands: [BandSlice::EMPTY; WORKERS],
+    };
+}
+
+const _: fn() = || {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<DrawPlan<'_>>();
+    assert_sync::<States>();
+    assert_sync::<[Vertex; 3]>();
+};
+
+#[repr(align(128))]
+struct CachePadded<T>(T);
+
+struct SharedPool {
+    job: CachePadded<UnsafeCell<BatchJob>>,
+    gen: CachePadded<AtomicU64>,
+    worker_parked: [CachePadded<AtomicBool>; WORKERS],
+    remaining: CachePadded<AtomicU32>,
+    main_parked: AtomicBool,
+    done_mu: Mutex<()>,
+    done_cv: Condvar,
+    has_panic: AtomicBool,
+    worker_panic: Mutex<Option<Box<dyn Any + Send>>>,
+}
+
+// SAFETY: `job` is written exclusively by the holder of `BandPool::dispatch_lock`
+// while `remaining == 0` and read by workers strictly between observing a new
+// `gen` (Acquire) and decrementing `remaining` (SeqCst). Every worker accesses
+// a mutually disjoint `(pixels, depth)` slice plus `Sync` batch data.
+unsafe impl Send for SharedPool {}
+unsafe impl Sync for SharedPool {}
+
+struct JoinGuard<'a> {
+    shared: &'a SharedPool,
+}
+
+impl Drop for JoinGuard<'_> {
+    fn drop(&mut self) {
+        let mut spins = 0u32;
+        while self.shared.remaining.0.load(Ordering::Acquire) != 0 {
+            if spins < MAIN_SPIN_ITERS {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                let mut guard = self
+                    .shared
+                    .done_mu
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                self.shared.main_parked.store(true, Ordering::SeqCst);
+                while self.shared.remaining.0.load(Ordering::SeqCst) != 0 {
+                    guard = self
+                        .shared
+                        .done_cv
+                        .wait(guard)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
+                self.shared.main_parked.store(false, Ordering::Relaxed);
+                drop(guard);
+                break;
+            }
+        }
+    }
+}
+
+struct BandPool {
+    dispatch_lock: Mutex<()>,
+    shared: Arc<SharedPool>,
+    workers: [std::thread::Thread; WORKERS],
+}
+
+static BAND_POOL: OnceLock<BandPool> = OnceLock::new();
+
+impl BandPool {
+    fn global() -> &'static Self {
+        BAND_POOL.get_or_init(Self::new)
+    }
+
+    fn new() -> Self {
+        let shared = Arc::new(SharedPool {
+            job: CachePadded(UnsafeCell::new(BatchJob::EMPTY)),
+            gen: CachePadded(AtomicU64::new(0)),
+            worker_parked: std::array::from_fn(|_| CachePadded(AtomicBool::new(false))),
+            remaining: CachePadded(AtomicU32::new(0)),
+            main_parked: AtomicBool::new(false),
+            done_mu: Mutex::new(()),
+            done_cv: Condvar::new(),
+            has_panic: AtomicBool::new(false),
+            worker_panic: Mutex::new(None),
+        });
+        let workers = std::array::from_fn(|worker_idx| {
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name(format!("raster-band-{}", worker_idx + 1))
+                .spawn(move || worker_loop(worker_idx, shared))
+                .expect("spawn raster band worker")
+                .thread()
+                .clone()
+        });
+        Self {
+            dispatch_lock: Mutex::new(()),
+            shared,
+            workers,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        band0: &mut Target<'_>,
+        worker_bands: [BandSlice; WORKERS],
+        list: &[[Vertex; 3]],
+        plan: &DrawPlan<'_>,
+        states: &States,
+        clip_left: i32,
+        clip_right: i32,
+    ) {
+        let _dispatch_guard = self.dispatch_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        if self.shared.has_panic.swap(false, Ordering::Relaxed) {
+            *self
+                .shared
+                .worker_panic
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
+        // SAFETY: Holding `dispatch_lock` with `remaining == 0` ensures no
+        // worker is accessing `job`. `JoinGuard` guarantees all workers finish
+        // before any borrowed slice or reference in `job` goes out of scope.
+        unsafe {
+            *self.shared.job.0.get() = BatchJob {
+                list_ptr: list.as_ptr(),
+                list_len: list.len(),
+                plan_ptr: std::ptr::from_ref(plan).cast::<DrawPlan<'static>>(),
+                states_ptr: std::ptr::from_ref(states),
+                width: band0.width,
+                pitch: band0.pitch,
+                format: band0.format,
+                clip_left,
+                clip_right,
+                bands: worker_bands,
+            };
+        }
+
+        self.shared
+            .remaining
+            .0
+            .store(WORKERS as u32, Ordering::Relaxed);
+        let join = JoinGuard {
+            shared: &self.shared,
+        };
+
+        let next_gen = self.shared.gen.0.load(Ordering::Relaxed) + 1;
+        self.shared.gen.0.store(next_gen, Ordering::Release);
+        fence(Ordering::SeqCst);
+        for (i, worker) in self.workers.iter().enumerate() {
+            if self.shared.worker_parked[i].0.load(Ordering::Relaxed) {
+                worker.unpark();
+            }
+        }
+
+        // Calling thread executes Band 0 directly.
+        draw_band(band0, list, plan, states);
+
+        drop(join);
+
+        if self.shared.has_panic.load(Ordering::Relaxed) {
+            if let Some(payload) = self
+                .shared
+                .worker_panic
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+fn worker_loop(worker_idx: usize, shared: Arc<SharedPool>) {
+    let mut seen_gen = 0u64;
+    loop {
+        let target_gen = seen_gen + 1;
+        let mut spins = 0u32;
+        while shared.gen.0.load(Ordering::Acquire) < target_gen {
+            if spins < WORKER_SPIN_ITERS {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                shared.worker_parked[worker_idx]
+                    .0
+                    .store(true, Ordering::Relaxed);
+                fence(Ordering::SeqCst);
+                if shared.gen.0.load(Ordering::Acquire) < target_gen {
+                    std::thread::park();
+                }
+                shared.worker_parked[worker_idx]
+                    .0
+                    .store(false, Ordering::Relaxed);
+            }
+        }
+        seen_gen = target_gen;
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: Main thread published `shared.job` before `gen.store(Release)`
+            // and waits on `JoinGuard` until `remaining == 0`, so every pointer and
+            // disjoint band slice is valid for the duration of this closure.
+            unsafe {
+                let job = &*shared.job.0.get();
+                let band = &job.bands[worker_idx];
+                if band.rows > 0 {
+                    let pixels = if band.pixels_len == 0 {
+                        &mut []
+                    } else {
+                        std::slice::from_raw_parts_mut(band.pixels_ptr, band.pixels_len)
+                    };
+                    let depth = if band.depth_len == 0 {
+                        &mut []
+                    } else {
+                        std::slice::from_raw_parts_mut(band.depth_ptr, band.depth_len)
+                    };
+                    let list = std::slice::from_raw_parts(job.list_ptr, job.list_len);
+                    let plan = &*job.plan_ptr;
+                    let states = &*job.states_ptr;
+                    let mut target = Target {
+                        pixels,
+                        width: job.width,
+                        height: band.rows,
+                        pitch: job.pitch,
+                        format: job.format,
+                        depth,
+                        clip: [
+                            job.clip_left,
+                            band.first_row as i32,
+                            job.clip_right,
+                            (band.first_row + band.rows) as i32,
+                        ],
+                        first_row: band.first_row,
+                    };
+                    draw_band(&mut target, list, plan, states);
+                }
+            }
+        }));
+
+        if let Err(payload) = res {
+            let mut slot = shared
+                .worker_panic
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(payload);
+            }
+            shared.has_panic.store(true, Ordering::Relaxed);
+        }
+
+        if shared.remaining.0.fetch_sub(1, Ordering::SeqCst) == 1
+            && shared.main_parked.load(Ordering::SeqCst)
+        {
+            let _guard = shared.done_mu.lock().unwrap_or_else(|e| e.into_inner());
+            shared.done_cv.notify_one();
+        }
+    }
+}
+
+fn draw_band(band: &mut Target<'_>, list: &[[Vertex; 3]], plan: &DrawPlan<'_>, states: &States) {
+    let band_top_f = band.first_row as f32;
+    let band_bottom_f = (band.first_row + band.height) as f32;
+    let can_fast_skip = band
+        .first_row
+        .checked_add(band.height)
+        .is_some_and(|end| end <= (1 << 24));
+    for &tri in list {
+        if can_fast_skip {
+            let [a, b, c] = tri;
+            let y_min = a.y.min(b.y).min(c.y);
+            let y_max = a.y.max(b.y).max(c.y);
+            if y_max <= band_top_f || y_min >= band_bottom_f {
+                continue;
+            }
+        }
+        triangle_with_plan(band, tri, plan, states);
+    }
+}
 
 /// Draw triangles in order: in bands of rows at once when there are enough
 /// pixels to be worth it, one after another otherwise, with the same result.
@@ -675,13 +1132,33 @@ pub fn triangles(
     texture: Option<&Texture<'_>>,
     states: &States,
 ) {
-    let area: f32 = list
-        .iter()
-        .map(|[a, b, c]| (edge(*a, *b, c.x, c.y) / 2.0).abs())
-        .sum();
-    let [left, top, right, bottom] = target.clip;
-    let top = top.max(target.first_row as i32);
-    let bottom = bottom.min((target.first_row + target.height) as i32);
+    let [left, clip_top, right, clip_bottom] = target.clip;
+    let clip_top = clip_top.max(target.first_row as i32).max(0);
+    let clip_bottom = clip_bottom.min((target.first_row + target.height) as i32);
+    if left >= right || clip_top >= clip_bottom || list.is_empty() {
+        return;
+    }
+
+    let mut area = 0.0f32;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for &[a, b, c] in list {
+        let e = edge(a, b, c.x, c.y);
+        if e != 0.0 && e.is_finite() {
+            area += (e * 0.5).abs();
+            min_y = min_y.min(a.y.min(b.y).min(c.y));
+            max_y = max_y.max(a.y.max(b.y).max(c.y));
+        }
+    }
+    if !min_y.is_finite() || !max_y.is_finite() {
+        return;
+    }
+    let top = (min_y.floor() as i32).max(clip_top);
+    let bottom = (max_y.ceil() as i32).min(clip_bottom);
+    if top >= bottom {
+        return;
+    }
+
     let plan = DrawPlan::new(target.format, texture, states);
     if area < WORTH_BANDS || bottom - top < BANDS as i32 * 2 {
         for triangle_ in list {
@@ -689,9 +1166,11 @@ pub fn triangles(
         }
         return;
     }
+
     let (width, pitch, format) = (target.width, target.pitch, target.format);
-    let rows_per_band = ((bottom - top) as u32).div_ceil(BANDS);
-    // The rows above the clip are nobody's; the rest go to the bands in turn.
+    let total_rows = (bottom - top) as u32;
+    // The rows above the batch's clamped Y range are nobody's; the rest are
+    // split evenly across the four bands.
     let skip = (top as u32 - target.first_row) as usize;
     let (_, mut pixels) = target
         .pixels
@@ -699,35 +1178,57 @@ pub fn triangles(
     let (_, mut depth) = target
         .depth
         .split_at_mut((skip * width as usize).min(target.depth.len()));
-    std::thread::scope(|scope| {
-        let mut band_top = top as u32;
-        while band_top < bottom as u32 {
-            let rows = rows_per_band.min(bottom as u32 - band_top);
-            let (band_pixels, rest_pixels) =
-                pixels.split_at_mut(((rows * pitch) as usize).min(pixels.len()));
-            let (band_depth, rest_depth) =
-                depth.split_at_mut(((rows * width) as usize).min(depth.len()));
-            pixels = rest_pixels;
-            depth = rest_depth;
-            let first_row = band_top;
-            scope.spawn(move || {
-                let mut band = Target {
-                    pixels: band_pixels,
-                    width,
-                    height: rows,
-                    pitch,
-                    format,
-                    depth: band_depth,
-                    clip: [left, first_row as i32, right, (first_row + rows) as i32],
-                    first_row,
-                };
-                for triangle_ in list {
-                    triangle_with_plan(&mut band, *triangle_, &plan, states);
-                }
-            });
-            band_top += rows;
-        }
-    });
+
+    let mut band_starts = [0u32; BANDS as usize];
+    let mut band_rows = [0u32; BANDS as usize];
+    for i in 0..BANDS {
+        let s = top as u32 + (u64::from(total_rows) * u64::from(i) / u64::from(BANDS)) as u32;
+        let e = top as u32 + (u64::from(total_rows) * u64::from(i + 1) / u64::from(BANDS)) as u32;
+        band_starts[i as usize] = s;
+        band_rows[i as usize] = e - s;
+    }
+
+    let rows0 = band_rows[0];
+    let (pix0, rest_pixels) = pixels.split_at_mut(((rows0 * pitch) as usize).min(pixels.len()));
+    let (dep0, rest_depth) = depth.split_at_mut(((rows0 * width) as usize).min(depth.len()));
+    pixels = rest_pixels;
+    depth = rest_depth;
+
+    let mut band0 = Target {
+        pixels: pix0,
+        width,
+        height: rows0,
+        pitch,
+        format,
+        depth: dep0,
+        clip: [
+            left,
+            band_starts[0] as i32,
+            right,
+            (band_starts[0] + rows0) as i32,
+        ],
+        first_row: band_starts[0],
+    };
+
+    let mut worker_bands = [BandSlice::EMPTY; WORKERS];
+    for (w, slot) in worker_bands.iter_mut().enumerate() {
+        let idx = w + 1;
+        let rows = band_rows[idx];
+        let (bp, rp) = pixels.split_at_mut(((rows * pitch) as usize).min(pixels.len()));
+        let (bd, rd) = depth.split_at_mut(((rows * width) as usize).min(depth.len()));
+        pixels = rp;
+        depth = rd;
+        *slot = BandSlice {
+            pixels_ptr: bp.as_mut_ptr(),
+            pixels_len: bp.len(),
+            depth_ptr: bd.as_mut_ptr(),
+            depth_len: bd.len(),
+            first_row: band_starts[idx],
+            rows,
+        };
+    }
+
+    BandPool::global().dispatch(&mut band0, worker_bands, list, &plan, states, left, right);
 }
 
 /// Twice the signed area of the triangle from `a` to `b` to the point:
@@ -739,6 +1240,7 @@ fn edge(a: Vertex, b: Vertex, x: f32, y: f32) -> f32 {
 
 /// Whether a pixel centre on an edge's line is the triangle's: only on a top
 /// or left edge.
+#[cfg(test)]
 fn covers(w: f32, a: Vertex, b: Vertex) -> bool {
     if w != 0.0 {
         return w > 0.0;
@@ -2117,5 +2619,408 @@ mod tests {
                 "bands draw every pixel the same ({name})"
             );
         }
+    }
+
+    /// Verify tightened `DrawPlan::carried` and demand-driven active-plane
+    /// evaluation across every render-state corner case (#275), holding every
+    /// combination bit-for-bit identical to `triangle_reference`.
+    #[test]
+    fn demand_driven_planes_and_carried_match_reference_bit_for_bit() {
+        const ARGB8888: PixelFormat = PixelFormat {
+            bits: 32,
+            masks: [0x00ff_0000, 0xff00, 0xff, 0xff00_0000],
+        };
+        let tex_bytes: Vec<u8> = (0..8 * 8 * 2)
+            .map(|i| ((i * 37 + 11) & 0xff) as u8)
+            .collect();
+        let tex = Texture {
+            bytes: &tex_bytes,
+            width: 8,
+            height: 8,
+            pitch: 16,
+            format: PixelFormat::RGB565,
+            palette: None,
+            colour_key: None,
+            clamp: [false, false],
+        };
+        let (w, h) = (40usize, 18usize);
+        let init_pix16: Vec<u8> = (0..w * h * 2)
+            .map(|i| ((i * 29 + 7) & 0xff) as u8)
+            .collect();
+        let init_pix32: Vec<u8> = (0..w * h * 4)
+            .map(|i| ((i * 19 + 3) & 0xff) as u8)
+            .collect();
+        let init_depth: Vec<f32> = (0..w * h)
+            .map(|i| if i % 5 == 0 { 0.25 } else { 0.85 })
+            .collect();
+        let tri = [
+            Vertex {
+                x: 2.25,
+                y: 1.5,
+                z: 0.2,
+                rhw: 0.75,
+                diffuse: [0.85, 0.35, 0.65, 0.7],
+                specular: [0.22, 0.41, 0.13],
+                uv: [-0.25, 0.1],
+                fog: 0.3,
+            },
+            Vertex {
+                x: 37.5,
+                y: 3.25,
+                z: 0.6,
+                rhw: 1.35,
+                diffuse: [0.25, 0.9, 0.45, 0.4],
+                specular: [0.48, 0.15, 0.31],
+                uv: [1.75, 0.6],
+                fog: 0.85,
+            },
+            Vertex {
+                x: 9.75,
+                y: 16.5,
+                z: 0.4,
+                rhw: 0.55,
+                diffuse: [0.5, 0.55, 0.95, 0.9],
+                specular: [0.09, 0.28, 0.52],
+                uv: [0.3, 1.9],
+                fog: 0.55,
+            },
+        ];
+
+        let cases: &[(&str, PixelFormat, Option<&Texture<'_>>, States, usize)] = &[
+            (
+                "untex_flat_no_z",
+                PixelFormat::RGB565,
+                None,
+                States {
+                    flat: true,
+                    depth_test: None,
+                    depth_write: false,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    ..States::default()
+                },
+                0,
+            ),
+            (
+                "untex_flat_z",
+                PixelFormat::RGB565,
+                None,
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    ..States::default()
+                },
+                1,
+            ),
+            (
+                "untex_flat_specular_z",
+                PixelFormat::RGB565,
+                None,
+                States {
+                    flat: true,
+                    specular: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    ..States::default()
+                },
+                1,
+            ),
+            (
+                "tex_flat_specular_z",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    flat: true,
+                    specular: true,
+                    ..States::default()
+                },
+                4,
+            ),
+            (
+                "tex_copy_gouraud_z",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    flat: false,
+                    colour: Combine::Texture,
+                    alpha: Combine::Texture,
+                    ..States::default()
+                },
+                4,
+            ),
+            (
+                "tex_copy_gouraud_noz",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    flat: false,
+                    colour: Combine::Texture,
+                    alpha: Combine::Texture,
+                    depth_test: None,
+                    depth_write: false,
+                    ..States::default()
+                },
+                4,
+            ),
+            (
+                "tex_mod_opaque_gouraud_rgb565",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States::default(),
+                7,
+            ),
+            (
+                "tex_mod_additive_gouraud_rgb565",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    blend: Some((Blend::One, Blend::One)),
+                    ..States::default()
+                },
+                7,
+            ),
+            (
+                "tex_mod_alpha_texonly_rgb565",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    alpha: Combine::Texture,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+                7,
+            ),
+            (
+                "tex_mod_opaque_gouraud_argb8888",
+                ARGB8888,
+                Some(&tex),
+                States::default(),
+                8,
+            ),
+            (
+                "tex_mod_alphatest_gouraud_rgb565",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    alpha_test: Some((Compare::GreaterEqual, 128)),
+                    ..States::default()
+                },
+                8,
+            ),
+            (
+                "tex_mod_specular_gouraud",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    specular: true,
+                    ..States::default()
+                },
+                11,
+            ),
+            (
+                "tex_flat_fog",
+                PixelFormat::RGB565,
+                Some(&tex),
+                States {
+                    flat: true,
+                    fog: Some([0.4, 0.6, 0.8]),
+                    ..States::default()
+                },
+                12,
+            ),
+            (
+                "untex_flat_fog",
+                PixelFormat::RGB565,
+                None,
+                States {
+                    flat: true,
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    fog: Some([0.2, 0.5, 0.9]),
+                    ..States::default()
+                },
+                12,
+            ),
+        ];
+
+        for &(label, fmt, texture, ref states, expected_carried) in cases {
+            let plan = DrawPlan::new(fmt, texture, states);
+            assert_eq!(plan.carried, expected_carried, "carried for {label}");
+            let (init_pix, pitch) = if fmt.bits == 32 {
+                (&init_pix32[..], w * 4)
+            } else {
+                (&init_pix16[..], w * 2)
+            };
+            assert_bit_exact(
+                w,
+                h,
+                pitch,
+                fmt,
+                init_pix,
+                &init_depth,
+                [0, 0, w as i32, h as i32],
+                0,
+                tri,
+                texture,
+                states,
+                label,
+            );
+        }
+    }
+
+    /// Exercise the persistent `BandPool` across repeated draws, clamped narrow
+    /// Y-bands, exact integer band-boundary triangles, spin-to-park wake cycles,
+    /// and concurrent calling threads (#275).
+    #[test]
+    fn band_pool_repeated_clamped_and_concurrent_draws_match_single_triangle() {
+        let (w, h) = (320usize, 240usize);
+        let tex_bytes: Vec<u8> = (0..16 * 16 * 2)
+            .map(|i| ((i * 59 + 23) & 0xff) as u8)
+            .collect();
+        let tex = Texture {
+            bytes: &tex_bytes,
+            width: 16,
+            height: 16,
+            pitch: 32,
+            format: PixelFormat::RGB565,
+            palette: None,
+            colour_key: None,
+            clamp: [false, false],
+        };
+
+        // Clamped batch confined to the bottom 56 rows (`y in 180..236`),
+        // including triangles with vertices sitting on exact integer band rows
+        // plus degenerate/zero-area triangles.
+        let mut seed = 0x5eed_cafeu32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let mut clamped_list: Vec<[Vertex; 3]> = (0..50)
+            .map(|_| {
+                let colour = [next(), next(), next(), 0.25 + 0.5 * next()];
+                std::array::from_fn(|_| Vertex {
+                    x: next() * 340.0 - 10.0,
+                    y: 180.0 + next() * 56.0,
+                    z: next(),
+                    rhw: 0.4 + next(),
+                    diffuse: colour,
+                    uv: [next() * 2.0, next() * 2.0],
+                    ..Vertex::default()
+                })
+            })
+            .collect();
+        // Exact integer boundary triangles at y = 194, 208, 222.
+        clamped_list.push([at(0.0, 180.0), at(320.0, 180.0), at(320.0, 194.0)]);
+        clamped_list.push([at(0.0, 194.0), at(320.0, 194.0), at(0.0, 208.0)]);
+        clamped_list.push([at(0.0, 208.0), at(320.0, 222.0), at(320.0, 208.0)]);
+        // Degenerate zero-area triangle must be ignored cleanly.
+        clamped_list.push([at(10.0, 200.0), at(50.0, 200.0), at(90.0, 200.0)]);
+
+        let states = States {
+            linear: true,
+            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+            depth_test: Some(Compare::LessEqual),
+            ..States::default()
+        };
+
+        let mut ref_pixels = vec![0u8; w * h * 2];
+        let mut ref_depth = vec![1.0f32; w * h];
+        {
+            let mut target = Target {
+                pixels: &mut ref_pixels,
+                width: w as u32,
+                height: h as u32,
+                pitch: (w * 2) as u32,
+                format: PixelFormat::RGB565,
+                depth: &mut ref_depth,
+                clip: [0, 0, w as i32, h as i32],
+                first_row: 0,
+            };
+            for t in &clamped_list {
+                triangle(&mut target, *t, Some(&tex), &states);
+            }
+        }
+        assert!(ref_pixels.iter().any(|&b| b != 0));
+
+        // Repeated draws from 4 concurrent threads, pausing mid-run so workers
+        // transition through spin -> Condvar park -> wake cleanly.
+        std::thread::scope(|s| {
+            for tid in 0..4usize {
+                let list = &clamped_list;
+                let tex_ref = &tex;
+                let ref_pixels = &ref_pixels;
+                let ref_depth = &ref_depth;
+                s.spawn(move || {
+                    for iter in 0..12 {
+                        if iter == 6 {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        let mut pixels = vec![0u8; w * h * 2];
+                        let mut depth = vec![1.0f32; w * h];
+                        let mut target = Target {
+                            pixels: &mut pixels,
+                            width: w as u32,
+                            height: h as u32,
+                            pitch: (w * 2) as u32,
+                            format: PixelFormat::RGB565,
+                            depth: &mut depth,
+                            clip: [0, 0, w as i32, h as i32],
+                            first_row: 0,
+                        };
+                        triangles(&mut target, list, Some(tex_ref), &states);
+                        assert_eq!(pixels, *ref_pixels, "thread {tid} iter {iter} pixels");
+                        assert_eq!(depth, *ref_depth, "thread {tid} iter {iter} depth");
+                    }
+                });
+            }
+        });
+    }
+
+    /// Prove `JoinGuard` blocks until all workers finish even while unwinding
+    /// from a Band-0 panic, guaranteeing no worker outlives borrowed slices.
+    #[test]
+    fn join_guard_waits_for_workers_during_unwind() {
+        use super::{BatchJob, CachePadded, JoinGuard, SharedPool};
+        use std::cell::UnsafeCell;
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let shared = Arc::new(SharedPool {
+            job: CachePadded(UnsafeCell::new(BatchJob::EMPTY)),
+            gen: CachePadded(AtomicU64::new(0)),
+            worker_parked: std::array::from_fn(|_| CachePadded(AtomicBool::new(false))),
+            remaining: CachePadded(AtomicU32::new(1)),
+            main_parked: AtomicBool::new(false),
+            done_mu: Mutex::new(()),
+            done_cv: Condvar::new(),
+            has_panic: AtomicBool::new(false),
+            worker_panic: Mutex::new(None),
+        });
+        let worker_done = Arc::new(AtomicBool::new(false));
+        let shared_w = Arc::clone(&shared);
+        let done_w = Arc::clone(&worker_done);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            done_w.store(true, Ordering::SeqCst);
+            if shared_w.remaining.0.fetch_sub(1, Ordering::SeqCst) == 1
+                && shared_w.main_parked.load(Ordering::SeqCst)
+            {
+                let _g = shared_w.done_mu.lock().unwrap_or_else(|e| e.into_inner());
+                shared_w.done_cv.notify_one();
+            }
+        });
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = JoinGuard { shared: &shared };
+            panic!("simulated Band 0 panic");
+        }));
+        assert!(unwound.is_err());
+        assert!(
+            worker_done.load(Ordering::SeqCst),
+            "JoinGuard must wait for in-flight workers before unwind finishes"
+        );
+        handle.join().unwrap();
     }
 }
