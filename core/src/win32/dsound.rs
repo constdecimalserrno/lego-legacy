@@ -32,6 +32,64 @@ pub struct Sounds {
     listener: Listener,
 }
 
+/// Read-only summary of one DirectSound buffer (#309).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferSummary {
+    pub addr: u32,
+    pub bytes: u32,
+    pub volume: i32,
+    pub pan: i32,
+    pub frequency: Option<u32>,
+    pub looping: bool,
+    pub playing: bool,
+}
+
+impl Sounds {
+    #[must_use]
+    pub fn buffer_count(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Read-only summary of currently playing DirectSound buffers at `declared_ms` (#309).
+    #[must_use]
+    pub fn active_buffers(&self, declared_ms: u64) -> Vec<BufferSummary> {
+        self.buffers
+            .iter()
+            .filter_map(|(&addr, buf)| {
+                let playing = buf.started.is_some_and(|started| {
+                    if buf.looping || buf.bytes == 0 {
+                        return true;
+                    }
+                    let Some(fmt) = &buf.format else {
+                        return true;
+                    };
+                    let rate = u64::from(buf.frequency.unwrap_or(fmt.rate)).max(1);
+                    let align = u64::from(fmt.block_align).max(1);
+                    let total_frames = u64::from(buf.bytes) / align;
+                    let start_frames = u64::from(buf.offset) / align;
+                    let elapsed_ms = declared_ms.saturating_sub(started);
+                    let played_frames = elapsed_ms.saturating_mul(rate) / 1000;
+                    start_frames.saturating_add(played_frames) < total_frames
+                });
+                if !playing {
+                    return None;
+                }
+                Some(BufferSummary {
+                    addr,
+                    bytes: buf.bytes,
+                    volume: buf.volume,
+                    pan: buf.pan,
+                    frequency: buf
+                        .frequency
+                        .or_else(|| buf.format.as_ref().map(|f| f.rate)),
+                    looping: buf.looping,
+                    playing: true,
+                })
+            })
+            .collect()
+    }
+}
+
 /// A buffer: its bytes, and what it plays and how.
 #[derive(Clone, Debug)]
 struct Buffer {

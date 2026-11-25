@@ -111,6 +111,98 @@ impl Tree {
         self.profile = Some(dir);
     }
 
+    /// The host profile directory backing guest writes, if configured.
+    #[must_use]
+    pub fn profile_dir(&self) -> Option<&std::path::Path> {
+        self.profile.as_deref()
+    }
+
+    /// The host path of the mounted pressing ISO image, if any.
+    #[must_use]
+    pub fn disc_path(&self) -> Option<&std::path::Path> {
+        self.iso.as_ref().map(Iso::path)
+    }
+
+    /// Read-only listing of declared installed files: `(guest_path, source_kind, known_size)`.
+    #[must_use]
+    pub fn declared_files(&self) -> Vec<(String, &'static str, u32)> {
+        self.files
+            .iter()
+            .map(|(path, source)| {
+                let (kind, size) = match source {
+                    Source::Declared(bytes) => {
+                        ("declared", u32::try_from(bytes.len()).unwrap_or(0))
+                    }
+                    Source::Packed(index) => (
+                        "packed",
+                        self.cabinet
+                            .as_ref()
+                            .and_then(|(c, _)| c.entries().get(*index))
+                            .map_or(0, |e| e.expanded),
+                    ),
+                    Source::Imploded(index) => (
+                        "imploded",
+                        self.archive
+                            .as_ref()
+                            .and_then(|(a, _)| a.members().get(*index))
+                            .map_or(0, |m| m.expanded),
+                    ),
+                    Source::Disc(_) => ("disc", 0),
+                };
+                (path.clone(), kind, size)
+            })
+            .collect()
+    }
+
+    /// Read a declared or disc file strictly read-only without mutating the
+    /// live ISO handle or `wall` state (opens a separate read-only ISO handle
+    /// when disc access is needed, #309).
+    #[must_use]
+    pub fn read_readonly(&self, guest_path: &str, joliet: bool) -> Option<Vec<u8>> {
+        let key = Self::key(guest_path);
+        let open_iso = || -> Option<Iso> {
+            let mut iso = Iso::open(self.iso.as_ref()?.path()).ok()?;
+            if joliet {
+                let _ = iso.read_joliet();
+            }
+            Some(iso)
+        };
+        match self.files.get(&key) {
+            Some(Source::Declared(bytes)) => Some(bytes.clone()),
+            Some(Source::Packed(index)) => {
+                let (cabinet, data_stem) = self.cabinet.as_ref()?;
+                let entry = cabinet.entries().get(*index)?;
+                let data_path = format!("{data_stem}{}.CAB", entry.volume);
+                let mut iso = open_iso()?;
+                let span = iso
+                    .read_range(&data_path, entry.offset, entry.compressed as usize)
+                    .ok()?;
+                cabinet.unpack(entry, &span).ok()
+            }
+            Some(Source::Imploded(index)) => {
+                let (archive, path) = self.archive.as_ref()?;
+                let member = archive.members().get(*index)?;
+                let mut iso = open_iso()?;
+                let span = iso
+                    .read_range(path, member.offset, member.compressed as usize)
+                    .ok()?;
+                member.expand(&span).ok()
+            }
+            Some(Source::Disc(path)) => open_iso()?.read(path).ok(),
+            None => {
+                let on_disc = key
+                    .strip_prefix("D:\\")
+                    .unwrap_or(&key)
+                    .trim_start_matches('\\')
+                    .replace('\\', "/");
+                if on_disc.is_empty() {
+                    return None;
+                }
+                open_iso()?.read(&on_disc).ok()
+            }
+        }
+    }
+
     /// Where in the profile a guest path lives: one host directory per path
     /// component, the drive among them, and every name as the declared
     /// machine reads it, so a file written as one spelling is found by any

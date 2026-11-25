@@ -61,6 +61,12 @@ pub struct Cli {
     pub fps_window: Option<(u64, u64)>,
     /// Serve the newline-delimited JSON control protocol on stdin/stdout (#308).
     pub control_stdio: bool,
+    /// Serve the HTTP/1.1 control & introspection endpoint on `HOST:PORT` (#309).
+    pub control_http: Option<String>,
+    /// Serve the HTTP/1.1 control & introspection endpoint on a Unix socket (#309).
+    pub control_unix: Option<PathBuf>,
+    /// Optional Bearer token required for mutating `POST` control endpoints (#309).
+    pub token: Option<String>,
     /// Initial control execution mode (`step` or `live`) (#308).
     pub control_mode: Option<crate::control::ExecMode>,
     /// Start paused on the first post-route flip (#308).
@@ -68,10 +74,20 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Whether any control-plane flag is active on this invocation (#308).
+    /// Whether any control-plane flag is active on this invocation (#308, #309).
     #[must_use]
     pub fn control_enabled(&self) -> bool {
-        self.control_stdio || self.control_mode.is_some() || self.paused
+        self.control_stdio
+            || self.control_http.is_some()
+            || self.control_unix.is_some()
+            || self.control_mode.is_some()
+            || self.paused
+    }
+
+    /// Whether an external agent/control transport is active (stdio, HTTP, or UDS).
+    #[must_use]
+    pub fn has_control_transport(&self) -> bool {
+        self.control_stdio || self.control_http.is_some() || self.control_unix.is_some()
     }
 }
 
@@ -136,6 +152,10 @@ usage: <title> [flags]
   --fps-report             report host speed and frame-time percentiles at run end
   --fps-window <a..b>      also report telemetry over flips [a, b)
   --control-stdio          serve JSONL control commands on stdin/stdout
+  --control [HOST:PORT]    serve HTTP/1.1 control & introspection (default: 127.0.0.1:0)
+  --control-unix <path>    serve HTTP/1.1 control & introspection on a Unix socket
+  --token <secret>         require Bearer token on mutating HTTP POST routes
+                           (also read from LEGO_LEGACY_TOKEN)
   --control-mode step|live initial control mode (default: step when control active)
   --paused                 start paused on the first post-route flip
   -h, --help               this";
@@ -152,8 +172,18 @@ impl Cli {
         S: Into<String>,
     {
         let mut cli = Self::default();
-        let mut it = args.into_iter().map(Into::into);
+        let mut it = args.into_iter().map(Into::into).peekable();
         while let Some(arg) = it.next() {
+            if let Some(addr) = arg.strip_prefix("--control=") {
+                if addr.is_empty() || !addr.contains(':') {
+                    return Err(CliError::BadValue {
+                        flag: "--control",
+                        value: addr.to_owned(),
+                    });
+                }
+                cli.control_http = Some(addr.to_owned());
+                continue;
+            }
             let mut value = |flag: &'static str| it.next().ok_or(CliError::MissingValue(flag));
             match arg.as_str() {
                 "--headless" => cli.headless = true,
@@ -163,6 +193,42 @@ impl Cli {
                 "--stub" => cli.stub = true,
                 "--fps-report" => cli.fps_report = true,
                 "--control-stdio" => cli.control_stdio = true,
+                "--control" => {
+                    let addr = match it.peek() {
+                        Some(next) if !next.starts_with('-') => {
+                            let v = it.next().expect("peeked");
+                            if v.is_empty() || !v.contains(':') {
+                                return Err(CliError::BadValue {
+                                    flag: "--control",
+                                    value: v,
+                                });
+                            }
+                            v
+                        }
+                        _ => "127.0.0.1:0".to_owned(),
+                    };
+                    cli.control_http = Some(addr);
+                }
+                "--control-unix" => {
+                    let v = value("--control-unix")?;
+                    if v.is_empty() {
+                        return Err(CliError::BadValue {
+                            flag: "--control-unix",
+                            value: v,
+                        });
+                    }
+                    cli.control_unix = Some(PathBuf::from(v));
+                }
+                "--token" => {
+                    let v = value("--token")?;
+                    if v.is_empty() {
+                        return Err(CliError::BadValue {
+                            flag: "--token",
+                            value: v,
+                        });
+                    }
+                    cli.token = Some(v);
+                }
                 "--paused" => cli.paused = true,
                 "--control-mode" => {
                     let v = value("--control-mode")?;
@@ -333,5 +399,34 @@ mod tests {
                 ..
             }
         ));
+
+        let http_default = Cli::parse(["--control", "--headless"]).unwrap();
+        assert!(http_default.control_enabled());
+        assert!(http_default.has_control_transport());
+        assert_eq!(http_default.control_http.as_deref(), Some("127.0.0.1:0"));
+        assert!(http_default.headless);
+
+        let http_explicit = Cli::parse([
+            "--control",
+            "0.0.0.0:7777",
+            "--control-unix",
+            "/tmp/lego.sock",
+            "--token",
+            "s3cr3t",
+        ])
+        .unwrap();
+        assert_eq!(http_explicit.control_http.as_deref(), Some("0.0.0.0:7777"));
+        assert_eq!(
+            http_explicit.control_unix.as_deref(),
+            Some(std::path::Path::new("/tmp/lego.sock"))
+        );
+        assert_eq!(http_explicit.token.as_deref(), Some("s3cr3t"));
+
+        let http_eq = Cli::parse(["--control=127.0.0.1:8080"]).unwrap();
+        assert_eq!(http_eq.control_http.as_deref(), Some("127.0.0.1:8080"));
+
+        assert!(Cli::parse(["--control", "badaddr"]).is_err());
+        assert!(Cli::parse(["--control-unix"]).is_err());
+        assert!(Cli::parse(["--token"]).is_err());
     }
 }

@@ -594,6 +594,22 @@ impl State {
         self.handles.iter().filter_map(Option::as_ref)
     }
 
+    /// Read-only view of all open handles as `(handle, &Object)` (#309).
+    pub fn open_handles(&self) -> impl Iterator<Item = (u32, &Object)> {
+        self.handles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| o.as_ref().map(|obj| (HANDLE_BASE + (i as u32) * 4, obj)))
+    }
+
+    /// Read-only view of primary COM objects (where `obj.identity == addr`) (#309).
+    pub fn com_objects(&self) -> impl Iterator<Item = (u32, &ComObject)> {
+        self.com
+            .iter()
+            .filter(|(&addr, obj)| obj.identity == addr)
+            .map(|(&addr, obj)| (addr, obj))
+    }
+
     /// What the guest reads out of the keyboard device: one byte per key, the
     /// top bit set on the ones that are down.
     #[must_use]

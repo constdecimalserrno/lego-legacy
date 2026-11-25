@@ -6,12 +6,13 @@
 //! and observes live frames, [`FrameDiff`], `#296` [`Telemetry`], and
 //! [`AgentState`] without touching `Machine`.
 
+use super::inspect::{execute_inspect, BookmarkData, InspectQuery, InspectReply};
 use super::timeline::{Action, Timeline};
 use crate::clock::FlipCost;
 use crate::host::telemetry::{FpsReport, Telemetry};
 use crate::host::{FlipMeta, Input};
-use crate::machine::Finish;
-use std::collections::VecDeque;
+use crate::machine::{Finish, Machine};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,8 @@ impl InputOwner {
 /// Initial configuration for [`ControlBus`] and [`super::host::ControlHost`].
 #[derive(Clone, Copy, Debug)]
 pub struct ControlConfig {
+    /// Title roster key reported in `/api/status` (e.g. `"lego-chess"`, `"stub"`).
+    pub title: &'static str,
     pub mode: ExecMode,
     pub owner: InputOwner,
     /// Start paused even in [`ExecMode::Live`].
@@ -107,6 +110,7 @@ pub struct ControlConfig {
 impl Default for ControlConfig {
     fn default() -> Self {
         Self {
+            title: "",
             mode: ExecMode::Step,
             owner: InputOwner::Agent,
             start_paused: false,
@@ -188,6 +192,7 @@ pub struct AgentStatePatch {
 /// Snapshot of the control plane's live status.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControlStatus {
+    pub title: String,
     pub flip: Option<u64>,
     pub cursor: u64,
     pub declared_ms: u64,
@@ -202,6 +207,7 @@ pub struct ControlStatus {
     pub pace: f64,
     pub route_active: bool,
     pub route_remaining: usize,
+    pub recording_len: usize,
     pub pointer_pos: (i32, i32),
     pub pointer_shown: bool,
     pub held_keys: Vec<u32>,
@@ -210,6 +216,39 @@ pub struct ControlStatus {
     pub frame_height: u32,
     pub frame_hash: Option<String>,
     pub diff: FrameDiff,
+}
+
+/// Result of a Tier-1 route checkpoint rewind (`/api/rewind`, #309).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewindResult {
+    pub name: String,
+    pub flip: u64,
+    pub cursor: u64,
+    pub declared_ms: u64,
+    pub digest: String,
+    pub expected_digest: String,
+    pub digest_match: bool,
+}
+
+struct InspectSlot {
+    reply: Mutex<Option<InspectReply>>,
+    ready: Condvar,
+}
+
+pub(crate) struct InspectTicket {
+    query: InspectQuery,
+    slot: Arc<InspectSlot>,
+}
+
+struct RewindSlot {
+    reply: Mutex<Option<Result<RewindResult, String>>>,
+    ready: Condvar,
+}
+
+pub(crate) struct PendingRewind {
+    pub name: String,
+    pub bookmark: BookmarkData,
+    slot: Arc<RewindSlot>,
 }
 
 /// Result of a `Wait`, `WaitUntilChange`, or `WaitUntilSettled` command.
@@ -320,6 +359,7 @@ pub(crate) enum WaitCondition {
 }
 
 pub(crate) struct BusState {
+    pub title: String,
     pub mode: ExecMode,
     pub owner: InputOwner,
     pub pause_requested: bool,
@@ -338,6 +378,7 @@ pub(crate) struct BusState {
     pub close_pending: bool,
     pub force_closes: u32,
     pub last_meta: Option<FlipMeta>,
+    pub recording_len: usize,
     pub pointer_pos: (i32, i32),
     pub pointer_shown: bool,
     pub held_keys: Vec<u32>,
@@ -347,11 +388,19 @@ pub(crate) struct BusState {
     pub timeline: Timeline,
     pub agent_state: AgentState,
     pub feed_seq: u64,
+    pub machine_attached: bool,
+    pub pending_inspects: VecDeque<InspectTicket>,
+    pub bookmarks: BTreeMap<String, BookmarkData>,
+    pub rewind_abort: bool,
+    pub pending_rewind: Option<PendingRewind>,
+    pub replaying_rewind: Option<PendingRewind>,
+    pub rewind_target_flip: Option<u64>,
 }
 
 impl BusState {
     fn new(config: ControlConfig) -> Self {
         Self {
+            title: config.title.to_owned(),
             mode: config.mode,
             owner: config.owner,
             pause_requested: config.start_paused,
@@ -370,6 +419,7 @@ impl BusState {
             close_pending: false,
             force_closes: 0,
             last_meta: None,
+            recording_len: 0,
             pointer_pos: (0, 0),
             pointer_shown: true,
             held_keys: Vec::new(),
@@ -379,6 +429,13 @@ impl BusState {
             timeline: Timeline::new(config.pointer_speed),
             agent_state: AgentState::default(),
             feed_seq: 0,
+            machine_attached: false,
+            pending_inspects: VecDeque::new(),
+            bookmarks: BTreeMap::new(),
+            rewind_abort: false,
+            pending_rewind: None,
+            replaying_rewind: None,
+            rewind_target_flip: None,
         }
     }
 
@@ -423,7 +480,10 @@ impl BusState {
     }
 
     pub(crate) fn should_pause(&self, route_active: bool) -> bool {
-        if self.finished || self.close_pending || self.force_closes > 0 {
+        if self.finished || self.close_pending || self.force_closes > 0 || self.rewind_abort {
+            return false;
+        }
+        if self.rewind_target_flip.is_some() {
             return false;
         }
         if route_active {
@@ -444,6 +504,7 @@ impl BusState {
             None => (0, 0, None, FrameDiff::default()),
         };
         ControlStatus {
+            title: self.title.clone(),
             flip: self.last_meta.map(|m| m.flip),
             cursor: self.last_meta.map_or(0, |m| m.cursor),
             declared_ms: self.current_declared_ms(),
@@ -458,6 +519,7 @@ impl BusState {
             pace: self.pace,
             route_active: self.last_meta.is_some_and(|m| m.route_active),
             route_remaining: self.last_meta.map_or(0, |m| m.route_remaining),
+            recording_len: self.recording_len,
             pointer_pos: self.pointer_pos,
             pointer_shown: self.pointer_shown,
             held_keys: self.held_keys.clone(),
@@ -560,11 +622,40 @@ impl ControlBus {
         state.finished = true;
         state.is_paused = false;
         state.active_wait = None;
+        state.machine_attached = false;
         state.outcome = Some(finish.outcome.to_string());
         state.digest = Some(digest.to_owned());
         state.step_epoch += 1;
         state.wait_epoch += 1;
+        let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
+        let orphaned_rewind = state
+            .pending_rewind
+            .take()
+            .or_else(|| state.replaying_rewind.take());
+        state.rewind_abort = false;
+        state.rewind_target_flip = None;
         drop(state);
+        for ticket in orphaned_inspects {
+            let mut slot = ticket
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(InspectReply::Error {
+                status: 410,
+                message: "run has finished".to_owned(),
+            });
+            ticket.slot.ready.notify_all();
+        }
+        if let Some(rw) = orphaned_rewind {
+            let mut slot = rw
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(Err("run finished before rewind completed".to_owned()));
+            rw.slot.ready.notify_all();
+        }
         self.notify_client();
         self.notify_host();
     }
@@ -576,11 +667,347 @@ impl ControlBus {
             state.finished = true;
             state.is_paused = false;
             state.active_wait = None;
+            state.machine_attached = false;
             state.step_epoch += 1;
             state.wait_epoch += 1;
+            let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
+            let orphaned_rewind = state
+                .pending_rewind
+                .take()
+                .or_else(|| state.replaying_rewind.take());
+            state.rewind_abort = false;
+            state.rewind_target_flip = None;
             drop(state);
+            for ticket in orphaned_inspects {
+                let mut slot = ticket
+                    .slot
+                    .reply
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(InspectReply::Error {
+                    status: 410,
+                    message: "control host closed".to_owned(),
+                });
+                ticket.slot.ready.notify_all();
+            }
+            if let Some(rw) = orphaned_rewind {
+                let mut slot = rw
+                    .slot
+                    .reply
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(Err("control host closed before rewind completed".to_owned()));
+                rw.slot.ready.notify_all();
+            }
             self.notify_client();
             self.notify_host();
+        }
+    }
+
+    /// Declare whether a live flip-boundary machine inspector is attached (#309).
+    pub fn set_machine_attached(&self, attached: bool) {
+        self.lock().machine_attached = attached;
+    }
+
+    /// Update cheap machine-boundary metadata cached for `/api/status` (#309).
+    pub fn update_machine_meta(&self, recording_len: usize) {
+        self.lock().recording_len = recording_len;
+    }
+
+    /// Submit a read-only [`InspectQuery`] to run on `&Machine` at the active or
+    /// next flip boundary (deadlock-free when paused in `Step` mode, #309).
+    #[must_use]
+    pub fn request_inspect(&self, query: InspectQuery, timeout: Option<Duration>) -> InspectReply {
+        let slot = Arc::new(InspectSlot {
+            reply: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        {
+            let mut state = self.lock();
+            if state.finished {
+                return InspectReply::Error {
+                    status: 410,
+                    message: "run has finished".to_owned(),
+                };
+            }
+            if !state.machine_attached {
+                return InspectReply::Error {
+                    status: 503,
+                    message: "machine inspector is not attached".to_owned(),
+                };
+            }
+            state.pending_inspects.push_back(InspectTicket {
+                query,
+                slot: Arc::clone(&slot),
+            });
+        }
+        self.notify_host();
+
+        let deadline = timeout.map(|d| Instant::now() + d);
+        let mut guard = slot
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while guard.is_none() {
+            guard = match deadline {
+                Some(dl) => {
+                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
+                        return InspectReply::Error {
+                            status: 504,
+                            message: "inspect request timed out waiting for flip boundary"
+                                .to_owned(),
+                        };
+                    };
+                    let (g, _) = slot
+                        .ready
+                        .wait_timeout(guard, rem)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g
+                }
+                None => slot
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
+        }
+        guard.take().unwrap_or(InspectReply::Error {
+            status: 500,
+            message: "empty inspect reply".to_owned(),
+        })
+    }
+
+    /// Drain all queued read-only inspect requests against `&Machine` (#309).
+    pub fn drain_inspects(&self, machine: &Machine) {
+        let tickets: Vec<InspectTicket> = {
+            let mut state = self.lock();
+            if state.pending_inspects.is_empty() {
+                return;
+            }
+            state.pending_inspects.drain(..).collect()
+        };
+        for ticket in tickets {
+            let reply = execute_inspect(machine, ticket.query);
+            let mut slot = ticket
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(reply);
+            ticket.slot.ready.notify_all();
+        }
+    }
+
+    /// Capture and store a named Tier-1 route checkpoint (`POST /api/bookmark`, #309).
+    ///
+    /// # Errors
+    /// Returns an error if the bookmark name is empty or the machine cannot be inspected.
+    pub fn save_bookmark(
+        &self,
+        name: String,
+        timeout: Option<Duration>,
+    ) -> Result<BookmarkData, String> {
+        let trimmed = name.trim().to_owned();
+        if trimmed.is_empty() {
+            return Err("bookmark `name` must not be empty".to_owned());
+        }
+        match self.request_inspect(InspectQuery::BookmarkCapture, timeout) {
+            InspectReply::Bookmark(data) => {
+                let mut state = self.lock();
+                state.bookmarks.insert(trimmed.clone(), data.clone());
+                state.push_feed(
+                    "control",
+                    format!("bookmark `{trimmed}` @ flip {}", data.flip),
+                );
+                Ok(data)
+            }
+            InspectReply::Error { message, .. } => Err(message),
+            _ => Err("unexpected bookmark capture reply".to_owned()),
+        }
+    }
+
+    /// List all saved Tier-1 route bookmarks.
+    #[must_use]
+    pub fn list_bookmarks(&self) -> Vec<(String, BookmarkData)> {
+        self.lock()
+            .bookmarks
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Request a Tier-1 route rewind to a previously saved bookmark (`POST /api/rewind`, #309).
+    ///
+    /// # Errors
+    /// Returns an error if the bookmark does not exist, a rewind is already in
+    /// progress, the run has finished, or the rewind fails/times out.
+    pub fn request_rewind(
+        &self,
+        name: &str,
+        timeout: Option<Duration>,
+    ) -> Result<RewindResult, String> {
+        let slot = Arc::new(RewindSlot {
+            reply: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        {
+            let mut state = self.lock();
+            if state.finished {
+                return Err("run has finished".to_owned());
+            }
+            if !state.machine_attached {
+                return Err("machine rewind is not available".to_owned());
+            }
+            if state.pending_rewind.is_some() || state.replaying_rewind.is_some() {
+                return Err("a rewind is already in progress".to_owned());
+            }
+            let Some(bookmark) = state.bookmarks.get(name).cloned() else {
+                return Err(format!("unknown bookmark `{name}`"));
+            };
+            state.push_feed(
+                "control",
+                format!("rewind `{name}` -> flip {}", bookmark.flip),
+            );
+            state.pending_rewind = Some(PendingRewind {
+                name: name.to_owned(),
+                bookmark,
+                slot: Arc::clone(&slot),
+            });
+            state.rewind_abort = true;
+            state.active_wait = None;
+        }
+        self.notify_host();
+
+        let deadline = timeout.map(|d| Instant::now() + d);
+        let mut guard = slot
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while guard.is_none() {
+            guard = match deadline {
+                Some(dl) => {
+                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
+                        return Err("rewind timed out".to_owned());
+                    };
+                    let (g, _) = slot
+                        .ready
+                        .wait_timeout(guard, rem)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g
+                }
+                None => slot
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
+        }
+        guard
+            .take()
+            .unwrap_or_else(|| Err("empty rewind reply".to_owned()))
+    }
+
+    #[must_use]
+    pub fn is_rewind_aborting(&self) -> bool {
+        self.lock().rewind_abort
+    }
+
+    #[must_use]
+    pub fn rewind_target_flip(&self) -> Option<u64> {
+        self.lock().rewind_target_flip
+    }
+
+    /// Called by `run.rs`'s outer loop after `Machine::run` stops for a rewind:
+    /// transitions `pending_rewind` into `replaying_rewind`, resets per-run bus
+    /// state while keeping `bookmarks` and `agent_state`, and returns the
+    /// bookmark to replay.
+    #[must_use]
+    pub fn take_pending_rewind(&self) -> Option<(String, BookmarkData)> {
+        let mut state = self.lock();
+        let pending = state.pending_rewind.take()?;
+        let name = pending.name.clone();
+        let bm = pending.bookmark.clone();
+        state.rewind_abort = false;
+        state.rewind_target_flip = Some(bm.flip);
+        state.replaying_rewind = Some(pending);
+        state.step_budget = 0;
+        state.active_wait = None;
+        state.close_pending = false;
+        state.force_closes = 0;
+        state.finished = false;
+        state.is_paused = false;
+        state.outcome = None;
+        state.digest = None;
+        state.last_meta = None;
+        state.latest_frame = None;
+        state.held_keys.clear();
+        state.timeline.clear();
+        state.recording_len = 0;
+        Some((name, bm))
+    }
+
+    /// Check whether a rewind replay has reached its target flip, verify
+    /// `state_digest()`, and wake the waiting `/api/rewind` caller.
+    pub fn complete_rewind_if_reached(&self, machine: &Machine) -> bool {
+        let reached = {
+            let state = self.lock();
+            state
+                .rewind_target_flip
+                .is_some_and(|target| machine.flips() >= target)
+        };
+        if !reached {
+            return false;
+        }
+        let actual_digest = machine.state_digest();
+        let actual_flip = machine.flips();
+        let actual_cursor = machine.clock.cursor();
+        let actual_ms = machine.clock.millis();
+        let replaying = {
+            let mut state = self.lock();
+            state.rewind_target_flip = None;
+            state.replaying_rewind.take()
+        };
+        if let Some(rw) = replaying {
+            let digest_match = actual_digest == rw.bookmark.digest;
+            let result = RewindResult {
+                name: rw.name,
+                flip: actual_flip,
+                cursor: actual_cursor,
+                declared_ms: actual_ms,
+                digest: actual_digest,
+                expected_digest: rw.bookmark.digest,
+                digest_match,
+            };
+            let mut slot = rw
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(Ok(result));
+            rw.slot.ready.notify_all();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fail an active rewind if `Machine::run` ended before reaching the target flip.
+    pub fn fail_pending_rewind(&self, message: String) {
+        let rw = {
+            let mut state = self.lock();
+            state.rewind_abort = false;
+            state.rewind_target_flip = None;
+            state
+                .replaying_rewind
+                .take()
+                .or_else(|| state.pending_rewind.take())
+        };
+        if let Some(rw) = rw {
+            let mut slot = rw
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(Err(message));
+            rw.slot.ready.notify_all();
         }
     }
 

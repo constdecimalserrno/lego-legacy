@@ -37,6 +37,7 @@ pub struct ControlHost<H> {
     inner: H,
     bus: ControlBus,
     _finish_guard: FinishGuard,
+    defer_pause: bool,
     last_clock_nanos: u64,
     last_flip_observed: Option<u64>,
     polls_since_flip: u64,
@@ -61,6 +62,7 @@ impl<H> ControlHost<H> {
             inner,
             bus,
             _finish_guard: guard,
+            defer_pause: false,
             last_clock_nanos: 0,
             last_flip_observed: None,
             polls_since_flip: 0,
@@ -71,6 +73,27 @@ impl<H> ControlHost<H> {
             staged_size: (0, 0),
             staged_valid: false,
         }
+    }
+
+    /// Defer the `Step`/pause blocking loop to [`service_flip_boundary`] so
+    /// read-only `&Machine` inspection requests can be served while paused
+    /// without deadlocking (#309).
+    #[must_use]
+    pub fn with_deferred_pause(mut self, defer: bool) -> Self {
+        self.defer_pause = defer;
+        self
+    }
+
+    /// Reset per-run staging/pacing anchors across an outer-loop Tier-1 rewind (#309).
+    pub fn reset_for_rewind(&mut self) {
+        self.last_clock_nanos = 0;
+        self.last_flip_observed = None;
+        self.polls_since_flip = 0;
+        self.pace_anchor_declared = 0;
+        self.pace_anchor_scaled = 0;
+        self.staged_bgra.clear();
+        self.staged_size = (0, 0);
+        self.staged_valid = false;
     }
 
     /// Clone a thread-safe handle to this host's [`ControlBus`].
@@ -274,6 +297,9 @@ impl<H: Host> Host for ControlHost<H> {
 
         let declared_ms = self.last_clock_nanos / 1_000_000;
         let mut state = self.bus.lock();
+        if state.rewind_abort || state.rewind_target_flip.is_some() {
+            return Vec::new();
+        }
         let owner = state.owner;
 
         let mut out = Vec::new();
@@ -351,7 +377,11 @@ impl<H: Host> Host for ControlHost<H> {
     }
 
     fn closes(&self) -> u32 {
-        self.inner.closes().saturating_add(self.bus.force_closes())
+        let rewind_close = if self.bus.is_rewind_aborting() { 2 } else { 0 };
+        self.inner
+            .closes()
+            .saturating_add(self.bus.force_closes())
+            .saturating_add(rewind_close)
     }
 
     fn audio_underruns(&self) -> Option<u64> {
@@ -363,7 +393,9 @@ impl<H: Host> Host for ControlHost<H> {
         let (uncapped, pace_mult) = {
             let state = self.bus.lock();
             let route_active = state.last_meta.is_some_and(|m| m.route_active);
-            let uncapped = route_active || (state.mode == ExecMode::Step && state.step_uncapped);
+            let uncapped = route_active
+                || state.rewind_target_flip.is_some()
+                || (state.mode == ExecMode::Step && state.step_uncapped);
             (uncapped, state.pace)
         };
 
@@ -446,22 +478,25 @@ impl<H: Host> Host for ControlHost<H> {
                 notify_clients = true;
             }
 
-            if self.inner.closes() == 0 && state.should_pause(meta.route_active) {
-                if state.transport_eof
-                    && state.mode == ExecMode::Step
-                    && state.owner == InputOwner::Agent
+            if !self.defer_pause {
+                if self.inner.closes() == 0 && state.should_pause(meta.route_active) {
+                    if state.transport_eof
+                        && state.mode == ExecMode::Step
+                        && state.owner == InputOwner::Agent
+                    {
+                        // Piped stdin finished with no more commands coming; close
+                        // cleanly so automated pipelines never hang.
+                        state.close_pending = true;
+                    } else {
+                        state.is_paused = true;
+                        state.step_epoch += 1;
+                        notify_clients = true;
+                        enter_pause = true;
+                    }
+                } else if !meta.route_active && state.active_wait.is_none() && state.step_budget > 0
                 {
-                    // Piped stdin finished with no more commands coming; close
-                    // cleanly so automated pipelines never hang.
-                    state.close_pending = true;
-                } else {
-                    state.is_paused = true;
-                    state.step_epoch += 1;
-                    notify_clients = true;
-                    enter_pause = true;
+                    state.step_budget -= 1;
                 }
-            } else if !meta.route_active && state.active_wait.is_none() && state.step_budget > 0 {
-                state.step_budget -= 1;
             }
         }
 
@@ -500,6 +535,98 @@ impl<H: Host> Host for ControlHost<H> {
             }
             self.set_host_paused(false);
         }
+    }
+}
+
+/// Machine-boundary flip observer invoked from `Machine::observe_flip` when
+/// [`ControlHost::with_deferred_pause`] is enabled (#309).
+///
+/// Serves read-only `&Machine` inspect requests, completes Tier-1 rewind
+/// replays at their exact target flip, and runs the 60 Hz pause-pump loop
+/// while continuing to answer inspect queries with zero deadlock.
+pub fn service_flip_boundary(
+    bus: &ControlBus,
+    machine: &crate::machine::Machine,
+    host: &mut dyn Host,
+) {
+    let rec_len = machine
+        .recording
+        .as_ref()
+        .map_or(0, crate::route::Route::len);
+    bus.update_machine_meta(rec_len);
+    let _ = bus.complete_rewind_if_reached(machine);
+    bus.drain_inspects(machine);
+
+    let route_active = machine.undelivered() > 0;
+    let host_closes = host.closes();
+    let mut notify_clients = false;
+    let mut enter_pause = false;
+    {
+        let mut state = bus.lock();
+        if host_closes == 0 && state.should_pause(route_active) {
+            if state.transport_eof
+                && state.mode == ExecMode::Step
+                && state.owner == InputOwner::Agent
+            {
+                state.close_pending = true;
+            } else {
+                state.is_paused = true;
+                state.step_epoch += 1;
+                notify_clients = true;
+                enter_pause = true;
+            }
+        } else if !route_active
+            && state.rewind_target_flip.is_none()
+            && state.active_wait.is_none()
+            && state.step_budget > 0
+        {
+            state.step_budget -= 1;
+        }
+    }
+
+    if notify_clients {
+        bus.notify_client();
+    }
+
+    if enter_pause {
+        host.set_paused(true);
+        loop {
+            bus.drain_inspects(machine);
+            let host_closes = host.closes();
+            let state = bus.lock();
+            if host_closes > 0 || state.rewind_abort || !state.should_pause(route_active) {
+                let mut state = state;
+                state.is_paused = false;
+                if !route_active
+                    && !state.rewind_abort
+                    && state.active_wait.is_none()
+                    && state.step_budget > 0
+                {
+                    state.step_budget -= 1;
+                }
+                drop(state);
+                break;
+            }
+            if state.transport_eof
+                && state.mode == ExecMode::Step
+                && state.owner == InputOwner::Agent
+            {
+                let mut state = state;
+                state.is_paused = false;
+                state.close_pending = true;
+                drop(state);
+                break;
+            }
+            if !state.pending_inspects.is_empty() {
+                drop(state);
+                continue;
+            }
+            let state = bus.wait_for_host_wake(state, PAUSE_PUMP_INTERVAL);
+            drop(state);
+            host.pump();
+        }
+        host.set_paused(false);
+        bus.drain_inspects(machine);
     }
 }
 

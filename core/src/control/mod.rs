@@ -1,5 +1,6 @@
-//! Composable control plane unifying human play, live agent control, and piped
-//! TAS/route tasks over any [`crate::host::Host`] (#308).
+//! Composable control plane unifying human play, live agent control, piped
+//! TAS/route tasks, and HTTP/UDS introspection over any [`crate::host::Host`]
+//! (#308, #309).
 //!
 //! Strictly outside guest state (Golden Rules 1 & 2, ADR-0001): every action
 //! compiles into deterministic [`crate::host::Input`] events delivered at flip
@@ -8,14 +9,26 @@
 
 pub mod bus;
 pub mod host;
+pub mod http;
+pub mod inspect;
+pub mod json;
+pub mod observe;
 pub mod stdio;
 pub mod timeline;
+#[cfg(unix)]
+pub mod unix;
 
 pub use bus::{
     ActionFeedEntry, AgentState, AgentStatePatch, Command, ControlBus, ControlConfig,
     ControlStatus, ExecMode, FrameDiff, FrameInfoData, FrameSnapshot, InputOwner, Response,
-    ResponseData, WaitResult,
+    ResponseData, RewindResult, WaitResult,
 };
-pub use host::ControlHost;
+pub use host::{service_flip_boundary, ControlHost};
+pub use http::{
+    write_session_registry, ExtraRoutes, HttpContext, HttpRequest, HttpResponse, HttpServer,
+    SessionRegistryGuard,
+};
 pub use stdio::StdioBridge;
 pub use timeline::{Action, ActionError, ScheduleReport, Timeline};
+#[cfg(unix)]
+pub use unix::UnixServer;

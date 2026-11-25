@@ -93,6 +93,9 @@ pub struct Finish {
     pub declared_millis: u64,
 }
 
+/// Read-only flip-boundary observer callback (#309).
+pub(crate) type FlipObserver = Box<dyn Fn(&Machine, &mut dyn Host)>;
+
 /// The whole machine.
 pub struct Machine {
     pub arena: Arena,
@@ -188,6 +191,9 @@ pub struct Machine {
     next_mix_cycle: u64,
     /// The guest's recent clock reads, from which a clock spin is passed (#217).
     spins: crate::spin::Spins,
+    /// Optional read-only host-side flip boundary observer (e.g. HTTP/UDS
+    /// introspection and pause servicing, #309). Never mutates guest state.
+    flip_observer: Option<FlipObserver>,
 }
 
 /// Where the machine is in the one schedule every run keeps (#131).
@@ -253,7 +259,25 @@ impl Machine {
             next_route_at: (0, 0),
             next_mix_cycle: 0,
             spins: crate::spin::Spins::default(),
+            flip_observer: None,
         })
+    }
+
+    /// Install a read-only flip-boundary observer (strictly outside guest state, #309).
+    pub(crate) fn set_flip_observer(&mut self, observer: FlipObserver) {
+        self.flip_observer = Some(observer);
+    }
+
+    /// The declared stub/direct surface, if any.
+    #[must_use]
+    pub fn surface(&self) -> Option<Surface> {
+        self.surface
+    }
+
+    /// The title this machine was built for.
+    #[must_use]
+    pub fn title(&self) -> &'static Title {
+        self.title
     }
 
     /// Place the stub guest and point the processor at it.
@@ -359,6 +383,9 @@ impl Machine {
             route_active: route_remaining > 0,
             route_remaining,
         });
+        if let Some(observer) = &self.flip_observer {
+            observer(self, host);
+        }
     }
 
     /// Hold the host to the declared clock, and say what pace it settled on

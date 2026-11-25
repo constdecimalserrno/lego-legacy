@@ -573,6 +573,13 @@ impl Mixer {
         self.blocks * BLOCK_FRAMES as u64 + (self.block.len() / 2) as u64
     }
 
+    /// Number of currently active (non-finished) voices in the mixer (#309).
+    #[must_use]
+    pub fn active_voice_count(&self) -> usize {
+        let frame = self.next_frame();
+        self.voices.iter().filter(|v| !v.over(frame)).count()
+    }
+
     /// Every block whose last frame the declared clock has passed.
     pub fn due(&mut self, nanos: u64, mem: &dyn GuestMem) -> Vec<Vec<i16>> {
         self.catch_up(nanos, mem);

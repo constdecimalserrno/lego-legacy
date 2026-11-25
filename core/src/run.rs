@@ -5,12 +5,16 @@
 //! player runs.
 
 use crate::cli::{Cli, CliError};
-use crate::control::{ControlConfig, ControlHost, ExecMode, InputOwner, StdioBridge};
+use crate::control::{
+    service_flip_boundary, write_session_registry, ControlConfig, ControlHost, ExecMode,
+    HttpContext, HttpServer, InputOwner, SessionRegistryGuard, StdioBridge,
+};
 use crate::host::{headless::Headless, telemetry::TelemetryHost, Host};
 use crate::machine::{Finish, Machine, Outcome};
 use crate::runlog::RunLog;
 use crate::Title;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 /// Where a run keeps what its guest writes: beside the pressing it was made
 /// from, unless the run was told to keep it somewhere of its own, which is
@@ -48,8 +52,9 @@ pub fn run_digested(
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
     if cli.control_enabled() {
         let config = ControlConfig {
+            title: title.key,
             mode: cli.control_mode.unwrap_or(ExecMode::Step),
-            owner: if cli.control_stdio {
+            owner: if cli.has_control_transport() {
                 InputOwner::Agent
             } else {
                 InputOwner::Human
@@ -60,16 +65,103 @@ pub fn run_digested(
             pointer_speed: title.pointer_speed,
             flip_cost: title.flip_cost,
         };
-        let mut control = ControlHost::new(host, config);
-        if cli.control_stdio {
-            StdioBridge::spawn(control.bus());
+        let mut control = ControlHost::new(host, config).with_deferred_pause(true);
+        let bus = control.bus();
+        bus.set_machine_attached(true);
+
+        let token = cli.token.clone().or_else(|| {
+            std::env::var("LEGO_LEGACY_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        let http_ctx = Arc::new(HttpContext::new(bus.clone(), title, token));
+
+        let mut http_server = if let Some(bind) = &cli.control_http {
+            let server = HttpServer::start(bind, Arc::clone(&http_ctx))?;
+            eprintln!("lego-legacy: control {}", server.url());
+            Some(server)
+        } else {
+            None
+        };
+
+        #[cfg(unix)]
+        let mut unix_server = if let Some(path) = &cli.control_unix {
+            let server = crate::control::UnixServer::start(path.clone(), Arc::clone(&http_ctx))?;
+            eprintln!("lego-legacy: control {}", server.url());
+            Some(server)
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        if cli.control_unix.is_some() {
+            return Err("--control-unix is only supported on Unix hosts".into());
         }
-        let (mut machine, mut log) = setup(title, cli, &mut control)?;
-        let finish = machine.run(&mut control, &mut log, budget);
+
+        let _session_guard: SessionRegistryGuard = if let Some(server) = &http_server {
+            write_session_registry(
+                title.key,
+                &server.url(),
+                Some(&server.watch_url()),
+                !cli.headless,
+            )
+        } else {
+            #[cfg(unix)]
+            {
+                if let Some(server) = &unix_server {
+                    write_session_registry(title.key, &server.url(), None, !cli.headless)
+                } else {
+                    SessionRegistryGuard::empty()
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                SessionRegistryGuard::empty()
+            }
+        };
+
+        if cli.control_stdio {
+            StdioBridge::spawn(bus.clone());
+        }
+
+        let mut rewind_route: Option<crate::route::Route> = None;
+        let (mut machine, mut log, finish) = loop {
+            let (mut machine, mut log) = setup(title, cli, &mut control)?;
+            if let Some(route) = rewind_route.take() {
+                log.line(&format!("rewind replay {} events", route.len()));
+                machine.route = Some(route);
+                machine.recording = Some(crate::route::Route::new());
+            }
+            let obs_bus = bus.clone();
+            machine.set_flip_observer(Box::new(move |m, h| {
+                service_flip_boundary(&obs_bus, m, h);
+            }));
+            let finish = machine.run(&mut control, &mut log, budget);
+            if let Some((_name, bm)) = bus.take_pending_rewind() {
+                match crate::route::Route::parse(&bm.route_text) {
+                    Ok(route) => {
+                        control.reset_for_rewind();
+                        rewind_route = Some(route);
+                        continue;
+                    }
+                    Err(e) => {
+                        bus.fail_pending_rewind(format!("failed to parse bookmark route: {e}"));
+                    }
+                }
+            }
+            break (machine, log, finish);
+        };
+
         control.free_mouse();
         control.pointer_shape(None);
         let digest = wrap_up(title, &mut machine, &mut control, &mut log, &finish);
         control.mark_finished(&finish, &digest);
+        if let Some(server) = &mut http_server {
+            server.stop();
+        }
+        #[cfg(unix)]
+        if let Some(server) = &mut unix_server {
+            server.stop();
+        }
         if cli.fps_report || cli.fps_window.is_some() {
             for line in control.telemetry_report(cli.fps_window).format_lines() {
                 log.line(&line);
@@ -411,9 +503,10 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
         Ok((finish, log)) => {
             report(title, cli, &finish, &log);
             // A run the person ended by closing the window has none left to
-            // close (#107). A `--control-stdio` session exits cleanly once the
-            // run finishes rather than blocking on a human window click (#308).
-            if !cli.control_stdio && finish.flips > 0 && host.closes() == 0 {
+            // close (#107). A controlled session (`--control-stdio`, `--control`,
+            // `--control-unix`) exits cleanly once the run finishes rather than
+            // blocking on a human window click (#308, #309).
+            if !cli.has_control_transport() && finish.flips > 0 && host.closes() == 0 {
                 println!("close the window to end");
                 while host.closes() == 0 {
                     host.pump();

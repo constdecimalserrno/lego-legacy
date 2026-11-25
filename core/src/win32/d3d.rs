@@ -36,6 +36,62 @@ pub struct Immediate {
     scratch: DrawScratch,
 }
 
+/// Read-only summary of one immediate-mode Direct3D device (#309).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceSummary {
+    pub addr: u32,
+    pub in_scene: bool,
+    pub current_viewport: u32,
+    pub render_states_set: usize,
+    pub active_textures: Vec<(u32, u32)>,
+}
+
+impl Immediate {
+    /// Read-only summary of every immediate-mode Direct3D device (#309).
+    #[must_use]
+    pub fn device_summaries(&self) -> Vec<DeviceSummary> {
+        self.devices
+            .iter()
+            .map(|(addr, dev)| {
+                let render_states_set = dev
+                    .render_set
+                    .iter()
+                    .map(|w| w.count_ones() as usize)
+                    .sum::<usize>()
+                    + dev.render_extra.len();
+                let mut active_textures = Vec::new();
+                for (stage, &tex) in dev.textures.iter().enumerate() {
+                    if tex != 0 {
+                        active_textures.push((stage as u32, tex));
+                    }
+                }
+                for (&stage, &tex) in &dev.textures_extra {
+                    if tex != 0 {
+                        active_textures.push((stage, tex));
+                    }
+                }
+                DeviceSummary {
+                    addr: *addr,
+                    in_scene: dev.in_scene,
+                    current_viewport: dev.current_viewport,
+                    render_states_set,
+                    active_textures,
+                }
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn materials_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    #[must_use]
+    pub fn viewports_count(&self) -> usize {
+        self.viewports.len()
+    }
+}
+
 /// Reusable per-draw buffers kept across immediate-mode and retained-mode
 /// draws so hot frames do not allocate or zero-initialise on every draw call.
 #[derive(Default)]

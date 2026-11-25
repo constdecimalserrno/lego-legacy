@@ -49,6 +49,17 @@ pub struct CdAudio {
     playing: Option<(u64, u64)>,
 }
 
+/// Read-only summary of Red Book CD audio state (#309).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CdStatusSummary {
+    pub open: bool,
+    pub playing: bool,
+    pub tracks_mode: bool,
+    pub sector: Option<u64>,
+    pub track_count: usize,
+    pub current_track: Option<usize>,
+}
+
 impl CdAudio {
     /// The sector the drive has played to at a declared millisecond, while it
     /// is playing: past the end of the disc, it has stopped.
@@ -56,6 +67,29 @@ impl CdAudio {
         let (disc, (sector, started)) = (self.disc.as_ref()?, self.playing?);
         let at = sector + millis.saturating_sub(started) * crate::disc::SECTORS_PER_SECOND / 1000;
         (at < disc.sectors).then_some(at)
+    }
+
+    /// Read-only CD audio status at `declared_ms` (#309).
+    #[must_use]
+    pub fn status_summary(&self, declared_ms: u64) -> CdStatusSummary {
+        let sector = self.at(declared_ms);
+        let track_count = self.disc.as_ref().map_or(0, |d| d.tracks.len());
+        let current_track = match (&self.disc, sector) {
+            (Some(disc), Some(sec)) => disc
+                .tracks
+                .iter()
+                .rposition(|t| t.pregap <= sec)
+                .map(|idx| disc.tracks[idx].number as usize),
+            _ => None,
+        };
+        CdStatusSummary {
+            open: self.open,
+            playing: sector.is_some(),
+            tracks_mode: self.tracks,
+            sector,
+            track_count,
+            current_track,
+        }
     }
 }
 
@@ -374,6 +408,28 @@ impl Stream {
             0x80 | 0x90 => self.sounding[channel] &= !bit,
             _ => {}
         }
+    }
+}
+
+impl Midi {
+    #[must_use]
+    pub fn has_stream(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.stream.as_ref().is_some_and(|s| s.playing)
+    }
+
+    #[must_use]
+    pub fn queued_buffers(&self) -> usize {
+        self.stream.as_ref().map_or(0, |s| s.queue.len())
+    }
+
+    #[must_use]
+    pub fn tempo(&self) -> Option<u32> {
+        self.stream.as_ref().map(|s| s.tempo)
     }
 }
 
