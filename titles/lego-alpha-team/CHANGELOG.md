@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Adds `AGENTS.md` agent playbook and enriches `GUIDE` (`controls`, `hazards`, `goals`) with verified `RelativeSteered` cursor clamping/in-place-click rules, Unit Menu & brick-drag controls, right-drag/keyboard/edge-scroll camera controls, HUD coordinates, specialist roster, and a 5-stage progression ladder (#337). Strictly outside guest state; no route moved.
+
 Declares static `GUIDE: TitleGuide` metadata (`RelativeSteered` `(1280,1280)` / `(320,240)` / `(0,480)` with automatic `mouse_delta` scaling, 30 Hz, `PauseToThink`, `Tab`/`R`/`Space` controls, Training Area & Adventure Mission 1 `M1010` goals, and `Game.txt` save path) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
 
 Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems. No route moved.
