@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Adds `AGENTS.md` agent playbook and enriches static `GUIDE: TitleGuide` (`controls`, `hazards`, `goals`) with verified `LegoRR.exe` / `Lego.cfg` camera, radar, Eye/Shoulder View, contextual `F2+<key>` HUD chords, Priorities/Top Panel hotspots, retail pause/audio keys, RTS hazards, and a 5-step progression ladder (#336). Strictly outside guest state; no route moved.
+
 Declares static `GUIDE: TitleGuide` metadata (`AbsoluteKept`, 60 Hz, `BurstThenPause`, `F2+W`/camera controls, border edge-scroll hazard, Mission 1 "Driller Night" goal, and `C:\LEGORR\DATA\SAVES\0.SAV`) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
 
 Took core 1.1.0, which the Windows (#107) and Linux (#108) backends joined, written but untested on those systems. No route moved.
