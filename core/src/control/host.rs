@@ -12,6 +12,7 @@ use super::bus::{
     analyze_frame, diff_pct_between, BusState, ControlBus, ControlConfig, ExecMode, FrameSnapshot,
     InputOwner, WaitCondition, WaitResult,
 };
+use crate::host::pace::Pace;
 use crate::host::telemetry::FpsReport;
 use crate::host::{Cursor, FlipMeta, Frame, Host, HostError, Input, Mapping};
 use crate::machine::Finish;
@@ -44,6 +45,9 @@ pub struct ControlHost<H> {
     host_paused: bool,
     pace_anchor_declared: u64,
     pace_anchor_scaled: u64,
+    wall_pace: Pace,
+    wall_pace_anchored: bool,
+    last_pace_epoch: u64,
     staged_bgra: Vec<u8>,
     staged_size: (u32, u32),
     staged_valid: bool,
@@ -69,6 +73,9 @@ impl<H> ControlHost<H> {
             host_paused: false,
             pace_anchor_declared: 0,
             pace_anchor_scaled: 0,
+            wall_pace: Pace::new(),
+            wall_pace_anchored: false,
+            last_pace_epoch: 0,
             staged_bgra: Vec::new(),
             staged_size: (0, 0),
             staged_valid: false,
@@ -91,6 +98,7 @@ impl<H> ControlHost<H> {
         self.polls_since_flip = 0;
         self.pace_anchor_declared = 0;
         self.pace_anchor_scaled = 0;
+        self.wall_pace_anchored = false;
         self.staged_bgra.clear();
         self.staged_size = (0, 0);
         self.staged_valid = false;
@@ -173,6 +181,8 @@ impl<H: Host> ControlHost<H> {
     fn set_host_paused(&mut self, paused: bool) {
         if self.host_paused != paused {
             self.host_paused = paused;
+            self.wall_pace.set_paused(paused);
+            self.wall_pace_anchored = false;
             self.inner.set_paused(paused);
             self.bus.lock().telemetry.set_paused(paused);
         }
@@ -396,21 +406,34 @@ impl<H: Host> Host for ControlHost<H> {
 
     fn pace(&mut self, declared_nanos: u64) -> f64 {
         self.last_clock_nanos = declared_nanos;
-        let (uncapped, pace_mult) = {
+        let (mode, paused, route_active, uncapped, pace_mult, pace_epoch) = {
             let state = self.bus.lock();
             let route_active = state.last_meta.is_some_and(|m| m.route_active);
             let uncapped = route_active
                 || state.rewind_target_flip.is_some()
                 || (state.mode == ExecMode::Step && state.step_uncapped);
-            (uncapped, state.pace)
+            (
+                state.mode,
+                state.is_paused,
+                route_active,
+                uncapped,
+                state.pace,
+                state.pace_epoch,
+            )
         };
 
         if uncapped {
             self.pace_anchor_declared = declared_nanos;
+            self.wall_pace_anchored = false;
+            self.last_pace_epoch = pace_epoch;
             return 1.0;
         }
 
-        if declared_nanos < self.pace_anchor_declared {
+        let epoch_changed = pace_epoch != self.last_pace_epoch;
+        self.last_pace_epoch = pace_epoch;
+
+        let backward = declared_nanos < self.pace_anchor_declared;
+        if backward {
             self.pace_anchor_declared = declared_nanos;
         }
         let delta = declared_nanos.saturating_sub(self.pace_anchor_declared);
@@ -422,7 +445,33 @@ impl<H: Host> Host for ControlHost<H> {
         let scaled = self.pace_anchor_scaled.saturating_add(scaled_delta);
         self.pace_anchor_declared = declared_nanos;
         self.pace_anchor_scaled = scaled;
-        self.inner.pace(scaled)
+
+        let inner_pace = self.inner.pace(scaled);
+
+        // Windowed hosts already enforce wall-clock pacing in `inner.pace`.
+        // For unpaced hosts (`Headless`), enforce wall-clock `declared / pace`
+        // in `Live` mode (while unpaused and not replaying a route) so `/watch`
+        // honors the pace slider instead of running uncapped (#325).
+        if !self.inner.is_paced()
+            && mode == ExecMode::Live
+            && !paused
+            && !route_active
+            && pace_mult > 0.0
+        {
+            if !self.wall_pace_anchored || epoch_changed || backward {
+                self.wall_pace.resync(scaled);
+                self.wall_pace_anchored = true;
+                return 1.0;
+            }
+            return self.wall_pace.hold(scaled);
+        }
+
+        self.wall_pace_anchored = false;
+        inner_pace
+    }
+
+    fn is_paced(&self) -> bool {
+        self.inner.is_paced()
     }
 
     fn pump(&mut self) {
@@ -694,6 +743,9 @@ mod tests {
         }
         fn closes(&self) -> u32 {
             self.closes
+        }
+        fn is_paced(&self) -> bool {
+            true
         }
         fn pump(&mut self) {
             self.pumps += 1;
@@ -1165,6 +1217,9 @@ mod tests {
                 self.seen_nanos.push(declared_nanos);
                 1.0
             }
+            fn is_paced(&self) -> bool {
+                true
+            }
         }
 
         let mut host = ControlHost::new(
@@ -1265,5 +1320,167 @@ mod tests {
             .ok
         );
         assert_eq!(host.poll_input(1), [Input::Move { x: 330, y: 250 }]);
+    }
+
+    #[test]
+    fn headless_live_mode_enforces_wall_pace_while_step_and_route_stay_uncapped() {
+        const MS: u64 = 1_000_000;
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                pace: 1.0,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
+
+        // 1. Live 1.0x: first flip anchors at 0 ms wait; next 4 flips of 20 ms
+        //    declared time (80 ms total) should pace against ~80 ms wall time.
+        let t0 = std::time::Instant::now();
+        for i in 0..=4u64 {
+            assert_eq!(host.pace(i * 20 * MS), 1.0);
+        }
+        let elapsed_1x = t0.elapsed();
+        assert!(
+            elapsed_1x >= Duration::from_millis(65),
+            "expected ~80 ms wall time at 1.0x, got {elapsed_1x:?}"
+        );
+
+        // 2. Live 2.0x: 4 flips of 20 ms declared (80 ms declared) -> ~40 ms wall.
+        assert!(bus.dispatch(Command::SetPace(2.0)).ok);
+        // Transition flip re-anchors cleanly with zero stall.
+        host.pace(100 * MS);
+        let t1 = std::time::Instant::now();
+        for i in 1..=4u64 {
+            assert_eq!(host.pace((100 + i * 20) * MS), 1.0);
+        }
+        let elapsed_2x = t1.elapsed();
+        assert!(
+            elapsed_2x >= Duration::from_millis(30) && elapsed_2x < Duration::from_millis(120),
+            "expected ~40 ms wall time at 2.0x, got {elapsed_2x:?}"
+        );
+
+        // 3. Step mode (step_uncapped: true) stays 100% uncapped even over 5 s declared.
+        assert!(
+            bus.dispatch(Command::SetMode {
+                mode: ExecMode::Step,
+                step_uncapped: Some(true),
+            })
+            .ok
+        );
+        let t2 = std::time::Instant::now();
+        for i in 1..=10u64 {
+            assert_eq!(host.pace((200 + i * 500) * MS), 1.0);
+        }
+        assert!(
+            t2.elapsed() < Duration::from_millis(25),
+            "Step uncapped mode must not sleep"
+        );
+
+        // 4. Route pre-roll in Live mode stays 100% uncapped.
+        assert!(
+            bus.dispatch(Command::SetMode {
+                mode: ExecMode::Live,
+                step_uncapped: None,
+            })
+            .ok
+        );
+        host.observe_flip(&FlipMeta {
+            flip: 1,
+            clock_nanos: 5_200 * MS,
+            cursor: 100,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (0, 0),
+            route_active: true,
+            route_remaining: 5,
+        });
+        let t3 = std::time::Instant::now();
+        for i in 1..=10u64 {
+            assert_eq!(host.pace((5_200 + i * 500) * MS), 1.0);
+        }
+        assert!(
+            t3.elapsed() < Duration::from_millis(25),
+            "active route replay must stay uncapped"
+        );
+    }
+
+    #[test]
+    fn headless_live_pace_resets_wall_anchor_across_pause_rewind_mode_and_pace_changes() {
+        const MS: u64 = 1_000_000;
+        const SEC: u64 = 1_000_000_000;
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                pace: 1.0,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
+        host.wall_pace.simulated = Some(0);
+
+        // Initial flip anchors without sleeping even when starting at declared = 1 s.
+        assert_eq!(host.pace(SEC), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 0);
+
+        // +100 ms declared at 1.0x advances simulated wall clock by 100 ms.
+        assert_eq!(host.pace(SEC + 100 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 100 * MS);
+
+        // Pause for 15 s wall time, then resume: anchor resets, zero catch-up burst.
+        host.set_paused(true);
+        *host.wall_pace.simulated.as_mut().unwrap() += 15 * SEC;
+        host.set_paused(false);
+        assert_eq!(host.pace(SEC + 200 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 100 * MS);
+        assert_eq!(host.pace(SEC + 300 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 200 * MS);
+
+        // Switch to 0.5x slow-mo: transition flip re-anchors, next +100 ms takes 200 ms.
+        assert!(bus.dispatch(Command::SetPace(0.5)).ok);
+        assert_eq!(host.pace(SEC + 400 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 200 * MS);
+        assert_eq!(host.pace(SEC + 500 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 400 * MS);
+
+        // Switch to 2.0x fast-forward: transition flip re-anchors, next +100 ms takes 50 ms.
+        assert!(bus.dispatch(Command::SetPace(2.0)).ok);
+        assert_eq!(host.pace(SEC + 600 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 400 * MS);
+        assert_eq!(host.pace(SEC + 700 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 450 * MS);
+
+        // Rewind resets anchor cleanly with no sleep jump.
+        host.reset_for_rewind();
+        assert_eq!(host.pace(500 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 450 * MS);
+        assert_eq!(host.pace(600 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 500 * MS);
+
+        // Mode change Step (uncapped) -> Live resets anchor cleanly with no sleep jump.
+        assert!(
+            bus.dispatch(Command::SetMode {
+                mode: ExecMode::Step,
+                step_uncapped: Some(true),
+            })
+            .ok
+        );
+        assert_eq!(host.pace(20 * SEC), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 500 * MS);
+        assert!(
+            bus.dispatch(Command::SetMode {
+                mode: ExecMode::Live,
+                step_uncapped: None,
+            })
+            .ok
+        );
+        assert_eq!(host.pace(20 * SEC + 100 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 500 * MS);
+        assert_eq!(host.pace(20 * SEC + 200 * MS), 1.0);
+        assert_eq!(host.wall_pace.wall_nanos(), 550 * MS);
     }
 }

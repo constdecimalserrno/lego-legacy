@@ -870,7 +870,15 @@ fn handle_frame_json(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         },
     };
     let st = ctx.bus.status();
-    let json = format_frame_json(&snap, cols, rows, st.pointer_pos, st.pointer_shown);
+    let json = format_frame_json(
+        &snap,
+        cols,
+        rows,
+        st.pointer_pos,
+        st.pointer_shown,
+        st.paused,
+        st.finished,
+    );
     HttpResponse::json(200, json)
 }
 

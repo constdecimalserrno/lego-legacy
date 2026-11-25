@@ -10,8 +10,22 @@ use super::bus::FrameSnapshot;
 use super::json::{write_json_f64, write_json_str};
 use std::fmt::Write as _;
 
-/// Threshold of consecutive identical flips before emitting a stuck-loop warning.
-pub const STUCK_LOOP_THRESHOLD: u64 = 30;
+/// Threshold of consecutive identical flips before emitting a stuck-loop warning
+/// during active play (3+ seconds at 60 FPS so normal idle loops do not false-trigger, #325).
+pub const STUCK_LOOP_THRESHOLD: u64 = 180;
+
+/// Format a `stuck_loop` warning when the frame has stayed unchanged for at
+/// least [`STUCK_LOOP_THRESHOLD`] flips during active play (suppressed while
+/// paused or once finished, #325).
+#[must_use]
+pub fn stuck_loop_warning(unchanged_streak: u64, paused: bool, finished: bool) -> Option<String> {
+    if paused || finished || unchanged_streak < STUCK_LOOP_THRESHOLD {
+        return None;
+    }
+    Some(format!(
+        "stuck_loop: frame unchanged for {unchanged_streak} consecutive flips"
+    ))
+}
 
 /// Options controlling host-side visual grounding overlays for `/api/frame.png`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,17 +374,16 @@ pub fn format_frame_json(
     rows: u32,
     pointer_pos: (i32, i32),
     pointer_shown: bool,
+    paused: bool,
+    finished: bool,
 ) -> String {
     let grid = downsample_rgb_grid(&snap.bgra, snap.width, snap.height, cols, rows);
     let mut warnings: Vec<String> = Vec::new();
     if snap.uniform {
         warnings.push("uniform_frame: every pixel has the same color".to_owned());
     }
-    if snap.diff.unchanged_streak >= STUCK_LOOP_THRESHOLD {
-        warnings.push(format!(
-            "stuck_loop: frame unchanged for {} consecutive flips",
-            snap.diff.unchanged_streak
-        ));
+    if let Some(w) = stuck_loop_warning(snap.diff.unchanged_streak, paused, finished) {
+        warnings.push(w);
     }
 
     let mut out = String::with_capacity(2048);
@@ -509,8 +522,10 @@ mod tests {
 
     #[test]
     fn frame_json_downsamples_rgb_and_emits_stuck_and_uniform_warnings() {
+        assert_eq!(STUCK_LOOP_THRESHOLD, 180);
+
         let snap = sample_snapshot(160, 120, STUCK_LOOP_THRESHOLD + 5, true);
-        let text = format_frame_json(&snap, 16, 12, (80, 60), true);
+        let text = format_frame_json(&snap, 16, 12, (80, 60), true, false, false);
         let parsed = crate::control::json::parse_json(&text).expect("valid json");
         let obj = parsed.as_object().unwrap();
         assert_eq!(obj["flip"].as_u64(), Some(12));
@@ -526,5 +541,44 @@ mod tests {
         assert_eq!(first_rgb[0].as_u64(), Some(60)); // R
         assert_eq!(first_rgb[1].as_u64(), Some(40)); // G
         assert_eq!(first_rgb[2].as_u64(), Some(20)); // B
+    }
+
+    #[test]
+    fn stuck_loop_warning_honors_180_flip_threshold_and_suppresses_when_paused_or_finished() {
+        // Normal idle loops (e.g. 30, 88, 179 unchanged flips) must not warn.
+        for streak in [0, 30, 88, STUCK_LOOP_THRESHOLD - 1] {
+            assert!(
+                stuck_loop_warning(streak, false, false).is_none(),
+                "unexpected warning at streak={streak}"
+            );
+            let snap = sample_snapshot(16, 12, streak, false);
+            let text = format_frame_json(&snap, 4, 3, (0, 0), true, false, false);
+            let parsed = crate::control::json::parse_json(&text).unwrap();
+            assert!(parsed.as_object().unwrap()["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
+
+        // At/above 180 flips in active play: emits stuck_loop.
+        assert!(stuck_loop_warning(STUCK_LOOP_THRESHOLD, false, false)
+            .is_some_and(|w| w.starts_with("stuck_loop:")));
+
+        // While paused or finished: suppressed even far above 180 flips.
+        assert!(stuck_loop_warning(500, true, false).is_none());
+        assert!(stuck_loop_warning(500, false, true).is_none());
+        let snap = sample_snapshot(16, 12, 500, false);
+        let paused_json = format_frame_json(&snap, 4, 3, (0, 0), true, true, false);
+        let parsed_paused = crate::control::json::parse_json(&paused_json).unwrap();
+        assert!(parsed_paused.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let finished_json = format_frame_json(&snap, 4, 3, (0, 0), true, false, true);
+        let parsed_finished = crate::control::json::parse_json(&finished_json).unwrap();
+        assert!(parsed_finished.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }

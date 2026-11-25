@@ -392,6 +392,7 @@ pub(crate) struct BusState {
     pub step_budget: u64,
     pub step_uncapped: bool,
     pub pace: f64,
+    pub pace_epoch: u64,
     pub active_wait: Option<WaitCondition>,
     pub last_wait_result: Option<WaitResult>,
     pub wait_epoch: u64,
@@ -459,6 +460,7 @@ impl BusState {
             step_budget: 0,
             step_uncapped: config.step_uncapped,
             pace: clamp_pace(config.pace),
+            pace_epoch: 0,
             active_wait: None,
             last_wait_result: None,
             wait_epoch: 0,
@@ -1736,6 +1738,7 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             state.pause_requested = true;
             state.step_budget = 0;
             state.active_wait = None;
+            state.pace_epoch = state.pace_epoch.wrapping_add(1);
             state.push_feed("control", "pause".to_owned());
             (ok_response(state, ResponseData::None), false)
         }
@@ -1744,6 +1747,7 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             if state.mode == ExecMode::Step {
                 state.mode = ExecMode::Live;
             }
+            state.pace_epoch = state.pace_epoch.wrapping_add(1);
             state.push_feed("control", "resume".to_owned());
             (ok_response(state, ResponseData::None), true)
         }
@@ -1758,6 +1762,7 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             if mode == ExecMode::Live {
                 state.pause_requested = false;
             }
+            state.pace_epoch = state.pace_epoch.wrapping_add(1);
             state.push_feed("control", format!("mode {}", mode.as_str()));
             (ok_response(state, ResponseData::None), true)
         }
@@ -1768,6 +1773,7 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
         }
         Command::SetPace(pace) => {
             state.pace = clamp_pace(pace);
+            state.pace_epoch = state.pace_epoch.wrapping_add(1);
             state.push_feed("control", format!("pace {:.2}x", state.pace));
             (ok_response(state, ResponseData::None), false)
         }
