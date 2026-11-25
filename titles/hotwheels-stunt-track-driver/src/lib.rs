@@ -107,33 +107,58 @@ pub const GUIDE: TitleGuide = TitleGuide {
     controls: &[
         ControlHint {
             input: "Up",
-            action: "Throttle",
-            notes: "Accelerate; hold only when the start light turns green for a Rocket Start.",
+            action: "Throttle / Rocket Start",
+            notes: "Accelerate (also `Keypad8`/`7`/`9`); hold only when the start light turns green for a Rocket Start.",
+        },
+        ControlHint {
+            input: "Down",
+            action: "Brake / reverse",
+            notes: "Brake before tight turns or reverse to recover (also `Keypad2`/`1`/`3`).",
         },
         ControlHint {
             input: "Left / Right",
             action: "Steer",
-            notes: "Steer left or right along the track.",
+            notes: "Steer left or right along the track (also `Keypad4`/`6`); pulse in short bursts to avoid oversteer.",
         },
         ControlHint {
             input: "LeftShift",
             action: "Barrel roll",
-            notes: "Perform a mid-air barrel roll stunt off ramps.",
+            notes: "Hold mid-air off ramps for a barrel roll (also `LeftAlt`/`PageDown`); release in time to land upright.",
         },
         ControlHint {
             input: "LeftControl",
             action: "Flip",
-            notes: "Perform a mid-air flip stunt off ramps.",
+            notes: "Hold mid-air off ramps for a flip (also `Delete`); release in time to land upright.",
         },
         ControlHint {
             input: "Space",
-            action: "Skip / advance",
-            notes: "Advance past splash screens and menus.",
+            action: "Skip / confirm",
+            notes: "Skip splashes and intro (~flip 285, hold ~5-9 flips); also acts as left-click confirm in menus.",
+        },
+        ControlHint {
+            input: "Left click (--hold-flips 5..6)",
+            action: "Select menu / wheel / workbench / Green GO",
+            notes: "Move cursor and settle first, then hold 5-6 flips: Main Menu Single Race `~(546,413)`, Championship `~(552,102)`, Track/Car Green GO `~(583,430)`, Car Select wheel, and Custom Garage workbench pieces.",
         },
         ControlHint {
             input: "Right click (270, 100)",
             action: "Unlock Secret Track WIRE",
-            notes: "Right-click the Mattel \"TT\" hotspot at `(270, 100)` on Track Select after clearing Championship Tracks 1-6.",
+            notes: "Right-click (`--hold-flips 5`) the invisible Mattel \"TT\" hotspot at `(270, 100)` on Track Select after clearing Championship Tracks 1-6, then click Green GO. Visually verify cursor alignment if returning from a race (#329).",
+        },
+        ControlHint {
+            input: "P / Pause",
+            action: "Pause race",
+            notes: "Toggle in-race pause safely without quitting.",
+        },
+        ControlHint {
+            input: "C",
+            action: "Reset / crash car",
+            notes: "Forces an in-race crash/respawn and increments the crash counter; use only if stuck.",
+        },
+        ControlHint {
+            input: "F1",
+            action: "Cycle race resolution",
+            notes: "In menus, cycles `640x480` / `320x240` / `320x200`; keep at `640x480` during normal runs.",
         },
         ControlHint {
             input: "Escape",
@@ -142,24 +167,51 @@ pub const GUIDE: TitleGuide = TitleGuide {
         },
     ],
     hazards: &[
-        "NEVER press `Escape` unless intending immediate exit: this title quits unconditionally on `Escape` (guarded by `escape_quits: true`; requires `force: true`).",
-        "Hold `Up` only on the green light for Rocket Start; revving early loses launch speed.",
+        "NEVER press `Escape` unless intending immediate exit: this title quits unconditionally on `Escape` (guarded by `escape_quits: true`; requires `force: true`). Use `P` or `Pause` to pause a race.",
+        "Menu clicks need `move` + settle and `--hold-flips 5` (or `5..6`); 1-flip clicks are frequently missed by DirectInput menu polling.",
+        "Post-race `SetCursorPos(320, 240)` cursor offset (#329): on race finish `STUNT.EXE` re-centers the Windows cursor while its internal DirectInput hand cursor integrates relative deltas; screenshot and steer with `delta` or offset-adjusted moves after any race.",
+        "Hold `Up` only on the green light for Rocket Start; revving on red/yellow loses launch speed.",
+        "Release `LeftShift` / `LeftControl` early enough in mid-air to land wheels down; landing inverted causes a crash.",
     ],
     goals: &[
         Goal {
             id: "first-race",
-            name: "First Race",
+            name: "Single Race (Track 1: Living Room)",
             milestone: Milestone::Playable,
-            description: "Complete the first Championship race cleanly.",
+            description: "Complete Single Race / Track 1 (`HOUS`) cleanly and persist `saves\\times.dat`.",
         },
         Goal {
-            id: "championship-and-wire-gold",
-            name: "Championship Tracks 1-6 & Secret Track WIRE Gold Medal",
+            id: "custom-garage-gold",
+            name: "Custom Garage Stunt Track Gold Medal",
+            milestone: Milestone::Playable,
+            description: "Open the Custom Garage Stunt Track Builder, place stunt pieces on the workbench, click Green GO, and earn a Gold Medal.",
+        },
+        Goal {
+            id: "aerial-stunts",
+            name: "Clean Aerial Stunts",
+            milestone: Milestone::Playable,
+            description: "Execute mid-air barrel rolls (`LeftShift`) and flips (`LeftControl`) off ramps and land upright without crashing.",
+        },
+        Goal {
+            id: "championship-tracks-1-6",
+            name: "Championship Tracks 1-6",
             milestone: Milestone::Complete,
-            description: "Clear Championship Tracks 1-6, right-click the Mattel \"TT\" logo at `(270, 100)` on Track Select to unlock Secret Track `WIRE`, and earn a Gold Medal (`<= 1:10`).",
+            description: "Clear Championship Tracks 1-6 (Living Room `HOUS`, Bedroom `TOYS`, Greenhouse `ATRI`, Attic `ATIC`, Sandbox `SAND`, Basement `BASE`) so `saves\\onoff.dat` holds all 6 unlock flags.",
+        },
+        Goal {
+            id: "secret-track-wire-gold",
+            name: "Secret Track WIRE Gold Medal",
+            milestone: Milestone::Complete,
+            description: "With Tracks 1-6 unlocked, right-click the Mattel \"TT\" hotspot at `(270, 100)` on Track Select to arm Secret Track `WIRE` (`WIRE.JAM`) and earn a Gold Medal (`<= 1:10`).",
         },
     ],
-    save_files: &["saves\\onoff.dat", "saves\\times.dat", "saves\\wheel.dat"],
+    save_files: &[
+        "saves\\onoff.dat",
+        "saves\\times.dat",
+        "saves\\wheel.dat",
+        "saves\\track0.dat",
+        "saves\\tracks.dat",
+    ],
 };
 
 #[cfg(test)]
@@ -185,6 +237,63 @@ mod tests {
         ] {
             let v = parse_json(&body).expect("valid JSON");
             assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+
+        let controls_json = parse_json(&format_controls_json(
+            &HOT_WHEELS_STUNT_TRACK_DRIVER,
+            &GUIDE,
+        ))
+        .expect("valid controls JSON");
+        let controls = controls_json.as_object().unwrap()["controls"]
+            .as_array()
+            .unwrap();
+        for required in [
+            "Up",
+            "Down",
+            "LeftShift",
+            "LeftControl",
+            "P / Pause",
+            "Escape",
+        ] {
+            assert!(
+                controls
+                    .iter()
+                    .any(|c| c.as_object().unwrap()["input"].as_str() == Some(required)),
+                "missing control hint `{required}`"
+            );
+        }
+        let hazards = controls_json.as_object().unwrap()["hazards"]
+            .as_array()
+            .unwrap();
+        assert!(
+            hazards
+                .iter()
+                .any(|h| h.as_str().unwrap_or("").contains("#329")),
+            "missing #329 post-race cursor offset hazard"
+        );
+        assert!(
+            hazards
+                .iter()
+                .any(|h| h.as_str().unwrap_or("").contains("--hold-flips 5")),
+            "missing menu click hold-flips hazard"
+        );
+
+        let goals_json = parse_json(&format_goals_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE))
+            .expect("valid goals JSON");
+        let goals = goals_json.as_object().unwrap()["goals"].as_array().unwrap();
+        for required_id in [
+            "first-race",
+            "custom-garage-gold",
+            "aerial-stunts",
+            "championship-tracks-1-6",
+            "secret-track-wire-gold",
+        ] {
+            assert!(
+                goals
+                    .iter()
+                    .any(|g| g.as_object().unwrap()["id"].as_str() == Some(required_id)),
+                "missing goal `{required_id}`"
+            );
         }
 
         let bus = ControlBus::new(ControlConfig {
