@@ -81,10 +81,10 @@ pub const ROCK_RAIDERS: Title = Title {
 };
 
 /// Static playability metadata served via `/api/meta`, `/api/controls`, and
-/// `/api/goals` (#311).
+/// `/api/goals` (#311, #336).
 pub const GUIDE: TitleGuide = TitleGuide {
     display_name: "LEGO Rock Raiders",
-    summary: "Real-time underground mining and base-building strategy game.",
+    summary: "Real-time underground mining and base-building strategy game: teleport Raiders, drill caverns, clear rubble, build Power Paths and HQ structures, and hit each mission's Energy Crystal or construction objective.",
     resolution: (640, 480),
     bpp: 16,
     refresh_hz: 60,
@@ -94,46 +94,131 @@ pub const GUIDE: TitleGuide = TitleGuide {
     cadence: AgentCadence::BurstThenPause { burst_ms: 500 },
     controls: &[
         ControlHint {
-            input: "Left click",
-            action: "Select / interact",
-            notes: "Select raiders, buildings, walls, or HUD icons; clicks skip intro movies directly.",
+            input: "Left click / Left drag",
+            action: "Select / interact / box-select",
+            notes: "Select raiders, vehicles, buildings, walls, floor tiles, or HUD icons; drag to box-select Raiders; clicks skip intro movies directly (`Start Game` at `(320, 222)`, Mission 1 at `(155, 160)`).",
         },
         ControlHint {
-            input: "F2+W",
-            action: "Drill wall",
-            notes: "Issues a drill order on the selected rock or dirt wall.",
+            input: "Right click",
+            action: "Deselect / cancel mode",
+            notes: "Clears current selection or cancels active building placement and targeting modes.",
+        },
+        ControlHint {
+            input: "LeftShift / RightShift + click",
+            action: "Multi-select units",
+            notes: "Hold Shift while left-clicking to add or modify a multi-Raider selection.",
+        },
+        ControlHint {
+            input: "Left / Right",
+            action: "Rotate camera (or turn in 1st/2nd person)",
+            notes: "Rotates the 3D cavern camera CCW/CW in Top View, or turns the controlled Raider/Vehicle in Eye/Shoulder View.",
+        },
+        ControlHint {
+            input: "Up / Down",
+            action: "Tilt camera (or move in 1st/2nd person)",
+            notes: "Pitches the 3D cavern camera up/down (0-60 deg) in Top View, or drives forward/backward in Eye/Shoulder View.",
+        },
+        ControlHint {
+            input: "Z / X",
+            action: "Strafe in Eye / Shoulder View",
+            notes: "Strafes the controlled unit left (`Z`) or right (`X`) while in 1st-person Eye View or 2nd-person Shoulder View.",
         },
         ControlHint {
             input: "Minus / Equals",
             action: "Zoom camera",
-            notes: "Zoom camera out (`Minus`) or in (`Equals`).",
+            notes: "Zooms Top View camera out (`Minus`) or in (`Equals`); also clickable on the bottom-right Camera Control widget at `(410, 410)`.",
         },
         ControlHint {
-            input: "Left / Right",
-            action: "Rotate camera",
-            notes: "Rotate the 3D cavern camera counter-clockwise or clockwise.",
+            input: "Radar click (16..167, 13..164)",
+            action: "Jump camera / radar view",
+            notes: "Left-click inside the top-left 151x151 radar to jump camera to that cavern spot; buttons below toggle Map View, Tagged View, Zoom In/Out, and Radar collapse.",
         },
         ControlHint {
-            input: "Up / Down",
-            action: "Tilt camera",
-            notes: "Pitch the 3D cavern camera up or down.",
+            input: "Border move (x<=3 || x>=636 || y<=3 || y>=476)",
+            action: "Edge-scroll map",
+            notes: "Pans the cavern camera (and scrolls the Level Select map vertically, e.g. `(320, 478)`); return pointer to `(320, 240)` to stop scrolling.",
         },
         ControlHint {
-            input: "Space / Escape",
-            action: "Skip / menu back",
-            notes: "Skip intro and briefing movies or back out of menus (`Escape` does not quit).",
+            input: "F2+W / F2+Q / F2+R / F2+E",
+            action: "Drill / Clear Rubble / Reinforce / Dynamite",
+            notes: "Contextual wall and floor orders (all HUD menu chords require holding `F2`, or click the right-sidebar icon). `F2+G` cancels drilling; `F2+E` also places Electric Fences.",
+        },
+        ControlHint {
+            input: "F2+M / F2+C / F2+V / F2+A / F2+P",
+            action: "Teleport Raider / Build menus / Power Path",
+            notes: "`F2+M` teleports a Raider down; `F2+C` Buildings menu (`F2+1`..`Equals`); `F2+V`/`F2+A` Small/Large Vehicles; `F2+P` builds Power Path, picks up, or toggles building power; `F2+B` Back.",
+        },
+        ControlHint {
+            input: "F2+J / F2+O / F2+I / F2+U / F2+D",
+            action: "Upgrade / Train / Tools / Unload / Enter-Exit",
+            notes: "`F2+J` upgrades Raider/building; `F2+O` Train Skill submenu; `F2+I` Get Tool submenu; `F2+U` drop/unload/upgrade vehicle; `F2+D` enter/exit vehicle or cancel construction.",
+        },
+        ControlHint {
+            input: "F2+1 / F2+2 / F2+3 / F2+T",
+            action: "Eye View / Shoulder View / Top View / Track",
+            notes: "Switches camera onto the selected Raider or Vehicle (`F2+1` 1st-person, `F2+2` 2nd-person), returns to overhead Top View (`F2+3`), or locks tracking (`F2+T`).",
+        },
+        ControlHint {
+            input: "Top Panel (330, 0) & Priorities (495, 12)",
+            action: "Action Stations / Options / AI Priorities",
+            notes: "Click Action Stations `(421, 12)`, Options/Pause `(458, 12)`, or Priorities `(495, 12)` to reorder or disable autonomous Raider jobs (Collect Crystals, Drill, Clear Rubble, Construction, Reinforce).",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Skip / dismiss briefing / toggle bubbles",
+            notes: "Skips intro movies, advances/dismisses Mission Brief and tutorial prompts, and toggles overhead task/status bubbles during gameplay.",
+        },
+        ControlHint {
+            input: "Escape / P",
+            action: "Pause Menu / quick pause",
+            notes: "`Escape` skips movies, backs out of menus, or opens the in-mission Paused Menu (contains `Options` -> `Game Speed` slider `0..5`); `P` toggles gameplay pause directly. `Escape` does not quit.",
+        },
+        ControlHint {
+            input: "S / M",
+            action: "Toggle SFX / Music",
+            notes: "Bare `S` toggles Sound Effects on/off; bare `M` toggles Red Book CD music on/off.",
         },
     ],
     hazards: &[
-        "Avoid moving the pointer into the screen border (`x < 4 || x > 635 || y < 4 || y > 475`), which triggers continuous edge-scrolling away from the base.",
+        "Keep the pointer inside the safe interior (`4..=635`, `4..=475`) when idle; entering the 4 px screen border (`x <= 3 || x >= 636 || y <= 3 || y >= 476`) triggers continuous edge-scrolling away from base.",
+        "All contextual HUD action hotkeys require holding `F2` (`chord F2,<Key>`), or clicking the sidebar icon; bare letter keys do not issue orders (bare `M` toggles music, bare `S` toggles SFX).",
+        "Avoid `F2+S` with a Raider selected or `F2+D` with a building/vehicle selected unless intentionally teleporting them back to the L.M.S. Explorer.",
+        "Retail `Lego.cfg` disables debug keys (`AllowDebugKeys FALSE`): `Keypad8`/`Keypad9` game-speed keys, `F6`, `Tab`, `Ctrl+F`, and `Ctrl+G` do not work; change Game Speed via Pause Menu -> Options.",
+        "Buildings require adjacent Power Paths (`OnlyBuildOnPaths TRUE`); unstable walls trigger landslides unless reinforced (`F2+R`); oxygen-limited missions fail at 0% air unless a Support Station is built.",
         "Front-end menu loops do not poll window close; closing there stops cleanly after core's 5-second grace window.",
     ],
-    goals: &[Goal {
-        id: "mission-1-driller-night",
-        name: "Mission 1: Driller Night",
-        milestone: Milestone::Playable,
-        description: "Find the Tool Store, drill walls, and collect 5 Energy Crystals.",
-    }],
+    goals: &[
+        Goal {
+            id: "boot-to-level-select",
+            name: "Boot to Level Select",
+            milestone: Milestone::FirstLight,
+            description: "Skip intro movies, click Start Game at (320, 222), and wait past the 3D rockfall transition to the Level Select cavern map.",
+        },
+        Goal {
+            id: "launch-mission-1",
+            name: "Launch Mission 1: Driller Night",
+            milestone: Milestone::FirstLight,
+            description: "Click Mission 1 at (155, 160), dismiss the Mission Brief pages with Space, and reach active 3D cavern gameplay.",
+        },
+        Goal {
+            id: "mission-1-driller-night",
+            name: "Complete Mission 1: Driller Night",
+            milestone: Milestone::Playable,
+            description: "Drill through cavern walls (F2+W or Drill icon) to locate the Tool Store, clear rubble, and collect all 5 Energy Crystals.",
+        },
+        Goal {
+            id: "advance-to-mission-2",
+            name: "Advance to Mission 2+ (The Path To Power / Rubble Trouble)",
+            milestone: Milestone::Playable,
+            description: "Advance past Mission 1's reward screen, save progress, and launch the next unlocked cavern (Level05 The Path To Power: build Power Station via upgraded Tool Store, Power Paths & Teleport Pad; or Level03 Rubble Trouble!: reinforce walls, clear rubble, collect 5 crystals).",
+        },
+        Goal {
+            id: "campaign-complete",
+            name: "Complete All 25 Campaign Missions",
+            milestone: Milestone::Complete,
+            description: "Clear every mission from Level01 Driller Night! through Level25 Rocky Horror with profile saves in C:\\LEGORR\\DATA\\SAVES\\.",
+        },
+    ],
     save_files: &["C:\\LEGORR\\DATA\\SAVES\\0.SAV"],
 };
 
@@ -142,6 +227,7 @@ mod tests {
     use super::*;
     use lego_legacy_core::control::json::parse_json;
     use lego_legacy_core::control::{format_controls_json, format_goals_json, format_meta_json};
+    use std::collections::BTreeSet;
 
     #[test]
     fn title_guide_serializes_valid_json() {
@@ -150,6 +236,25 @@ mod tests {
         assert_eq!(GUIDE.resolution, (640, 480));
         assert_eq!(GUIDE.bpp, 16);
         assert_eq!(GUIDE.refresh_hz, 60);
+        assert!(GUIDE.controls.len() >= 10);
+        assert!(GUIDE.hazards.len() >= 4);
+        assert!(GUIDE.goals.len() >= 4);
+
+        let mut goal_ids = BTreeSet::new();
+        for goal in GUIDE.goals {
+            assert!(!goal.id.is_empty());
+            assert!(!goal.name.is_empty());
+            assert!(!goal.description.is_empty());
+            assert!(goal_ids.insert(goal.id), "duplicate goal id {}", goal.id);
+        }
+        assert!(goal_ids.contains("mission-1-driller-night"));
+
+        for hint in GUIDE.controls {
+            assert!(!hint.input.is_empty());
+            assert!(!hint.action.is_empty());
+            assert!(!hint.notes.is_empty());
+        }
+
         for body in [
             format_meta_json(&ROCK_RAIDERS, &GUIDE),
             format_controls_json(&ROCK_RAIDERS, &GUIDE),
