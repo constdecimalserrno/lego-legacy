@@ -5,6 +5,7 @@
 //! player runs.
 
 use crate::cli::{Cli, CliError};
+use crate::control::{ControlConfig, ControlHost, ExecMode, InputOwner, StdioBridge};
 use crate::host::{headless::Headless, telemetry::TelemetryHost, Host};
 use crate::machine::{Finish, Machine, Outcome};
 use crate::runlog::RunLog;
@@ -45,6 +46,42 @@ pub fn run_digested(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
+    if cli.control_enabled() {
+        let config = ControlConfig {
+            mode: cli.control_mode.unwrap_or(ExecMode::Step),
+            owner: if cli.control_stdio {
+                InputOwner::Agent
+            } else {
+                InputOwner::Human
+            },
+            start_paused: cli.paused,
+            step_uncapped: true,
+            pace: 1.0,
+            pointer_speed: title.pointer_speed,
+            flip_cost: title.flip_cost,
+        };
+        let mut control = ControlHost::new(host, config);
+        if cli.control_stdio {
+            StdioBridge::spawn(control.bus());
+        }
+        let (mut machine, mut log) = setup(title, cli, &mut control)?;
+        let finish = machine.run(&mut control, &mut log, budget);
+        control.free_mouse();
+        control.pointer_shape(None);
+        let digest = wrap_up(title, &mut machine, &mut control, &mut log, &finish);
+        control.mark_finished(&finish, &digest);
+        if cli.fps_report || cli.fps_window.is_some() {
+            for line in control.telemetry_report(cli.fps_window).format_lines() {
+                log.line(&line);
+                if cli.control_stdio {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+        return Ok((finish, log, digest));
+    }
     if cli.fps_report || cli.fps_window.is_some() {
         let mut telemetry = TelemetryHost::new(host, title.flip_cost);
         let (mut machine, mut log) = setup(title, cli, &mut telemetry)?;
@@ -141,7 +178,7 @@ pub(crate) fn setup(
         log.line(&format!("route {} events {}", path.display(), route.len()));
         machine.route = Some(route);
     }
-    if cli.record {
+    if cli.record || cli.control_enabled() {
         machine.recording = Some(crate::route::Route::new());
     }
     machine.screenshots = cli.screenshots.clone();
@@ -294,7 +331,7 @@ pub fn main(title: &'static Title) -> ExitCode {
     let mut host = Headless::new();
     match run(title, &cli, &mut host, u64::MAX) {
         Ok((finish, log)) => {
-            report(title, &finish, &log);
+            report(title, &cli, &finish, &log);
             status(&finish)
         }
         Err(e) => {
@@ -305,15 +342,26 @@ pub fn main(title: &'static Title) -> ExitCode {
 }
 
 /// Say how a finished run ended, where, and where its log is.
-fn report(title: &Title, finish: &Finish, log: &RunLog) {
-    println!("{}: {}", title.key, finish.outcome);
-    println!(
-        "cursor {} flips {} declared-ms {} log {}",
-        finish.cursor,
-        finish.flips,
-        finish.declared_millis,
-        log.dir().join("log").display()
-    );
+fn report(title: &Title, cli: &Cli, finish: &Finish, log: &RunLog) {
+    if cli.control_stdio {
+        eprintln!("{}: {}", title.key, finish.outcome);
+        eprintln!(
+            "cursor {} flips {} declared-ms {} log {}",
+            finish.cursor,
+            finish.flips,
+            finish.declared_millis,
+            log.dir().join("log").display()
+        );
+    } else {
+        println!("{}: {}", title.key, finish.outcome);
+        println!(
+            "cursor {} flips {} declared-ms {} log {}",
+            finish.cursor,
+            finish.flips,
+            finish.declared_millis,
+            log.dir().join("log").display()
+        );
+    }
 }
 
 /// The guest's own exit status when it ended the run itself, and failure
@@ -361,10 +409,11 @@ fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     host.close_audio();
     match ran {
         Ok((finish, log)) => {
-            report(title, &finish, &log);
+            report(title, cli, &finish, &log);
             // A run the person ended by closing the window has none left to
-            // close (#107).
-            if finish.flips > 0 && host.closes() == 0 {
+            // close (#107). A `--control-stdio` session exits cleanly once the
+            // run finishes rather than blocking on a human window click (#308).
+            if !cli.control_stdio && finish.flips > 0 && host.closes() == 0 {
                 println!("close the window to end");
                 while host.closes() == 0 {
                     host.pump();

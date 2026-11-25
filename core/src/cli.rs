@@ -59,6 +59,20 @@ pub struct Cli {
     pub fps_report: bool,
     /// Optional half-open flip window `<start>..<end>` for `--fps-report` (#296).
     pub fps_window: Option<(u64, u64)>,
+    /// Serve the newline-delimited JSON control protocol on stdin/stdout (#308).
+    pub control_stdio: bool,
+    /// Initial control execution mode (`step` or `live`) (#308).
+    pub control_mode: Option<crate::control::ExecMode>,
+    /// Start paused on the first post-route flip (#308).
+    pub paused: bool,
+}
+
+impl Cli {
+    /// Whether any control-plane flag is active on this invocation (#308).
+    #[must_use]
+    pub fn control_enabled(&self) -> bool {
+        self.control_stdio || self.control_mode.is_some() || self.paused
+    }
 }
 
 /// The flips a run writes as PNG files: named ones, and every so many.
@@ -121,6 +135,9 @@ usage: <title> [flags]
   --stub                   run the machine's own stub guest
   --fps-report             report host speed and frame-time percentiles at run end
   --fps-window <a..b>      also report telemetry over flips [a, b)
+  --control-stdio          serve JSONL control commands on stdin/stdout
+  --control-mode step|live initial control mode (default: step when control active)
+  --paused                 start paused on the first post-route flip
   -h, --help               this";
 
 impl Cli {
@@ -145,6 +162,17 @@ impl Cli {
                 "--repl" => cli.repl = true,
                 "--stub" => cli.stub = true,
                 "--fps-report" => cli.fps_report = true,
+                "--control-stdio" => cli.control_stdio = true,
+                "--paused" => cli.paused = true,
+                "--control-mode" => {
+                    let v = value("--control-mode")?;
+                    cli.control_mode = Some(crate::control::ExecMode::parse(&v).ok_or(
+                        CliError::BadValue {
+                            flag: "--control-mode",
+                            value: v,
+                        },
+                    )?);
+                }
                 "-h" | "--help" => return Err(CliError::Help),
                 "--route" => cli.route = Some(PathBuf::from(value("--route")?)),
                 "--data-root" => cli.data_root = Some(PathBuf::from(value("--data-root")?)),
@@ -277,6 +305,31 @@ mod tests {
             Cli::parse(["--trace", "everything"]).unwrap_err(),
             CliError::BadValue {
                 flag: "--trace",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn control_flags_parse_and_validate() {
+        let cli = Cli::parse(["--control-stdio", "--control-mode", "live", "--paused"]).unwrap();
+        assert!(cli.control_enabled());
+        assert!(cli.control_stdio);
+        assert_eq!(cli.control_mode, Some(crate::control::ExecMode::Live));
+        assert!(cli.paused);
+
+        let step_cli = Cli::parse(["--control-mode", "step"]).unwrap();
+        assert!(step_cli.control_enabled());
+        assert_eq!(step_cli.control_mode, Some(crate::control::ExecMode::Step));
+
+        assert!(matches!(
+            Cli::parse(["--control-mode"]).unwrap_err(),
+            CliError::MissingValue("--control-mode")
+        ));
+        assert!(matches!(
+            Cli::parse(["--control-mode", "turbo"]).unwrap_err(),
+            CliError::BadValue {
+                flag: "--control-mode",
                 ..
             }
         ));

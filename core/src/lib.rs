@@ -9,6 +9,7 @@ pub mod cabinet;
 pub mod cli;
 pub mod clock;
 pub mod com;
+pub mod control;
 pub mod cpu;
 pub mod disc;
 pub mod dls;
