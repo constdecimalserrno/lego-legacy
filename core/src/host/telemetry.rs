@@ -523,6 +523,10 @@ impl<H: Host> Host for TelemetryHost<H> {
         self.inner.pace(declared_nanos)
     }
 
+    fn is_paced(&self) -> bool {
+        self.inner.is_paced()
+    }
+
     fn pump(&mut self) {
         self.inner.pump();
     }

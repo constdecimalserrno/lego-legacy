@@ -10,7 +10,7 @@
 use super::bus::{AgentState, ControlStatus, FrameSnapshot};
 use super::http::{ExtraRoutes, HttpContext, HttpRequest, HttpResponse, StreamIo};
 use super::json::{write_agent_state, write_json_str, write_status, write_window_metrics};
-use super::observe::STUCK_LOOP_THRESHOLD;
+use super::observe::stuck_loop_warning;
 use super::ws::{
     encode_binary_frame, encode_xor_rle, is_websocket_upgrade, read_client_frame,
     write_handshake_response, write_ws_frame, WsClientFrame, FRAME_FLAG_PNG_KEYFRAME,
@@ -55,8 +55,10 @@ impl ExtraRoutes for SpectatorRoutes {
         _ctx: &HttpContext,
         stream: &mut dyn io::Write,
     ) -> io::Result<bool> {
-        if req.method == "GET" && matches!(req.path.as_str(), "/" | "/watch" | "/watch/") {
-            serve_watch_html(stream)?;
+        if matches!(req.method.as_str(), "GET" | "HEAD")
+            && matches!(req.path.as_str(), "/" | "/watch" | "/watch/")
+        {
+            serve_watch_html(stream, req.method == "HEAD")?;
             return Ok(true);
         }
         Ok(false)
@@ -68,12 +70,16 @@ impl ExtraRoutes for SpectatorRoutes {
         ctx: &HttpContext,
         stream: &mut dyn StreamIo,
     ) -> io::Result<bool> {
+        if req.method == "HEAD" && matches!(req.path.as_str(), "/" | "/watch" | "/watch/") {
+            serve_watch_html(stream, true)?;
+            return Ok(true);
+        }
         if req.method != "GET" {
             return Ok(false);
         }
         match req.path.as_str() {
             "/" | "/watch" | "/watch/" => {
-                serve_watch_html(stream)?;
+                serve_watch_html(stream, false)?;
                 Ok(true)
             }
             "/api/stream" => {
@@ -97,13 +103,26 @@ impl ExtraRoutes for SpectatorRoutes {
     }
 }
 
-fn serve_watch_html(stream: &mut dyn io::Write) -> io::Result<()> {
-    HttpResponse::raw(
-        200,
-        "text/html; charset=utf-8",
-        WATCH_HTML.as_bytes().to_vec(),
-    )
-    .write_to(stream)
+fn serve_watch_html(stream: &mut dyn io::Write, head_only: bool) -> io::Result<()> {
+    if head_only {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             Cache-Control: no-store\r\n\
+             Connection: close\r\n\r\n",
+            WATCH_HTML.len()
+        )?;
+        stream.flush()
+    } else {
+        HttpResponse::raw(
+            200,
+            "text/html; charset=utf-8",
+            WATCH_HTML.as_bytes().to_vec(),
+        )
+        .write_to(stream)
+    }
 }
 
 fn parse_fps_param(req: &HttpRequest, default_fps: u32) -> Duration {
@@ -433,11 +452,10 @@ pub fn format_sse_event_json(ctx: &HttpContext) -> (String, ControlStatus, Agent
     if uniform {
         warnings.push("uniform_frame: every pixel has the same color".to_owned());
     }
-    if status.diff.unchanged_streak >= STUCK_LOOP_THRESHOLD {
-        warnings.push(format!(
-            "stuck_loop: frame unchanged for {} consecutive flips",
-            status.diff.unchanged_streak
-        ));
+    if let Some(w) =
+        stuck_loop_warning(status.diff.unchanged_streak, status.paused, status.finished)
+    {
+        warnings.push(w);
     }
 
     let mut out = String::with_capacity(1024);
@@ -889,5 +907,112 @@ mod tests {
         let (bytes_i, kf_i) = encode_stream_frame(Some(&f0), &f1, KEYFRAME_INTERVAL);
         assert!(kf_i);
         assert_eq!(bytes_i[0], FRAME_FLAG_PNG_KEYFRAME);
+    }
+
+    #[test]
+    fn head_watch_routes_return_200_with_content_length_and_empty_body() {
+        let bus = ControlBus::new(ControlConfig::default());
+        let ctx = Arc::new(HttpContext::new(bus, &Title::STUB, None));
+        let mut server = HttpServer::start("127.0.0.1:0", ctx).expect("http start");
+        let addr = server.addr();
+        let expected_cl = format!("Content-Length: {}\r\n", WATCH_HTML.len());
+
+        for path in ["/", "/watch", "/watch/"] {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(
+                s,
+                "HEAD {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).unwrap();
+            let text = String::from_utf8(resp).expect("utf-8 head response");
+            let (head, body) = text.split_once("\r\n\r\n").expect("header terminator");
+            assert!(
+                head.starts_with("HTTP/1.1 200 OK\r\n"),
+                "HEAD {path}: {head}"
+            );
+            assert!(
+                head.contains("Content-Type: text/html; charset=utf-8\r\n"),
+                "HEAD {path}: {head}"
+            );
+            assert!(
+                format!("{head}\r\n").contains(&expected_cl),
+                "HEAD {path}: expected `{expected_cl}` in {head}"
+            );
+            assert!(
+                body.is_empty(),
+                "HEAD {path} must return an empty body, got {} bytes",
+                body.len()
+            );
+        }
+
+        server.stop();
+    }
+
+    #[test]
+    fn sse_event_json_suppresses_stuck_loop_while_paused_finished_or_below_180_flips() {
+        use crate::control::bus::FrameDiff;
+        use crate::control::observe::STUCK_LOOP_THRESHOLD;
+
+        let bus = ControlBus::new(ControlConfig::default());
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+
+        let set_streak = |streak: u64, paused: bool, finished: bool| {
+            let mut state = bus.lock();
+            state.is_paused = paused;
+            state.finished = finished;
+            state.latest_frame = Some(FrameSnapshot {
+                flip: streak,
+                width: 4,
+                height: 4,
+                bgra: Arc::new(vec![0u8; 64]),
+                frame_hash: "0123456789abcdef".to_owned(),
+                diff: FrameDiff {
+                    diff_pixels: 0,
+                    total_pixels: 16,
+                    diff_pct: 0.0,
+                    diff_bbox: None,
+                    unchanged_streak: streak,
+                },
+                uniform: false,
+            });
+        };
+
+        // 88-flip idle loop in active play: no stuck_loop warning.
+        set_streak(88, false, false);
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        assert!(parsed.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // 180+ flips while paused: suppressed.
+        set_streak(STUCK_LOOP_THRESHOLD + 20, true, false);
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        assert!(parsed.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // 180+ flips once finished: suppressed.
+        set_streak(STUCK_LOOP_THRESHOLD + 20, false, true);
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        assert!(parsed.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // 180+ flips in active play: warning emitted.
+        set_streak(STUCK_LOOP_THRESHOLD, false, false);
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        let warnings = parsed.as_object().unwrap()["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].as_str().unwrap().starts_with("stuck_loop:"));
     }
 }

@@ -373,6 +373,15 @@ pub trait Host {
         1.0
     }
 
+    /// Whether this host enforces wall-clock pacing inside [`Self::pace`] (#325).
+    ///
+    /// Windowed backends return `true`; [`headless::Headless`] defaults to
+    /// `false` so [`crate::control::ControlHost`] can pace headless `Live` runs
+    /// without double-sleeping a windowed host.
+    fn is_paced(&self) -> bool {
+        false
+    }
+
     /// Pump host window events without presenting a frame or polling guest
     /// input (#296). Keeps a window responsive while paused.
     fn pump(&mut self) {}
@@ -430,6 +439,10 @@ impl<H: Host + ?Sized> Host for &mut H {
 
     fn pace(&mut self, declared_nanos: u64) -> f64 {
         (**self).pace(declared_nanos)
+    }
+
+    fn is_paced(&self) -> bool {
+        (**self).is_paced()
     }
 
     fn pump(&mut self) {

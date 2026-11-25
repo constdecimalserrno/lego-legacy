@@ -1436,6 +1436,10 @@ impl Host for MacWindow {
         self.pace.hold(declared_nanos)
     }
 
+    fn is_paced(&self) -> bool {
+        true
+    }
+
     fn pump(&mut self) {
         MacWindow::pump(self);
     }

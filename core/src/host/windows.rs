@@ -1171,6 +1171,10 @@ impl Host for WinWindow {
         self.pace.hold(declared_nanos)
     }
 
+    fn is_paced(&self) -> bool {
+        true
+    }
+
     fn pump(&mut self) {
         WinWindow::pump(self);
     }

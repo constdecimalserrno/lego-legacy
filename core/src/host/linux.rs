@@ -1138,6 +1138,10 @@ impl Host for LinuxWindow {
         self.pace.hold(declared_nanos)
     }
 
+    fn is_paced(&self) -> bool {
+        true
+    }
+
     fn pump(&mut self) {
         LinuxWindow::pump(self);
     }

@@ -468,6 +468,7 @@ fn sync_after_live_restore(
     state.active_wait = None;
     state.step_budget = 0;
     state.close_pending = false;
+    state.pace_epoch = state.pace_epoch.wrapping_add(1);
     state.force_closes = 0;
 }
 
