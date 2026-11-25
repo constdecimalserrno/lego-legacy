@@ -13,10 +13,12 @@ pub mod http;
 pub mod inspect;
 pub mod json;
 pub mod observe;
+pub mod spectator;
 pub mod stdio;
 pub mod timeline;
 #[cfg(unix)]
 pub mod unix;
+pub mod ws;
 
 pub use bus::{
     ActionFeedEntry, AgentState, AgentStatePatch, Command, ControlBus, ControlConfig,
@@ -26,8 +28,9 @@ pub use bus::{
 pub use host::{service_flip_boundary, ControlHost};
 pub use http::{
     write_session_registry, ExtraRoutes, HttpContext, HttpRequest, HttpResponse, HttpServer,
-    SessionRegistryGuard,
+    SessionRegistryGuard, StreamIo,
 };
+pub use spectator::SpectatorRoutes;
 pub use stdio::StdioBridge;
 pub use timeline::{Action, ActionError, ScheduleReport, Timeline};
 #[cfg(unix)]

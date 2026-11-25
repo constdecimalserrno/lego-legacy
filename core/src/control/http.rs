@@ -27,7 +27,7 @@ use crate::Title;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -146,6 +146,78 @@ fn status_reason(code: u16) -> &'static str {
     }
 }
 
+/// Bidirectional byte stream exposed to streaming [`ExtraRoutes`] handlers
+/// (WebSocket `/api/stream`, multipart PNG, and SSE `/api/events`, #310).
+pub trait StreamIo: Read + Write {
+    /// Set read timeout on the underlying socket, if supported.
+    ///
+    /// # Errors
+    /// Returns any socket option error.
+    fn set_stream_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Set write timeout on the underlying socket, if supported.
+    ///
+    /// # Errors
+    /// Returns any socket option error.
+    fn set_stream_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Disable Nagle's algorithm on TCP sockets for low-latency frame delivery.
+    ///
+    /// # Errors
+    /// Returns any socket option error.
+    fn set_stream_nodelay(&self, _nodelay: bool) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Whether [`Self::set_stream_read_timeout`] enforces timed reads (so loops
+    /// can poll client Close/Ping/EOF without stalling frame pushes).
+    fn supports_read_timeout(&self) -> bool {
+        false
+    }
+}
+
+impl StreamIo for TcpStream {
+    fn set_stream_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+
+    fn set_stream_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_write_timeout(timeout)
+    }
+
+    fn set_stream_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        self.set_nodelay(nodelay)
+    }
+
+    fn supports_read_timeout(&self) -> bool {
+        true
+    }
+}
+
+struct GenericStream<S>(S);
+
+impl<S: Read> Read for GenericStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<S: Write> Write for GenericStream<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<S: Read + Write> StreamIo for GenericStream<S> {}
+
 /// Extensible route hook for downstream tickets (#310 `/watch`, `/api/stream`,
 /// `/api/events`; #311 `/api/meta`, `/api/controls`, `/api/goals`).
 pub trait ExtraRoutes: Send + Sync {
@@ -162,6 +234,20 @@ pub trait ExtraRoutes: Send + Sync {
         ctx: &HttpContext,
         stream: &mut dyn Write,
     ) -> io::Result<bool>;
+
+    /// Streaming variant exposing full bidirectional [`StreamIo`] (used by
+    /// WebSocket `/api/stream` and SSE `/api/events`). Defaults to [`Self::handle`].
+    ///
+    /// # Errors
+    /// Returns any I/O error reading from or writing to `stream`.
+    fn handle_stream(
+        &self,
+        req: &HttpRequest,
+        ctx: &HttpContext,
+        stream: &mut dyn StreamIo,
+    ) -> io::Result<bool> {
+        self.handle(req, ctx, stream)
+    }
 }
 
 /// Shared context passed to every HTTP/1.1 and UDS request handler.
@@ -179,7 +265,7 @@ impl HttpContext {
             bus,
             title,
             token: token.filter(|t| !t.is_empty()),
-            extra: None,
+            extra: Some(Arc::new(super::spectator::SpectatorRoutes)),
         }
     }
 
@@ -313,7 +399,7 @@ impl HttpServer {
                             let _ = thread::Builder::new()
                                 .name("control-http-req".to_owned())
                                 .spawn(move || {
-                                    handle_connection(stream, &conn_ctx);
+                                    handle_stream_connection(stream, &conn_ctx);
                                 });
                         }
                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -365,7 +451,11 @@ impl Drop for HttpServer {
 }
 
 /// Handle one HTTP/1.1 connection over any `Read + Write` stream (TCP or Unix socket).
-pub fn handle_connection<S: Read + Write>(mut stream: S, ctx: &HttpContext) {
+pub fn handle_connection<S: Read + Write>(stream: S, ctx: &HttpContext) {
+    handle_stream_connection(GenericStream(stream), ctx);
+}
+
+fn handle_stream_connection<S: StreamIo>(mut stream: S, ctx: &HttpContext) {
     let req = match read_http_request(&mut stream) {
         Ok(Some(r)) => r,
         Ok(None) => return,
@@ -376,7 +466,7 @@ pub fn handle_connection<S: Read + Write>(mut stream: S, ctx: &HttpContext) {
     };
 
     if let Some(extra) = &ctx.extra {
-        match extra.handle(&req, ctx, &mut stream) {
+        match extra.handle_stream(&req, ctx, &mut stream) {
             Ok(true) => return,
             Ok(false) => {}
             Err(_) => return,
@@ -516,16 +606,18 @@ fn check_auth(req: &HttpRequest, ctx: &HttpContext) -> bool {
     let Some(expected) = &ctx.token else {
         return true;
     };
-    let Some(header) = req.headers.get("authorization") else {
-        return false;
-    };
-    let Some(provided) = header
-        .strip_prefix("Bearer ")
-        .or_else(|| header.strip_prefix("bearer "))
-    else {
-        return false;
-    };
-    constant_time_eq(provided.trim().as_bytes(), expected.as_bytes())
+    if let Some(header) = req.headers.get("authorization") {
+        if let Some(provided) = header
+            .strip_prefix("Bearer ")
+            .or_else(|| header.strip_prefix("bearer "))
+        {
+            return constant_time_eq(provided.trim().as_bytes(), expected.as_bytes());
+        }
+    }
+    if let Some(provided) = req.query.get("token") {
+        return constant_time_eq(provided.trim().as_bytes(), expected.as_bytes());
+    }
+    false
 }
 
 fn parse_bool_param(val: Option<&String>) -> bool {
