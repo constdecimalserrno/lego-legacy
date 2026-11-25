@@ -30,6 +30,7 @@ pub mod pace;
 pub mod pointer;
 pub mod stretch;
 pub mod sys;
+pub mod telemetry;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
@@ -258,6 +259,29 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
+/// Machine metadata observed once per presented flip, strictly outside guest
+/// state (#296).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlipMeta {
+    /// Zero-based flip index being presented.
+    pub flip: u64,
+    /// Declared clock nanoseconds after charging this flip's refresh cost.
+    pub clock_nanos: u64,
+    /// Guest instructions retired so far, including passed clock spins.
+    pub cursor: u64,
+    /// Guest instructions retired by passing clock spins rather than running
+    /// the engine (ADR-0004).
+    pub instructions_passed: u64,
+    /// Whether the host pointer is shown (`false` when the title draws its own).
+    pub pointer_shown: bool,
+    /// Last guest pointer coordinates.
+    pub pointer_pos: (i32, i32),
+    /// Whether a route is actively replaying undelivered events.
+    pub route_active: bool,
+    /// Undelivered route events remaining before this flip's input delivery.
+    pub route_remaining: usize,
+}
+
 /// The real machine the emulator runs on. Everything the guest cannot see.
 pub trait Host {
     /// Show the guest's surface. The host scales it to whatever window it has;
@@ -347,6 +371,77 @@ pub trait Host {
     /// headless host does nothing here, runs uncapped, and has no pace.
     fn pace(&mut self, _declared_nanos: u64) -> f64 {
         1.0
+    }
+
+    /// Pump host window events without presenting a frame or polling guest
+    /// input (#296). Keeps a window responsive while paused.
+    fn pump(&mut self) {}
+
+    /// Pause or resume host-side pacing and audio playback (#296).
+    ///
+    /// Strictly host-side: guest clocks and state are never affected.
+    fn set_paused(&mut self, _paused: bool) {}
+
+    /// Observe metadata for a presented flip after audio mixing and
+    /// immediately before input delivery (#296).
+    fn observe_flip(&mut self, _meta: &FlipMeta) {}
+}
+
+impl<H: Host + ?Sized> Host for &mut H {
+    fn present(&mut self, frame: &Frame<'_>) {
+        (**self).present(frame);
+    }
+
+    fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+        (**self).poll_input(flip)
+    }
+
+    fn audio(&mut self, samples: &[i16]) {
+        (**self).audio(samples);
+    }
+
+    fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+        (**self).map(len)
+    }
+
+    fn show_pointer(&mut self, show: bool) {
+        (**self).show_pointer(show);
+    }
+
+    fn free_mouse(&mut self) {
+        (**self).free_mouse();
+    }
+
+    fn put_pointer(&mut self, x: i32, y: i32) {
+        (**self).put_pointer(x, y);
+    }
+
+    fn pointer_shape(&mut self, shape: Option<&Cursor>) {
+        (**self).pointer_shape(shape);
+    }
+
+    fn closes(&self) -> u32 {
+        (**self).closes()
+    }
+
+    fn audio_underruns(&self) -> Option<u64> {
+        (**self).audio_underruns()
+    }
+
+    fn pace(&mut self, declared_nanos: u64) -> f64 {
+        (**self).pace(declared_nanos)
+    }
+
+    fn pump(&mut self) {
+        (**self).pump();
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        (**self).set_paused(paused);
+    }
+
+    fn observe_flip(&mut self, meta: &FlipMeta) {
+        (**self).observe_flip(meta);
     }
 }
 

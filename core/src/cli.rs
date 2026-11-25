@@ -55,6 +55,10 @@ pub struct Cli {
     pub repl: bool,
     /// Run the stub guest instead of the title: the machine's own test guest.
     pub stub: bool,
+    /// Print and log host-side speed and frame-time telemetry at run end (#296).
+    pub fps_report: bool,
+    /// Optional half-open flip window `<start>..<end>` for `--fps-report` (#296).
+    pub fps_window: Option<(u64, u64)>,
 }
 
 /// The flips a run writes as PNG files: named ones, and every so many.
@@ -115,6 +119,8 @@ usage: <title> [flags]
                            beside the rip
   --repl                   drive the machine from a debugger on stdin
   --stub                   run the machine's own stub guest
+  --fps-report             report host speed and frame-time percentiles at run end
+  --fps-window <a..b>      also report telemetry over flips [a, b)
   -h, --help               this";
 
 impl Cli {
@@ -138,6 +144,7 @@ impl Cli {
                 "--audio" => cli.audio = true,
                 "--repl" => cli.repl = true,
                 "--stub" => cli.stub = true,
+                "--fps-report" => cli.fps_report = true,
                 "-h" | "--help" => return Err(CliError::Help),
                 "--route" => cli.route = Some(PathBuf::from(value("--route")?)),
                 "--data-root" => cli.data_root = Some(PathBuf::from(value("--data-root")?)),
@@ -174,6 +181,18 @@ impl Cli {
                         flag: "--snapshot-every",
                         value: v,
                     })?);
+                }
+                "--fps-window" => {
+                    let v = value("--fps-window")?;
+                    let parsed = v
+                        .split_once("..")
+                        .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+                        .filter(|(a, b)| a < b)
+                        .ok_or(CliError::BadValue {
+                            flag: "--fps-window",
+                            value: v,
+                        })?;
+                    cli.fps_window = Some(parsed);
                 }
                 _ => return Err(CliError::Unknown(arg)),
             }
@@ -212,16 +231,40 @@ mod tests {
             "4700,5450",
             "--screenshot-every",
             "300",
+            "--fps-report",
+            "--fps-window",
+            "5450..8500",
         ])
         .unwrap();
         assert_eq!(cli.screenshots.at, [4700, 5450]);
         assert_eq!(cli.screenshots.every, Some(300));
         assert!(Cli::parse(["--screenshot-every", "0"]).is_err());
-        assert!(cli.headless && cli.record && cli.audio && cli.repl && cli.stub);
+        assert!(cli.headless && cli.record && cli.audio && cli.repl && cli.stub && cli.fps_report);
+        assert_eq!(cli.fps_window, Some((5450, 8500)));
         assert_eq!(cli.trace, Trace::Insns);
         assert_eq!(cli.snapshot_every, Some(64));
         assert_eq!(cli.route.unwrap().to_str().unwrap(), "r.route");
         assert_eq!(cli.data_root.unwrap().to_str().unwrap(), "/tmp/dr");
+    }
+
+    #[test]
+    fn fps_window_rejects_missing_or_malformed_ranges() {
+        assert!(matches!(
+            Cli::parse(["--fps-window"]).unwrap_err(),
+            CliError::MissingValue("--fps-window")
+        ));
+        for bad in ["100", "100..", "..200", "200..100", "100..100", "a..b"] {
+            assert!(
+                matches!(
+                    Cli::parse(["--fps-window", bad]).unwrap_err(),
+                    CliError::BadValue {
+                        flag: "--fps-window",
+                        ..
+                    }
+                ),
+                "expected refusal for `{bad}`"
+            );
+        }
     }
 
     #[test]

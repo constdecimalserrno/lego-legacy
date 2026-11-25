@@ -5,7 +5,7 @@
 //! player runs.
 
 use crate::cli::{Cli, CliError};
-use crate::host::{headless::Headless, Host};
+use crate::host::{headless::Headless, telemetry::TelemetryHost, Host};
 use crate::machine::{Finish, Machine, Outcome};
 use crate::runlog::RunLog;
 use crate::Title;
@@ -45,6 +45,19 @@ pub fn run_digested(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
+    if cli.fps_report || cli.fps_window.is_some() {
+        let mut telemetry = TelemetryHost::new(host, title.flip_cost);
+        let (mut machine, mut log) = setup(title, cli, &mut telemetry)?;
+        let finish = machine.run(&mut telemetry, &mut log, budget);
+        telemetry.free_mouse();
+        telemetry.pointer_shape(None);
+        let digest = wrap_up(title, &mut machine, &mut telemetry, &mut log, &finish);
+        for line in telemetry.report(cli.fps_window).format_lines() {
+            log.line(&line);
+            println!("{line}");
+        }
+        return Ok((finish, log, digest));
+    }
     let (mut machine, mut log) = setup(title, cli, host)?;
     let finish = machine.run(host, &mut log, budget);
     // Nothing reads the mouse once the run has ended, so it is the person's

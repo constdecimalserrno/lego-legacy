@@ -65,6 +65,7 @@ type NewOutput = unsafe extern "C" fn(
 type AllocateBuffer = unsafe extern "C" fn(Queue, u32, *mut *mut Buffer) -> i32;
 type EnqueueBuffer = unsafe extern "C" fn(Queue, *mut Buffer, u32, *const c_void) -> i32;
 type Start = unsafe extern "C" fn(Queue, *const c_void) -> i32;
+type Pause = unsafe extern "C" fn(Queue) -> i32;
 type Dispose = unsafe extern "C" fn(Queue, u8) -> i32;
 
 /// What the queue's thread and the run share: the samples waiting to be heard.
@@ -82,6 +83,8 @@ impl Shared {
 /// The Mac's default output, playing the mix.
 pub struct MacAudio {
     queue: Queue,
+    start: Start,
+    pause: Pause,
     dispose: Dispose,
     /// Made with `Box::into_raw` and read by the queue's thread; given back to
     /// a box only once the queue is disposed of.
@@ -97,12 +100,13 @@ impl MacAudio {
     pub fn open() -> Result<Self, HostError> {
         let toolbox = sys::Library::open(AUDIO_TOOLBOX)?;
         // Safety: each type is the signature AudioQueue.h gives the function.
-        let (new_output, allocate, enqueue, start, dispose) = unsafe {
+        let (new_output, allocate, enqueue, start, pause, dispose) = unsafe {
             (
                 toolbox.function::<NewOutput>("AudioQueueNewOutput")?,
                 toolbox.function::<AllocateBuffer>("AudioQueueAllocateBuffer")?,
                 toolbox.function::<EnqueueBuffer>("AudioQueueEnqueueBuffer")?,
                 toolbox.function::<Start>("AudioQueueStart")?,
+                toolbox.function::<Pause>("AudioQueuePause")?,
                 toolbox.function::<Dispose>("AudioQueueDispose")?,
             )
         };
@@ -144,6 +148,8 @@ impl MacAudio {
         // From here the queue is disposed of if anything below fails.
         let audio = Self {
             queue,
+            start,
+            pause,
             dispose,
             shared,
             _toolbox: toolbox,
@@ -187,6 +193,27 @@ impl MacAudio {
         let shared = unsafe { &*self.shared };
         let underruns = shared.waiting().underruns;
         underruns
+    }
+
+    /// Pause or resume the audio queue without counting underruns (#296).
+    pub fn set_paused(&self, paused: bool) {
+        // Safety: the shared state lives as long as `self`, and the queue is
+        // live until `Drop`.
+        let shared = unsafe { &*self.shared };
+        {
+            let mut waiting = shared.waiting();
+            if waiting.paused == paused {
+                return;
+            }
+            waiting.set_paused(paused);
+        }
+        unsafe {
+            if paused {
+                (self.pause)(self.queue);
+            } else {
+                (self.start)(self.queue, std::ptr::null());
+            }
+        }
     }
 }
 

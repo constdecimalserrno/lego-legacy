@@ -176,6 +176,11 @@ impl LinuxAudio {
     pub fn underruns(&self) -> u64 {
         self.shared.waiting().underruns
     }
+
+    /// Pause or resume feeding samples without counting underruns (#296).
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.waiting().set_paused(paused);
+    }
 }
 
 impl Drop for LinuxAudio {
@@ -217,7 +222,10 @@ fn feed(device: &Device, shared: &Shared) {
             // person hears as a gap just as they hear the mix running out:
             // counted with those (#75).
             if wrote == RAN_DRY {
-                shared.waiting().underruns += 1;
+                let mut waiting = shared.waiting();
+                if !waiting.paused {
+                    waiting.underruns += 1;
+                }
             }
             let error = c_int::try_from(wrote).unwrap_or(c_int::MIN);
             // Safety: a live PCM, and the error it gave.

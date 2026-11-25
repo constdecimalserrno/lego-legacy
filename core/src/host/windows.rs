@@ -1170,6 +1170,17 @@ impl Host for WinWindow {
     fn pace(&mut self, declared_nanos: u64) -> f64 {
         self.pace.hold(declared_nanos)
     }
+
+    fn pump(&mut self) {
+        WinWindow::pump(self);
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.pace.set_paused(paused);
+        if let Some(device) = &self.audio {
+            device.set_paused(paused);
+        }
+    }
 }
 
 pub(super) use way_back::listen;

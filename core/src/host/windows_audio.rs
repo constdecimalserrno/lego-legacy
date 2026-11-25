@@ -161,6 +161,8 @@ pub struct WinAudio {
     prepare: Header,
     unprepare: Header,
     write: Header,
+    pause: Device,
+    restart: Device,
     reset: Device,
     close: Device,
     _winmm: sys::Library,
@@ -186,12 +188,14 @@ impl WinAudio {
     pub fn open() -> Result<Self, HostError> {
         let winmm = sys::Library::open("winmm.dll")?;
         // Safety: each type is the signature mmeapi.h gives the function.
-        let (open, prepare, unprepare, write, reset, close) = unsafe {
+        let (open, prepare, unprepare, write, pause, restart, reset, close) = unsafe {
             (
                 winmm.function::<Open>("waveOutOpen")?,
                 winmm.function::<Header>("waveOutPrepareHeader")?,
                 winmm.function::<Header>("waveOutUnprepareHeader")?,
                 winmm.function::<Header>("waveOutWrite")?,
+                winmm.function::<Device>("waveOutPause")?,
+                winmm.function::<Device>("waveOutRestart")?,
                 winmm.function::<Device>("waveOutReset")?,
                 winmm.function::<Device>("waveOutClose")?,
             )
@@ -260,6 +264,8 @@ impl WinAudio {
             prepare,
             unprepare,
             write,
+            pause,
+            restart,
             reset,
             close,
             _winmm: winmm,
@@ -304,6 +310,25 @@ impl WinAudio {
     #[must_use]
     pub fn underruns(&self) -> u64 {
         self.shared.waiting().underruns
+    }
+
+    /// Pause or resume the waveOut device without counting underruns (#296).
+    pub fn set_paused(&self, paused: bool) {
+        {
+            let mut waiting = self.shared.waiting();
+            if waiting.paused == paused {
+                return;
+            }
+            waiting.set_paused(paused);
+        }
+        // Safety: an open waveOut device handle, live until `Drop`.
+        unsafe {
+            if paused {
+                (self.pause)(self.device);
+            } else {
+                (self.restart)(self.device);
+            }
+        }
     }
 }
 

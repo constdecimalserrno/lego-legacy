@@ -340,8 +340,25 @@ impl Machine {
         ));
         self.pace(host, log);
 
+        self.observe_flip(host);
         self.deliver_input(host, log);
         self.flips += 1;
+    }
+
+    /// Notify the host of flip metadata after audio mixing and immediately
+    /// before input delivery, strictly outside guest state (#296).
+    fn observe_flip(&self, host: &mut dyn Host) {
+        let route_remaining = self.undelivered();
+        host.observe_flip(&crate::host::FlipMeta {
+            flip: self.flips,
+            clock_nanos: self.clock.nanos(),
+            cursor: self.clock.cursor(),
+            instructions_passed: self.instructions_passed(),
+            pointer_shown: self.pointer_shown,
+            pointer_pos: self.state.pointer,
+            route_active: route_remaining > 0,
+            route_remaining,
+        });
     }
 
     /// Hold the host to the declared clock, and say what pace it settled on
@@ -2399,6 +2416,7 @@ impl Machine {
             }
         }
         self.mix(host);
+        self.observe_flip(host);
         self.deliver_input(host, log);
         self.flips += 1;
     }

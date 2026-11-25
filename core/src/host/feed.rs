@@ -35,6 +35,16 @@ pub struct Waiting {
     /// waiting, having been playing. Each one is a gap a person hears, and
     /// counting them is how a run says whether the mix is keeping up (#75).
     pub underruns: u64,
+    /// Whether host playback is paused (#296). While paused, [`fill_frames`]
+    /// outputs silence without consuming samples or counting underruns.
+    pub paused: bool,
+}
+
+impl Waiting {
+    /// Pause or resume draining samples to the audio device (#296).
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
 }
 
 /// Add samples to those waiting, dropping the oldest whole frames past
@@ -50,9 +60,13 @@ pub fn add_waiting(waiting: &mut Waiting, samples: &[i16]) {
 }
 
 /// Fill `bytes` with whole frames of what is waiting, so the channels never
-/// swap. Until enough has waited, and from when it runs dry until enough has
-/// waited again, the device plays silence.
+/// swap. Until enough has waited, while paused, and from when it runs dry
+/// until enough has waited again, the device plays silence.
 pub fn fill_frames(waiting: &mut Waiting, bytes: &mut [u8]) {
+    if waiting.paused {
+        bytes.fill(0);
+        return;
+    }
     for frame in bytes.as_chunks_mut::<{ FRAME_BYTES as usize }>().0 {
         let samples = &mut waiting.samples;
         let (left, right) = match (waiting.playing, samples.front(), samples.get(1)) {
@@ -293,5 +307,35 @@ mod tests {
             Some(0),
             "a frame's left"
         );
+    }
+
+    #[test]
+    fn pausing_outputs_silence_without_phantom_underruns_or_sample_loss() {
+        let mut waiting = Waiting::default();
+        let initial: Vec<i16> = (1..=(ENOUGH_TO_PLAY as i16)).collect();
+        add_waiting(&mut waiting, &initial);
+        assert!(waiting.playing);
+
+        waiting.set_paused(true);
+        let mut bytes = [0xaa; 32];
+        for _ in 0..100 {
+            bytes.fill(0xaa);
+            fill_frames(&mut waiting, &mut bytes);
+            assert_eq!(bytes, [0; 32], "paused device receives silence");
+        }
+        assert_eq!(waiting.underruns, 0, "pausing never counts underruns");
+        assert!(waiting.playing, "playing state preserved across pause");
+        assert_eq!(
+            waiting.samples.len(),
+            ENOUGH_TO_PLAY,
+            "queued samples preserved while paused"
+        );
+
+        // Resuming continues draining the exact queued frames.
+        waiting.set_paused(false);
+        let mut out = [0u8; 8];
+        fill_frames(&mut waiting, &mut out);
+        assert_eq!(out, [1, 0, 2, 0, 3, 0, 4, 0]);
+        assert_eq!(waiting.underruns, 0);
     }
 }
