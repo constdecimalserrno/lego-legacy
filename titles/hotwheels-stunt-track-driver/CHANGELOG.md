@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Added `AGENTS.md` agent playbook and enriched static `GUIDE` (`controls`, `hazards`, `goals`, `save_files`) with verified `STUNT.EXE` DirectInput controls (`Up`/`Down`/`Left`/`Right`, `LeftShift`/`LeftControl` aerial stunts, `Space`, `P`/`Pause`, `C` crash/respawn, `F1` race resolution, `Escape` quit hazard), menu click hold/settle rules (`--hold-flips 5..6`), post-race `SetCursorPos(320, 240)` cursor offset caveat (#329), and concrete progression goals from Single Race and Custom Garage Gold Medal through Championship Tracks 1–6 and Secret Track `WIRE` Gold Medal (#334). Strictly outside guest state; no route moved.
+
 Declares static `GUIDE: TitleGuide` metadata (`AbsoluteKept`, 8bpp, 60 Hz, `escape_quits: true` safety guard requiring `force: true` to send `Escape`, `MicroStep`, `Up`/`Left`/`Right`/`LeftShift`/`LeftControl` racing & stunt controls, Mattel `"TT"` `(270,100)` Track Select hotspot for Secret Track `WIRE`, First Race & Championship + `WIRE` Gold Medal goals, and `saves\onoff.dat`/`times.dat`/`wheel.dat`) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
 
 Added `routes/secret-track.route` (#285): a deterministic route from a clean `--data-root` that
