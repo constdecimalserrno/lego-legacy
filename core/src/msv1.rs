@@ -29,6 +29,19 @@ pub struct Picture {
     pixels: Vec<u16>,
 }
 
+impl crate::snap::Snap for Picture {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            width,
+            height,
+            pixels,
+        } = self;
+        v.usize(width);
+        v.usize(height);
+        crate::snap::snap_u16_vec(v, pixels);
+    }
+}
+
 impl Picture {
     /// Make a black picture of `width` by `height`, each a non-zero multiple
     /// of four.

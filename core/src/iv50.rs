@@ -365,6 +365,190 @@ impl Default for Decoder {
     }
 }
 
+impl crate::snap::Snap for Layout {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            width,
+            height,
+            tile_width,
+            tile_height,
+        } = self;
+        v.usize(width);
+        v.usize(height);
+        v.usize(tile_width);
+        v.usize(tile_height);
+    }
+}
+
+impl crate::snap::Snap for Codebook {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            rows,
+            xbits,
+            base,
+            count,
+        } = self;
+        v.usize(rows);
+        v.bytes(xbits);
+        for b in base {
+            v.u32(b);
+        }
+        for c in count {
+            v.u32(c);
+        }
+    }
+}
+
+impl crate::snap::Snap for Macroblock {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            x,
+            y,
+            offset,
+            inter,
+            cbp,
+            q_delta,
+            mv_x,
+            mv_y,
+        } = self;
+        v.usize(x);
+        v.usize(y);
+        v.usize(offset);
+        v.bool(inter);
+        v.u8(cbp);
+        v.i32(q_delta);
+        v.i32(mv_x);
+        v.i32(mv_y);
+    }
+}
+
+impl crate::snap::Snap for Tile {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            x,
+            y,
+            width,
+            height,
+            blocks,
+        } = self;
+        v.usize(x);
+        v.usize(y);
+        v.usize(width);
+        v.usize(height);
+        crate::snap::snap_vec(v, blocks, |b, v| b.snap(v));
+    }
+}
+
+impl crate::snap::Snap for Band {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            width,
+            height,
+            pitch,
+            aligned_height,
+            planes,
+            halfpel,
+            mb_size,
+            blk_size,
+            transform,
+            scan,
+            intra_base,
+            inter_base,
+            intra_scale,
+            inter_scale,
+            tiles,
+        } = self;
+        v.usize(width);
+        v.usize(height);
+        v.usize(pitch);
+        v.usize(aligned_height);
+        crate::snap::snap_i16_vec(v, &mut planes[0]);
+        crate::snap::snap_i16_vec(v, &mut planes[1]);
+        v.bool(halfpel);
+        v.usize(mb_size);
+        v.usize(blk_size);
+        let mut t_tag = match transform {
+            Transform::Slant8x8 => 0u8,
+            Transform::Slant4x4 => 1u8,
+        };
+        v.u8(&mut t_tag);
+        if v.is_reading() {
+            match t_tag {
+                0 => {
+                    *transform = Transform::Slant8x8;
+                    *scan = &tables::SCAN_ZIGZAG_8X8;
+                    *intra_base = &tables::BASE_QUANT_8X8_INTRA;
+                    *inter_base = &tables::BASE_QUANT_8X8_INTER;
+                    *intra_scale = &tables::SCALE_QUANT_8X8_INTRA;
+                    *inter_scale = &tables::SCALE_QUANT_8X8_INTER;
+                }
+                1 => {
+                    *transform = Transform::Slant4x4;
+                    *scan = &tables::SCAN_DIRECT_4X4;
+                    *intra_base = &tables::BASE_QUANT_4X4_INTRA;
+                    *inter_base = &tables::BASE_QUANT_4X4_INTER;
+                    *intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
+                    *inter_scale = &tables::SCALE_QUANT_4X4_INTER;
+                }
+                _ => v.mark_corrupt("iv50::Transform tag"),
+            }
+        }
+        crate::snap::snap_vec_with(
+            v,
+            tiles,
+            || Tile {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                blocks: Vec::new(),
+            },
+            |t, v| t.snap(v),
+        );
+    }
+}
+
+impl crate::snap::Snap for Decoder {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            layout,
+            gop_valid,
+            decoded_any,
+            gop_flags,
+            frame_flags,
+            frame_type,
+            previous_type,
+            switch,
+            dst,
+            reference,
+            mb_book,
+            planes,
+        } = self;
+        crate::snap::snap_option(v, layout, |l, v| l.snap(v));
+        v.bool(gop_valid);
+        v.bool(decoded_any);
+        v.u32(gop_flags);
+        v.u32(frame_flags);
+        v.u8(frame_type);
+        v.u8(previous_type);
+        v.usize(switch);
+        v.usize(dst);
+        v.usize(reference);
+        crate::snap::snap_option_with(
+            v,
+            mb_book,
+            || Codebook {
+                rows: 0,
+                xbits: [0; 16],
+                base: [0; 16],
+                count: [0; 16],
+            },
+            |b, v| b.snap(v),
+        );
+        crate::snap::snap_vec_with(v, planes, || Band::new(0, 0, 1), |b, v| b.snap(v));
+    }
+}
+
 impl Decoder {
     #[must_use]
     pub fn new() -> Self {

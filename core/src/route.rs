@@ -191,6 +191,22 @@ pub struct Route {
     events: Vec<((u64, u64), Input)>,
 }
 
+impl crate::snap::Snap for Route {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { events } = self;
+        crate::snap::snap_vec_with(
+            v,
+            events,
+            || ((0u64, 0u64), Input::Close),
+            |((flip, poll), ev), v| {
+                v.u64(flip);
+                v.u64(poll);
+                ev.snap(v);
+            },
+        );
+    }
+}
+
 impl Route {
     #[must_use]
     pub fn new() -> Self {

@@ -93,8 +93,9 @@ pub struct Finish {
     pub declared_millis: u64,
 }
 
-/// Read-only flip-boundary observer callback (#309).
-pub(crate) type FlipObserver = Box<dyn Fn(&Machine, &mut dyn Host)>;
+/// Flip-boundary observer callback (#309, #313): serves read-only introspection
+/// as well as instant live `LLSNAP v2` snapshot/restore operations.
+pub(crate) type FlipObserver = Box<dyn Fn(&mut Machine, &mut dyn Host)>;
 
 /// The whole machine.
 pub struct Machine {
@@ -371,7 +372,7 @@ impl Machine {
 
     /// Notify the host of flip metadata after audio mixing and immediately
     /// before input delivery, strictly outside guest state (#296).
-    fn observe_flip(&self, host: &mut dyn Host) {
+    fn observe_flip(&mut self, host: &mut dyn Host) {
         let route_remaining = self.undelivered();
         host.observe_flip(&crate::host::FlipMeta {
             flip: self.flips,
@@ -383,8 +384,34 @@ impl Machine {
             route_active: route_remaining > 0,
             route_remaining,
         });
-        if let Some(observer) = &self.flip_observer {
+        if let Some(observer) = self.flip_observer.take() {
             observer(self, host);
+            if self.flip_observer.is_none() {
+                self.flip_observer = Some(observer);
+            }
+        }
+    }
+
+    /// Synchronize host-side pointer visibility/cursor shape after an in-place
+    /// live snapshot restore (#313).
+    pub(crate) fn sync_host_after_restore(&self, host: &mut dyn Host) {
+        host.show_pointer(self.pointer_shown);
+        if let Some(cursor) = self.cursor_told {
+            host.pointer_shape(crate::win32::user32::shape(&self.state, cursor).as_ref());
+        } else {
+            host.pointer_shape(None);
+        }
+    }
+
+    /// Latest converted BGRA framebuffer held by this machine (if any guest flip
+    /// has presented), paired with its `(width, height)`.
+    pub(crate) fn last_presented_bgra(&self) -> Option<(u32, u32, &[u8])> {
+        let (w, h, _) = self.state.display_mode;
+        let expected = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if expected > 0 && self.present_buffer.len() >= expected {
+            Some((w, h, &self.present_buffer[..expected]))
+        } else {
+            None
         }
     }
 
@@ -1698,55 +1725,279 @@ impl Machine {
         regions
     }
 
-    /// Write the machine's state, keyed by what produced it.
+    /// Merged, sorted, non-overlapping 4 KiB page intervals `[start_page, end_page)`
+    /// covering every guest-writable region of the arena (excluding read-only
+    /// file mappings tracked separately in `state.mapped_files`).
+    fn live_page_ranges(&self) -> Vec<(u32, u32)> {
+        const PAGE: u32 = 4096;
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        let mut push_bytes = |start: u32, len: u32| {
+            if len == 0 {
+                return;
+            }
+            let p_start = start / PAGE;
+            let p_end = start.saturating_add(len).div_ceil(PAGE);
+            if p_start < p_end {
+                ranges.push((p_start, p_end));
+            }
+        };
+        for (start, len) in self.snapshot_regions() {
+            push_bytes(start, len);
+        }
+        push_bytes(crate::loader::ATTACH_PROGRAM, PAGE);
+        if self.stub {
+            push_bytes(stub::ENTRY, PAGE);
+        }
+        for (&base, &(size, _)) in &self.state.reserved {
+            push_bytes(base, size);
+        }
+        for &page in self.state.committed.keys() {
+            push_bytes(page, PAGE);
+        }
+        if ranges.is_empty() {
+            return ranges;
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        merged
+    }
+
+    /// Snapshot or restore all scalar & structured `Machine` fields (excluding
+    /// sparse arena pages, profile overlay, and host-side config/callbacks).
+    fn snap_machine_fields(&mut self, v: &mut dyn crate::snap::Visitor) {
+        use crate::snap::Snap;
+        // Exhaustively destructure `Machine` so any field added later causes a
+        // compile error here rather than being silently omitted from snapshots (#313).
+        let Self {
+            arena,
+            cpu,
+            clock,
+            engine: _,
+            flip_cost: _,
+            surface,
+            stub,
+            flips,
+            paced,
+            boundary,
+            image: _,
+            modules,
+            bound_names,
+            state,
+            tree,
+            title: _,
+            input,
+            present_buffer: _,
+            pointer_puts,
+            pointer_puts_told,
+            pointer_shown,
+            cursor_told,
+            continuations,
+            dialog_turns,
+            pass_through,
+            bound: _,
+            render_turns,
+            route: _,
+            recording,
+            screenshots: _,
+            snapshot_every: _,
+            next_snapshot: _,
+            turn,
+            close_by,
+            polls,
+            ask_at,
+            delivered,
+            next_route_at: _,
+            next_mix_cycle: _,
+            spins,
+            flip_observer: _,
+        } = self;
+
+        cpu.snap(v);
+        clock.snap(v);
+        arena.snap_meta(v);
+        crate::snap::snap_option_with(
+            v,
+            surface,
+            || Surface {
+                addr: 0,
+                width: 0,
+                height: 0,
+                pitch: 0,
+            },
+            |s, v| {
+                let Surface {
+                    addr,
+                    width,
+                    height,
+                    pitch,
+                } = s;
+                v.u32(addr);
+                v.u32(width);
+                v.u32(height);
+                v.u32(pitch);
+            },
+        );
+        v.bool(stub);
+        v.u64(flips);
+        v.f64(paced);
+        boundary.snap(v);
+        modules.snap(v);
+        v.usize(bound_names);
+        state.snap(v);
+        tree.snap_wall(v);
+        crate::snap::snap_vec_with(
+            v,
+            input,
+            || ((0u64, 0u64), crate::host::Input::Close),
+            |((f, p), ev), v| {
+                v.u64(f);
+                v.u64(p);
+                ev.snap(v);
+            },
+        );
+        v.u64(pointer_puts);
+        v.u64(pointer_puts_told);
+        v.bool(pointer_shown);
+        crate::snap::snap_option(v, cursor_told, |c, v| v.u32(c));
+        crate::snap::snap_vec(v, continuations, |(a, b, c), v| {
+            v.u32(a);
+            v.u32(b);
+            v.u32(c);
+        });
+        crate::snap::snap_vec(v, dialog_turns, |d, v| v.usize(d));
+        crate::snap::snap_vec(v, pass_through, |d, v| v.usize(d));
+        crate::snap::snap_vec(v, render_turns, |(d, s), v| {
+            v.usize(d);
+            v.u32(s);
+        });
+        crate::snap::snap_option(v, recording, |r, v| r.snap(v));
+        let mut turn_tag = match turn {
+            Turn::Top => 0u8,
+            Turn::Burst(_) => 1u8,
+            Turn::Switched => 2u8,
+        };
+        v.u8(&mut turn_tag);
+        if v.is_reading() {
+            match turn_tag {
+                0 => *turn = Turn::Top,
+                1 => {
+                    let mut end = 0u64;
+                    v.u64(&mut end);
+                    *turn = Turn::Burst(end);
+                }
+                2 => *turn = Turn::Switched,
+                _ => v.mark_corrupt("Machine::turn tag"),
+            }
+        } else if let Turn::Burst(end) = turn {
+            v.u64(end);
+        }
+        crate::snap::snap_option(v, close_by, |c, v| v.u64(c));
+        v.u64(polls);
+        v.u64(ask_at);
+        v.usize(delivered);
+        spins.snap(v);
+    }
+
+    /// Write the entire live machine state (`LLSNAP v2`, #313): provenance,
+    /// full CPU/x87/clock/schedule/Win32/COM/audio/movie state, sparse non-zero
+    /// 4 KiB arena pages, and profile directory file overlay.
+    ///
+    /// # Errors
+    /// When guest memory cannot be read.
+    pub fn snapshot_v2(&mut self) -> Result<Vec<u8>, crate::guest::Fault> {
+        use crate::snap::{Visitor, Writer, MAGIC};
+
+        let mut writer = Writer::with_capacity(256 * 1024);
+        writer.out.extend_from_slice(MAGIC);
+        let provenance = self.provenance();
+        for part in [&provenance.build, &provenance.title, &provenance.route] {
+            let len = u32::try_from(part.len()).unwrap_or(0);
+            writer.out.extend_from_slice(&len.to_le_bytes());
+            writer.out.extend_from_slice(part.as_bytes());
+        }
+
+        let stashed_files = self
+            .state
+            .stash_readonly_files(|p| self.tree.holds(p) && !self.tree.is_in_profile(p));
+        let mut deferred_files: Vec<(u32, u32, String)> = stashed_files
+            .iter()
+            .map(|(idx, resolved, bytes)| {
+                (
+                    u32::try_from(*idx).unwrap_or(u32::MAX),
+                    u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+                    resolved.clone(),
+                )
+            })
+            .collect();
+        self.snap_machine_fields(&mut writer);
+        self.state.unstash_readonly_files(stashed_files);
+        crate::snap::snap_vec(&mut writer, &mut deferred_files, |(idx, len, path), v| {
+            v.u32(idx);
+            v.u32(len);
+            v.string(path);
+        });
+
+        let page_ranges = self.live_page_ranges();
+        self.arena.write_sparse_pages(&page_ranges, &mut writer.out);
+
+        let mut profile_files = self
+            .tree
+            .profile_dir()
+            .map(capture_profile_overlay)
+            .unwrap_or_default();
+        let mut count = u32::try_from(profile_files.len()).unwrap_or(u32::MAX);
+        writer.u32(&mut count);
+        for (rel, bytes) in &mut profile_files {
+            writer.string(rel);
+            writer.byte_vec(bytes);
+        }
+        Ok(writer.out)
+    }
+
+    /// Write the machine's full state (`LLSNAP v2`), keyed by what produced it.
     ///
     /// # Errors
     /// When guest memory cannot be read.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, crate::guest::Fault> {
-        use crate::snap::{Snap, Visitor, Writer, MAGIC};
-
-        let mut out = Vec::from(*MAGIC);
-        let provenance = self.provenance();
-        for part in [&provenance.build, &provenance.title, &provenance.route] {
-            out.extend_from_slice(&u32::try_from(part.len()).unwrap_or(0).to_le_bytes());
-            out.extend_from_slice(part.as_bytes());
-        }
-
-        let mut writer = Writer::new();
-        self.cpu.snap(&mut writer);
-        self.clock.snap(&mut writer);
-        let mut flips = self.flips;
-        writer.u64(&mut flips);
-
-        let regions = self.snapshot_regions();
-        let mut count = u32::try_from(regions.len()).unwrap_or(0);
-        writer.u32(&mut count);
-        for (start, len) in regions {
-            let (mut start, mut len) = (start, len);
-            writer.u32(&mut start);
-            writer.u32(&mut len);
-            let bytes = self.arena.slice(start, len as usize)?.to_vec();
-            writer.out.extend_from_slice(&bytes);
-        }
-        out.extend_from_slice(&writer.out);
-        Ok(out)
+        self.snapshot_v2()
     }
 
-    /// Put the machine back where a snapshot left it: its processor, declared
-    /// clock, flips and guest memory. The Win32 state and the x87's status
-    /// word and stack top stay as this machine already has them, so only the
-    /// stub, which keeps no Win32 state, resumes whole (`snap`).
+    /// Restore the entire live machine state from an `LLSNAP v2` blob (#313),
+    /// enforcing strict provenance (`build`, `title`, and `route`).
     ///
     /// # Errors
-    /// When the snapshot came from another build, title or route, or when it
-    /// is not a snapshot at all.
-    // ponytail: and so does where the route is (#215): how many of its events
-    // were delivered, and the polls since the flip, so a run replaying a route
-    // resumed past its start would be handed them again. Only the stub
-    // resumes, and it reads no input. Upgrade path: carry both in the
-    // snapshot when a title resumes.
-    pub fn resume(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::snap::{Reader, Snap, SnapError, Visitor, MAGIC};
+    /// When the bytes are not an `LLSNAP v2` snapshot, fail provenance checks,
+    /// are truncated/corrupt, or profile restoration fails.
+    pub fn restore_v2(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.restore_v2_inner(bytes, true)
+    }
+
+    /// Restore the entire live machine state from an `LLSNAP v2` blob inside an
+    /// interactive control session (#313), verifying `build` and `title`
+    /// provenance while permitting differing pre-roll routes.
+    ///
+    /// # Errors
+    /// When the bytes are not an `LLSNAP v2` snapshot, fail `build`/`title`
+    /// provenance checks, are truncated/corrupt, or profile restoration fails.
+    pub fn restore_v2_live(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.restore_v2_inner(bytes, false)
+    }
+
+    fn restore_v2_inner(
+        &mut self,
+        bytes: &[u8],
+        strict_route: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::snap::{Reader, SnapError, Visitor, MAGIC};
 
         if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
             return Err(SnapError::NotASnapshot.into());
@@ -1769,44 +2020,333 @@ impl Machine {
             title: part()?,
             route: part()?,
         };
-        self.provenance().accepts(&found)?;
+        if strict_route {
+            self.provenance().accepts(&found)?;
+        } else {
+            self.provenance().accepts_target(&found)?;
+        }
+
+        // Capture pre-restore dirty ranges, open read-only file buffers, and
+        // mapped file state so pages written after the snapshot are zeroed
+        // cleanly and unchanged read-only archives are kept in place with zero copy.
+        let prev_page_ranges = self.live_page_ranges();
+        let prev_next_mapping = self.state.next_mapping;
+        let prev_mapped_files = self.state.mapped_files.clone();
+        let mut prev_handles = self.state.take_handles();
 
         let mut reader = Reader::new(&bytes[at..]);
-        self.cpu.snap(&mut reader);
-        self.clock.snap(&mut reader);
-        let mut flips = 0u64;
-        reader.u64(&mut flips);
-        self.flips = flips;
+        self.snap_machine_fields(&mut reader);
+        reader.finish("machine state")?;
 
-        let mut count = 0u32;
-        reader.u32(&mut count);
-        for _ in 0..count {
-            let (mut start, mut len) = (0u32, 0u32);
-            reader.u32(&mut start);
-            reader.u32(&mut len);
-            let mut region = vec![0u8; len as usize];
-            reader.bytes(&mut region);
-            self.arena.write(start, &region)?;
+        let mut deferred_files: Vec<(u32, u32, String)> = Vec::new();
+        crate::snap::snap_vec(&mut reader, &mut deferred_files, |(idx, len, path), v| {
+            v.u32(idx);
+            v.u32(len);
+            v.string(path);
+        });
+        reader.finish("deferred files")?;
+
+        let post_page_ranges = self.live_page_ranges();
+        let clear_ranges = merge_page_ranges(&prev_page_ranges, &post_page_ranges);
+        self.arena.restore_sparse_pages(&clear_ranges, &mut reader);
+        reader.finish("arena pages")?;
+
+        // Read profile overlay before touching disk so a truncated snapshot
+        // never partially modifies profile files.
+        let mut profile_count = 0u32;
+        reader.u32(&mut profile_count);
+        let profile_count = profile_count as usize;
+        if !reader.check_remaining(profile_count.saturating_mul(8)) {
+            return Err(SnapError::Truncated("profile overlay").into());
         }
-        if reader.short {
-            return Err(SnapError::Truncated("state").into());
+        let mut profile_files: Vec<(String, Vec<u8>)> = Vec::with_capacity(profile_count);
+        for _ in 0..profile_count {
+            let mut rel = String::new();
+            let mut data = Vec::new();
+            reader.string(&mut rel);
+            reader.byte_vec(&mut data);
+            if reader.failed() {
+                break;
+            }
+            profile_files.push((rel, data));
         }
-        self.next_mix_cycle = 0;
-        self.next_route_at = (0, 0);
-        // Nothing decoded before the resume describes the memory that is here
-        // now.
+        reader.finish("profile overlay")?;
+
+        // Sync <data-root>/profile/ back to the exact file set at snapshot time
+        // before re-hydrating any mapped or AVI files that may come from profile.
+        if let Some(profile_root) = self.tree.profile_dir().map(std::path::Path::to_path_buf) {
+            restore_profile_overlay(&profile_root, &profile_files)?;
+        }
+
+        // Rehydrate deferred read-only file handle buffers: swap in place from
+        // `prev_handles` on live restore (0 copy, 0 I/O) or read from `tree` on cold.
+        for (idx, expected_len, resolved_path) in deferred_files {
+            let idx = idx as usize;
+            let expected_len = expected_len as usize;
+            let Some(crate::win32::Object::File {
+                path,
+                contents: crate::win32::Contents::Held(bytes),
+                wrote: false,
+                ..
+            }) = self.state.handle_slot_mut(idx)
+            else {
+                return Err(SnapError::Corrupt("deferred file handle").into());
+            };
+            if !bytes.is_empty() {
+                return Err(SnapError::Corrupt("deferred file non-empty").into());
+            }
+            if let Some(Some(crate::win32::Object::File {
+                path: prev_path,
+                contents: crate::win32::Contents::Held(prev_bytes),
+                wrote: false,
+                ..
+            })) = prev_handles.get_mut(idx)
+            {
+                if prev_path == path && prev_bytes.len() == expected_len {
+                    std::mem::swap(bytes, prev_bytes);
+                    continue;
+                }
+            }
+            let Some(loaded) = self.tree.read(&resolved_path) else {
+                return Err(SnapError::Corrupt("deferred file missing from tree").into());
+            };
+            if loaded.len() != expected_len {
+                return Err(SnapError::Corrupt("deferred file length mismatch").into());
+            }
+            if let Some(crate::win32::Object::File {
+                contents: crate::win32::Contents::Held(slot),
+                ..
+            }) = self.state.handle_slot_mut(idx)
+            {
+                *slot = loaded;
+            }
+        }
+
+        // Reconcile read-only file mappings at MAPPING_BASE..next_mapping:
+        // - Prefix entries matching what is already mapped in the live arena
+        //   require zero bytes copied (keeps Alpha Team's 400 MB archives <1 ms).
+        // - Any new/cold entries are populated from `self.tree`.
+        // - Any tail mapped after the snapshot is zeroed back cleanly.
+        let new_next_mapping = self.state.next_mapping;
+        if prev_next_mapping > new_next_mapping {
+            self.arena
+                .zero_range_raw(new_next_mapping, prev_next_mapping);
+        }
+        let need_remap: Vec<(u32, u32, String)> = self
+            .state
+            .mapped_files
+            .iter()
+            .enumerate()
+            .filter(|(i, entry)| prev_mapped_files.get(*i) != Some(*entry))
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        for (map_at, map_len, map_path) in need_remap {
+            let Some(file_bytes) = self.tree.read(&map_path) else {
+                return Err(SnapError::Corrupt("mapped file missing from tree").into());
+            };
+            let take = (map_len as usize).min(file_bytes.len());
+            self.arena.write(map_at, &file_bytes[..take])?;
+            let padded = map_len.next_multiple_of(0x1000);
+            if (take as u32) < padded {
+                self.arena.zero_range_raw(
+                    map_at.saturating_add(take as u32),
+                    map_at.saturating_add(padded),
+                );
+            }
+        }
+
+        // Rehydrate AVIFile `Rc<[u8]>` handles from `state.movie_bytes` or `tree`.
+        let avi_keys: Vec<(u32, String)> = self
+            .state
+            .avi_files
+            .iter()
+            .filter(|(_, f)| f.needs_bytes())
+            .map(|(&obj, f)| (obj, f.key.clone()))
+            .collect();
+        for (obj, key) in avi_keys {
+            let bytes = if let Some(cached) = self.state.movie_bytes.get(&key) {
+                cached.clone()
+            } else if let Some(loaded) = self.tree.read(&key) {
+                let rc: std::rc::Rc<[u8]> = loaded.into();
+                self.state.movie_bytes.insert(key, rc.clone());
+                rc
+            } else {
+                return Err(SnapError::Corrupt("avi movie missing from tree").into());
+            };
+            if let Some(file) = self.state.avi_files.get_mut(&obj) {
+                file.set_bytes(bytes);
+            }
+        }
+
+        if !strict_route {
+            let route_len = self.route.as_ref().map_or(0, crate::route::Route::len);
+            if self.delivered > route_len {
+                self.delivered = route_len;
+            }
+        }
+
+        // Invalidate decoded fast-block cache & boundary lookup cache and
+        // re-sync scheduler/mixer horizons cleanly.
+        self.bound.clear();
         self.forget_decoded();
+        self.next_mix_cycle = self
+            .clock
+            .first_cycle_of_audio_frame(self.state.mixer.next_frame().saturating_add(1));
+        self.next_route_at = self.peek_next_route_at();
+        self.next_snapshot = self
+            .snapshot_every
+            .map(|every| self.flips.saturating_add(every.max(1)));
         Ok(())
+    }
+
+    /// Put the machine back where a snapshot left it (`LLSNAP v2`, #313).
+    ///
+    /// # Errors
+    /// When the snapshot came from another build, title or route, or when it
+    /// is not a snapshot at all.
+    pub fn resume(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.restore_v2(bytes)
     }
 
     /// Throw away every decoded instruction, after memory has changed under
     /// the engine.
     pub fn forget_decoded(&mut self) {
-        self.engine = Box::new(Interp::new(Mode {
-            processor: self.title.declared.processor,
-            ..Mode::FLAT
-        }));
+        self.engine.forget();
+        self.arena.clear_code();
     }
+}
+
+/// Merge two sorted, non-overlapping `[start_page, end_page)` interval lists.
+fn merge_page_ranges(a: &[(u32, u32)], b: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut all = Vec::with_capacity(a.len() + b.len());
+    all.extend_from_slice(a);
+    all.extend_from_slice(b);
+    if all.is_empty() {
+        return all;
+    }
+    all.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(all.len());
+    for (s, e) in all {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    merged
+}
+
+/// Capture all regular files under `root` as sorted `(rel_unix_path, bytes)`.
+fn capture_profile_overlay(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return out;
+    }
+    fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<std::path::PathBuf> =
+            entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for path in paths {
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                walk(base, &path, out);
+            } else if meta.is_file() {
+                if let (Ok(rel), Ok(bytes)) = (path.strip_prefix(base), std::fs::read(&path)) {
+                    let rel_unix = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    out.push((rel_unix, bytes));
+                }
+            }
+        }
+    }
+    walk(root, root, &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Validate a relative profile overlay path against traversal or absolute escapes.
+fn validate_overlay_rel(rel: &str) -> Result<std::path::PathBuf, crate::snap::SnapError> {
+    use std::path::{Component, Path, PathBuf};
+    if rel.is_empty() || rel.contains('\0') {
+        return Err(crate::snap::SnapError::Corrupt("profile path"));
+    }
+    let mut out = PathBuf::new();
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::Normal(part) => out.push(part),
+            _ => return Err(crate::snap::SnapError::Corrupt("profile path")),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(crate::snap::SnapError::Corrupt("profile path"));
+    }
+    Ok(out)
+}
+
+/// Synchronize `root` on disk to match `files` bit-for-bit, removing any files
+/// created after the snapshot and restoring overwritten or deleted files.
+fn restore_profile_overlay(
+    root: &std::path::Path,
+    files: &[(String, Vec<u8>)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+    let mut wanted: BTreeMap<std::path::PathBuf, &[u8]> = BTreeMap::new();
+    for (rel, data) in files {
+        let sub = validate_overlay_rel(rel)?;
+        wanted.insert(root.join(sub), data.as_slice());
+    }
+
+    if root.is_dir() {
+        fn sweep(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            wanted: &BTreeMap<std::path::PathBuf, &[u8]>,
+        ) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(dir)? {
+                let path = entry?.path();
+                let meta = std::fs::symlink_metadata(&path)?;
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
+                    sweep(&path, root, wanted)?;
+                    // Remove subdirectories that became empty.
+                    if std::fs::read_dir(&path)?.next().is_none() {
+                        let _ = std::fs::remove_dir(&path);
+                    }
+                } else if meta.is_file() && !wanted.contains_key(&path) {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+            let _ = root;
+            Ok(())
+        }
+        sweep(root, root, &wanted)?;
+    }
+
+    for (path, bytes) in wanted {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let unchanged = std::fs::read(&path).is_ok_and(|cur| cur.as_slice() == bytes);
+        if !unchanged {
+            std::fs::write(&path, bytes)?;
+        }
+    }
+    Ok(())
 }
 
 impl Machine {

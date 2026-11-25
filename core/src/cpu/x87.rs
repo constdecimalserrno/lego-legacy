@@ -51,6 +51,25 @@ impl Default for X87 {
     }
 }
 
+impl crate::snap::Snap for X87 {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            regs,
+            top,
+            used,
+            control,
+            status,
+        } = self;
+        for reg in regs {
+            v.f64(reg);
+        }
+        v.u8(top);
+        v.u8(used);
+        v.u16(control);
+        v.u16(status);
+    }
+}
+
 impl X87 {
     #[must_use]
     pub fn new() -> Self {

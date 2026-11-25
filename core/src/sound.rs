@@ -679,6 +679,149 @@ impl Mixer {
     }
 }
 
+impl crate::snap::Snap for Format {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            tag,
+            channels,
+            rate,
+            block_align,
+            bits,
+            coefficients,
+        } = self;
+        v.u16(tag);
+        v.u16(channels);
+        v.u32(rate);
+        v.u16(block_align);
+        v.u16(bits);
+        crate::snap::snap_vec(v, coefficients, |(a, b), v| {
+            v.i32(a);
+            v.i32(b);
+        });
+    }
+}
+
+impl crate::snap::Snap for Pcm {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            store,
+            bytes,
+            channels,
+            bits,
+            rate,
+            left,
+            right,
+        } = self;
+        v.u32(store);
+        v.u32(bytes);
+        v.u16(channels);
+        v.u16(bits);
+        v.u32(rate);
+        v.f64(left);
+        v.f64(right);
+    }
+}
+
+impl crate::snap::Snap for Source {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Decoded(_) => 0u8,
+            Self::Guest(_) => 1u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => {
+                    let mut samples = Vec::new();
+                    crate::snap::snap_i16_vec(v, &mut samples);
+                    *self = Self::Decoded(samples);
+                }
+                1 => {
+                    let mut pcm = Pcm {
+                        store: 0,
+                        bytes: 0,
+                        channels: 0,
+                        bits: 0,
+                        rate: 1,
+                        left: 0.0,
+                        right: 0.0,
+                    };
+                    pcm.snap(v);
+                    *self = Self::Guest(pcm);
+                }
+                _ => v.mark_corrupt("sound::Source tag"),
+            }
+        } else {
+            match self {
+                Self::Decoded(samples) => crate::snap::snap_i16_vec(v, samples),
+                Self::Guest(pcm) => pcm.snap(v),
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Voice {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            id,
+            looping,
+            source,
+            start,
+            first,
+            end,
+        } = self;
+        v.u32(id);
+        v.bool(looping);
+        source.snap(v);
+        v.u64(start);
+        v.u64(first);
+        crate::snap::snap_option(v, end, |e, v| v.u64(e));
+    }
+}
+
+impl crate::snap::Snap for Mixer {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            voices,
+            synth,
+            blocks,
+            block,
+            ready,
+        } = self;
+        crate::snap::snap_vec_with(
+            v,
+            voices,
+            || Voice {
+                id: 0,
+                looping: false,
+                source: Source::Decoded(Vec::new()),
+                start: 0,
+                first: 0,
+                end: None,
+            },
+            |voice, v| voice.snap(v),
+        );
+        let mut has_synth = synth.is_some();
+        v.bool(&mut has_synth);
+        if v.is_reading() {
+            if has_synth {
+                if let Some(s) = synth.as_mut() {
+                    s.snap(v);
+                } else {
+                    v.mark_corrupt("mixer synth missing bank");
+                }
+            } else {
+                *synth = None;
+            }
+        } else if let Some(s) = synth.as_mut() {
+            s.snap(v);
+        }
+        v.u64(blocks);
+        crate::snap::snap_i16_vec(v, block);
+        crate::snap::snap_vec(v, ready, |b, v| crate::snap::snap_i16_vec(v, b));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{frame_at, Format, Mixer, Pcm, BLOCK_FRAMES, RATE};

@@ -1144,6 +1144,23 @@ pub struct Timer {
     pub callback: u32,
 }
 
+impl crate::snap::Snap for Timer {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            window,
+            id,
+            period,
+            due,
+            callback,
+        } = self;
+        v.u32(window);
+        v.u32(id);
+        v.u64(period);
+        v.u64(due);
+        v.u32(callback);
+    }
+}
+
 fn set_timer(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // SetTimer(window, id, elapse, callback). Windows keeps the period
     // between USER_TIMER_MINIMUM and USER_TIMER_MAXIMUM, and a window's timer
@@ -1857,6 +1874,52 @@ pub struct Dialog {
 struct List {
     items: Vec<String>,
     selected: Option<usize>,
+}
+
+impl Dialog {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            window: 0,
+            procedure: 0,
+            turns: 0,
+            parked: false,
+            ended: None,
+            lists: BTreeMap::new(),
+            checks: BTreeMap::new(),
+            disabled: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
+impl crate::snap::Snap for List {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { items, selected } = self;
+        crate::snap::snap_vec(v, items, |s, v| v.string(s));
+        crate::snap::snap_option(v, selected, |s, v| v.usize(s));
+    }
+}
+
+impl crate::snap::Snap for Dialog {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            window,
+            procedure,
+            turns,
+            parked,
+            ended,
+            lists,
+            checks,
+            disabled,
+        } = self;
+        v.u32(window);
+        v.u32(procedure);
+        v.u32(turns);
+        v.bool(parked);
+        crate::snap::snap_option(v, ended, |e, v| v.u32(e));
+        crate::snap::snap_btree_map(v, lists, |k, v| v.u32(k), |l, v| l.snap(v));
+        crate::snap::snap_btree_map(v, checks, |k, v| v.u32(k), |c, v| v.u32(c));
+        crate::snap::snap_btree_set(v, disabled, |k, v| v.u32(k));
+    }
 }
 
 /// The dialog's own window handle.

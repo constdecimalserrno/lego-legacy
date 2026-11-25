@@ -62,11 +62,53 @@ const STREAM_INFO_BYTES: u32 = 140;
 /// of the same file shares, its structure, and the streams handed out of it.
 pub struct File {
     name: String,
+    /// Normalized upper-case absolute guest path keying `State::movie_bytes`.
+    pub(crate) key: String,
     bytes: std::rc::Rc<[u8]>,
     avi: crate::avi::Avi,
     /// Each stream's object, once `AVIFileGetStream` has handed it out: the
     /// same one every time, as AVIFile hands out the one stream.
     streams: Vec<Option<u32>>,
+}
+
+impl File {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            name: String::new(),
+            key: String::new(),
+            bytes: std::rc::Rc::from([]),
+            avi: crate::avi::Avi::default(),
+            streams: Vec::new(),
+        }
+    }
+
+    pub(crate) fn set_bytes(&mut self, bytes: std::rc::Rc<[u8]>) {
+        self.bytes = bytes;
+    }
+
+    pub(crate) fn needs_bytes(&self) -> bool {
+        self.bytes.is_empty() && !self.key.is_empty()
+    }
+}
+
+impl crate::snap::Snap for File {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        // `bytes` is an immutable `Rc<[u8]>` backed by `State::movie_bytes` / `Tree`
+        // and is rehydrated by `key` on restore to avoid copying 172 MB of AVI data.
+        let Self {
+            name,
+            key,
+            bytes: _,
+            avi,
+            streams,
+        } = self;
+        v.string(name);
+        v.string(key);
+        avi.snap(v);
+        crate::snap::snap_vec(v, streams, |s, v| {
+            crate::snap::snap_option(v, s, |id, v| v.u32(id));
+        });
+    }
 }
 
 pub static AVI_FILE: Interface = Interface {
@@ -138,6 +180,73 @@ pub struct Getter {
     codec: Codec,
     /// The last frame decoded into the picture, which the DIB holds.
     decoded: Option<usize>,
+}
+
+impl Getter {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            file: 0,
+            stream: 0,
+            dib: 0,
+            bits: 0,
+            codec: Codec::Iv50(Box::default(), crate::iv50::Picture::default()),
+            decoded: None,
+        }
+    }
+}
+
+impl crate::snap::Snap for Codec {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Iv50(_, _) => 0u8,
+            Self::Video1(_) => 1u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => {
+                    let mut dec = Box::new(crate::iv50::Decoder::new());
+                    let mut pic = crate::iv50::Picture::default();
+                    dec.snap(v);
+                    pic.snap(v);
+                    *self = Self::Iv50(dec, pic);
+                }
+                1 => {
+                    let mut pic = crate::msv1::Picture::new(4, 4).expect("4x4");
+                    pic.snap(v);
+                    *self = Self::Video1(pic);
+                }
+                _ => v.mark_corrupt("avifile::Codec tag"),
+            }
+        } else {
+            match self {
+                Self::Iv50(dec, pic) => {
+                    dec.snap(v);
+                    pic.snap(v);
+                }
+                Self::Video1(pic) => pic.snap(v),
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Getter {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            file,
+            stream,
+            dib,
+            bits,
+            codec,
+            decoded,
+        } = self;
+        v.u32(file);
+        v.usize(stream);
+        v.u32(dib);
+        v.u16(bits);
+        codec.snap(v);
+        crate::snap::snap_option(v, decoded, |d, v| v.usize(d));
+    }
 }
 
 /// AVIFileInit and AVIFileExit, which start and end the library's use, as
@@ -239,7 +348,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // Only a movie that opens is kept.
     ctx.state
         .movie_bytes
-        .entry(path)
+        .entry(path.clone())
         .or_insert_with(|| bytes.clone());
     let object = State::make_com(ctx, &AVI_FILE, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
@@ -252,6 +361,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         object,
         File {
             name,
+            key: path,
             bytes,
             avi,
             streams,

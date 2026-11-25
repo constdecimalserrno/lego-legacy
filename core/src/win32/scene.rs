@@ -431,6 +431,177 @@ pub struct Scene {
     pub(crate) scratch: RenderScratch,
 }
 
+fn snap_matrix(m: &mut Matrix, v: &mut dyn crate::snap::Visitor) {
+    for row in m {
+        for val in row {
+            v.f32(val);
+        }
+    }
+}
+
+impl crate::snap::Snap for Frame {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            parent,
+            parent_slot,
+            children,
+            visuals,
+            lights,
+            local,
+            zbuffer_mode,
+            color,
+            background,
+            fog,
+        } = self;
+        v.u32(parent);
+        v.u32(parent_slot);
+        crate::snap::snap_u32_vec(v, children);
+        crate::snap::snap_u32_vec(v, visuals);
+        crate::snap::snap_u32_vec(v, lights);
+        snap_matrix(local, v);
+        v.u32(zbuffer_mode);
+        v.u32(color);
+        v.u32(background);
+        v.bool(fog);
+    }
+}
+
+impl crate::snap::Snap for Light {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            kind,
+            colour,
+            range,
+            umbra,
+            penumbra,
+            attenuation,
+            enable_frame,
+        } = self;
+        v.u32(kind);
+        v.u32(colour);
+        crate::snap::snap_option(v, range, |x, v| v.f32(x));
+        crate::snap::snap_option(v, umbra, |x, v| v.f32(x));
+        crate::snap::snap_option(v, penumbra, |x, v| v.f32(x));
+        for a in attenuation {
+            crate::snap::snap_option(v, a, |x, v| v.f32(x));
+        }
+        v.u32(enable_frame);
+    }
+}
+
+impl crate::snap::Snap for Group {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            vertices,
+            per_face,
+            indices,
+            all_indices_in_bounds,
+            colour,
+            mapping,
+            quality,
+            material,
+            texture,
+        } = self;
+        crate::snap::snap_vec(v, vertices, |vert, v| {
+            crate::snap::snap_option(v, vert, |words, v| {
+                for w in words {
+                    v.u32(w);
+                }
+            });
+        });
+        v.u32(per_face);
+        crate::snap::snap_u32_vec(v, indices);
+        v.bool(all_indices_in_bounds);
+        crate::snap::snap_option(v, colour, |x, v| v.u32(x));
+        crate::snap::snap_option(v, mapping, |x, v| v.u32(x));
+        crate::snap::snap_option(v, quality, |x, v| v.u32(x));
+        v.u32(material);
+        v.u32(texture);
+    }
+}
+
+impl crate::snap::Snap for Mesh {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { groups } = self;
+        crate::snap::snap_vec(v, groups, |g, v| g.snap(v));
+    }
+}
+
+impl crate::snap::Snap for Material {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            power,
+            specular,
+            emissive,
+        } = self;
+        v.f32(power);
+        for s in specular {
+            v.f32(s);
+        }
+        for e in emissive {
+            v.f32(e);
+        }
+    }
+}
+
+impl crate::snap::Snap for View {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            front,
+            back,
+            plane,
+            projection,
+        } = self;
+        v.f32(front);
+        v.f32(back);
+        for p in plane {
+            v.f32(p);
+        }
+        v.u32(projection);
+    }
+}
+
+impl crate::snap::Snap for FrameTable {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { slots, keys, table } = self;
+        crate::snap::snap_vec(v, slots, |f, v| f.snap(v));
+        crate::snap::snap_u32_vec(v, keys);
+        crate::snap::snap_vec(v, table, |(k, s), v| {
+            v.u32(k);
+            v.u32(s);
+        });
+    }
+}
+
+impl crate::snap::Snap for Scene {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            frames,
+            lights,
+            meshes,
+            materials,
+            textures,
+            viewports,
+            random,
+            scratch: _,
+        } = self;
+        frames.snap(v);
+        crate::snap::snap_btree_map(v, lights, |k, v| v.u32(k), |l, v| l.snap(v));
+        crate::snap::snap_btree_map(v, meshes, |k, v| v.u32(k), |m, v| m.snap(v));
+        crate::snap::snap_btree_map_with(
+            v,
+            materials,
+            u32::default,
+            || Material::new(0.0),
+            |k, v| v.u32(k),
+            |m, v| m.snap(v),
+        );
+        crate::snap::snap_btree_map(v, textures, |k, v| v.u32(k), |t, v| v.u32(t));
+        crate::snap::snap_btree_map(v, viewports, |k, v| v.u32(k), |vp, v| vp.snap(v));
+        crate::snap::snap_option(v, random, |r, v| v.u32(r));
+    }
+}
+
 #[inline]
 fn is_exact_identity(m: &Matrix) -> bool {
     for r in 0..4 {

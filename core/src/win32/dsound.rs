@@ -204,6 +204,138 @@ impl Default for Listener {
     }
 }
 
+impl crate::snap::Snap for Mode {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = self.to_ds() as u8;
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match Self::from_ds(u32::from(tag)) {
+                Some(m) => *self = m,
+                None => v.mark_corrupt("dsound::Mode tag"),
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Place {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            position,
+            min_distance,
+            max_distance,
+            mode,
+        } = self;
+        for p in position {
+            v.f32(p);
+        }
+        v.f32(min_distance);
+        v.f32(max_distance);
+        mode.snap(v);
+    }
+}
+
+impl crate::snap::Snap for Listener {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            position,
+            front,
+            top,
+            distance_factor,
+            rolloff_factor,
+            doppler_factor,
+        } = self;
+        for p in position {
+            v.f32(p);
+        }
+        for f in front {
+            v.f32(f);
+        }
+        for t in top {
+            v.f32(t);
+        }
+        v.f32(distance_factor);
+        v.f32(rolloff_factor);
+        v.f32(doppler_factor);
+    }
+}
+
+impl crate::snap::Snap for Buffer {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            store,
+            bytes,
+            format,
+            volume,
+            pan,
+            frequency,
+            looping,
+            started,
+            offset,
+            part,
+            place,
+            cached_millis,
+            cached_at,
+            cached_playing,
+        } = self;
+        v.u32(store);
+        v.u32(bytes);
+        crate::snap::snap_option_with(
+            v,
+            format,
+            || Format {
+                tag: 0,
+                channels: 0,
+                rate: 0,
+                block_align: 0,
+                bits: 0,
+                coefficients: Vec::new(),
+            },
+            |f, v| f.snap(v),
+        );
+        v.i32(volume);
+        v.i32(pan);
+        crate::snap::snap_option(v, frequency, |f, v| v.u32(f));
+        v.bool(looping);
+        crate::snap::snap_option(v, started, |s, v| v.u64(s));
+        v.u32(offset);
+        v.u64(part);
+        crate::snap::snap_option(v, place, |p, v| p.snap(v));
+        v.u64(cached_millis);
+        v.u32(cached_at);
+        v.bool(cached_playing);
+    }
+}
+
+impl crate::snap::Snap for Sounds {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { buffers, listener } = self;
+        crate::snap::snap_btree_map_with(
+            v,
+            buffers,
+            u32::default,
+            || Buffer {
+                store: 0,
+                bytes: 0,
+                format: None,
+                volume: 0,
+                pan: 0,
+                frequency: None,
+                looping: false,
+                started: None,
+                offset: 0,
+                part: 0,
+                place: None,
+                cached_millis: u64::MAX,
+                cached_at: 0,
+                cached_playing: false,
+            },
+            |k, v| v.u32(k),
+            |b, v| b.snap(v),
+        );
+        listener.snap(v);
+    }
+}
+
 /// `DSBSTATUS_PLAYING` and `DSBSTATUS_LOOPING`.
 const DSBSTATUS_PLAYING: u32 = 0x1;
 const DSBSTATUS_LOOPING: u32 = 0x4;

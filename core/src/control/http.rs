@@ -656,6 +656,8 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 | "/api/agent-state"
                 | "/api/bookmark"
                 | "/api/rewind"
+                | "/api/snapshot"
+                | "/api/restore"
         );
     if is_mutating_post && !check_auth(req, ctx) {
         return HttpResponse::error_json(401, "unauthorized: valid Bearer token required")
@@ -763,6 +765,9 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         ("GET", "/api/bookmark") => handle_list_bookmarks(ctx),
         ("POST", "/api/bookmark") => handle_bookmark(req, ctx),
         ("POST", "/api/rewind") => handle_rewind(req, ctx),
+        ("GET", "/api/snapshot") => super::snapshot::handle_list_snapshots(ctx),
+        ("POST", "/api/snapshot") => super::snapshot::handle_save_snapshot(req, ctx),
+        ("POST", "/api/restore") => super::snapshot::handle_restore_snapshot(req, ctx),
 
         _ => HttpResponse::error_json(404, &format!("no route for {} {}", req.method, req.path)),
     }
@@ -1503,7 +1508,13 @@ fn handle_rewind(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             write_json_str(&mut out, &res.digest);
             out.push_str(",\"expected_digest\":");
             write_json_str(&mut out, &res.expected_digest);
-            let _ = write!(out, ",\"digest_match\":{}}}", res.digest_match);
+            let _ = write!(out, ",\"digest_match\":{},\"mode\":", res.digest_match);
+            write_json_str(&mut out, res.mode);
+            if let Some(ms) = res.restore_ms {
+                out.push_str(",\"restore_ms\":");
+                write_json_f64(&mut out, ms);
+            }
+            out.push('}');
             HttpResponse::json(200, out)
         }
         Err(e) => HttpResponse::error_json(400, &e),
@@ -1704,6 +1715,8 @@ mod tests {
         assert!(!reg_path.exists(), "session registry removed on drop");
 
         let client_bus = bus.clone();
+        let tmp_dir_client = tmp_dir.clone();
+        let profile_dir_client = profile_dir.clone();
         let client = thread::spawn(move || {
             let _guard = CloseOnDrop(client_bus.clone());
             let st = client_bus.wait_until_paused(Some(Duration::from_secs(5)));
@@ -1713,8 +1726,10 @@ mod tests {
             let auth = [("Authorization", "Bearer test-secret-309")];
 
             // 1. Auth enforcement: mutating POST without token returns 401.
-            let (code, _, _) = tcp_call(addr, "POST", "/api/step", &[], b"{\"flips\":1}");
-            assert_eq!(code, 401);
+            for ep in ["/api/step", "/api/snapshot", "/api/restore"] {
+                let (code, _, _) = tcp_call(addr, "POST", ep, &[], b"{}");
+                assert_eq!(code, 401, "POST {ep} requires bearer token");
+            }
 
             // 2. GET /api/status, /api/fps, /api/meta, /api/controls, /api/goals
             let (code, _, body) = tcp_call(addr, "GET", "/api/status", &[], &[]);
@@ -1875,7 +1890,7 @@ mod tests {
                 .unwrap()
                 .starts_with("#lego-legacy-route 1"));
 
-            // 9. POST /api/rewind back to "at2" -> verifies exact digest_match == true!
+            // 9. POST /api/rewind back to "at2" -> verifies instant LLSNAP v2 + exact digest_match == true!
             let (code, _, body) =
                 tcp_call(addr, "POST", "/api/rewind", &auth, br#"{"name":"at2"}"#);
             assert_eq!(code, 200);
@@ -1888,6 +1903,68 @@ mod tests {
             assert_eq!(
                 rwj.as_object().unwrap()["digest_match"].as_bool(),
                 Some(true)
+            );
+            assert_eq!(rwj.as_object().unwrap()["mode"].as_str(), Some("llsnap_v2"));
+
+            // 9b. POST /api/snapshot (slot + file), GET /api/snapshot, mutate profile + advance,
+            // then POST /api/restore (slot AND file) and verify bit-exact rollback.
+            let snap_file = tmp_dir_client.join("slot.snapshot");
+            let snap_req = format!(
+                "{{\"name\":\"slot2\",\"path\":\"{}\"}}",
+                snap_file.display().to_string().replace('\\', "\\\\")
+            );
+            let (code, _, body) =
+                tcp_call(addr, "POST", "/api/snapshot", &auth, snap_req.as_bytes());
+            assert_eq!(code, 200);
+            let spj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
+            assert_eq!(spj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(
+                spj.as_object().unwrap()["digest"].as_str(),
+                Some(bm_digest.as_str())
+            );
+            assert!(snap_file.is_file());
+
+            let (code, _, body) = tcp_call(addr, "GET", "/api/snapshot", &[], &[]);
+            assert_eq!(code, 200);
+            assert!(std::str::from_utf8(&body).unwrap().contains("\"slot2\""));
+
+            std::fs::write(profile_dir_client.join("PROFILE.SAV"), b"mutated").unwrap();
+            let (code, _, _) = tcp_call(addr, "POST", "/api/step", &auth, br#"{"flips":2}"#);
+            assert_eq!(code, 200);
+
+            let (code, _, body) =
+                tcp_call(addr, "POST", "/api/restore", &auth, br#"{"name":"slot2"}"#);
+            assert_eq!(code, 200);
+            let rsj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
+            assert_eq!(rsj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(
+                rsj.as_object().unwrap()["digest"].as_str(),
+                Some(bm_digest.as_str())
+            );
+            assert_eq!(
+                rsj.as_object().unwrap()["digest_match"].as_bool(),
+                Some(true)
+            );
+            assert_eq!(
+                std::fs::read(profile_dir_client.join("PROFILE.SAV")).unwrap(),
+                b"save-bytes"
+            );
+
+            // Also verify disk file restore via `path`.
+            let (code, _, _) = tcp_call(addr, "POST", "/api/step", &auth, br#"{"flips":1}"#);
+            assert_eq!(code, 200);
+            let restore_req = format!(
+                "{{\"path\":\"{}\"}}",
+                snap_file.display().to_string().replace('\\', "\\\\")
+            );
+            let (code, _, body) =
+                tcp_call(addr, "POST", "/api/restore", &auth, restore_req.as_bytes());
+            assert_eq!(code, 200);
+            let rpj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
+            assert_eq!(rpj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(
+                rpj.as_object().unwrap()["digest"].as_str(),
+                Some(bm_digest.as_str())
             );
 
             // 10. Switch to Live mode via /api/mode to finish the run cleanly.

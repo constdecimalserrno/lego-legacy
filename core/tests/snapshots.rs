@@ -192,3 +192,310 @@ fn a_budget_running_out_writes_no_wall_report() {
         "a budget running out is not a wall"
     );
 }
+
+#[test]
+fn x87_full_state_survives_snapshot_and_restore_bit_exact() {
+    let (mut m, _host) = machine_at(4);
+    // Drive non-zero top, custom control/status, -0.0, and NaN payload bits.
+    m.cpu.fpu.set_control(0x0c3f);
+    m.cpu.fpu.push(1.25);
+    m.cpu.fpu.push(-0.0);
+    m.cpu.fpu.push(f64::from_bits(0x7ff8_1234_5678_9abc));
+    let _ = m.cpu.fpu.pop();
+    m.cpu.fpu.push(std::f64::consts::PI);
+
+    let expected_ctrl = m.cpu.fpu.control();
+    let expected_stat = m.cpu.fpu.status();
+    let expected_st: [(bool, u64); 8] =
+        std::array::from_fn(|i| (m.cpu.fpu.occupied(i), m.cpu.fpu.st(i).to_bits()));
+
+    let bytes = m.snapshot_v2().expect("snapshot v2");
+
+    // Clobber every x87 register and control word.
+    m.cpu.fpu = lego_legacy_core::cpu::x87::X87::default();
+    m.cpu.fpu.set_control(0x027f);
+    for k in 0..5 {
+        m.cpu.fpu.push(f64::from(k) * 7.0);
+    }
+
+    m.restore_v2(&bytes).expect("restore v2");
+    assert_eq!(m.cpu.fpu.control(), expected_ctrl);
+    assert_eq!(m.cpu.fpu.status(), expected_stat);
+    let actual_st: [(bool, u64); 8] =
+        std::array::from_fn(|i| (m.cpu.fpu.occupied(i), m.cpu.fpu.st(i).to_bits()));
+    assert_eq!(actual_st, expected_st);
+}
+
+#[test]
+fn live_restore_zeroes_post_snapshot_dirty_pages_and_invalidates_code_cache() {
+    use lego_legacy_core::guest::GuestMem;
+
+    let (mut m, mut host) = machine_at(0);
+    // Program: eax = 1; int 0x20 (present); add eax, 0x10; int 0x21 (exit).
+    let prog_a: [u8; 14] = [
+        0xb8,
+        0x01,
+        0x00,
+        0x00,
+        0x00, // mov eax, 1
+        0xcd,
+        stub::INT_PRESENT, // int 0x20
+        0x83,
+        0xc0,
+        0x10, // add eax, 0x10
+        0xcd,
+        stub::INT_EXIT, // int 0x21
+        0x90,
+        0x90,
+    ];
+    m.arena.write(stub::ENTRY, &prog_a).expect("write stub");
+    let mut log = lego_legacy_core::runlog::RunLog::create(
+        "snap-dirty-live",
+        lego_legacy_core::cli::Trace::Off,
+    )
+    .expect("log");
+
+    // Step past mov eax, 1 and int 0x20 (flip 0 -> 1).
+    while m.flips() < 1 {
+        assert!(m.tick(&mut host, &mut log).is_none());
+    }
+    let snap = m.snapshot_v2().expect("snapshot");
+    let snap_digest = m.state_digest();
+
+    // Mutate guest code (self-modifying overwrite), allocate fresh heap pages,
+    // and dirty pages well above snapshot heap extent so Interp decodes the new code.
+    let new_alloc = m.state.heap.alloc(0x8000);
+    assert_ne!(new_alloc, 0, "heap alloc");
+    m.arena
+        .write(new_alloc, &vec![0xab; 0x8000])
+        .expect("dirty heap");
+    let prog_b: [u8; 14] = [
+        0xb8,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0xcd,
+        stub::INT_PRESENT,
+        0x83,
+        0xc0,
+        0x7f,
+        0xcd,
+        stub::INT_EXIT,
+        0x90,
+        0x90,
+    ];
+    m.arena.write(stub::ENTRY, &prog_b).expect("overwrite code");
+    let finish_b = m.run(&mut host, &mut log, 1_000);
+    assert_eq!(
+        finish_b.outcome,
+        lego_legacy_core::machine::Outcome::Exited { code: 0x80 }
+    );
+
+    // Restore live: post-snapshot heap pages MUST be zeroed back and stale
+    // decoded blocks for `prog_b` MUST be invalidated so `prog_a` executes.
+    m.restore_v2(&snap).expect("live restore");
+    assert_eq!(m.state_digest(), snap_digest);
+    let mut zero_check = [0xffu8; 0x2000];
+    m.arena
+        .read(new_alloc, &mut zero_check)
+        .expect("read zeroed page");
+    assert!(
+        zero_check.iter().all(|&b| b == 0),
+        "dirty post-snapshot pages must be zeroed on restore"
+    );
+
+    let finish_a = m.run(&mut host, &mut log, 1_000);
+    assert_eq!(
+        finish_a.outcome,
+        lego_legacy_core::machine::Outcome::Exited { code: 0x11 }
+    );
+}
+
+#[test]
+fn profile_overlay_and_deferred_readonly_files_round_trip_live_and_cold() {
+    use lego_legacy_core::win32::{Contents, Object};
+
+    scratch();
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("snap-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let profile_live = root.join("profile-live");
+    let profile_cold = root.join("profile-cold");
+    std::fs::create_dir_all(profile_live.join("sub")).unwrap();
+    std::fs::write(profile_live.join("slot1.sav"), b"v1-save-data").unwrap();
+    std::fs::write(profile_live.join("sub/meta.bin"), b"meta-bytes").unwrap();
+
+    // Immutable >= 64 KiB declared file to exercise deferred read-only handle rehydration.
+    let big_archive: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+
+    let mut host = Headless::new();
+    let mut m = Machine::new(&STUB, &mut host).expect("machine");
+    m.load_stub().expect("stub");
+    m.tree.set_profile(profile_live.clone());
+    m.tree.declare("C:\\DATA\\BIG.PAK", big_archive.clone());
+
+    let h_ro = m.state.give(Object::File {
+        path: "C:\\DATA\\BIG.PAK".to_owned(),
+        contents: Contents::Held(big_archive.clone()),
+        at: 1234,
+        access: 0x8000_0000, // GENERIC_READ
+        share: 1,
+        wrote: false,
+    });
+    let h_rw = m.state.give(Object::File {
+        path: "C:\\PROFILE\\SLOT1.SAV".to_owned(),
+        contents: Contents::Held(b"dirty-unflushed".to_vec()),
+        at: 5,
+        access: 0xc000_0000, // GENERIC_READ | GENERIC_WRITE
+        share: 0,
+        wrote: true,
+    });
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    let digest_0 = m.state_digest();
+    // Deferred read-only 100 KB archive must NOT inflate the snapshot payload.
+    assert!(
+        snap.len() < big_archive.len(),
+        "deferred read-only archive should be omitted from snapshot (len={})",
+        snap.len()
+    );
+    // Live handle contents must remain intact after snapshot.
+    assert_eq!(
+        m.state.object(h_ro),
+        Some(&Object::File {
+            path: "C:\\DATA\\BIG.PAK".to_owned(),
+            contents: Contents::Held(big_archive.clone()),
+            at: 1234,
+            access: 0x8000_0000,
+            share: 1,
+            wrote: false,
+        })
+    );
+
+    // Mutate profile files on disk and close handles.
+    std::fs::write(profile_live.join("slot1.sav"), b"OVERWRITTEN").unwrap();
+    std::fs::write(profile_live.join("extra.sav"), b"brand-new").unwrap();
+    std::fs::remove_file(profile_live.join("sub/meta.bin")).unwrap();
+    m.state.close(h_rw);
+
+    // 1. Live restore rolls back profile files + handles + state digest bit-for-bit.
+    m.restore_v2(&snap).expect("live restore");
+    assert_eq!(m.state_digest(), digest_0);
+    assert_eq!(
+        std::fs::read(profile_live.join("slot1.sav")).unwrap(),
+        b"v1-save-data"
+    );
+    assert_eq!(
+        std::fs::read(profile_live.join("sub/meta.bin")).unwrap(),
+        b"meta-bytes"
+    );
+    assert!(!profile_live.join("extra.sav").exists());
+    assert!(m.state.object(h_rw).is_some());
+    assert_eq!(
+        m.state.object(h_ro),
+        Some(&Object::File {
+            path: "C:\\DATA\\BIG.PAK".to_owned(),
+            contents: Contents::Held(big_archive.clone()),
+            at: 1234,
+            access: 0x8000_0000,
+            share: 1,
+            wrote: false,
+        })
+    );
+
+    // 2. Cold restore into a fresh Machine with an empty profile directory.
+    let mut host2 = Headless::new();
+    let mut cold = Machine::new(&STUB, &mut host2).expect("cold machine");
+    cold.load_stub().expect("stub");
+    cold.tree.set_profile(profile_cold.clone());
+    cold.tree.declare("C:\\DATA\\BIG.PAK", big_archive.clone());
+    cold.restore_v2(&snap).expect("cold restore");
+    assert_eq!(cold.state_digest(), digest_0);
+    assert_eq!(
+        std::fs::read(profile_cold.join("slot1.sav")).unwrap(),
+        b"v1-save-data"
+    );
+    assert_eq!(
+        std::fs::read(profile_cold.join("sub/meta.bin")).unwrap(),
+        b"meta-bytes"
+    );
+    assert_eq!(
+        cold.state.object(h_ro),
+        Some(&Object::File {
+            path: "C:\\DATA\\BIG.PAK".to_owned(),
+            contents: Contents::Held(big_archive),
+            at: 1234,
+            access: 0x8000_0000,
+            share: 1,
+            wrote: false,
+        })
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn truncated_v1_and_route_mismatched_snapshots_are_handled_cleanly() {
+    use lego_legacy_core::route::Route;
+
+    let (mut m, _host) = machine_at(4);
+    let snap = m.snapshot_v2().expect("snapshot v2");
+
+    // 1. Legacy v1 magic is rejected cleanly.
+    let mut v1 = snap.clone();
+    v1[6] = 1;
+    let err = m.restore_v2(&v1).expect_err("v1 must be refused");
+    assert!(err.to_string().contains("not a snapshot"), "{err}");
+
+    // 2. Truncations across header & payload refuse without panic or OOM.
+    for cut in [0, 4, 8, 12, 24, 64, snap.len() / 2, snap.len() - 1] {
+        let mut fresh_host = Headless::new();
+        let mut fresh = Machine::new(&STUB, &mut fresh_host).expect("machine");
+        fresh.load_stub().expect("stub");
+        assert!(
+            fresh.restore_v2(&snap[..cut]).is_err(),
+            "truncation at {cut} must error"
+        );
+    }
+
+    // 3. Different route is refused by strict `restore_v2`, allowed by `restore_v2_live`.
+    let mut h2 = Headless::new();
+    let mut other_route = Machine::new(&STUB, &mut h2).expect("machine");
+    other_route.load_stub().expect("stub");
+    other_route.route = Some(Route::parse("#lego-legacy-route 1\nflip 0 close\n").unwrap());
+    let err = other_route
+        .restore_v2(&snap)
+        .expect_err("strict route mismatch must be refused");
+    assert!(err.to_string().contains("different route"), "{err}");
+    other_route
+        .restore_v2_live(&snap)
+        .expect("live restore permits differing pre-roll route");
+
+    // 4. Path traversal inside crafted profile overlay is refused cleanly.
+    let profile_dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("snap-trav-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&profile_dir);
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let mut crafted = snap.clone();
+    // Replace trailing empty profile_count (0u32) with 1 entry "../escape.txt".
+    let tail = crafted.len() - 4;
+    crafted.truncate(tail);
+    crafted.extend_from_slice(&1u32.to_le_bytes());
+    let bad_path = b"../escape.txt";
+    crafted.extend_from_slice(&(bad_path.len() as u32).to_le_bytes());
+    crafted.extend_from_slice(bad_path);
+    crafted.extend_from_slice(&3u32.to_le_bytes());
+    crafted.extend_from_slice(b"bad");
+
+    let mut h3 = Headless::new();
+    let mut guarded = Machine::new(&STUB, &mut h3).expect("machine");
+    guarded.load_stub().expect("stub");
+    guarded.tree.set_profile(profile_dir.clone());
+    let err = guarded
+        .restore_v2(&crafted)
+        .expect_err("traversal must be refused");
+    assert!(err.to_string().contains("profile path"), "{err}");
+    assert!(!profile_dir.parent().unwrap().join("escape.txt").exists());
+    let _ = std::fs::remove_dir_all(&profile_dir);
+}

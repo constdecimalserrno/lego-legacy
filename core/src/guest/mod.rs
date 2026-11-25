@@ -781,6 +781,191 @@ impl Arena {
             ))
         }
     }
+
+    /// Snapshot or restore arena metadata (`floor`, `watching`, `held`) while
+    /// clearing the decoded code-page bitmap and `[code_min, code_max)` bounding
+    /// box cleanly on restore (paired with `CpuEngine::forget`).
+    pub fn snap_meta(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            mapping: _,
+            floor,
+            code,
+            code_min,
+            code_max,
+            code_written,
+            written_code,
+            written_all,
+            watching,
+            held,
+        } = self;
+        v.u32(floor);
+        v.bool(watching);
+        crate::snap::snap_vec_with(
+            v,
+            held,
+            || (0u32, 0u8, [0u8; HELD_BYTES]),
+            |(addr, len, bytes), v| {
+                v.u32(addr);
+                v.u8(len);
+                v.bytes(bytes);
+            },
+        );
+        if v.is_reading() {
+            code.fill(0);
+            *code_min = u32::MAX;
+            *code_max = 0;
+            *code_written = false;
+            written_code.clear();
+            *written_all = false;
+        }
+    }
+
+    /// Write all non-zero 4 KiB pages within `page_ranges` (sorted, non-overlapping
+    /// `[start_page, end_page)` page index intervals) as `[count: u32, (page_idx: u32, 4096 B)*]`.
+    pub fn write_sparse_pages(&self, page_ranges: &[(u32, u32)], out: &mut Vec<u8>) {
+        const PAGE: usize = CODE_PAGE as usize;
+        let max_pages = (self.mapping.len() / PAGE) as u32;
+        let count_pos = out.len();
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut count = 0u32;
+        let base = self.mapping.as_ptr();
+        for &(start_page, end_page) in page_ranges {
+            let end = end_page.min(max_pages);
+            for page_idx in start_page..end {
+                let offset = (page_idx as usize) * PAGE;
+                // Safety: `offset + PAGE <= self.mapping.len()`.
+                let slice = unsafe { core::slice::from_raw_parts(base.add(offset), PAGE) };
+                if !is_zero_page(slice) {
+                    out.extend_from_slice(&page_idx.to_le_bytes());
+                    out.extend_from_slice(slice);
+                    count += 1;
+                }
+            }
+        }
+        out[count_pos..count_pos + 4].copy_from_slice(&count.to_le_bytes());
+    }
+
+    /// Restore sparse 4 KiB pages written by [`Arena::write_sparse_pages`],
+    /// zeroing any dirty non-zero page in `clear_ranges` that was not present in
+    /// the snapshot, in a single linear merge pass without faulting untouched pages.
+    pub fn restore_sparse_pages(
+        &mut self,
+        clear_ranges: &[(u32, u32)],
+        v: &mut dyn crate::snap::Visitor,
+    ) {
+        const PAGE: usize = CODE_PAGE as usize;
+        let max_pages = (self.mapping.len() / PAGE) as u32;
+        let mut count = 0u32;
+        v.u32(&mut count);
+        let count = count as usize;
+        let Some(need) = count.checked_mul(4 + PAGE) else {
+            v.mark_corrupt("sparse page count");
+            return;
+        };
+        if !v.check_remaining(need) {
+            return;
+        }
+
+        let base = self.mapping.as_ptr();
+        let mut range_idx = 0usize;
+        let mut clear_page = clear_ranges.first().map_or(u32::MAX, |r| r.0);
+
+        let advance_clear = |range_idx: &mut usize, clear_page: &mut u32| {
+            while *range_idx < clear_ranges.len() {
+                let (_, end) = clear_ranges[*range_idx];
+                let end = end.min(max_pages);
+                if *clear_page < end {
+                    return;
+                }
+                *range_idx += 1;
+                if *range_idx < clear_ranges.len() {
+                    *clear_page = clear_ranges[*range_idx].0;
+                } else {
+                    *clear_page = u32::MAX;
+                }
+            }
+        };
+        advance_clear(&mut range_idx, &mut clear_page);
+
+        for _ in 0..count {
+            let mut page_idx = 0u32;
+            v.u32(&mut page_idx);
+            if v.failed() {
+                return;
+            }
+            if page_idx >= max_pages {
+                v.mark_corrupt("sparse page index out of bounds");
+                return;
+            }
+            // Zero any dirty page strictly before `page_idx`.
+            while clear_page < page_idx {
+                let offset = (clear_page as usize) * PAGE;
+                // Safety: `clear_page < page_idx < max_pages`, so `offset + PAGE <= mapping.len()`.
+                let slice = unsafe { core::slice::from_raw_parts_mut(base.add(offset), PAGE) };
+                if !is_zero_page(slice) {
+                    slice.fill(0);
+                }
+                clear_page += 1;
+                advance_clear(&mut range_idx, &mut clear_page);
+            }
+            if clear_page == page_idx {
+                clear_page += 1;
+                advance_clear(&mut range_idx, &mut clear_page);
+            }
+            let offset = (page_idx as usize) * PAGE;
+            // Safety: `page_idx < max_pages`, so `offset + PAGE <= mapping.len()`.
+            let slice = unsafe { core::slice::from_raw_parts_mut(base.add(offset), PAGE) };
+            v.bytes(slice);
+            if v.failed() {
+                return;
+            }
+        }
+
+        // Zero any remaining dirty pages in `clear_ranges` after the last saved page.
+        while clear_page < max_pages && range_idx < clear_ranges.len() {
+            let offset = (clear_page as usize) * PAGE;
+            let slice = unsafe { core::slice::from_raw_parts_mut(base.add(offset), PAGE) };
+            if !is_zero_page(slice) {
+                slice.fill(0);
+            }
+            clear_page += 1;
+            advance_clear(&mut range_idx, &mut clear_page);
+        }
+    }
+
+    /// Zero a byte range `[start, end)` in the arena without triggering code or watch hooks.
+    pub(crate) fn zero_range_raw(&mut self, start: u32, end: u32) {
+        const PAGE: usize = CODE_PAGE as usize;
+        let len = self.mapping.len();
+        let s = (start as usize).min(len);
+        let e = (end as usize).min(len);
+        if s >= e {
+            return;
+        }
+        let base = self.mapping.as_ptr();
+        let mut at = s;
+        while at < e {
+            let chunk = (e - at).min(PAGE);
+            // Safety: `at + chunk <= e <= len`.
+            let slice = unsafe { core::slice::from_raw_parts_mut(base.add(at), chunk) };
+            if !is_zero_page(slice) {
+                slice.fill(0);
+            }
+            at += chunk;
+        }
+    }
+}
+
+/// Fast word-wise check whether a page/slice is all zeros (avoids dirtying clean pages).
+#[inline]
+fn is_zero_page(bytes: &[u8]) -> bool {
+    let (chunks, tail) = bytes.as_chunks::<16>();
+    for c in chunks {
+        if u128::from_ne_bytes(*c) != 0 {
+            return false;
+        }
+    }
+    tail.iter().all(|&b| b == 0)
 }
 
 #[cfg(test)]

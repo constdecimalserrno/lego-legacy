@@ -410,6 +410,9 @@ impl<H: Host> Host for ControlHost<H> {
             return 1.0;
         }
 
+        if declared_nanos < self.pace_anchor_declared {
+            self.pace_anchor_declared = declared_nanos;
+        }
         let delta = declared_nanos.saturating_sub(self.pace_anchor_declared);
         let scaled_delta = if (pace_mult - 1.0).abs() < 1e-6 {
             delta
@@ -545,14 +548,15 @@ impl<H: Host> Host for ControlHost<H> {
 }
 
 /// Machine-boundary flip observer invoked from `Machine::observe_flip` when
-/// [`ControlHost::with_deferred_pause`] is enabled (#309).
+/// [`ControlHost::with_deferred_pause`] is enabled (#309, #313).
 ///
-/// Serves read-only `&Machine` inspect requests, completes Tier-1 rewind
-/// replays at their exact target flip, and runs the 60 Hz pause-pump loop
-/// while continuing to answer inspect queries with zero deadlock.
+/// Serves read-only `&Machine` inspect requests, instant live `LLSNAP v2`
+/// snapshot/restore/rewind requests, completes Tier-1 rewind replays at their
+/// exact target flip, and runs the 60 Hz pause-pump loop while continuing to
+/// answer queries with zero deadlock.
 pub fn service_flip_boundary(
     bus: &ControlBus,
-    machine: &crate::machine::Machine,
+    machine: &mut crate::machine::Machine,
     host: &mut dyn Host,
 ) {
     let rec_len = machine
@@ -562,6 +566,7 @@ pub fn service_flip_boundary(
     bus.update_machine_meta(rec_len);
     let _ = bus.complete_rewind_if_reached(machine);
     bus.drain_inspects(machine);
+    bus.drain_snapshots(machine, host);
 
     let route_active = machine.undelivered() > 0;
     let host_closes = host.closes();
@@ -598,6 +603,8 @@ pub fn service_flip_boundary(
         host.set_paused(true);
         loop {
             bus.drain_inspects(machine);
+            bus.drain_snapshots(machine, host);
+            let route_active = machine.undelivered() > 0;
             let host_closes = host.closes();
             let state = bus.lock();
             if host_closes > 0 || state.rewind_abort || !state.should_pause(route_active) {
@@ -623,7 +630,7 @@ pub fn service_flip_boundary(
                 drop(state);
                 break;
             }
-            if !state.pending_inspects.is_empty() {
+            if !state.pending_inspects.is_empty() || !state.pending_snapshots.is_empty() {
                 drop(state);
                 continue;
             }
@@ -633,6 +640,7 @@ pub fn service_flip_boundary(
         }
         host.set_paused(false);
         bus.drain_inspects(machine);
+        bus.drain_snapshots(machine, host);
     }
 }
 

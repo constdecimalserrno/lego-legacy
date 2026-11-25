@@ -237,4 +237,7 @@ pub trait CpuEngine {
 
     /// What this engine is called, for the run log.
     fn name(&self) -> &'static str;
+
+    /// Invalidate any cached decoded blocks (e.g. after restoring guest memory).
+    fn forget(&mut self) {}
 }

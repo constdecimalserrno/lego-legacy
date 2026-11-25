@@ -32,7 +32,26 @@ pub struct Stream {
     source: Format,
 }
 
+impl crate::snap::Snap for Stream {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { source } = self;
+        source.snap(v);
+    }
+}
+
 impl Stream {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            source: Format {
+                tag: 0,
+                channels: 0,
+                rate: 0,
+                block_align: 0,
+                bits: 0,
+                coefficients: Vec::new(),
+            },
+        }
+    }
     /// Bytes of ADPCM in a block.
     fn align(&self) -> u32 {
         u32::from(self.source.block_align)

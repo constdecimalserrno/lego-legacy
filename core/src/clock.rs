@@ -67,6 +67,31 @@ impl Default for Clock {
     }
 }
 
+impl crate::snap::Snap for Clock {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            cursor,
+            charged_cycles,
+            hz,
+            nanos_num,
+            nanos_den,
+            cached_millis,
+            next_millis_cycle,
+        } = self;
+        v.u64(cursor);
+        v.u64(charged_cycles);
+        if v.is_reading() {
+            // Keep the live machine's declared frequency and rebuild all derived
+            // cached fields (`nanos_num`, `nanos_den`, `cached_millis`, `next_millis_cycle`).
+            let rebuilt = Self::resumed(*cursor, cursor.saturating_add(*charged_cycles), *hz);
+            *nanos_num = rebuilt.nanos_num;
+            *nanos_den = rebuilt.nanos_den;
+            *cached_millis = rebuilt.cached_millis;
+            *next_millis_cycle = rebuilt.next_millis_cycle;
+        }
+    }
+}
+
 impl Clock {
     /// A clock on a declared processor of this frequency.
     #[must_use]

@@ -186,6 +186,61 @@ impl Spins {
     }
 }
 
+impl crate::snap::Snap for Read {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            crossing,
+            cursor,
+            cycles,
+            millis,
+            cpu,
+        } = self;
+        v.u64(crossing);
+        v.u64(cursor);
+        v.u64(cycles);
+        v.u64(millis);
+        cpu.snap(v);
+    }
+}
+
+impl crate::snap::Snap for Entry {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { crossing, eip } = self;
+        v.u64(crossing);
+        v.u32(eip);
+    }
+}
+
+impl crate::snap::Snap for Spins {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            crossings,
+            read,
+            last,
+            steady,
+            budget: _,
+            allowed: _,
+            instructions,
+        } = self;
+        v.u64(crossings);
+        read.snap(v);
+        crate::snap::snap_option_with(
+            v,
+            last,
+            || Read {
+                crossing: 0,
+                cursor: 0,
+                cycles: 0,
+                millis: 0,
+                cpu: Cpu::default(),
+            },
+            |r, v| r.snap(v),
+        );
+        crate::snap::snap_option(v, steady, |s, v| v.u64(s));
+        v.u64(instructions);
+    }
+}
+
 /// The same processor, bit for bit. Its cycle counter is the machine's to set
 /// from the clock at every burst, and its floating-point unit is held to its
 /// bits, since `==` on a float calls 0.0 and -0.0 one and a NaN no number.

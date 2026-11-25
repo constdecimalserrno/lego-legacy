@@ -49,6 +49,26 @@ pub struct CdAudio {
     playing: Option<(u64, u64)>,
 }
 
+impl crate::snap::Snap for CdAudio {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            open,
+            disc,
+            tracks,
+            playing,
+        } = self;
+        v.bool(open);
+        crate::snap::snap_option_with(v, disc, crate::disc::RedBook::empty_for_snap, |d, v| {
+            d.snap(v)
+        });
+        v.bool(tracks);
+        crate::snap::snap_option(v, playing, |(sector, started), v| {
+            v.u64(sector);
+            v.u64(started);
+        });
+    }
+}
+
 /// Read-only summary of Red Book CD audio state (#309).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CdStatusSummary {
@@ -412,6 +432,14 @@ impl Stream {
 }
 
 impl Midi {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            player: 0,
+            stream: None,
+            owed: VecDeque::new(),
+        }
+    }
+
     #[must_use]
     pub fn has_stream(&self) -> bool {
         self.stream.is_some()
@@ -430,6 +458,87 @@ impl Midi {
     #[must_use]
     pub fn tempo(&self) -> Option<u32> {
         self.stream.as_ref().map(|s| s.tempo)
+    }
+}
+
+impl crate::snap::Snap for Stream {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            handle,
+            callback,
+            instance,
+            division,
+            tempo,
+            queue,
+            at,
+            played,
+            left_over,
+            clock,
+            playing,
+            stopped,
+            closing,
+            sounding,
+        } = self;
+        v.u32(handle);
+        v.u32(callback);
+        v.u32(instance);
+        v.u32(division);
+        v.u32(tempo);
+        crate::snap::snap_vec_deque(v, queue, |h, v| v.u32(h));
+        v.u32(at);
+        v.u64(played);
+        v.u128(left_over);
+        v.u64(&mut clock.0);
+        v.u64(&mut clock.1);
+        v.bool(playing);
+        v.bool(stopped);
+        v.bool(closing);
+        for s in sounding {
+            v.u128(s);
+        }
+    }
+}
+
+impl crate::snap::Snap for Midi {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            player,
+            stream,
+            owed,
+        } = self;
+        v.usize(player);
+        crate::snap::snap_option_with(
+            v,
+            stream,
+            || Stream {
+                handle: 0,
+                callback: 0,
+                instance: 0,
+                division: 0,
+                tempo: 0,
+                queue: VecDeque::new(),
+                at: 0,
+                played: 0,
+                left_over: 0,
+                clock: (0, 0),
+                playing: false,
+                stopped: false,
+                closing: false,
+                sounding: [0; 16],
+            },
+            |s, v| s.snap(v),
+        );
+        crate::snap::snap_vec_deque_with(
+            v,
+            owed,
+            || (0u32, [0u32; 5]),
+            |(cb, args), v| {
+                v.u32(cb);
+                for a in args {
+                    v.u32(a);
+                }
+            },
+        );
     }
 }
 

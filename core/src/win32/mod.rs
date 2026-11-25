@@ -274,6 +274,10 @@ pub struct State {
     /// everything else the machine hands out, because Alpha Team maps four
     /// hundred megabytes of archives and never lets go (#57).
     pub next_mapping: u32,
+    /// Every file mapped into `MAPPING_BASE..next_mapping` as `(at, len, path)`,
+    /// so cold snapshot restores can re-populate mapped disc archives from
+    /// `Tree` without storing 400 MB of read-only bytes inside snapshots (#313).
+    pub mapped_files: Vec<(u32, u32, String)>,
     /// Which failures the guest asked to have handed back rather than shown:
     /// what `SetErrorMode` was last told. Read when something looks on the
     /// empty floppy drive: with `SEM_FAILCRITICALERRORS` the call fails as
@@ -477,6 +481,7 @@ impl State {
             reserved: BTreeMap::new(),
             committed: BTreeMap::new(),
             next_mapping: MAPPING_BASE,
+            mapped_files: Vec::new(),
             sections: Vec::new(),
             section_waiters: 0,
             tls_slots: 0,
@@ -600,6 +605,97 @@ impl State {
             .iter()
             .enumerate()
             .filter_map(|(i, o)| o.as_ref().map(|obj| (HANDLE_BASE + (i as u32) * 4, obj)))
+    }
+
+    /// Resolve `path` against `self.current_directory` using the same rule as
+    /// `Ctx::absolute`.
+    #[must_use]
+    pub fn absolute_path(&self, path: &str) -> String {
+        let path = path.trim();
+        let here = &self.current_directory;
+        if path.len() > 1 && path.as_bytes().get(1) == Some(&b':') {
+            path.to_owned()
+        } else if path.starts_with(['\\', '/']) {
+            let drive = if here.as_bytes().get(1) == Some(&b':') {
+                &here[..2]
+            } else {
+                ""
+            };
+            format!("{drive}{path}")
+        } else {
+            format!("{}\\{path}", here.strip_suffix('\\').unwrap_or(here))
+        }
+    }
+
+    /// Temporarily detach large immutable read-only `Contents::Held` buffers
+    /// from open handles during `LLSNAP v2` capture so 250–400 MB unpacked
+    /// archives are not copied into every snapshot (#313).
+    pub(crate) fn stash_readonly_files(
+        &mut self,
+        can_rehydrate: impl Fn(&str) -> bool,
+    ) -> Vec<(usize, String, Vec<u8>)> {
+        const MIN_DEFER_BYTES: usize = 65_536;
+        // GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA.
+        const WRITE_ACCESS_BITS: u32 = 0x5000_0006;
+        let cwd = self.current_directory.clone();
+        let resolve = |path: &str| -> String {
+            let path = path.trim();
+            if path.len() > 1 && path.as_bytes().get(1) == Some(&b':') {
+                path.to_owned()
+            } else if path.starts_with(['\\', '/']) {
+                let drive = if cwd.as_bytes().get(1) == Some(&b':') {
+                    &cwd[..2]
+                } else {
+                    ""
+                };
+                format!("{drive}{path}")
+            } else {
+                format!("{}\\{path}", cwd.strip_suffix('\\').unwrap_or(&cwd))
+            }
+        };
+        let mut stashed = Vec::new();
+        for (idx, slot) in self.handles.iter_mut().enumerate() {
+            if let Some(Object::File {
+                path,
+                contents: Contents::Held(bytes),
+                access,
+                wrote: false,
+                ..
+            }) = slot
+            {
+                if (*access & WRITE_ACCESS_BITS) == 0 && bytes.len() >= MIN_DEFER_BYTES {
+                    let resolved = resolve(path);
+                    if can_rehydrate(&resolved) {
+                        stashed.push((idx, resolved, std::mem::take(bytes)));
+                    }
+                }
+            }
+        }
+        stashed
+    }
+
+    /// Put stashed read-only `Contents::Held` buffers back into their handle slots.
+    pub(crate) fn unstash_readonly_files(&mut self, stashed: Vec<(usize, String, Vec<u8>)>) {
+        for (idx, _, bytes) in stashed {
+            if let Some(Some(Object::File {
+                contents: Contents::Held(slot),
+                ..
+            })) = self.handles.get_mut(idx)
+            {
+                *slot = bytes;
+            }
+        }
+    }
+
+    /// Take the live handle table before a snapshot restore so matching open
+    /// read-only archive buffers can be swapped back in with zero copy (#313).
+    pub(crate) fn take_handles(&mut self) -> Vec<Option<Object>> {
+        std::mem::take(&mut self.handles)
+    }
+
+    /// Mutable access to raw handle table slot `idx` for snapshot rehydration.
+    pub(crate) fn handle_slot_mut(&mut self, idx: usize) -> Option<&mut Object> {
+        self.handles.get_mut(idx)?.as_mut()
     }
 
     /// Read-only view of primary COM objects (where `obj.identity == addr`) (#309).
@@ -1478,6 +1574,958 @@ fn written(dll: &str) -> impl Iterator<Item = &'static Shim> + '_ {
     .into_iter()
     .flatten()
     .filter(move |s| s.dll.eq_ignore_ascii_case(bare))
+}
+
+fn resolve_named_kind(s: &str) -> Option<&'static str> {
+    match s {
+        "mutex" => Some("mutex"),
+        "event" => Some("event"),
+        "thread" => Some("thread"),
+        _ => None,
+    }
+}
+
+fn resolve_setting_name(s: &str) -> Option<&'static str> {
+    match s {
+        "texture colours" => Some("texture colours"),
+        "texture shades" => Some("texture shades"),
+        "dither" => Some("dither"),
+        "shades" => Some("shades"),
+        "quality" => Some("quality"),
+        "texture quality" => Some("texture quality"),
+        "render mode" => Some("render mode"),
+        _ => None,
+    }
+}
+
+fn resolve_interface_name(s: &str) -> Option<&'static str> {
+    interface_named(s).map(|i| i.name)
+}
+
+impl crate::snap::Snap for Contents {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Held(_) => 0u8,
+            Self::Lies { .. } => 1u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => {
+                    let mut bytes = Vec::new();
+                    v.byte_vec(&mut bytes);
+                    *self = Self::Held(bytes);
+                }
+                1 => {
+                    let (mut start, mut len) = (0u64, 0u32);
+                    v.u64(&mut start);
+                    v.u32(&mut len);
+                    *self = Self::Lies { start, len };
+                }
+                _ => v.mark_corrupt("win32::Contents tag"),
+            }
+        } else {
+            match self {
+                Self::Held(bytes) => v.byte_vec(bytes),
+                Self::Lies { start, len } => {
+                    v.u64(start);
+                    v.u32(len);
+                }
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Object {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Module { .. } => 0u8,
+            Self::Heap => 1u8,
+            Self::Std(_) => 2u8,
+            Self::File { .. } => 3u8,
+            Self::Named { .. } => 4u8,
+            Self::Semaphore { .. } => 5u8,
+            Self::Hook(_) => 6u8,
+            Self::Find { .. } => 7u8,
+            Self::Mapping { .. } => 8u8,
+            Self::Key { .. } => 9u8,
+            Self::MidiStream => 10u8,
+            Self::Mmio { .. } => 11u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => {
+                    let (mut name, mut base) = (String::new(), 0u32);
+                    v.string(&mut name);
+                    v.u32(&mut base);
+                    *self = Self::Module { name, base };
+                }
+                1 => *self = Self::Heap,
+                2 => {
+                    let mut n = 0u32;
+                    v.u32(&mut n);
+                    *self = Self::Std(n);
+                }
+                3 => {
+                    let mut path = String::new();
+                    let mut contents = Contents::Held(Vec::new());
+                    let (mut at, mut access, mut share, mut wrote) = (0u32, 0u32, 0u32, false);
+                    v.string(&mut path);
+                    contents.snap(v);
+                    v.u32(&mut at);
+                    v.u32(&mut access);
+                    v.u32(&mut share);
+                    v.bool(&mut wrote);
+                    *self = Self::File {
+                        path,
+                        contents,
+                        at,
+                        access,
+                        share,
+                        wrote,
+                    };
+                }
+                4 => {
+                    let mut kind = "";
+                    crate::snap::snap_static_str(
+                        v,
+                        &mut kind,
+                        "Object::Named kind",
+                        resolve_named_kind,
+                    );
+                    let mut name = String::new();
+                    let (mut signalled, mut manual) = (false, false);
+                    let mut held: Option<(u32, u32)> = None;
+                    v.string(&mut name);
+                    v.bool(&mut signalled);
+                    v.bool(&mut manual);
+                    crate::snap::snap_option(v, &mut held, |(a, b), v| {
+                        v.u32(a);
+                        v.u32(b);
+                    });
+                    *self = Self::Named {
+                        kind,
+                        name,
+                        signalled,
+                        manual,
+                        held,
+                    };
+                }
+                5 => {
+                    let (mut count, mut max) = (0u32, 0u32);
+                    v.u32(&mut count);
+                    v.u32(&mut max);
+                    *self = Self::Semaphore { count, max };
+                }
+                6 => {
+                    let mut h = 0u32;
+                    v.u32(&mut h);
+                    *self = Self::Hook(h);
+                }
+                7 => {
+                    let mut matches = Vec::new();
+                    let mut at = 0usize;
+                    crate::snap::snap_vec(v, &mut matches, |(n, sz), v| {
+                        v.string(n);
+                        v.u32(sz);
+                    });
+                    v.usize(&mut at);
+                    *self = Self::Find { matches, at };
+                }
+                8 => {
+                    let (mut at, mut len) = (0u32, 0u32);
+                    v.u32(&mut at);
+                    v.u32(&mut len);
+                    *self = Self::Mapping { at, len };
+                }
+                9 => {
+                    let mut path = String::new();
+                    v.string(&mut path);
+                    *self = Self::Key { path };
+                }
+                10 => *self = Self::MidiStream,
+                11 => {
+                    let (mut base, mut len, mut at, mut owned) = (0u32, 0u32, 0u32, false);
+                    v.u32(&mut base);
+                    v.u32(&mut len);
+                    v.u32(&mut at);
+                    v.bool(&mut owned);
+                    *self = Self::Mmio {
+                        base,
+                        len,
+                        at,
+                        owned,
+                    };
+                }
+                _ => v.mark_corrupt("win32::Object tag"),
+            }
+        } else {
+            match self {
+                Self::Module { name, base } => {
+                    v.string(name);
+                    v.u32(base);
+                }
+                Self::Heap | Self::MidiStream => {}
+                Self::Std(n) | Self::Hook(n) => v.u32(n),
+                Self::File {
+                    path,
+                    contents,
+                    at,
+                    access,
+                    share,
+                    wrote,
+                } => {
+                    v.string(path);
+                    contents.snap(v);
+                    v.u32(at);
+                    v.u32(access);
+                    v.u32(share);
+                    v.bool(wrote);
+                }
+                Self::Named {
+                    kind,
+                    name,
+                    signalled,
+                    manual,
+                    held,
+                } => {
+                    crate::snap::snap_static_str(v, kind, "Object::Named kind", resolve_named_kind);
+                    v.string(name);
+                    v.bool(signalled);
+                    v.bool(manual);
+                    crate::snap::snap_option(v, held, |(a, b), v| {
+                        v.u32(a);
+                        v.u32(b);
+                    });
+                }
+                Self::Semaphore { count, max } => {
+                    v.u32(count);
+                    v.u32(max);
+                }
+                Self::Find { matches, at } => {
+                    crate::snap::snap_vec(v, matches, |(n, sz), v| {
+                        v.string(n);
+                        v.u32(sz);
+                    });
+                    v.usize(at);
+                }
+                Self::Mapping { at, len } => {
+                    v.u32(at);
+                    v.u32(len);
+                }
+                Self::Key { path } => v.string(path),
+                Self::Mmio {
+                    base,
+                    len,
+                    at,
+                    owned,
+                } => {
+                    v.u32(base);
+                    v.u32(len);
+                    v.u32(at);
+                    v.bool(owned);
+                }
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for GuestThread {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            cpu,
+            handle,
+            id,
+            suspended,
+            ended,
+            code,
+            tls,
+            wake_at,
+            gives_up_at,
+            waiting_on,
+            time_critical,
+        } = self;
+        cpu.snap(v);
+        v.u32(handle);
+        v.u32(id);
+        v.bool(suspended);
+        v.bool(ended);
+        v.u32(code);
+        crate::snap::snap_u32_vec(v, tls);
+        v.u64(wake_at);
+        v.u64(gives_up_at);
+        crate::snap::snap_u32_vec(v, waiting_on);
+        v.bool(time_critical);
+    }
+}
+
+impl crate::snap::Snap for Message {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            window,
+            message,
+            wparam,
+            lparam,
+            time,
+            point,
+        } = self;
+        v.u32(window);
+        v.u32(message);
+        v.u32(wparam);
+        v.u32(lparam);
+        v.u32(time);
+        v.i32(&mut point.0);
+        v.i32(&mut point.1);
+    }
+}
+
+impl crate::snap::Snap for Present {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            pixels,
+            width,
+            height,
+            pitch,
+            depth,
+        } = self;
+        v.u32(pixels);
+        v.u32(width);
+        v.u32(height);
+        v.u32(pitch);
+        v.u32(depth);
+    }
+}
+
+impl crate::snap::Snap for ComState {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::None => 0u8,
+            Self::Device { .. } => 1u8,
+            Self::Sound => 2u8,
+            Self::Surface { .. } => 3u8,
+            Self::Palette { .. } => 4u8,
+            Self::MultiMediaStream => 5u8,
+            Self::MediaStream { .. } => 6u8,
+            Self::StreamSample { .. } => 7u8,
+            Self::AviStream { .. } => 8u8,
+            Self::Device3D { .. } => 9u8,
+            Self::VertexBuffer { .. } => 10u8,
+            Self::Array { .. } => 11u8,
+            Self::PickedArray { .. } => 12u8,
+            Self::UserVisual { .. } => 13u8,
+            Self::RetainedDevice { .. } => 14u8,
+            Self::Viewport { .. } => 15u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => *self = Self::None,
+                1 => {
+                    let mut keyboard = false;
+                    v.bool(&mut keyboard);
+                    *self = Self::Device { keyboard };
+                }
+                2 => *self = Self::Sound,
+                3 => {
+                    let (mut pixels, mut width, mut height, mut pitch) = (0u32, 0u32, 0u32, 0u32);
+                    let mut format = crate::raster::PixelFormat::RGB565;
+                    let (mut primary, mut caps, mut back, mut palette) = (false, 0u32, 0u32, 0u32);
+                    v.u32(&mut pixels);
+                    v.u32(&mut width);
+                    v.u32(&mut height);
+                    v.u32(&mut pitch);
+                    format.snap(v);
+                    v.bool(&mut primary);
+                    v.u32(&mut caps);
+                    v.u32(&mut back);
+                    v.u32(&mut palette);
+                    *self = Self::Surface {
+                        pixels,
+                        width,
+                        height,
+                        pitch,
+                        format,
+                        primary,
+                        caps,
+                        back,
+                        palette,
+                    };
+                }
+                4 => {
+                    let mut store = 0u32;
+                    v.u32(&mut store);
+                    *self = Self::Palette { store };
+                }
+                5 => *self = Self::MultiMediaStream,
+                6 => {
+                    let (mut owner, mut video) = (0u32, false);
+                    v.u32(&mut owner);
+                    v.bool(&mut video);
+                    *self = Self::MediaStream { owner, video };
+                }
+                7 => {
+                    let (mut owner, mut surface) = (0u32, 0u32);
+                    v.u32(&mut owner);
+                    v.u32(&mut surface);
+                    *self = Self::StreamSample { owner, surface };
+                }
+                8 => {
+                    let (mut file, mut stream) = (0u32, 0usize);
+                    v.u32(&mut file);
+                    v.usize(&mut stream);
+                    *self = Self::AviStream { file, stream };
+                }
+                9 => {
+                    let mut surface = 0u32;
+                    v.u32(&mut surface);
+                    *self = Self::Device3D { surface };
+                }
+                10 => {
+                    let (mut store, mut fvf, mut count) = (0u32, 0u32, 0u32);
+                    v.u32(&mut store);
+                    v.u32(&mut fvf);
+                    v.u32(&mut count);
+                    *self = Self::VertexBuffer { store, fvf, count };
+                }
+                11 => {
+                    let mut items = Vec::new();
+                    crate::snap::snap_u32_vec(v, &mut items);
+                    *self = Self::Array { items };
+                }
+                12 => {
+                    let mut picks = Vec::new();
+                    crate::snap::snap_vec(v, &mut picks, |(a, b, desc), v| {
+                        v.u32(a);
+                        v.u32(b);
+                        for w in desc {
+                            v.u32(w);
+                        }
+                    });
+                    *self = Self::PickedArray { picks };
+                }
+                13 => {
+                    let (mut callback, mut argument) = (0u32, 0u32);
+                    v.u32(&mut callback);
+                    v.u32(&mut argument);
+                    *self = Self::UserVisual { callback, argument };
+                }
+                14 => {
+                    let (mut surface, mut buffers, mut immediate) = (0u32, 0u32, 0u32);
+                    v.u32(&mut surface);
+                    v.u32(&mut buffers);
+                    v.u32(&mut immediate);
+                    *self = Self::RetainedDevice {
+                        surface,
+                        buffers,
+                        immediate,
+                    };
+                }
+                15 => {
+                    let (
+                        mut device,
+                        mut camera,
+                        mut x,
+                        mut y,
+                        mut width,
+                        mut height,
+                        mut background,
+                        mut immediate,
+                    ) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+                    v.u32(&mut device);
+                    v.u32(&mut camera);
+                    v.u32(&mut x);
+                    v.u32(&mut y);
+                    v.u32(&mut width);
+                    v.u32(&mut height);
+                    v.u32(&mut background);
+                    v.u32(&mut immediate);
+                    *self = Self::Viewport {
+                        device,
+                        camera,
+                        x,
+                        y,
+                        width,
+                        height,
+                        background,
+                        immediate,
+                    };
+                }
+                _ => v.mark_corrupt("win32::ComState tag"),
+            }
+        } else {
+            match self {
+                Self::None | Self::Sound | Self::MultiMediaStream => {}
+                Self::Device { keyboard } => v.bool(keyboard),
+                Self::Surface {
+                    pixels,
+                    width,
+                    height,
+                    pitch,
+                    format,
+                    primary,
+                    caps,
+                    back,
+                    palette,
+                } => {
+                    v.u32(pixels);
+                    v.u32(width);
+                    v.u32(height);
+                    v.u32(pitch);
+                    format.snap(v);
+                    v.bool(primary);
+                    v.u32(caps);
+                    v.u32(back);
+                    v.u32(palette);
+                }
+                Self::Palette { store } => v.u32(store),
+                Self::MediaStream { owner, video } => {
+                    v.u32(owner);
+                    v.bool(video);
+                }
+                Self::StreamSample { owner, surface } => {
+                    v.u32(owner);
+                    v.u32(surface);
+                }
+                Self::AviStream { file, stream } => {
+                    v.u32(file);
+                    v.usize(stream);
+                }
+                Self::Device3D { surface } => v.u32(surface),
+                Self::VertexBuffer { store, fvf, count } => {
+                    v.u32(store);
+                    v.u32(fvf);
+                    v.u32(count);
+                }
+                Self::Array { items } => crate::snap::snap_u32_vec(v, items),
+                Self::PickedArray { picks } => {
+                    crate::snap::snap_vec(v, picks, |(a, b, desc), v| {
+                        v.u32(a);
+                        v.u32(b);
+                        for w in desc {
+                            v.u32(w);
+                        }
+                    });
+                }
+                Self::UserVisual { callback, argument } => {
+                    v.u32(callback);
+                    v.u32(argument);
+                }
+                Self::RetainedDevice {
+                    surface,
+                    buffers,
+                    immediate,
+                } => {
+                    v.u32(surface);
+                    v.u32(buffers);
+                    v.u32(immediate);
+                }
+                Self::Viewport {
+                    device,
+                    camera,
+                    x,
+                    y,
+                    width,
+                    height,
+                    background,
+                    immediate,
+                } => {
+                    v.u32(device);
+                    v.u32(camera);
+                    v.u32(x);
+                    v.u32(y);
+                    v.u32(width);
+                    v.u32(height);
+                    v.u32(background);
+                    v.u32(immediate);
+                }
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for ComObject {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            interface,
+            refs,
+            identity,
+            app_data,
+            state,
+        } = self;
+        crate::snap::snap_static_str(v, interface, "ComObject interface", resolve_interface_name);
+        v.i32(refs);
+        v.u32(identity);
+        v.u32(app_data);
+        state.snap(v);
+    }
+}
+
+impl crate::snap::Snap for State {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        // Exhaustively destructure every field of `State`: adding a field later
+        // is a compile error rather than silent snapshot corruption (#313).
+        let Self {
+            foreign_frees,
+            saves_refused,
+            heap,
+            handles,
+            command_line,
+            last_error,
+            threads,
+            thread,
+            next_thread_id,
+            tls_slots,
+            sections,
+            section_waiters,
+            claimed,
+            reserved,
+            committed,
+            next_mapping,
+            mapped_files,
+            error_mode,
+            current_directory,
+            volume_label,
+            waited_millis,
+            yielded,
+            installed_files,
+            window_procedure,
+            window_made,
+            quit,
+            window_thread,
+            window_style,
+            window_instance,
+            pointer,
+            last_move,
+            display_mode,
+            color_keys,
+            clipped,
+            clip_lists,
+            surface_dcs,
+            drawdibs,
+            next_drawdib,
+            acm_streams,
+            next_acm_stream,
+            palette,
+            present,
+            mixer,
+            sound,
+            players,
+            avi_files,
+            movie_bytes: _,
+            frame_getters,
+            cd,
+            midi,
+            keys_down,
+            keys_pressed,
+            keys_read,
+            mouse_delta,
+            mouse_data,
+            keyboard_data,
+            input_sequence,
+            mouse_down,
+            right_down,
+            last_click,
+            last_right_click,
+            double_clicks,
+            clip,
+            screen_saver_running,
+            paint_erase,
+            pointer_put,
+            cursor_shown,
+            cursor,
+            cursors,
+            messages,
+            timers,
+            dialog,
+            names,
+            set_values,
+            immediate,
+            scene,
+            render,
+            com,
+            faces,
+            vtables,
+            registry,
+        } = self;
+
+        v.u64(foreign_frees);
+        v.u64(saves_refused);
+        heap.snap(v);
+        crate::snap::snap_vec(v, handles, |slot, v| {
+            crate::snap::snap_option_with(v, slot, || Object::Heap, |obj, v| obj.snap(v));
+        });
+        crate::snap::snap_option(v, command_line, |c, v| v.u32(c));
+        v.u32(last_error);
+        crate::snap::snap_vec_with(
+            v,
+            threads,
+            || GuestThread {
+                cpu: Cpu::default(),
+                handle: 0,
+                id: 0,
+                suspended: false,
+                ended: false,
+                code: 0,
+                tls: Vec::new(),
+                wake_at: 0,
+                gives_up_at: 0,
+                waiting_on: Vec::new(),
+                time_critical: false,
+            },
+            |t, v| t.snap(v),
+        );
+        v.usize(thread);
+        v.u32(next_thread_id);
+        v.usize(tls_slots);
+        crate::snap::snap_vec(v, sections, |(a, b, c), v| {
+            v.u32(a);
+            v.u32(b);
+            v.u32(c);
+        });
+        v.u32(section_waiters);
+        crate::snap::snap_vec(v, claimed, |(a, b), v| {
+            v.u32(a);
+            v.u32(b);
+        });
+        crate::snap::snap_btree_map(
+            v,
+            reserved,
+            |k, v| v.u32(k),
+            |(a, b), v| {
+                v.u32(a);
+                v.u32(b);
+            },
+        );
+        crate::snap::snap_btree_map(v, committed, |k, v| v.u32(k), |p, v| v.u32(p));
+        v.u32(next_mapping);
+        crate::snap::snap_vec(v, mapped_files, |(at, len, path), v| {
+            v.u32(at);
+            v.u32(len);
+            v.string(path);
+        });
+        v.u32(error_mode);
+        v.string(current_directory);
+        v.string(volume_label);
+        v.u64(waited_millis);
+        v.bool(yielded);
+        v.usize(installed_files);
+        v.u32(window_procedure);
+        v.bool(window_made);
+        crate::snap::snap_option(v, quit, |(t, c), v| {
+            v.u32(t);
+            v.u32(c);
+        });
+        v.u32(window_thread);
+        v.u32(window_style);
+        v.u32(window_instance);
+        v.i32(&mut pointer.0);
+        v.i32(&mut pointer.1);
+        v.i32(&mut last_move.0);
+        v.i32(&mut last_move.1);
+        v.u32(&mut display_mode.0);
+        v.u32(&mut display_mode.1);
+        v.u32(&mut display_mode.2);
+        crate::snap::snap_btree_map(v, color_keys, |k, v| v.u32(k), |c, v| v.u32(c));
+        crate::snap::snap_btree_set(v, clipped, |k, v| v.u32(k));
+        crate::snap::snap_btree_map(
+            v,
+            clip_lists,
+            |k, v| v.u32(k),
+            |(a, b, c, d), v| {
+                v.i32(a);
+                v.i32(b);
+                v.i32(c);
+                v.i32(d);
+            },
+        );
+        crate::snap::snap_btree_map(v, surface_dcs, |k, v| v.u32(k), |s, v| v.u32(s));
+        crate::snap::snap_btree_set(v, drawdibs, |k, v| v.u32(k));
+        v.u32(next_drawdib);
+        crate::snap::snap_btree_map_with(
+            v,
+            acm_streams,
+            u32::default,
+            msacm32::Stream::empty_for_snap,
+            |k, v| v.u32(k),
+            |s, v| s.snap(v),
+        );
+        v.u32(next_acm_stream);
+        v.u32(palette);
+        crate::snap::snap_option_with(
+            v,
+            present,
+            || Present {
+                pixels: 0,
+                width: 0,
+                height: 0,
+                pitch: 0,
+                depth: 0,
+            },
+            |p, v| p.snap(v),
+        );
+        mixer.snap(v);
+        sound.snap(v);
+        crate::snap::snap_btree_map(v, players, |k, v| v.u32(k), |p, v| p.snap(v));
+        crate::snap::snap_btree_map_with(
+            v,
+            avi_files,
+            u32::default,
+            avifile::File::empty_for_snap,
+            |k, v| v.u32(k),
+            |f, v| f.snap(v),
+        );
+        crate::snap::snap_btree_map_with(
+            v,
+            frame_getters,
+            u32::default,
+            avifile::Getter::empty_for_snap,
+            |k, v| v.u32(k),
+            |g, v| g.snap(v),
+        );
+        cd.snap(v);
+        crate::snap::snap_option_with(v, midi, winmm::Midi::empty_for_snap, |m, v| m.snap(v));
+        crate::snap::snap_u32_vec(v, keys_down);
+        crate::snap::snap_u32_vec(v, keys_pressed);
+        crate::snap::snap_u32_vec(v, keys_read);
+        v.i32(&mut mouse_delta.0);
+        v.i32(&mut mouse_delta.1);
+        crate::snap::snap_vec_deque(v, mouse_data, |(a, b), v| {
+            v.u32(a);
+            v.u32(b);
+        });
+        crate::snap::snap_vec_deque(v, keyboard_data, |(a, b), v| {
+            v.u32(a);
+            v.u32(b);
+        });
+        v.u32(input_sequence);
+        v.bool(mouse_down);
+        v.bool(right_down);
+        v.u32(&mut last_click.0);
+        v.i32(&mut last_click.1 .0);
+        v.i32(&mut last_click.1 .1);
+        v.u32(&mut last_right_click.0);
+        v.i32(&mut last_right_click.1 .0);
+        v.i32(&mut last_right_click.1 .1);
+        v.bool(double_clicks);
+        crate::snap::snap_option(v, clip, |rect, v| {
+            for r in rect {
+                v.i32(r);
+            }
+        });
+        v.bool(screen_saver_running);
+        crate::snap::snap_option(v, paint_erase, |b, v| v.bool(b));
+        crate::snap::snap_option(v, pointer_put, |(x, y), v| {
+            v.i32(x);
+            v.i32(y);
+        });
+        v.i32(cursor_shown);
+        crate::snap::snap_option(v, cursor, |c, v| v.u32(c));
+        crate::snap::snap_vec_with(
+            v,
+            cursors,
+            || (0u32, 0u32, crate::host::Cursor::none()),
+            |(m, n, cur), v| {
+                v.u32(m);
+                v.u32(n);
+                cur.snap(v);
+            },
+        );
+        crate::snap::snap_vec_deque_with(
+            v,
+            messages,
+            || Message {
+                window: 0,
+                message: 0,
+                wparam: 0,
+                lparam: 0,
+                time: 0,
+                point: (0, 0),
+            },
+            |m, v| m.snap(v),
+        );
+        crate::snap::snap_vec_with(
+            v,
+            timers,
+            || user32::Timer {
+                window: 0,
+                id: 0,
+                period: 0,
+                due: 0,
+                callback: 0,
+            },
+            |t, v| t.snap(v),
+        );
+        crate::snap::snap_option_with(v, dialog, user32::Dialog::empty_for_snap, |d, v| d.snap(v));
+        crate::snap::snap_btree_map(v, names, |k, v| v.u32(k), |s, v| v.string(s));
+        crate::snap::snap_btree_map_with(
+            v,
+            set_values,
+            || (0u32, ""),
+            u32::default,
+            |(id, name), v| {
+                v.u32(id);
+                crate::snap::snap_static_str(v, name, "set_values setting", resolve_setting_name);
+            },
+            |val, v| v.u32(val),
+        );
+        immediate.snap(v);
+        scene.snap(v);
+        crate::snap::snap_option_with(v, render, d3drm::RenderPass::empty_for_snap, |r, v| {
+            r.snap(v)
+        });
+        crate::snap::snap_btree_map_with(
+            v,
+            com,
+            u32::default,
+            || ComObject {
+                interface: "",
+                refs: 0,
+                identity: 0,
+                app_data: 0,
+                state: ComState::None,
+            },
+            |k, v| v.u32(k),
+            |obj, v| obj.snap(v),
+        );
+        crate::snap::snap_btree_map_with(
+            v,
+            faces,
+            || (0u32, ""),
+            u32::default,
+            |(id, iface), v| {
+                v.u32(id);
+                crate::snap::snap_static_str(v, iface, "faces interface", resolve_interface_name);
+            },
+            |val, v| v.u32(val),
+        );
+        crate::snap::snap_btree_map_with(
+            v,
+            vtables,
+            || "",
+            u32::default,
+            |iface, v| {
+                crate::snap::snap_static_str(v, iface, "vtables interface", resolve_interface_name);
+            },
+            |val, v| v.u32(val),
+        );
+        crate::snap::snap_btree_map(
+            v,
+            registry,
+            |k, v| v.string(k),
+            |inner, v| {
+                crate::snap::snap_btree_map(
+                    v,
+                    inner,
+                    |k, v| v.string(k),
+                    |(kind, bytes), v| {
+                        v.u32(kind);
+                        v.byte_vec(bytes);
+                    },
+                );
+            },
+        );
+    }
 }
 
 #[cfg(test)]

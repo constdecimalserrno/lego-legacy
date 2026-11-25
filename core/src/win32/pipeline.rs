@@ -157,6 +157,161 @@ pub enum Light {
     },
 }
 
+impl crate::snap::Snap for Light {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Ambient { .. } => 0u8,
+            Self::Directional { .. } => 1u8,
+            Self::Point { .. } => 2u8,
+            Self::Spot { .. } => 3u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => {
+                    let mut colour = [0.0f32; 3];
+                    for c in &mut colour {
+                        v.f32(c);
+                    }
+                    *self = Self::Ambient { colour };
+                }
+                1 => {
+                    let (mut colour, mut direction) = ([0.0f32; 3], [0.0f32; 3]);
+                    for c in &mut colour {
+                        v.f32(c);
+                    }
+                    for d in &mut direction {
+                        v.f32(d);
+                    }
+                    *self = Self::Directional { colour, direction };
+                }
+                2 => {
+                    let (mut colour, mut position, mut range, mut attenuation) =
+                        ([0.0f32; 3], [0.0f32; 3], 0.0f32, [0.0f32; 3]);
+                    for c in &mut colour {
+                        v.f32(c);
+                    }
+                    for p in &mut position {
+                        v.f32(p);
+                    }
+                    v.f32(&mut range);
+                    for a in &mut attenuation {
+                        v.f32(a);
+                    }
+                    *self = Self::Point {
+                        colour,
+                        position,
+                        range,
+                        attenuation,
+                    };
+                }
+                3 => {
+                    let (
+                        mut colour,
+                        mut position,
+                        mut direction,
+                        mut range,
+                        mut attenuation,
+                        mut inner,
+                        mut outer,
+                    ) = (
+                        [0.0f32; 3],
+                        [0.0f32; 3],
+                        [0.0f32; 3],
+                        0.0f32,
+                        [0.0f32; 3],
+                        0.0f32,
+                        0.0f32,
+                    );
+                    for c in &mut colour {
+                        v.f32(c);
+                    }
+                    for p in &mut position {
+                        v.f32(p);
+                    }
+                    for d in &mut direction {
+                        v.f32(d);
+                    }
+                    v.f32(&mut range);
+                    for a in &mut attenuation {
+                        v.f32(a);
+                    }
+                    v.f32(&mut inner);
+                    v.f32(&mut outer);
+                    *self = Self::Spot {
+                        colour,
+                        position,
+                        direction,
+                        range,
+                        attenuation,
+                        inner,
+                        outer,
+                    };
+                }
+                _ => v.mark_corrupt("pipeline::Light tag"),
+            }
+        } else {
+            match self {
+                Self::Ambient { colour } => {
+                    for c in colour {
+                        v.f32(c);
+                    }
+                }
+                Self::Directional { colour, direction } => {
+                    for c in colour {
+                        v.f32(c);
+                    }
+                    for d in direction {
+                        v.f32(d);
+                    }
+                }
+                Self::Point {
+                    colour,
+                    position,
+                    range,
+                    attenuation,
+                } => {
+                    for c in colour {
+                        v.f32(c);
+                    }
+                    for p in position {
+                        v.f32(p);
+                    }
+                    v.f32(range);
+                    for a in attenuation {
+                        v.f32(a);
+                    }
+                }
+                Self::Spot {
+                    colour,
+                    position,
+                    direction,
+                    range,
+                    attenuation,
+                    inner,
+                    outer,
+                } => {
+                    for c in colour {
+                        v.f32(c);
+                    }
+                    for p in position {
+                        v.f32(p);
+                    }
+                    for d in direction {
+                        v.f32(d);
+                    }
+                    v.f32(range);
+                    for a in attenuation {
+                        v.f32(a);
+                    }
+                    v.f32(inner);
+                    v.f32(outer);
+                }
+            }
+        }
+    }
+}
+
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }

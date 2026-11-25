@@ -1768,6 +1768,77 @@ struct Visit {
     visual: u32,
 }
 
+impl RenderPass {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            visits: Vec::new(),
+            next: 0,
+            drawing: false,
+            device: 0,
+            viewport: 0,
+            immediate: 0,
+            lights: Vec::new(),
+            parked: false,
+        }
+    }
+}
+
+impl crate::snap::Snap for Visit {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            frame,
+            callback,
+            argument,
+            visual,
+        } = self;
+        v.u32(frame);
+        v.u32(callback);
+        v.u32(argument);
+        v.u32(visual);
+    }
+}
+
+impl crate::snap::Snap for RenderPass {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            visits,
+            next,
+            drawing,
+            device,
+            viewport,
+            immediate,
+            lights,
+            parked,
+        } = self;
+        crate::snap::snap_vec_with(
+            v,
+            visits,
+            || Visit {
+                frame: 0,
+                callback: 0,
+                argument: 0,
+                visual: 0,
+            },
+            |vis, v| vis.snap(v),
+        );
+        v.usize(next);
+        v.bool(drawing);
+        v.u32(device);
+        v.u32(viewport);
+        v.u32(immediate);
+        crate::snap::snap_vec_with(
+            v,
+            lights,
+            || (0u32, super::pipeline::Light::Ambient { colour: [0.0; 3] }),
+            |(only, light), v| {
+                v.u32(only);
+                light.snap(v);
+            },
+        );
+        v.bool(parked);
+    }
+}
+
 /// `D3DRMUSERVISUAL_CANSEE` and `D3DRMUSERVISUAL_RENDER`.
 const CAN_SEE: u32 = 0;
 const DRAW: u32 = 1;

@@ -184,6 +184,54 @@ impl Heap {
     }
 }
 
+impl crate::snap::Snap for Heap {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            next,
+            end,
+            live,
+            free,
+        } = self;
+        v.u32(next);
+        v.u32(end);
+        if v.is_reading() {
+            let mut len = 0u32;
+            v.u32(&mut len);
+            let len = len as usize;
+            if !v.check_remaining(len.saturating_mul(8)) {
+                return;
+            }
+            live.clear();
+            live.reserve(len);
+            for _ in 0..len {
+                let (mut addr, mut size) = (0u32, 0u32);
+                v.u32(&mut addr);
+                v.u32(&mut size);
+                if v.failed() {
+                    return;
+                }
+                live.insert(addr, size);
+            }
+        } else {
+            // Sort by address so snapshot bytes are deterministic.
+            let mut entries: Vec<(u32, u32)> = live.iter().map(|(&a, &s)| (a, s)).collect();
+            entries.sort_unstable_by_key(|&(a, _)| a);
+            let mut len = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+            v.u32(&mut len);
+            for (mut addr, mut size) in entries {
+                v.u32(&mut addr);
+                v.u32(&mut size);
+            }
+        }
+        crate::snap::snap_btree_map(
+            v,
+            free,
+            |k, v| v.u32(k),
+            |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Heap, HEAP_BASE};

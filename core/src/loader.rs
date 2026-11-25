@@ -251,3 +251,39 @@ impl Modules {
 fn trim(name: &str) -> String {
     name.to_ascii_lowercase()
 }
+
+impl crate::snap::Snap for Module {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            name,
+            base,
+            size,
+            entry,
+            exports,
+        } = self;
+        v.string(name);
+        v.u32(base);
+        v.u32(size);
+        v.u32(entry);
+        exports.snap(v);
+    }
+}
+
+impl crate::snap::Snap for Modules {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { list, next } = self;
+        crate::snap::snap_vec_with(
+            v,
+            list,
+            || Module {
+                name: String::new(),
+                base: 0,
+                size: 0,
+                entry: 0,
+                exports: Exports::default(),
+            },
+            |m, v| m.snap(v),
+        );
+        v.u32(next);
+    }
+}

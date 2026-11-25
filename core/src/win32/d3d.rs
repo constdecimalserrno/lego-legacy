@@ -179,6 +179,111 @@ impl Default for Device {
     }
 }
 
+impl crate::snap::Snap for Device {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            render,
+            render_set,
+            render_extra,
+            light,
+            light_set,
+            light_extra,
+            transforms,
+            transforms_extra,
+            view_proj,
+            textures,
+            textures_extra,
+            stages,
+            stages_set,
+            stages_extra,
+            current_viewport,
+            viewport7,
+            in_scene,
+            direct3d,
+            depth,
+        } = self;
+        for r in render {
+            v.u32(r);
+        }
+        for w in render_set {
+            v.u64(w);
+        }
+        crate::snap::snap_btree_map(v, render_extra, |k, v| v.u32(k), |val, v| v.u32(val));
+        for l in light {
+            v.u32(l);
+        }
+        v.u8(light_set);
+        crate::snap::snap_btree_map(v, light_extra, |k, v| v.u32(k), |val, v| v.u32(val));
+        for m in transforms {
+            for w in m {
+                v.u32(w);
+            }
+        }
+        crate::snap::snap_btree_map(
+            v,
+            transforms_extra,
+            |k, v| v.u32(k),
+            |m, v| {
+                for w in m {
+                    v.u32(w);
+                }
+            },
+        );
+        if v.is_reading() {
+            *view_proj = None;
+        }
+        for t in textures {
+            v.u32(t);
+        }
+        crate::snap::snap_btree_map(v, textures_extra, |k, v| v.u32(k), |val, v| v.u32(val));
+        for st in stages {
+            for val in st {
+                v.u32(val);
+            }
+        }
+        for s in stages_set {
+            v.u32(s);
+        }
+        crate::snap::snap_btree_map(
+            v,
+            stages_extra,
+            |(a, b), v| {
+                v.u32(a);
+                v.u32(b);
+            },
+            |val, v| v.u32(val),
+        );
+        v.u32(current_viewport);
+        for w in viewport7 {
+            v.u32(w);
+        }
+        v.bool(in_scene);
+        v.u32(direct3d);
+        crate::snap::snap_f32_vec(v, depth);
+    }
+}
+
+impl crate::snap::Snap for Immediate {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            devices,
+            materials,
+            handles,
+            next_handle,
+            viewports,
+            scratch: _,
+        } = self;
+        crate::snap::snap_vec(v, devices, |(addr, dev), v| {
+            v.u32(addr);
+            dev.snap(v);
+        });
+        crate::snap::snap_btree_map(v, materials, |k, v| v.u32(k), |b, v| v.byte_vec(b));
+        crate::snap::snap_btree_map(v, handles, |k, v| v.u32(k), |val, v| v.u32(val));
+        v.u32(next_handle);
+        crate::snap::snap_btree_map(v, viewports, |k, v| v.u32(k), |b, v| v.byte_vec(b));
+    }
+}
+
 impl Device {
     #[inline]
     fn set_render(&mut self, state: u32, value: u32) {

@@ -454,6 +454,55 @@ pub struct RedBook {
     pub sectors: u64,
 }
 
+impl crate::snap::Snap for Track {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            number,
+            pregap,
+            start,
+        } = self;
+        v.u32(number);
+        v.u64(pregap);
+        v.u64(start);
+    }
+}
+
+impl RedBook {
+    pub(crate) fn empty_for_snap() -> Self {
+        Self {
+            bin: PathBuf::new(),
+            tracks: Vec::new(),
+            sectors: 0,
+        }
+    }
+}
+
+impl crate::snap::Snap for RedBook {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            bin,
+            tracks,
+            sectors,
+        } = self;
+        let mut path_str = bin.to_string_lossy().into_owned();
+        v.string(&mut path_str);
+        if v.is_reading() {
+            *bin = PathBuf::from(path_str);
+        }
+        crate::snap::snap_vec_with(
+            v,
+            tracks,
+            || Track {
+                number: 0,
+                pregap: 0,
+                start: 0,
+            },
+            |t, v| t.snap(v),
+        );
+        v.u64(sectors);
+    }
+}
+
 impl RedBook {
     /// The audio tracks a cue sheet lists, by their `INDEX` lines: `00` where
     /// the pregap starts, `01` where the music does, each as minutes, seconds

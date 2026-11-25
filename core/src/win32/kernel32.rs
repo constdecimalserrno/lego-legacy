@@ -2482,6 +2482,8 @@ fn create_file_mapping(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     };
     ctx.state.next_mapping = end;
     ctx.mem.write(at, &bytes).map_err(Stop::Fault)?;
+    let abs_path = ctx.absolute(&path);
+    ctx.state.mapped_files.push((at, len, abs_path));
     ctx.log
         .line(&format!("mapped {path}: {len} bytes at {at:#010x}"));
     Ok(ctx.state.give(Object::Mapping { at, len }))

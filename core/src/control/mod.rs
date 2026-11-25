@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod json;
 pub mod meta;
 pub mod observe;
+pub mod snapshot;
 pub mod spectator;
 pub mod stdio;
 pub mod timeline;
@@ -32,6 +33,7 @@ pub use http::{
     SessionRegistryGuard, StreamIo,
 };
 pub use meta::{format_controls_json, format_goals_json, format_meta_json, write_title_guide};
+pub use snapshot::{SnapshotOp, SnapshotReply, SnapshotSummary};
 pub use spectator::SpectatorRoutes;
 pub use stdio::StdioBridge;
 pub use timeline::{Action, ActionError, ScheduleReport, Timeline};

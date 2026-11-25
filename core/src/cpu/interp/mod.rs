@@ -814,6 +814,10 @@ impl CpuEngine for Interp {
     fn name(&self) -> &'static str {
         "interp"
     }
+
+    fn forget(&mut self) {
+        Interp::forget(self);
+    }
 }
 
 /// Decode one instruction, for a caller that wants to look rather than run.

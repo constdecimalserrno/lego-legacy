@@ -49,6 +49,56 @@ pub struct Movie {
     running_since: Option<u64>,
 }
 
+impl crate::snap::Snap for Movie {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            name,
+            bytes,
+            avi,
+            video,
+            decoder,
+            picture,
+            next,
+            running_since,
+        } = self;
+        v.string(name);
+        v.byte_vec(bytes);
+        avi.snap(v);
+        v.usize(video);
+        decoder.snap(v);
+        picture.snap(v);
+        v.usize(next);
+        crate::snap::snap_option(v, running_since, |r, v| v.u64(r));
+    }
+}
+
+impl crate::snap::Snap for Player {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            video_stream,
+            audio_stream,
+            movie,
+        } = self;
+        v.u32(video_stream);
+        v.u32(audio_stream);
+        crate::snap::snap_option_with(
+            v,
+            movie,
+            || Movie {
+                name: String::new(),
+                bytes: Vec::new(),
+                avi: crate::avi::Avi::default(),
+                video: 0,
+                decoder: crate::iv50::Decoder::new(),
+                picture: crate::iv50::Picture::default(),
+                next: 0,
+                running_since: None,
+            },
+            |m, v| m.snap(v),
+        );
+    }
+}
+
 impl Movie {
     /// How long one frame is on screen, in declared milliseconds, as a ratio.
     fn frame_millis(&self) -> (u64, u64) {

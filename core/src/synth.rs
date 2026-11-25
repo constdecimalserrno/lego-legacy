@@ -793,6 +793,198 @@ impl Synth {
     }
 }
 
+impl crate::snap::Snap for Stage {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Attack => 0u8,
+            Self::Decay => 1u8,
+            Self::Sustain => 2u8,
+            Self::Release => 3u8,
+            Self::Done => 4u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => *self = Self::Attack,
+                1 => *self = Self::Decay,
+                2 => *self = Self::Sustain,
+                3 => *self = Self::Release,
+                4 => *self = Self::Done,
+                _ => v.mark_corrupt("synth::Stage tag"),
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Generator {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            stage,
+            level,
+            attack,
+            decay,
+            sustain,
+            release,
+        } = self;
+        stage.snap(v);
+        v.u32(level);
+        v.u32(attack);
+        v.u32(decay);
+        v.u32(sustain);
+        v.u32(release);
+    }
+}
+
+impl crate::snap::Snap for Lfo {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { delay, phase, step } = self;
+        v.u64(delay);
+        v.u32(phase);
+        v.u32(step);
+    }
+}
+
+impl crate::snap::Snap for Channel {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            instrument,
+            bank,
+            volume,
+            expression,
+            pan,
+            modulation,
+            sustain,
+            bend,
+            range,
+            fine,
+            coarse,
+            rpn,
+            nrpn,
+        } = self;
+        crate::snap::snap_option(v, instrument, |i, v| v.usize(i));
+        v.u16(bank);
+        v.u8(volume);
+        v.u8(expression);
+        v.u8(pan);
+        v.u8(modulation);
+        v.bool(sustain);
+        v.i16(bend);
+        v.u8(&mut range.0);
+        v.u8(&mut range.1);
+        v.u16(fine);
+        v.u8(coarse);
+        v.u8(&mut rpn.0);
+        v.u8(&mut rpn.1);
+        v.bool(nrpn);
+    }
+}
+
+impl crate::snap::Snap for Voice {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            channel,
+            note,
+            instrument,
+            region,
+            serial,
+            held,
+            sustained,
+            position,
+            rate,
+            ended,
+            pitch,
+            attenuation,
+            pan,
+            lfo,
+            volume,
+            pitch_eg,
+        } = self;
+        v.usize(channel);
+        v.u8(note);
+        v.usize(instrument);
+        v.usize(region);
+        v.u64(serial);
+        v.bool(held);
+        v.bool(sustained);
+        v.u64(position);
+        v.u64(rate);
+        v.bool(ended);
+        v.i64(pitch);
+        v.i64(attenuation);
+        v.u64(&mut pan[0]);
+        v.u64(&mut pan[1]);
+        lfo.snap(v);
+        volume.snap(v);
+        pitch_eg.snap(v);
+    }
+}
+
+impl crate::snap::Snap for Synth {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        // `bank` is the immutable DLS wavetable loaded at setup and stays in place.
+        let Self {
+            bank: _,
+            channels,
+            voices,
+            queue,
+            running,
+            started,
+            gain,
+        } = self;
+        for ch in channels {
+            ch.snap(v);
+        }
+        crate::snap::snap_vec_with(
+            v,
+            voices,
+            || Voice {
+                channel: 0,
+                note: 0,
+                instrument: 0,
+                region: 0,
+                serial: 0,
+                held: false,
+                sustained: false,
+                position: 0,
+                rate: 0,
+                ended: false,
+                pitch: 0,
+                attenuation: 0,
+                pan: [0, 0],
+                lfo: Lfo {
+                    delay: 0,
+                    phase: 0,
+                    step: 0,
+                },
+                volume: Generator {
+                    stage: Stage::Done,
+                    level: 0,
+                    attack: 0,
+                    decay: 0,
+                    sustain: 0,
+                    release: 0,
+                },
+                pitch_eg: Generator {
+                    stage: Stage::Done,
+                    level: 0,
+                    attack: 0,
+                    decay: 0,
+                    sustain: 0,
+                    release: 0,
+                },
+            },
+            |voice, v| voice.snap(v),
+        );
+        crate::snap::snap_vec_deque(v, queue, |(frame, msg), v| {
+            v.u64(frame);
+            v.u32(msg);
+        });
+        v.u8(running);
+        v.u64(started);
+        v.i64(gain);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{tables, Synth, VOICES};

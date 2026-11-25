@@ -187,3 +187,74 @@ impl Boundary {
 fn address(slot: usize) -> u32 {
     THUNK_BASE + u32::try_from(slot).unwrap_or(0) * THUNK_STRIDE
 }
+
+impl crate::snap::Snap for Entry {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::Return => 0u8,
+            Self::Import(_) => 1u8,
+            Self::Method { .. } => 2u8,
+            Self::Attach { .. } => 3u8,
+            Self::Unhandled { .. } => 4u8,
+            Self::ThreadEnd => 5u8,
+            Self::MidiPlayer => 6u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => *self = Self::Return,
+                1 => {
+                    let mut imp = Import {
+                        dll: String::new(),
+                        name: String::new(),
+                        iat: 0,
+                    };
+                    imp.snap(v);
+                    *self = Self::Import(imp);
+                }
+                2 => {
+                    let mut interface = "";
+                    crate::snap::snap_static_str(v, &mut interface, "COM interface", |n| {
+                        crate::win32::interface_named(n).map(|i| i.name)
+                    });
+                    let mut slot = 0usize;
+                    v.usize(&mut slot);
+                    *self = Self::Method { interface, slot };
+                }
+                3 => {
+                    let mut module = String::new();
+                    v.string(&mut module);
+                    *self = Self::Attach { module };
+                }
+                4 => {
+                    let mut what = String::new();
+                    v.string(&mut what);
+                    *self = Self::Unhandled { what };
+                }
+                5 => *self = Self::ThreadEnd,
+                6 => *self = Self::MidiPlayer,
+                _ => v.mark_corrupt("shim::Entry tag"),
+            }
+        } else {
+            match self {
+                Self::Return | Self::ThreadEnd | Self::MidiPlayer => {}
+                Self::Import(imp) => imp.snap(v),
+                Self::Method { interface, slot } => {
+                    crate::snap::snap_static_str(v, interface, "COM interface", |n| {
+                        crate::win32::interface_named(n).map(|i| i.name)
+                    });
+                    v.usize(slot);
+                }
+                Self::Attach { module } => v.string(module),
+                Self::Unhandled { what } => v.string(what),
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for Boundary {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self { slots } = self;
+        crate::snap::snap_vec_with(v, slots, || Entry::Return, |entry, v| entry.snap(v));
+    }
+}

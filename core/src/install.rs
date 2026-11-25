@@ -111,10 +111,22 @@ impl Tree {
         self.profile = Some(dir);
     }
 
+    /// Snapshot or restore the pending wall state on this install tree.
+    pub(crate) fn snap_wall(&mut self, v: &mut dyn crate::snap::Visitor) {
+        crate::snap::snap_option(v, &mut self.wall, |w, v| v.string(w));
+    }
+
     /// The host profile directory backing guest writes, if configured.
     #[must_use]
     pub fn profile_dir(&self) -> Option<&std::path::Path> {
         self.profile.as_deref()
+    }
+
+    /// Whether `guest_path` currently resolves to a mutable file inside the
+    /// profile overlay directory.
+    #[must_use]
+    pub(crate) fn is_in_profile(&self, guest_path: &str) -> bool {
+        self.profile_path(guest_path).is_some_and(|p| p.is_file())
     }
 
     /// The host path of the mounted pressing ISO image, if any.

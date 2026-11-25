@@ -7,10 +7,13 @@
 //! [`AgentState`] without touching `Machine`.
 
 use super::inspect::{execute_inspect, BookmarkData, InspectQuery, InspectReply};
+use super::snapshot::{
+    execute_snapshot_op, SnapshotOp, SnapshotReply, SnapshotSlot, SnapshotSummary,
+};
 use super::timeline::{resolve_key, Action, Timeline};
 use crate::clock::FlipCost;
 use crate::host::telemetry::{FpsReport, Telemetry};
-use crate::host::{FlipMeta, Input};
+use crate::host::{FlipMeta, Host, Input};
 use crate::machine::{Finish, Machine};
 use crate::route::Route;
 use crate::title::{MouseMode, TitleGuide};
@@ -227,8 +230,8 @@ pub struct ControlStatus {
     pub diff: FrameDiff,
 }
 
-/// Result of a Tier-1 route checkpoint rewind (`/api/rewind`, #309).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Result of a bookmark rewind (`/api/rewind`, #309, #313).
+#[derive(Clone, Debug, PartialEq)]
 pub struct RewindResult {
     pub name: String,
     pub flip: u64,
@@ -237,6 +240,8 @@ pub struct RewindResult {
     pub digest: String,
     pub expected_digest: String,
     pub digest_match: bool,
+    pub mode: &'static str,
+    pub restore_ms: Option<f64>,
 }
 
 struct InspectSlot {
@@ -247,6 +252,16 @@ struct InspectSlot {
 pub(crate) struct InspectTicket {
     query: InspectQuery,
     slot: Arc<InspectSlot>,
+}
+
+struct SnapshotTicketSlot {
+    reply: Mutex<Option<SnapshotReply>>,
+    ready: Condvar,
+}
+
+pub(crate) struct SnapshotTicket {
+    op: SnapshotOp,
+    slot: Arc<SnapshotTicketSlot>,
 }
 
 struct RewindSlot {
@@ -400,7 +415,10 @@ pub(crate) struct BusState {
     pub feed_seq: u64,
     pub machine_attached: bool,
     pub pending_inspects: VecDeque<InspectTicket>,
+    pub pending_snapshots: VecDeque<SnapshotTicket>,
+    pub snapshots: BTreeMap<String, SnapshotSlot>,
     pub bookmarks: BTreeMap<String, BookmarkData>,
+    pub bookmark_snapshots: BTreeMap<String, (Arc<Vec<u8>>, Option<FrameSnapshot>)>,
     pub rewind_abort: bool,
     pub pending_rewind: Option<PendingRewind>,
     pub replaying_rewind: Option<PendingRewind>,
@@ -464,7 +482,10 @@ impl BusState {
             feed_seq: 0,
             machine_attached: false,
             pending_inspects: VecDeque::new(),
+            pending_snapshots: VecDeque::new(),
+            snapshots: BTreeMap::new(),
             bookmarks: BTreeMap::new(),
+            bookmark_snapshots: BTreeMap::new(),
             rewind_abort: false,
             pending_rewind: None,
             replaying_rewind: None,
@@ -667,6 +688,7 @@ impl ControlBus {
         state.step_epoch += 1;
         state.wait_epoch += 1;
         let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
+        let orphaned_snapshots: Vec<_> = state.pending_snapshots.drain(..).collect();
         let orphaned_rewind = state
             .pending_rewind
             .take()
@@ -681,6 +703,18 @@ impl ControlBus {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *slot = Some(InspectReply::Error {
+                status: 410,
+                message: "run has finished".to_owned(),
+            });
+            ticket.slot.ready.notify_all();
+        }
+        for ticket in orphaned_snapshots {
+            let mut slot = ticket
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(SnapshotReply::Error {
                 status: 410,
                 message: "run has finished".to_owned(),
             });
@@ -710,6 +744,7 @@ impl ControlBus {
             state.step_epoch += 1;
             state.wait_epoch += 1;
             let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
+            let orphaned_snapshots: Vec<_> = state.pending_snapshots.drain(..).collect();
             let orphaned_rewind = state
                 .pending_rewind
                 .take()
@@ -724,6 +759,18 @@ impl ControlBus {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *slot = Some(InspectReply::Error {
+                    status: 410,
+                    message: "control host closed".to_owned(),
+                });
+                ticket.slot.ready.notify_all();
+            }
+            for ticket in orphaned_snapshots {
+                let mut slot = ticket
+                    .slot
+                    .reply
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(SnapshotReply::Error {
                     status: 410,
                     message: "control host closed".to_owned(),
                 });
@@ -836,10 +883,104 @@ impl ControlBus {
         }
     }
 
-    /// Capture and store a named Tier-1 route checkpoint (`POST /api/bookmark`, #309).
+    /// Submit a live `LLSNAP v2` snapshot or restore operation to run on
+    /// `&mut Machine` at the active or next flip boundary (#313).
+    #[must_use]
+    pub fn request_snapshot_op(&self, op: SnapshotOp, timeout: Option<Duration>) -> SnapshotReply {
+        let slot = Arc::new(SnapshotTicketSlot {
+            reply: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        {
+            let mut state = self.lock();
+            if state.finished {
+                return SnapshotReply::Error {
+                    status: 410,
+                    message: "run has finished".to_owned(),
+                };
+            }
+            if !state.machine_attached {
+                return SnapshotReply::Error {
+                    status: 503,
+                    message: "machine snapshot engine is not attached".to_owned(),
+                };
+            }
+            state.pending_snapshots.push_back(SnapshotTicket {
+                op,
+                slot: Arc::clone(&slot),
+            });
+        }
+        self.notify_host();
+
+        let deadline = timeout.map(|d| Instant::now() + d);
+        let mut guard = slot
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while guard.is_none() {
+            guard = match deadline {
+                Some(dl) => {
+                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
+                        return SnapshotReply::Error {
+                            status: 504,
+                            message: "snapshot operation timed out waiting for flip boundary"
+                                .to_owned(),
+                        };
+                    };
+                    let (g, _) = slot
+                        .ready
+                        .wait_timeout(guard, rem)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g
+                }
+                None => slot
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
+        }
+        guard.take().unwrap_or(SnapshotReply::Error {
+            status: 500,
+            message: "empty snapshot reply".to_owned(),
+        })
+    }
+
+    /// Drain all queued live snapshot/restore operations against `&mut Machine` (#313).
+    pub fn drain_snapshots(&self, machine: &mut Machine, host: &mut dyn Host) {
+        let tickets: Vec<SnapshotTicket> = {
+            let mut state = self.lock();
+            if state.pending_snapshots.is_empty() {
+                return;
+            }
+            state.pending_snapshots.drain(..).collect()
+        };
+        for ticket in tickets {
+            let reply = execute_snapshot_op(self, machine, host, ticket.op);
+            let mut slot = ticket
+                .slot
+                .reply
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(reply);
+            ticket.slot.ready.notify_all();
+        }
+    }
+
+    /// List all saved in-memory `LLSNAP v2` snapshot slots (#313).
+    #[must_use]
+    pub fn list_snapshots(&self) -> Vec<SnapshotSummary> {
+        self.lock()
+            .snapshots
+            .values()
+            .map(SnapshotSlot::summary)
+            .collect()
+    }
+
+    /// Capture and store a named checkpoint (`POST /api/bookmark`, #309, #313),
+    /// backed by an instant `LLSNAP v2` live snapshot in addition to its route text.
     ///
     /// # Errors
-    /// Returns an error if the bookmark name is empty or the machine cannot be inspected.
+    /// Returns an error if the bookmark name is empty or the machine cannot be snapshotted.
     pub fn save_bookmark(
         &self,
         name: String,
@@ -849,22 +990,14 @@ impl ControlBus {
         if trimmed.is_empty() {
             return Err("bookmark `name` must not be empty".to_owned());
         }
-        match self.request_inspect(InspectQuery::BookmarkCapture, timeout) {
-            InspectReply::Bookmark(data) => {
-                let mut state = self.lock();
-                state.bookmarks.insert(trimmed.clone(), data.clone());
-                state.push_feed(
-                    "control",
-                    format!("bookmark `{trimmed}` @ flip {}", data.flip),
-                );
-                Ok(data)
-            }
-            InspectReply::Error { message, .. } => Err(message),
+        match self.request_snapshot_op(SnapshotOp::SaveBookmark { name: trimmed }, timeout) {
+            SnapshotReply::BookmarkSaved { data, .. } => Ok(data),
+            SnapshotReply::Error { message, .. } => Err(message),
             _ => Err("unexpected bookmark capture reply".to_owned()),
         }
     }
 
-    /// List all saved Tier-1 route bookmarks.
+    /// List all saved checkpoints.
     #[must_use]
     pub fn list_bookmarks(&self) -> Vec<(String, BookmarkData)> {
         self.lock()
@@ -874,7 +1007,9 @@ impl ControlBus {
             .collect()
     }
 
-    /// Request a Tier-1 route rewind to a previously saved bookmark (`POST /api/rewind`, #309).
+    /// Rewind to a previously saved bookmark (`POST /api/rewind`, #309, #313):
+    /// uses instant live `LLSNAP v2` restore when available, falling back to
+    /// Tier-1 outer-loop route replay otherwise.
     ///
     /// # Errors
     /// Returns an error if the bookmark does not exist, a rewind is already in
@@ -884,6 +1019,54 @@ impl ControlBus {
         name: &str,
         timeout: Option<Duration>,
     ) -> Result<RewindResult, String> {
+        let has_v2 = {
+            let state = self.lock();
+            if state.finished {
+                return Err("run has finished".to_owned());
+            }
+            if !state.machine_attached {
+                return Err("machine rewind is not available".to_owned());
+            }
+            if !state.bookmarks.contains_key(name) {
+                return Err(format!("unknown bookmark `{name}`"));
+            }
+            state.bookmark_snapshots.contains_key(name)
+        };
+
+        if has_v2 {
+            return match self.request_snapshot_op(
+                SnapshotOp::RewindBookmark {
+                    name: name.to_owned(),
+                },
+                timeout,
+            ) {
+                SnapshotReply::Restored {
+                    name,
+                    flip,
+                    cursor,
+                    declared_ms,
+                    digest,
+                    expected_digest,
+                    digest_match,
+                    restore_ms,
+                    mode,
+                    ..
+                } => Ok(RewindResult {
+                    name: name.unwrap_or_default(),
+                    flip,
+                    cursor,
+                    declared_ms,
+                    digest: digest.clone(),
+                    expected_digest: expected_digest.unwrap_or(digest),
+                    digest_match,
+                    mode,
+                    restore_ms: Some(restore_ms),
+                }),
+                SnapshotReply::Error { message, .. } => Err(message),
+                _ => Err("unexpected bookmark rewind reply".to_owned()),
+            };
+        }
+
         let slot = Arc::new(RewindSlot {
             reply: Mutex::new(None),
             ready: Condvar::new(),
@@ -1014,6 +1197,8 @@ impl ControlBus {
                 digest: actual_digest,
                 expected_digest: rw.bookmark.digest,
                 digest_match,
+                mode: "route_replay",
+                restore_ms: None,
             };
             let mut slot = rw
                 .slot
