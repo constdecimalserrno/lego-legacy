@@ -3,7 +3,10 @@
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::LEGO_ISLAND as ENTRY;
-use lego_legacy_core::title::{Declared, Installed, WINDOWS_95};
+use lego_legacy_core::title::{
+    AgentCadence, ControlHint, Declared, Goal, Installed, Milestone, MouseMode, TitleGuide,
+    WINDOWS_95,
+};
 use lego_legacy_core::Title;
 
 /// Where this title's installer puts it: `%PROGRAM_FILES%\%MAINDIR%`, with
@@ -122,3 +125,98 @@ pub const LEGO_ISLAND: Title = Title {
     // speed only acts on a pointer a title has taken.
     pointer_speed: (1.0, 1.0),
 };
+
+/// Static playability metadata served via `/api/meta`, `/api/controls`, and
+/// `/api/goals` (#311).
+pub const GUIDE: TitleGuide = TitleGuide {
+    display_name: "LEGO Island",
+    summary: "First-person 3D exploration and minigame adventure set on LEGO Island.",
+    resolution: (640, 480),
+    bpp: 16,
+    refresh_hz: 60,
+    mouse_mode: MouseMode::AbsoluteKept,
+    escape_quits: false,
+    skip_keys: &["Space"],
+    cadence: AgentCadence::BurstThenPause { burst_ms: 500 },
+    controls: &[
+        ControlHint {
+            input: "Up / Down / Left / Right",
+            action: "Drive / steer / walk",
+            notes: "Move forward/back and turn in first person or steer vehicles (bicycle, skateboard, race car).",
+        },
+        ControlHint {
+            input: "Left click (quick)",
+            action: "Pick / interact / enter doors",
+            notes: "Quick click to pick objects, talk, enter buildings, sign the book, or skip intro scenes.",
+        },
+        ControlHint {
+            input: "Left hold (>= 1050 ms)",
+            action: "Walk-drag",
+            notes: "Holding Left button still for >= 1050 ms fires the 1-second `WM_TIMER` to start walk-drag movement.",
+        },
+        ControlHint {
+            input: "Left drag",
+            action: "Build Race Car",
+            notes: "Drag and release vehicle pieces onto build slots in the Race Car workshop.",
+        },
+        ControlHint {
+            input: "Quit Door (590, 260) -> Yes (210, 400)",
+            action: "Save & quit",
+            notes: "Click the Information Center Quit Door at `(590, 260)`, then the green Yes brick at `(210, 400)` to save and exit.",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Skip cutscene",
+            notes: "Skip dialog and cutscene sequences.",
+        },
+    ],
+    hazards: &[
+        "You must sign the Information Center registration book and select a character portrait before the revolving door lets you onto the island.",
+        "Holding Left button still for >= 1000 ms starts continuous walk-drag; keep normal interaction clicks brief.",
+    ],
+    goals: &[
+        Goal {
+            id: "information-center",
+            name: "Sign in & explore Information Center",
+            milestone: Milestone::FirstLight,
+            description: "Sign a player name in the registration book, pick a character portrait, and exit through the revolving door.",
+        },
+        Goal {
+            id: "pizza-delivery",
+            name: "Pizza Delivery",
+            milestone: Milestone::Playable,
+            description: "Take a pizza delivery job at the Pizzeria, deliver it on the skateboard, and save via the Quit Door.",
+        },
+        Goal {
+            id: "race-car-track",
+            name: "Build Race Car & win 2-lap Race Track",
+            milestone: Milestone::Complete,
+            description: "Assemble the Race Car by dragging pieces in the workshop and win the 2-lap Race Track event.",
+        },
+    ],
+    save_files: &["Players.gsi", "History.gsi", "G0.GS"],
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lego_legacy_core::control::json::parse_json;
+    use lego_legacy_core::control::{format_controls_json, format_goals_json, format_meta_json};
+
+    #[test]
+    fn title_guide_serializes_valid_json() {
+        assert!(!GUIDE.is_empty());
+        const { assert!(!GUIDE.escape_quits) };
+        assert_eq!(GUIDE.resolution, (640, 480));
+        assert_eq!(GUIDE.bpp, 16);
+        assert_eq!(GUIDE.refresh_hz, 60);
+        for body in [
+            format_meta_json(&LEGO_ISLAND, &GUIDE),
+            format_controls_json(&LEGO_ISLAND, &GUIDE),
+            format_goals_json(&LEGO_ISLAND, &GUIDE),
+        ] {
+            let v = parse_json(&body).expect("valid JSON");
+            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+    }
+}

@@ -7,14 +7,19 @@
 //! [`AgentState`] without touching `Machine`.
 
 use super::inspect::{execute_inspect, BookmarkData, InspectQuery, InspectReply};
-use super::timeline::{Action, Timeline};
+use super::timeline::{resolve_key, Action, Timeline};
 use crate::clock::FlipCost;
 use crate::host::telemetry::{FpsReport, Telemetry};
 use crate::host::{FlipMeta, Input};
 use crate::machine::{Finish, Machine};
+use crate::route::Route;
+use crate::title::{MouseMode, TitleGuide};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+/// DirectInput scancode for `Escape` (guarded when `guide.escape_quits == true`).
+const DIK_ESCAPE: u32 = 0x01;
 
 /// Maximum entries retained in [`AgentState::action_feed`].
 pub const MAX_ACTION_FEED: usize = 200;
@@ -91,7 +96,7 @@ impl InputOwner {
 /// Initial configuration for [`ControlBus`] and [`super::host::ControlHost`].
 #[derive(Clone, Copy, Debug)]
 pub struct ControlConfig {
-    /// Title roster key reported in `/api/status` (e.g. `"lego-chess"`, `"stub"`).
+    /// Title roster key reported in `/api/status` (e.g. `"stub"`).
     pub title: &'static str,
     pub mode: ExecMode,
     pub owner: InputOwner,
@@ -105,6 +110,9 @@ pub struct ControlConfig {
     pub pointer_speed: (f64, f64),
     /// Title's declared flip cost for embedded `#296` [`Telemetry`].
     pub flip_cost: FlipCost,
+    /// Static per-title playability metadata (#311), used for safety guards
+    /// (`escape_quits`), relative-steering scaling hints, and `/api/meta`.
+    pub guide: &'static TitleGuide,
 }
 
 impl Default for ControlConfig {
@@ -118,6 +126,7 @@ impl Default for ControlConfig {
             pace: 1.0,
             pointer_speed: (1.0, 1.0),
             flip_cost: FlipCost::Refresh(60),
+            guide: &TitleGuide::EMPTY,
         }
     }
 }
@@ -360,6 +369,7 @@ pub(crate) enum WaitCondition {
 
 pub(crate) struct BusState {
     pub title: String,
+    pub guide: &'static TitleGuide,
     pub mode: ExecMode,
     pub owner: InputOwner,
     pub pause_requested: bool,
@@ -399,8 +409,31 @@ pub(crate) struct BusState {
 
 impl BusState {
     fn new(config: ControlConfig) -> Self {
+        let guide = config.guide;
+        let effective_speed = match guide.relative_steered_scale() {
+            Some(scale)
+                if (config.pointer_speed.0 - 1.0).abs() < 1e-9
+                    && (config.pointer_speed.1 - 1.0).abs() < 1e-9 =>
+            {
+                scale
+            }
+            _ => config.pointer_speed,
+        };
+        let mut timeline = Timeline::new(effective_speed);
+        if guide.resolution.0 > 0 && guide.resolution.1 > 0 {
+            timeline.set_frame_size(guide.resolution.0, guide.resolution.1);
+        }
+        let (pointer_pos, pointer_shown) = match guide.mouse_mode {
+            MouseMode::RelativeSteered { recenter, .. } => {
+                timeline.set_pointer(recenter.0, recenter.1);
+                timeline.set_pointer_shown(false);
+                (recenter, false)
+            }
+            MouseMode::AbsoluteKept | MouseMode::SoftwareAbsolute { .. } => ((0, 0), true),
+        };
         Self {
             title: config.title.to_owned(),
+            guide,
             mode: config.mode,
             owner: config.owner,
             pause_requested: config.start_paused,
@@ -420,13 +453,13 @@ impl BusState {
             force_closes: 0,
             last_meta: None,
             recording_len: 0,
-            pointer_pos: (0, 0),
-            pointer_shown: true,
+            pointer_pos,
+            pointer_shown,
             held_keys: Vec::new(),
             latest_frame: None,
             telemetry: Telemetry::new(config.flip_cost),
             audio_underruns: None,
-            timeline: Timeline::new(config.pointer_speed),
+            timeline,
             agent_state: AgentState::default(),
             feed_seq: 0,
             machine_attached: false,
@@ -589,6 +622,12 @@ impl ControlBus {
     #[must_use]
     pub fn status(&self) -> ControlStatus {
         self.lock().status()
+    }
+
+    /// Static per-title [`TitleGuide`] configured on this control plane (#311).
+    #[must_use]
+    pub fn guide(&self) -> &'static TitleGuide {
+        self.lock().guide
     }
 
     /// Latest presented BGRA frame snapshot, if any flip has occurred.
@@ -1057,8 +1096,15 @@ impl ControlBus {
     /// own thread).
     #[must_use]
     pub fn dispatch(&self, cmd: Command) -> Response {
+        self.dispatch_forced(cmd, false)
+    }
+
+    /// Non-blocking dispatch with explicit `force` flag to override title
+    /// safety guards such as [`TitleGuide::escape_quits`] (#311).
+    #[must_use]
+    pub fn dispatch_forced(&self, cmd: Command, force: bool) -> Response {
         let mut state = self.lock();
-        let (resp, wake) = apply_command(&mut state, cmd);
+        let (resp, wake) = apply_command(&mut state, cmd, force);
         drop(state);
         if wake {
             self.notify_host();
@@ -1072,6 +1118,17 @@ impl ControlBus {
     /// elapses).
     #[must_use]
     pub fn dispatch_sync(&self, cmd: Command, timeout: Option<Duration>) -> Response {
+        self.dispatch_sync_forced(cmd, false, timeout)
+    }
+
+    /// Synchronous variant of [`Self::dispatch_forced`] (#311).
+    #[must_use]
+    pub fn dispatch_sync_forced(
+        &self,
+        cmd: Command,
+        force: bool,
+        timeout: Option<Duration>,
+    ) -> Response {
         enum SyncKind {
             None,
             Step { start_epoch: u64 },
@@ -1104,7 +1161,7 @@ impl ControlBus {
             _ => SyncKind::None,
         };
 
-        let (mut resp, wake) = apply_command(&mut state, cmd);
+        let (mut resp, wake) = apply_command(&mut state, cmd, force);
         if !resp.ok {
             drop(state);
             return resp;
@@ -1201,7 +1258,58 @@ fn err_response(state: &BusState, msg: impl Into<String>) -> Response {
     }
 }
 
-fn apply_command(state: &mut BusState, cmd: Command) -> (Response, bool) {
+fn action_presses_escape(action: &Action) -> bool {
+    match action {
+        Action::KeyHold { key, .. } => resolve_key(key) == Some(DIK_ESCAPE),
+        Action::Chord { keys, .. } => keys.iter().any(|k| resolve_key(k) == Some(DIK_ESCAPE)),
+        _ => false,
+    }
+}
+
+fn route_presses_escape(route_text: &str) -> bool {
+    let Ok(route) = Route::parse(route_text) else {
+        return false;
+    };
+    route.due(0, (u64::MAX, u64::MAX)).iter().any(|(_, input)| {
+        matches!(
+            input,
+            Input::Key {
+                code: DIK_ESCAPE,
+                down: true
+            }
+        )
+    })
+}
+
+fn apply_guide_action_hints(guide: &TitleGuide, action: &Action) -> Action {
+    match action {
+        Action::MouseDelta {
+            dx,
+            dy,
+            flips,
+            scale_x,
+            scale_y,
+        } => {
+            if let Some((gx, gy)) = guide.relative_steered_scale() {
+                Action::MouseDelta {
+                    dx: *dx,
+                    dy: *dy,
+                    flips: *flips,
+                    scale_x: scale_x.or(Some(gx)),
+                    scale_y: scale_y.or(Some(gy)),
+                }
+            } else {
+                action.clone()
+            }
+        }
+        _ => action.clone(),
+    }
+}
+
+const ESCAPE_QUITS_ERROR: &str =
+    "Escape immediately quits this title (`escape_quits: true`); pass `force: true` to confirm exit";
+
+fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, bool) {
     match cmd {
         Command::Status => (ok_response(state, ResponseData::None), false),
         Command::FrameInfo => match &state.latest_frame {
@@ -1258,10 +1366,14 @@ fn apply_command(state: &mut BusState, cmd: Command) -> (Response, bool) {
             (ok_response(state, ResponseData::None), flips > 0)
         }
         Command::Act { action, auto_step } => {
+            if state.guide.escape_quits && !force && action_presses_escape(&action) {
+                return (err_response(state, ESCAPE_QUITS_ERROR), false);
+            }
+            let effective = apply_guide_action_hints(state.guide, &action);
             let flip = state.current_flip();
             let ms = state.current_declared_ms();
-            let summary = action.summary();
-            match state.timeline.schedule(&action, flip, ms) {
+            let summary = effective.summary();
+            match state.timeline.schedule(&effective, flip, ms) {
                 Ok(report) => {
                     state.push_feed("agent", summary);
                     let wake = if auto_step && report.required_flips > 0 {
@@ -1286,14 +1398,18 @@ fn apply_command(state: &mut BusState, cmd: Command) -> (Response, bool) {
             }
         }
         Command::Batch { actions, auto_step } => {
+            if state.guide.escape_quits && !force && actions.iter().any(action_presses_escape) {
+                return (err_response(state, ESCAPE_QUITS_ERROR), false);
+            }
             let flip = state.current_flip();
             let ms = state.current_declared_ms();
             let mut total_events = 0usize;
             let mut max_end = flip;
             let mut max_req = 0u64;
             for action in &actions {
-                let summary = action.summary();
-                match state.timeline.schedule(action, flip, ms) {
+                let effective = apply_guide_action_hints(state.guide, action);
+                let summary = effective.summary();
+                match state.timeline.schedule(&effective, flip, ms) {
                     Ok(report) => {
                         state.push_feed("agent", summary);
                         total_events += report.events_scheduled;
@@ -1326,6 +1442,9 @@ fn apply_command(state: &mut BusState, cmd: Command) -> (Response, bool) {
             relative,
             auto_step,
         } => {
+            if state.guide.escape_quits && !force && route_presses_escape(&route_text) {
+                return (err_response(state, ESCAPE_QUITS_ERROR), false);
+            }
             let flip = state.current_flip();
             match state.timeline.pipe_route(&route_text, flip, relative) {
                 Ok(report) => {
@@ -1693,5 +1812,126 @@ mod tests {
             let _ = bus.dispatch(Command::SetPace(1.0));
         }
         assert_eq!(bus.agent_state().action_feed.len(), MAX_ACTION_FEED);
+    }
+
+    #[test]
+    fn escape_quits_guard_blocks_escape_without_force_and_allows_with_force() {
+        const GUARDED: TitleGuide = TitleGuide {
+            display_name: "Escape Guard Fixture",
+            escape_quits: true,
+            ..TitleGuide::EMPTY
+        };
+        let bus = ControlBus::new(ControlConfig {
+            guide: &GUARDED,
+            ..ControlConfig::default()
+        });
+
+        // KeyHold with "Escape", case-insensitive "escape", and hex "0x01" are blocked.
+        for key in ["Escape", "escape", "0x01"] {
+            let resp = bus.dispatch(Command::Act {
+                action: Action::KeyHold {
+                    key: key.to_owned(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            });
+            assert!(!resp.ok, "expected `{key}` to be blocked");
+            assert!(resp.error.as_deref().unwrap_or("").contains("force"));
+            assert_eq!(resp.status.pending_actions, 0);
+        }
+
+        // Chord containing Escape is blocked.
+        let resp = bus.dispatch(Command::Act {
+            action: Action::Chord {
+                keys: vec!["LeftShift".into(), "Escape".into()],
+                hold_flips: 1,
+                hold_ms: None,
+            },
+            auto_step: false,
+        });
+        assert!(!resp.ok);
+        assert_eq!(resp.status.pending_actions, 0);
+
+        // Batch containing Escape is rejected atomically (first Space is NOT scheduled).
+        let resp = bus.dispatch(Command::Batch {
+            actions: vec![
+                Action::KeyHold {
+                    key: "Space".into(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                Action::KeyHold {
+                    key: "Escape".into(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+            ],
+            auto_step: false,
+        });
+        assert!(!resp.ok);
+        assert_eq!(resp.status.pending_actions, 0);
+
+        // PipeRoute containing Escape is blocked without force.
+        let resp = bus.dispatch(Command::PipeRoute {
+            route_text: "#lego-legacy-route 1\nflip 0 key Escape down\nflip 1 key Escape up\n"
+                .to_owned(),
+            relative: true,
+            auto_step: false,
+        });
+        assert!(!resp.ok);
+        assert_eq!(resp.status.pending_actions, 0);
+
+        // Non-Escape keys (including "1" = DIK_1 = 0x02 and "Space") are allowed.
+        for key in ["Space", "1"] {
+            let resp = bus.dispatch(Command::Act {
+                action: Action::KeyHold {
+                    key: key.to_owned(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            });
+            assert!(resp.ok, "expected `{key}` to be allowed");
+        }
+
+        // With `force = true`, Escape is allowed for Act, Batch, and PipeRoute.
+        let resp = bus.dispatch_forced(
+            Command::Act {
+                action: Action::KeyHold {
+                    key: "Escape".into(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            },
+            true,
+        );
+        assert!(resp.ok);
+
+        let resp = bus.dispatch_forced(
+            Command::PipeRoute {
+                route_text: "#lego-legacy-route 1\nflip 0 key Escape down\nflip 1 key Escape up\n"
+                    .to_owned(),
+                relative: true,
+                auto_step: false,
+            },
+            true,
+        );
+        assert!(resp.ok);
+    }
+
+    #[test]
+    fn unguarded_title_allows_escape_without_force() {
+        let bus = ControlBus::new(ControlConfig::default());
+        let resp = bus.dispatch(Command::Act {
+            action: Action::KeyHold {
+                key: "Escape".into(),
+                hold_flips: 1,
+                hold_ms: None,
+            },
+            auto_step: false,
+        });
+        assert!(resp.ok);
     }
 }

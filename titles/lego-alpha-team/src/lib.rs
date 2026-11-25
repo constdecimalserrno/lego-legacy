@@ -3,7 +3,10 @@
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::ALPHA_TEAM as ENTRY;
-use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
+use lego_legacy_core::title::{
+    AgentCadence, ControlHint, Declared, Goal, Installed, Milestone, MouseMode, TitleGuide,
+    WINDOWS_98_SE,
+};
 use lego_legacy_core::Title;
 
 /// What this title declares about the machine it runs on.
@@ -141,3 +144,132 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
     // nothing to answer differently and what is handed over is the only lever.
     pointer_speed: (1280.0 / 640.0, 1280.0 / 480.0),
 };
+
+/// Static playability metadata served via `/api/meta`, `/api/controls`, and
+/// `/api/goals` (#311).
+pub const GUIDE: TitleGuide = TitleGuide {
+    display_name: "LEGO Alpha Team",
+    summary: "Isometric puzzle-action game where agents place gadgets and trigger chain reactions.",
+    resolution: (640, 480),
+    bpp: 16,
+    refresh_hz: 30,
+    mouse_mode: MouseMode::RelativeSteered {
+        virtual_span: (1280, 1280),
+        recenter: (320, 240),
+        start_corner: (0, 480),
+    },
+    escape_quits: false,
+    skip_keys: &["Space", "Escape"],
+    cadence: AgentCadence::PauseToThink {
+        settle_ms: 1000,
+        settle_flips: 30,
+    },
+    controls: &[
+        ControlHint {
+            input: "mouse_delta",
+            action: "Steer software cursor",
+            notes: "Required because `DDMouse` re-centers the cursor to `(320, 240)` every flip on a `1280x1280` virtual span (`2.0x` X, `2.667x` Y).",
+        },
+        ControlHint {
+            input: "Left click",
+            action: "Select / place / activate",
+            notes: "Clicks the UI button, gadget, or map tile under the drawn software cursor.",
+        },
+        ControlHint {
+            input: "Tab",
+            action: "NextCam",
+            notes: "Cycle to the next camera preset.",
+        },
+        ControlHint {
+            input: "R",
+            action: "RotateCW",
+            notes: "Rotate the held gadget or orientation clockwise.",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Go / Stop",
+            notes: "Toggle mission action execution and advance dialog.",
+        },
+        ControlHint {
+            input: "Escape",
+            action: "Skip intro / menu",
+            notes: "Skip intro movie from ~flip 440 onward or open the in-mission menu.",
+        },
+    ],
+    hazards: &[
+        "Absolute `move` coordinates do not position the software pointer: `DDMouse` re-centers to `(320, 240)` every flip, so always use `mouse_delta`.",
+        "Intended presentation rate is 30 Hz (33.3 ms per flip), not 60 Hz.",
+    ],
+    goals: &[
+        Goal {
+            id: "training-area",
+            name: "Training Area",
+            milestone: Milestone::Playable,
+            description: "Complete the Training Area mission following the coach's narration and return to the main menu.",
+        },
+        Goal {
+            id: "adventure-m1010",
+            name: "Adventure Mission 1 (M1010)",
+            milestone: Milestone::Complete,
+            description: "Open Select Adventure and complete Mission 1 (`M1010`).",
+        },
+    ],
+    save_files: &["C:\\Program Files\\LEGO Media\\LEGO Alpha Team\\Game.txt"],
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lego_legacy_core::control::json::parse_json;
+    use lego_legacy_core::control::{
+        format_controls_json, format_goals_json, format_meta_json, Action, Command, ControlConfig,
+        ControlHost, ExecMode, InputOwner,
+    };
+    use lego_legacy_core::host::headless::Headless;
+    use lego_legacy_core::host::{Host, Input};
+
+    #[test]
+    fn title_guide_serializes_valid_json_and_auto_scales_relative_steered() {
+        assert!(!GUIDE.is_empty());
+        const { assert!(!GUIDE.escape_quits) };
+        assert_eq!(GUIDE.refresh_hz, 30);
+        let (sx, sy) = GUIDE.relative_steered_scale().expect("steered scale");
+        assert!((sx - 2.0).abs() < 1e-12);
+        assert!((sy - (1280.0 / 480.0)).abs() < 1e-12);
+
+        for body in [
+            format_meta_json(&LEGO_ALPHA_TEAM, &GUIDE),
+            format_controls_json(&LEGO_ALPHA_TEAM, &GUIDE),
+            format_goals_json(&LEGO_ALPHA_TEAM, &GUIDE),
+        ] {
+            let v = parse_json(&body).expect("valid JSON");
+            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                title: LEGO_ALPHA_TEAM.key,
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                guide: &GUIDE,
+                ..ControlConfig::default()
+            },
+        );
+        assert!(
+            host.bus()
+                .dispatch(Command::Act {
+                    action: Action::MouseDelta {
+                        dx: 20.0,
+                        dy: -15.0,
+                        flips: 1,
+                        scale_x: None,
+                        scale_y: None,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        assert_eq!(host.poll_input(0), [Input::Move { x: 360, y: 200 }]);
+    }
+}

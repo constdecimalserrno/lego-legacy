@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-10-21
 
+Declares static `GUIDE: TitleGuide` metadata (`SoftwareAbsolute { requires_poll_release: true }`, 60 Hz, `PauseToThink`, `click_poll` / `Space` poll-release / 50 ms `WM_CHAR` typing debounce / mid-match close hazard, Quick Game & Pirates vs AI checkmate goals, and `profiles\prof1.lcp`/`profiles\1save.lcs` save paths) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
+
 On the roster (#143): `Lego Chess.exe`, V2.06, out of the Masterpiece pressing's `MAIN.Z`, an
 InstallShield 3 archive the declared tree expands whole into `C:\Program Files\LEGO Media\Games\LEGO
 Chess`, with the game's own strings, `Text.txt`, copied out of `_SETUP.LIB` beside it. A Minimum

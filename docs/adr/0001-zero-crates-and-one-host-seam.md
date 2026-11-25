@@ -43,3 +43,13 @@ the pointer protocols are also ones a compositor need not offer. A native Waylan
 later as its own ticket. PipeWire's and PulseAudio's own libraries are rejected for sound: a system
 with either has ALSA's plugin for it, and a system with neither still has ALSA.
 
+## Composable host decorators (#296, #308, #309, #311)
+
+Host-side instrumentation and control planes (`TelemetryHost<H>` and `ControlHost<H>`) sit strictly
+above the single `Host` trait seam as composable decorators over `Headless` or any OS window
+backend, rather than adding a second platform seam or branching inside `Machine`. Every transport
+they expose (newline-delimited JSON stdio, HTTP/1.1 over `std::net::TcpListener`, and Unix domain
+sockets over `std::os::unix::net::UnixListener`) stays 100% zero-crate `std`, and per-title
+playability metadata (`TitleGuide`) is declared statically in each title crate and threaded through
+the run seam so core remains free of title-specific knowledge (Golden Rule 4).
+

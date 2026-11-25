@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Declares static `GUIDE: TitleGuide` metadata (`AbsoluteKept`, 8bpp, 60 Hz, `escape_quits: true` safety guard requiring `force: true` to send `Escape`, `MicroStep`, `Up`/`Left`/`Right`/`LeftShift`/`LeftControl` racing & stunt controls, Mattel `"TT"` `(270,100)` Track Select hotspot for Secret Track `WIRE`, First Race & Championship + `WIRE` Gold Medal goals, and `saves\onoff.dat`/`times.dat`/`wheel.dat`) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
+
 Added `routes/secret-track.route` (#285): a deterministic route from a clean `--data-root` that
 completes Championship Tracks 1–6 on the unmodified retail binary to unlock `saves\onoff.dat` (28
 bytes, `01 00 00 00` × 6 + `00 00 00 00`), right-clicks the invisible Mattel "TT" logo hotspot on

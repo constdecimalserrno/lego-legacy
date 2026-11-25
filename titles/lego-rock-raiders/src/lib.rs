@@ -3,7 +3,10 @@
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::ROCK_RAIDERS as ENTRY;
-use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
+use lego_legacy_core::title::{
+    AgentCadence, ControlHint, Declared, Goal, Installed, Milestone, MouseMode, TitleGuide,
+    WINDOWS_98_SE,
+};
 use lego_legacy_core::Title;
 
 /// What this title declares about the machine it runs on.
@@ -76,3 +79,84 @@ pub const ROCK_RAIDERS: Title = Title {
     // and there is nothing to steer (#31, #46).
     pointer_speed: (1.0, 1.0),
 };
+
+/// Static playability metadata served via `/api/meta`, `/api/controls`, and
+/// `/api/goals` (#311).
+pub const GUIDE: TitleGuide = TitleGuide {
+    display_name: "LEGO Rock Raiders",
+    summary: "Real-time underground mining and base-building strategy game.",
+    resolution: (640, 480),
+    bpp: 16,
+    refresh_hz: 60,
+    mouse_mode: MouseMode::AbsoluteKept,
+    escape_quits: false,
+    skip_keys: &["Escape", "Space"],
+    cadence: AgentCadence::BurstThenPause { burst_ms: 500 },
+    controls: &[
+        ControlHint {
+            input: "Left click",
+            action: "Select / interact",
+            notes: "Select raiders, buildings, walls, or HUD icons; clicks skip intro movies directly.",
+        },
+        ControlHint {
+            input: "F2+W",
+            action: "Drill wall",
+            notes: "Issues a drill order on the selected rock or dirt wall.",
+        },
+        ControlHint {
+            input: "Minus / Equals",
+            action: "Zoom camera",
+            notes: "Zoom camera out (`Minus`) or in (`Equals`).",
+        },
+        ControlHint {
+            input: "Left / Right",
+            action: "Rotate camera",
+            notes: "Rotate the 3D cavern camera counter-clockwise or clockwise.",
+        },
+        ControlHint {
+            input: "Up / Down",
+            action: "Tilt camera",
+            notes: "Pitch the 3D cavern camera up or down.",
+        },
+        ControlHint {
+            input: "Space / Escape",
+            action: "Skip / menu back",
+            notes: "Skip intro and briefing movies or back out of menus (`Escape` does not quit).",
+        },
+    ],
+    hazards: &[
+        "Avoid moving the pointer into the screen border (`x < 4 || x > 635 || y < 4 || y > 475`), which triggers continuous edge-scrolling away from the base.",
+        "Front-end menu loops do not poll window close; closing there stops cleanly after core's 5-second grace window.",
+    ],
+    goals: &[Goal {
+        id: "mission-1-driller-night",
+        name: "Mission 1: Driller Night",
+        milestone: Milestone::Playable,
+        description: "Find the Tool Store, drill walls, and collect 5 Energy Crystals.",
+    }],
+    save_files: &["C:\\LEGORR\\DATA\\SAVES\\0.SAV"],
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lego_legacy_core::control::json::parse_json;
+    use lego_legacy_core::control::{format_controls_json, format_goals_json, format_meta_json};
+
+    #[test]
+    fn title_guide_serializes_valid_json() {
+        assert!(!GUIDE.is_empty());
+        const { assert!(!GUIDE.escape_quits) };
+        assert_eq!(GUIDE.resolution, (640, 480));
+        assert_eq!(GUIDE.bpp, 16);
+        assert_eq!(GUIDE.refresh_hz, 60);
+        for body in [
+            format_meta_json(&ROCK_RAIDERS, &GUIDE),
+            format_controls_json(&ROCK_RAIDERS, &GUIDE),
+            format_goals_json(&ROCK_RAIDERS, &GUIDE),
+        ] {
+            let v = parse_json(&body).expect("valid JSON");
+            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+    }
+}

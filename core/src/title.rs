@@ -289,9 +289,222 @@ impl Title {
     };
 }
 
+/// How a title reads and moves the mouse pointer (#311).
+///
+/// Declared per title in its crate's [`TitleGuide`] so the control plane and
+/// external agents know whether to issue absolute coordinates (`move`/`click`),
+/// poll-released clicks (`click_poll`), or scaled relative deltas
+/// (`mouse_delta`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseMode {
+    /// Absolute pointer coordinates kept by the title; standard `move`/`click`
+    /// work directly.
+    AbsoluteKept,
+    /// Title hides the system cursor and draws its own pointer at absolute
+    /// `WM_MOUSEMOVE` coordinates; `requires_poll_release` flags titles whose
+    /// UI loops wait for button or key release without flipping (`click_poll`).
+    SoftwareAbsolute { requires_poll_release: bool },
+    /// Title re-centers the pointer each flip and steers a software cursor by
+    /// relative deltas mapped onto `virtual_span`; `mouse_delta` scales by
+    /// `(virtual_span.0 / resolution.0, virtual_span.1 / resolution.1)`.
+    RelativeSteered {
+        virtual_span: (u32, u32),
+        recenter: (i32, i32),
+        start_corner: (i32, i32),
+    },
+}
+
+/// Recommended observation/action cadence for an agent driving a title (#311).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentCadence {
+    /// Pause at flip boundaries while thinking; after acting, wait up to
+    /// `settle_ms` declared milliseconds or `settle_flips` flips to settle.
+    PauseToThink { settle_ms: u64, settle_flips: u64 },
+    /// Run a burst of `burst_ms` declared milliseconds, then pause to observe
+    /// and decide the next command.
+    BurstThenPause { burst_ms: u64 },
+    /// Step tightly in small `flips_per_step` increments for reflex steering
+    /// and stunt timing.
+    MicroStep { flips_per_step: u64 },
+}
+
+/// One documented input control, gesture, or coordinate hotspot (#311).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlHint {
+    /// Key name(s), chord, mouse gesture, or hotspot coordinate.
+    pub input: &'static str,
+    /// Short label of what the control does.
+    pub action: &'static str,
+    /// Practical note, timing constraint, or hazard warning.
+    pub notes: &'static str,
+}
+
+/// Coarse progression milestone from `CONTEXT.md` (#311).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Milestone {
+    FirstLight,
+    Playable,
+    Complete,
+    Credits,
+}
+
+impl Milestone {
+    /// Canonical lowercase snake_case name used in JSON metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstLight => "first_light",
+            Self::Playable => "playable",
+            Self::Complete => "complete",
+            Self::Credits => "credits",
+        }
+    }
+}
+
+/// One concrete playable objective for a title (#311).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Goal {
+    /// Stable identifier (e.g. `"mission-1"`).
+    pub id: &'static str,
+    /// Human-readable goal title.
+    pub name: &'static str,
+    /// Progression milestone this goal corresponds to.
+    pub milestone: Milestone,
+    /// Concrete description and completion criteria.
+    pub description: &'static str,
+}
+
+/// Static, first-class per-title playability metadata declared by a title crate
+/// (#311).
+///
+/// Strictly outside guest state (Golden Rules 2 & 4): never alters emulation
+/// behaviour, while giving the control plane (`ControlHost`) and external
+/// agents/spectators (`/api/meta`, `/api/controls`, `/api/goals`) accurate
+/// knowledge of display timing, mouse regime, safety hazards, cadence,
+/// controls, goals, and save files with zero title names in core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TitleGuide {
+    /// Human-readable display name of the title (empty in [`Self::EMPTY`]).
+    pub display_name: &'static str,
+    /// One-line gameplay summary.
+    pub summary: &'static str,
+    /// Native gameplay framebuffer dimensions `(width, height)`.
+    pub resolution: (u32, u32),
+    /// Native gameplay colour depth in bits per pixel (`8` or `16`).
+    pub bpp: u32,
+    /// Intended presentation rate in Hz (e.g. `60` or `30`).
+    pub refresh_hz: u32,
+    /// Pointer regime and relative-steering parameters.
+    pub mouse_mode: MouseMode,
+    /// Whether pressing `Escape` immediately quits the title (arms the
+    /// `ControlHost` safety guard requiring `force: true` to send `Escape`).
+    pub escape_quits: bool,
+    /// DirectInput key names that skip intros or cutscenes.
+    pub skip_keys: &'static [&'static str],
+    /// Recommended agent observation/stepping cadence.
+    pub cadence: AgentCadence,
+    /// Keybindings, mouse gestures, and timing/hotspot notes.
+    pub controls: &'static [ControlHint],
+    /// Playability hazards and pitfalls an agent or player should avoid.
+    pub hazards: &'static [&'static str],
+    /// Concrete playable objectives and milestones.
+    pub goals: &'static [Goal],
+    /// Profile save file paths (relative to the profile/install tree or full
+    /// guest paths).
+    pub save_files: &'static [&'static str],
+}
+
+impl TitleGuide {
+    /// Empty fallback guide for tests or callers that invoke
+    /// [`crate::run::main`] without supplying a [`TitleGuide`].
+    pub const EMPTY: Self = Self {
+        display_name: "",
+        summary: "",
+        resolution: (640, 480),
+        bpp: 16,
+        refresh_hz: 60,
+        mouse_mode: MouseMode::AbsoluteKept,
+        escape_quits: false,
+        skip_keys: &[],
+        cadence: AgentCadence::PauseToThink {
+            settle_ms: 500,
+            settle_flips: 15,
+        },
+        controls: &[],
+        hazards: &[],
+        goals: &[],
+        save_files: &[],
+    };
+
+    /// Whether this guide carries no populated metadata (`display_name` empty).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.display_name.is_empty()
+    }
+
+    /// Relative pointer scaling hint `(scale_x, scale_y)` derived from
+    /// `virtual_span / resolution` when [`Self::mouse_mode`] is
+    /// [`MouseMode::RelativeSteered`].
+    #[must_use]
+    pub const fn relative_steered_scale(&self) -> Option<(f64, f64)> {
+        match self.mouse_mode {
+            MouseMode::RelativeSteered { virtual_span, .. }
+                if self.resolution.0 > 0
+                    && self.resolution.1 > 0
+                    && virtual_span.0 > 0
+                    && virtual_span.1 > 0 =>
+            {
+                Some((
+                    virtual_span.0 as f64 / self.resolution.0 as f64,
+                    virtual_span.1 as f64 / self.resolution.1 as f64,
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_guide_empty_and_relative_steered_scale() {
+        assert!(TitleGuide::EMPTY.is_empty());
+        assert_eq!(TitleGuide::EMPTY.relative_steered_scale(), None);
+        const { assert!(!TitleGuide::EMPTY.escape_quits) };
+        assert_eq!(Milestone::FirstLight.as_str(), "first_light");
+        assert_eq!(Milestone::Playable.as_str(), "playable");
+        assert_eq!(Milestone::Complete.as_str(), "complete");
+        assert_eq!(Milestone::Credits.as_str(), "credits");
+
+        const STEERED: TitleGuide = TitleGuide {
+            display_name: "Steered Fixture",
+            summary: "Fixture",
+            resolution: (640, 480),
+            bpp: 16,
+            refresh_hz: 30,
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            escape_quits: false,
+            skip_keys: &["Space"],
+            cadence: AgentCadence::PauseToThink {
+                settle_ms: 1000,
+                settle_flips: 30,
+            },
+            controls: &[],
+            hazards: &[],
+            goals: &[],
+            save_files: &[],
+        };
+        assert!(!STEERED.is_empty());
+        let (sx, sy) = STEERED.relative_steered_scale().expect("steered scale");
+        assert!((sx - 2.0).abs() < 1e-12);
+        assert!((sy - (1280.0 / 480.0)).abs() < 1e-12);
+    }
 
     #[test]
     fn each_declared_windows_answers_what_that_windows_answered() {

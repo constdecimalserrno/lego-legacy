@@ -18,11 +18,12 @@ use super::json::{
     parse_u32_addr, write_agent_state, write_diff, write_fps_report, write_json_f64,
     write_json_str, write_status, write_wait_result, JsonValue,
 };
+use super::meta::{format_controls_json, format_goals_json, format_meta_json};
 use super::observe::{
     format_frame_json, parse_crop, parse_grid_dims, render_frame_png, ObserveOptions,
 };
 use super::stdio::parse_command_line;
-use crate::clock::FlipCost;
+use crate::title::TitleGuide;
 use crate::Title;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -254,6 +255,7 @@ pub trait ExtraRoutes: Send + Sync {
 pub struct HttpContext {
     pub bus: ControlBus,
     pub title: &'static Title,
+    pub guide: &'static TitleGuide,
     pub token: Option<String>,
     pub extra: Option<Arc<dyn ExtraRoutes>>,
 }
@@ -261,12 +263,20 @@ pub struct HttpContext {
 impl HttpContext {
     #[must_use]
     pub fn new(bus: ControlBus, title: &'static Title, token: Option<String>) -> Self {
+        let guide = bus.guide();
         Self {
             bus,
             title,
+            guide,
             token: token.filter(|t| !t.is_empty()),
             extra: Some(Arc::new(super::spectator::SpectatorRoutes)),
         }
+    }
+
+    #[must_use]
+    pub fn with_guide(mut self, guide: &'static TitleGuide) -> Self {
+        self.guide = guide;
+        self
     }
 
     #[must_use]
@@ -737,10 +747,12 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         }
         ("POST", "/api/agent-state") => handle_set_agent_state(req, ctx),
 
-        // --- Baseline Title Metadata Stubs (#311 plugs TitleGuide in here) ---
-        ("GET", "/api/meta") => HttpResponse::json(200, format_meta_json(ctx.title)),
-        ("GET", "/api/controls") => HttpResponse::json(200, format_controls_json(ctx.title)),
-        ("GET", "/api/goals") => HttpResponse::json(200, format_goals_json(ctx.title)),
+        // --- First-Class Per-Title Metadata (#311) ---
+        ("GET", "/api/meta") => HttpResponse::json(200, format_meta_json(ctx.title, ctx.guide)),
+        ("GET", "/api/controls") => {
+            HttpResponse::json(200, format_controls_json(ctx.title, ctx.guide))
+        }
+        ("GET", "/api/goals") => HttpResponse::json(200, format_goals_json(ctx.title, ctx.guide)),
 
         // --- Control, Piping & Tier-1 Checkpoints ---
         ("POST", "/api/act") => handle_act(req, ctx),
@@ -1002,6 +1014,10 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         Err(resp) => return resp,
     };
     let sync = obj.get("wait").and_then(JsonValue::as_bool).unwrap_or(true);
+    let force = obj
+        .get("force")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
     let auto_step = obj
         .get("auto_step")
         .and_then(JsonValue::as_bool)
@@ -1079,9 +1095,10 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
     };
 
     let resp = if sync {
-        ctx.bus.dispatch_sync(cmd, Some(DEFAULT_SYNC_TIMEOUT))
+        ctx.bus
+            .dispatch_sync_forced(cmd, force, Some(DEFAULT_SYNC_TIMEOUT))
     } else {
-        ctx.bus.dispatch(cmd)
+        ctx.bus.dispatch_forced(cmd, force)
     };
 
     let obs_json = if resp.ok {
@@ -1142,6 +1159,7 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         .query
         .get("auto_step")
         .is_none_or(|v| !matches!(v.as_str(), "0" | "false"));
+    let force = parse_bool_param(req.query.get("force"));
 
     // 1. Raw `#lego-legacy-route 1` text (or `flip ...` route lines).
     let content_type = req
@@ -1159,14 +1177,15 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             auto_step,
         };
         let resp = if sync {
-            ctx.bus.dispatch_sync(cmd, Some(DEFAULT_SYNC_TIMEOUT))
+            ctx.bus
+                .dispatch_sync_forced(cmd, force, Some(DEFAULT_SYNC_TIMEOUT))
         } else {
-            ctx.bus.dispatch(cmd)
+            ctx.bus.dispatch_forced(cmd, force)
         };
         return control_resp_to_http(&resp, None);
     }
 
-    // 2. Single JSON object `{ route, relative?, auto_step?, wait? }`.
+    // 2. Single JSON object `{ route, relative?, auto_step?, wait?, force? }`.
     if let Ok(JsonValue::Object(obj)) = parse_json(trimmed) {
         if let Some(route_text) = obj.get("route").and_then(JsonValue::as_str) {
             let rel = obj
@@ -1178,15 +1197,20 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(auto_step);
             let wait = obj.get("wait").and_then(JsonValue::as_bool).unwrap_or(sync);
+            let obj_force = obj
+                .get("force")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(force);
             let cmd = Command::PipeRoute {
                 route_text: route_text.to_owned(),
                 relative: rel,
                 auto_step: step,
             };
             let resp = if wait {
-                ctx.bus.dispatch_sync(cmd, Some(DEFAULT_SYNC_TIMEOUT))
+                ctx.bus
+                    .dispatch_sync_forced(cmd, obj_force, Some(DEFAULT_SYNC_TIMEOUT))
             } else {
-                ctx.bus.dispatch(cmd)
+                ctx.bus.dispatch_forced(cmd, obj_force)
             };
             return control_resp_to_http(&resp, None);
         }
@@ -1200,6 +1224,10 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
+        let line_force = parse_json(l)
+            .ok()
+            .and_then(|v| v.as_object()?.get("force")?.as_bool())
+            .unwrap_or(force);
         let parsed = match parse_command_line(l) {
             Ok(p) => p,
             Err(e) => {
@@ -1209,9 +1237,10 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         executed += 1;
         for cmd in parsed.commands {
             let resp = if parsed.sync && sync {
-                ctx.bus.dispatch_sync(cmd, Some(DEFAULT_SYNC_TIMEOUT))
+                ctx.bus
+                    .dispatch_sync_forced(cmd, line_force, Some(DEFAULT_SYNC_TIMEOUT))
             } else {
-                ctx.bus.dispatch(cmd)
+                ctx.bus.dispatch_forced(cmd, line_force)
             };
             let ok = resp.ok;
             last_resp = Some(resp);
@@ -1525,73 +1554,6 @@ fn control_resp_to_http(resp: &Response, observe_after_json: Option<&str>) -> Ht
     }
     out.push('}');
     HttpResponse::json(if resp.ok { 200 } else { 400 }, out)
-}
-
-fn format_meta_json(title: &Title) -> String {
-    let mut out = String::with_capacity(512);
-    out.push_str("{\"ok\":true,\"title\":");
-    write_json_str(&mut out, title.key);
-    out.push_str(",\"version\":");
-    write_json_str(&mut out, title.version);
-    out.push_str(",\"install_dir\":");
-    write_json_str(&mut out, title.install_dir);
-    let _ = write!(
-        out,
-        ",\"declared\":{{\"hz\":{},\"megabytes\":{},\"joliet\":{},\"floppy\":{},\"computer\":",
-        title.declared.hz, title.declared.megabytes, title.declared.joliet, title.declared.floppy
-    );
-    write_json_str(&mut out, title.declared.computer);
-    out.push_str(",\"modes\":[");
-    for (i, &(w, h, bpp)) in title.declared.modes.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let _ = write!(out, "[{w},{h},{bpp}]");
-    }
-    out.push_str("]},\"pointer_speed\":[");
-    write_json_f64(&mut out, title.pointer_speed.0);
-    out.push(',');
-    write_json_f64(&mut out, title.pointer_speed.1);
-    out.push_str("],\"flip_cost\":");
-    match title.flip_cost {
-        FlipCost::Free => out.push_str("\"free\""),
-        FlipCost::Refresh(hz) => {
-            let _ = write!(out, "{{\"refresh_hz\":{hz}}}");
-        }
-    }
-    out.push_str(",\"guide\":null}");
-    out
-}
-
-fn format_controls_json(title: &Title) -> String {
-    let mut out = String::with_capacity(384);
-    out.push_str("{\"ok\":true,\"title\":");
-    write_json_str(&mut out, title.key);
-    out.push_str(",\"pointer_speed\":[");
-    write_json_f64(&mut out, title.pointer_speed.0);
-    out.push(',');
-    write_json_f64(&mut out, title.pointer_speed.1);
-    out.push_str("],\"click_in_a_movie\":");
-    match title.click_in_a_movie {
-        Some(code) => {
-            let _ = write!(out, "{code}");
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(
-        ",\"actions\":[\"move\",\"mouse_delta\",\"click\",\"click_poll\",\"drag\",\"key_hold\",\"chord\",\"type_text\"],\"guide\":null}",
-    );
-    out
-}
-
-fn format_goals_json(title: &Title) -> String {
-    let mut out = String::with_capacity(256);
-    out.push_str("{\"ok\":true,\"title\":");
-    write_json_str(&mut out, title.key);
-    out.push_str(
-        ",\"milestones\":[\"first_light\",\"playable\",\"complete\",\"credits\"],\"goals\":[],\"guide\":null}",
-    );
-    out
 }
 
 #[cfg(test)]
@@ -2158,5 +2120,164 @@ mod tests {
             Some(2)
         );
         assert!(ctx.bus.status().pending_actions >= 3);
+    }
+
+    #[test]
+    fn http_serves_title_guide_and_enforces_escape_quits_guard() {
+        use crate::title::{AgentCadence, ControlHint, Goal, Milestone, MouseMode};
+
+        const GUARDED_GUIDE: TitleGuide = TitleGuide {
+            display_name: "Guarded Title",
+            summary: "Escape immediately quits.",
+            resolution: (640, 480),
+            bpp: 8,
+            refresh_hz: 60,
+            mouse_mode: MouseMode::AbsoluteKept,
+            escape_quits: true,
+            skip_keys: &["Space"],
+            cadence: AgentCadence::MicroStep { flips_per_step: 8 },
+            controls: &[ControlHint {
+                input: "Up",
+                action: "Throttle",
+                notes: "Hold on green.",
+            }],
+            hazards: &["Escape quits immediately."],
+            goals: &[Goal {
+                id: "first-run",
+                name: "First Run",
+                milestone: Milestone::Playable,
+                description: "Finish the first course.",
+            }],
+            save_files: &["saves\\times.dat"],
+        };
+
+        let bus = ControlBus::new(ControlConfig {
+            title: Title::STUB.key,
+            mode: ExecMode::Live,
+            guide: &GUARDED_GUIDE,
+            ..ControlConfig::default()
+        });
+        let ctx = HttpContext::new(bus, &Title::STUB, None);
+
+        // GET /api/meta, /api/controls, /api/goals serve the populated TitleGuide.
+        let meta_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/meta".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(meta_resp.status, 200);
+        let mj = parse_json(std::str::from_utf8(&meta_resp.body).unwrap()).unwrap();
+        let g = mj.as_object().unwrap()["guide"].as_object().unwrap();
+        assert_eq!(g["display_name"].as_str(), Some("Guarded Title"));
+        assert_eq!(g["bpp"].as_u64(), Some(8));
+        assert_eq!(g["escape_quits"].as_bool(), Some(true));
+
+        let ctrl_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/controls".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(ctrl_resp.status, 200);
+        let cj = parse_json(std::str::from_utf8(&ctrl_resp.body).unwrap()).unwrap();
+        assert_eq!(
+            cj.as_object().unwrap()["escape_quits"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            cj.as_object().unwrap()["controls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let goals_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/goals".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(goals_resp.status, 200);
+        let gj = parse_json(std::str::from_utf8(&goals_resp.body).unwrap()).unwrap();
+        assert_eq!(
+            gj.as_object().unwrap()["goals"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            gj.as_object().unwrap()["save_files"].as_array().unwrap()[0].as_str(),
+            Some("saves\\times.dat")
+        );
+
+        // POST /api/act with Escape is rejected (400) without force: true.
+        let blocked = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"key_hold","key":"Escape","queue":true,"wait":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(blocked.status, 400);
+        assert!(std::str::from_utf8(&blocked.body)
+            .unwrap()
+            .contains("force"));
+
+        // POST /api/act with Escape + force: true succeeds (200).
+        let forced = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"key_hold","key":"Escape","force":true,"queue":true,"wait":false}"#
+                    .to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(forced.status, 200);
+
+        // POST /api/pipe route with Escape is rejected without force, allowed with ?force=1.
+        let pipe_blocked = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/pipe".to_owned(),
+                query: BTreeMap::from([("wait".to_owned(), "0".to_owned())]),
+                headers: BTreeMap::from([("content-type".to_owned(), "text/plain".to_owned())]),
+                body: b"#lego-legacy-route 1\nflip 0 key Escape down\n".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(pipe_blocked.status, 400);
+
+        let pipe_forced = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/pipe".to_owned(),
+                query: BTreeMap::from([
+                    ("wait".to_owned(), "0".to_owned()),
+                    ("force".to_owned(), "1".to_owned()),
+                ]),
+                headers: BTreeMap::from([("content-type".to_owned(), "text/plain".to_owned())]),
+                body: b"#lego-legacy-route 1\nflip 0 key Escape down\n".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(pipe_forced.status, 200);
     }
 }

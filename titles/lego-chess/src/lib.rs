@@ -3,7 +3,10 @@
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::LEGO_CHESS as ENTRY;
-use lego_legacy_core::title::{Declared, Installed, Kept, WINDOWS_98_SE};
+use lego_legacy_core::title::{
+    AgentCadence, ControlHint, Declared, Goal, Installed, Kept, Milestone, MouseMode, TitleGuide,
+    WINDOWS_98_SE,
+};
 use lego_legacy_core::Title;
 
 /// The archive the roster keeps the game in, which the setup expands.
@@ -122,3 +125,91 @@ pub const LEGO_CHESS: Title = Title {
     // `WM_MOUSEMOVE`, which core does not post at a `SetCursorPos` (#157, #235).
     pointer_speed: (1.0, 1.0),
 };
+
+/// Static playability metadata served via `/api/meta`, `/api/controls`, and
+/// `/api/goals` (#311).
+pub const GUIDE: TitleGuide = TitleGuide {
+    display_name: "LEGO Chess",
+    summary: "3D themed chess game with animated capture cartoons, tutorials, and computer AI.",
+    resolution: (640, 480),
+    bpp: 16,
+    refresh_hz: 60,
+    mouse_mode: MouseMode::SoftwareAbsolute {
+        requires_poll_release: true,
+    },
+    escape_quits: false,
+    skip_keys: &["Space"],
+    cadence: AgentCadence::PauseToThink {
+        settle_ms: 1000,
+        settle_flips: 20,
+    },
+    controls: &[
+        ControlHint {
+            input: "click_poll",
+            action: "Click UI buttons & chess squares",
+            notes: "Use `click_poll` (between-flip release) on UI buttons, green ticks, and menu clicks because release loops wait without flipping.",
+        },
+        ControlHint {
+            input: "Space (poll release)",
+            action: "Skip intro / story movies",
+            notes: "Release `Space` between flips so the post-movie key-up wait (`0x0040D220`) does not stall.",
+        },
+        ControlHint {
+            input: "type_text (50 ms debounce)",
+            action: "Type profile & save names",
+            notes: "Text boxes require >= 50 ms declared time and key-up between characters (`WM_CHAR` debounce).",
+        },
+        ControlHint {
+            input: "Escape",
+            action: "Resign / menu back",
+            notes: "Opens the resignation prompt in a match or backs out of menus; does not quit the process.",
+        },
+    ],
+    hazards: &[
+        "Requires `click_poll` (between-flip release) on UI buttons and `Space` movie skips because release loops do not present new frames.",
+        "Text input boxes enforce a 50 ms declared-time `WM_CHAR` debounce and require each key to release before the next.",
+        "Never send `close` mid-match (it does not exit on `WM_QUIT` and hits the 5 s close grace); return to the Throne Room before closing.",
+    ],
+    goals: &[
+        Goal {
+            id: "quick-game-checkmate",
+            name: "Create profile & Quick Game checkmate",
+            milestone: Milestone::Playable,
+            description: "Create a player profile on the New Player form, enter the Throne Room, start a Quick Game, and win by checkmate.",
+        },
+        Goal {
+            id: "pirates-vs-ai",
+            name: "Pirates 3D theme vs Computer AI checkmate",
+            milestone: Milestone::Complete,
+            description: "Select the Pirates 3D theme against the Computer AI and win by checkmate.",
+        },
+    ],
+    save_files: &["profiles\\prof1.lcp", "profiles\\1save.lcs"],
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lego_legacy_core::control::json::parse_json;
+    use lego_legacy_core::control::{format_controls_json, format_goals_json, format_meta_json};
+
+    #[test]
+    fn title_guide_serializes_valid_json() {
+        assert!(!GUIDE.is_empty());
+        const { assert!(!GUIDE.escape_quits) };
+        assert_eq!(
+            GUIDE.mouse_mode,
+            MouseMode::SoftwareAbsolute {
+                requires_poll_release: true
+            }
+        );
+        for body in [
+            format_meta_json(&LEGO_CHESS, &GUIDE),
+            format_controls_json(&LEGO_CHESS, &GUIDE),
+            format_goals_json(&LEGO_CHESS, &GUIDE),
+        ] {
+            let v = parse_json(&body).expect("valid JSON");
+            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+    }
+}

@@ -29,6 +29,12 @@ throttles presentation to hold pace at 1.0×, and headless runs are uncapped.
   the guest, and must be treated as such.
 - An engine too slow for a title shows as slow motion with stretched audio, which is the honest
   symptom of a throughput problem.
+- Pausing a live run on the host — such as `ControlHost<H>` holding at a flip boundary in `Step`
+  mode via `Host::set_paused(true)` while an agent inspects state or pumps the window (#296, #308,
+  #309, #311) — freezes only the host-side wall anchor inside `Pace` and mutes `Waiting` audio
+  consumption without advancing or altering the declared machine clock. Resuming after any pause
+  duration leaves retired instructions, flips, declared milliseconds, and `state_digest()`
+  unchanged, with no catch-up burst or phantom audio underrun.
 
 ## Considered options
 

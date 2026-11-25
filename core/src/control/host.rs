@@ -102,6 +102,12 @@ impl<H> ControlHost<H> {
         self.bus.clone()
     }
 
+    /// Static per-title [`crate::title::TitleGuide`] configured on this host (#311).
+    #[must_use]
+    pub fn guide(&self) -> &'static crate::title::TitleGuide {
+        self.bus.guide()
+    }
+
     #[must_use]
     pub fn inner(&self) -> &H {
         &self.inner
@@ -1187,5 +1193,69 @@ mod tests {
         assert!(bus.dispatch(Command::SetPace(0.5)).ok);
         host.pace(13_000_000_000);
         assert_eq!(host.inner().seen_nanos, [0, 1_000_000_000, 3_000_000_000]);
+    }
+
+    #[test]
+    fn control_host_applies_relative_steered_scaling_hint_and_escape_guard() {
+        use crate::title::{MouseMode, TitleGuide};
+
+        const STEERED_GUIDE: TitleGuide = TitleGuide {
+            display_name: "Steered Test",
+            resolution: (640, 480),
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            ..TitleGuide::EMPTY
+        };
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                guide: &STEERED_GUIDE,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
+        assert_eq!(host.guide().display_name, "Steered Test");
+        assert_eq!(bus.status().pointer_pos, (320, 240));
+        assert!(!bus.status().pointer_shown);
+
+        // Even with default pointer_speed (1.0, 1.0) on ControlConfig, MouseMode::RelativeSteered
+        // auto-scales dx by 1280/640 = 2.0 and dy by 1280/480 = 8/3 around recenter (320, 240).
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::MouseDelta {
+                    dx: 30.0,
+                    dy: -15.0,
+                    flips: 1,
+                    scale_x: None,
+                    scale_y: None,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        assert_eq!(host.poll_input(0), [Input::Move { x: 380, y: 200 }]);
+
+        // Explicit scale override still wins over the RelativeSteered hint.
+        host.put_pointer(320, 240);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::MouseDelta {
+                    dx: 10.0,
+                    dy: 10.0,
+                    flips: 1,
+                    scale_x: Some(1.0),
+                    scale_y: Some(1.0),
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        assert_eq!(host.poll_input(1), [Input::Move { x: 330, y: 250 }]);
     }
 }

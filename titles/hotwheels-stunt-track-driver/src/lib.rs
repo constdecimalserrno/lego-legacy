@@ -3,7 +3,10 @@
 use lego_legacy_core::clock::FlipCost;
 use lego_legacy_core::cpu::Processor;
 use lego_legacy_core::roster::HOT_WHEELS as ENTRY;
-use lego_legacy_core::title::{Declared, Installed, WINDOWS_98_SE};
+use lego_legacy_core::title::{
+    AgentCadence, ControlHint, Declared, Goal, Installed, Milestone, MouseMode, TitleGuide,
+    WINDOWS_98_SE,
+};
 use lego_legacy_core::Title;
 
 /// What this title declares about the machine it runs on.
@@ -88,3 +91,128 @@ pub const HOT_WHEELS_STUNT_TRACK_DRIVER: Title = Title {
     // pointer and the mouse move as one (#37).
     pointer_speed: (1.0, 1.0),
 };
+
+/// Static playability metadata served via `/api/meta`, `/api/controls`, and
+/// `/api/goals` (#311).
+pub const GUIDE: TitleGuide = TitleGuide {
+    display_name: "Hot Wheels: Stunt Track Driver",
+    summary: "Arcade 3D stunt racing across household tabletop tracks with aerial tricks and a secret wireframe track.",
+    resolution: (640, 480),
+    bpp: 8,
+    refresh_hz: 60,
+    mouse_mode: MouseMode::AbsoluteKept,
+    escape_quits: true,
+    skip_keys: &["Space"],
+    cadence: AgentCadence::MicroStep { flips_per_step: 8 },
+    controls: &[
+        ControlHint {
+            input: "Up",
+            action: "Throttle",
+            notes: "Accelerate; hold only when the start light turns green for a Rocket Start.",
+        },
+        ControlHint {
+            input: "Left / Right",
+            action: "Steer",
+            notes: "Steer left or right along the track.",
+        },
+        ControlHint {
+            input: "LeftShift",
+            action: "Barrel roll",
+            notes: "Perform a mid-air barrel roll stunt off ramps.",
+        },
+        ControlHint {
+            input: "LeftControl",
+            action: "Flip",
+            notes: "Perform a mid-air flip stunt off ramps.",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Skip / advance",
+            notes: "Advance past splash screens and menus.",
+        },
+        ControlHint {
+            input: "Right click (270, 100)",
+            action: "Unlock Secret Track WIRE",
+            notes: "Right-click the Mattel \"TT\" hotspot at `(270, 100)` on Track Select after clearing Championship Tracks 1-6.",
+        },
+        ControlHint {
+            input: "Escape",
+            action: "Immediate exit (HAZARD)",
+            notes: "NEVER press `Escape` unless intending immediate process exit (`exits 1`); blocked unless `force: true`.",
+        },
+    ],
+    hazards: &[
+        "NEVER press `Escape` unless intending immediate exit: this title quits unconditionally on `Escape` (guarded by `escape_quits: true`; requires `force: true`).",
+        "Hold `Up` only on the green light for Rocket Start; revving early loses launch speed.",
+    ],
+    goals: &[
+        Goal {
+            id: "first-race",
+            name: "First Race",
+            milestone: Milestone::Playable,
+            description: "Complete the first Championship race cleanly.",
+        },
+        Goal {
+            id: "championship-and-wire-gold",
+            name: "Championship Tracks 1-6 & Secret Track WIRE Gold Medal",
+            milestone: Milestone::Complete,
+            description: "Clear Championship Tracks 1-6, right-click the Mattel \"TT\" logo at `(270, 100)` on Track Select to unlock Secret Track `WIRE`, and earn a Gold Medal (`<= 1:10`).",
+        },
+    ],
+    save_files: &["saves\\onoff.dat", "saves\\times.dat", "saves\\wheel.dat"],
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lego_legacy_core::control::json::parse_json;
+    use lego_legacy_core::control::{
+        format_controls_json, format_goals_json, format_meta_json, Action, Command, ControlBus,
+        ControlConfig,
+    };
+
+    #[test]
+    fn title_guide_serializes_valid_json_and_guards_escape() {
+        assert!(!GUIDE.is_empty());
+        const { assert!(GUIDE.escape_quits) };
+        assert_eq!(GUIDE.bpp, 8);
+        assert_eq!(GUIDE.refresh_hz, 60);
+
+        for body in [
+            format_meta_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE),
+            format_controls_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE),
+            format_goals_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE),
+        ] {
+            let v = parse_json(&body).expect("valid JSON");
+            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
+        }
+
+        let bus = ControlBus::new(ControlConfig {
+            title: HOT_WHEELS_STUNT_TRACK_DRIVER.key,
+            guide: &GUIDE,
+            ..ControlConfig::default()
+        });
+        let blocked = bus.dispatch(Command::Act {
+            action: Action::KeyHold {
+                key: "Escape".into(),
+                hold_flips: 1,
+                hold_ms: None,
+            },
+            auto_step: false,
+        });
+        assert!(!blocked.ok, "Escape must be blocked without force");
+
+        let allowed = bus.dispatch_forced(
+            Command::Act {
+                action: Action::KeyHold {
+                    key: "Escape".into(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            },
+            true,
+        );
+        assert!(allowed.ok, "Escape must succeed with force=true");
+    }
+}

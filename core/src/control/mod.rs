@@ -12,6 +12,7 @@ pub mod host;
 pub mod http;
 pub mod inspect;
 pub mod json;
+pub mod meta;
 pub mod observe;
 pub mod spectator;
 pub mod stdio;
@@ -30,6 +31,7 @@ pub use http::{
     write_session_registry, ExtraRoutes, HttpContext, HttpRequest, HttpResponse, HttpServer,
     SessionRegistryGuard, StreamIo,
 };
+pub use meta::{format_controls_json, format_goals_json, format_meta_json, write_title_guide};
 pub use spectator::SpectatorRoutes;
 pub use stdio::StdioBridge;
 pub use timeline::{Action, ActionError, ScheduleReport, Timeline};
