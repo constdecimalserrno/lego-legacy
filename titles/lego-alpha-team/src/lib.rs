@@ -146,10 +146,10 @@ pub const LEGO_ALPHA_TEAM: Title = Title {
 };
 
 /// Static playability metadata served via `/api/meta`, `/api/controls`, and
-/// `/api/goals` (#311).
+/// `/api/goals` (#311, #337).
 pub const GUIDE: TitleGuide = TitleGuide {
     display_name: "LEGO Alpha Team",
-    summary: "Isometric puzzle-action game where agents place gadgets and trigger chain reactions.",
+    summary: "Isometric 3D puzzle-action game: place and orient Action Bricks, connect belts/cords/ropes, and press GO so specialists clear Evil Orbs, rescue teammates, and unlock each room's exit.",
     resolution: (640, 480),
     bpp: 16,
     refresh_hz: 30,
@@ -159,7 +159,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         start_corner: (0, 480),
     },
     escape_quits: false,
-    skip_keys: &["Space", "Escape"],
+    skip_keys: &["Escape", "Space"],
     cadence: AgentCadence::PauseToThink {
         settle_ms: 1000,
         settle_flips: 30,
@@ -168,50 +168,98 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "mouse_delta",
             action: "Steer software cursor",
-            notes: "Required because `DDMouse` re-centers the cursor to `(320, 240)` every flip on a `1280x1280` virtual span (`2.0x` X, `2.667x` Y).",
+            notes: "Required because `DDMouse` re-centers to `(320, 240)` every flip on a `1280x1280` virtual span (`2.0x` X, `8/3x` Y); cursor starts at `(0, 480)` bottom-left. Spread large moves across multiple flips (<= 140 px X, <= 80 px Y per flip) to avoid clamping, and confirm cursor position visually before clicking.",
         },
         ControlHint {
-            input: "Left click",
-            action: "Select / place / activate",
-            notes: "Clicks the UI button, gadget, or map tile under the drawn software cursor.",
+            input: "Left click (in-place)",
+            action: "Click UI / open Unit Menu",
+            notes: "Omit `x`/`y` (or pass `320, 240`) so no absolute jump occurs. Clicks menu/HUD buttons; clicking and releasing a movable Action Brick opens its Unit Menu (`RotateCW`, `RotateCCW`, `Info`, `Hint`, plus Belt/Cord/Rope attach or Mirror toggle). Clicks during the intro translate to `Escape` (`click_in_a_movie`).",
         },
         ControlHint {
-            input: "Tab",
-            action: "NextCam",
-            notes: "Cycle to the next camera preset.",
+            input: "Left hold + relative drag",
+            action: "Move Action Brick",
+            notes: "Hold Left on a movable brick (Direction Tile, Jump Tile, Stairs, Slide, Trampoline, Platform, Mirror, See-Saw, Bomb) and pipe small relative moves (~8-16 raw px/flip from `320, 240`) to carry it onto a valid pad, then release.",
+        },
+        ControlHint {
+            input: "Right hold + relative drag",
+            action: "Orbit 3D camera",
+            notes: "Hold Right button (`down right`) and sweep with relative moves to orbit the mission camera around the puzzle space.",
+        },
+        ControlHint {
+            input: "Screen edges (<= 16 px X / <= 12 px Y)",
+            action: "Edge-scroll camera",
+            notes: "Moving the software cursor within 1/40th of any screen edge pans the mission camera in that direction.",
+        },
+        ControlHint {
+            input: "HUD bar (y=428)",
+            action: "Menu / Camera / Specialists / GO-Stop",
+            notes: "Planning: Menu `(66,428)`, `PrevCam (215)`, `Nav_InOut (283)`, `Nav_Pivot (348)`, `NextCam (412)`, `GO/Stop (573)`. Running: follow-cams Flex `(170)`, Cam `(220)`, Charge `(270)`, Radia `(320)`, Crunch `(370)`, Dash `(419)`, `ICam (470)`, `SmartCam (534,433)`, `Stop (573)`.",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Go / Stop & attract screen",
+            notes: "Toggles simulation execution (`GO`) and resets agents/props back to setup (`Stop`); also advances past the post-intro attract screen. Ignored during the intro movie.",
+        },
+        ControlHint {
+            input: "Tab / Shift+Tab",
+            action: "NextCam / PrevCam",
+            notes: "Cycles mission camera presets forward (`Tab`) or backward (`Shift+Tab`).",
         },
         ControlHint {
             input: "R",
             action: "RotateCW",
-            notes: "Rotate the held gadget or orientation clockwise.",
+            notes: "Rotates the selected Action Brick 90 degrees clockwise.",
         },
         ControlHint {
-            input: "Space",
-            action: "Go / Stop",
-            notes: "Toggle mission action execution and advance dialog.",
+            input: "Up / Down / Left / Right / PageUp / PageDown",
+            action: "Pan / elevate camera",
+            notes: "Moves/orbits the 3D mission camera while held (`A`/`Z`, `Q`/`W`, `S`/`X` also adjust camera zoom/orbit/pitch axes).",
         },
         ControlHint {
             input: "Escape",
-            action: "Skip intro / menu",
-            notes: "Skip intro movie from ~flip 440 onward or open the in-mission menu.",
+            action: "Skip intro / Mission Menu",
+            notes: "Skips `LMIINTRO.AVI` from ~flip 440 onward (refused during the opening logo); opens/closes the in-mission menu (`Keep Playing`, `Start Over`, `Skip Training Mission`, `Return to HQ`) or cancels active selection. Never quits.",
         },
     ],
     hazards: &[
-        "Absolute `move` coordinates do not position the software pointer: `DDMouse` re-centers to `(320, 240)` every flip, so always use `mouse_delta`.",
-        "Intended presentation rate is 30 Hz (33.3 ms per flip), not 60 Hz.",
+        "Absolute `move`/`drag` or `click` with non-`(320, 240)` coordinates knocks the software cursor off target because `DDMouse` re-centers to `(320, 240)` every flip; always steer with `mouse_delta` and click in place.",
+        "Cursor clamping & drift (#332): a single flip clamps at `0..639 x 0..479` (max `+-159.5` visual px X, `+-89.6` Y per flip). Spread moves across `flips >= 4` and verify the drawn software cursor in a screenshot before every click.",
+        "Leaving the software cursor within `16 px` of left/right or `12 px` of top/bottom edges continuously scrolls the mission camera.",
+        "Intended presentation rate is 30 Hz (33.3 ms per flip), not 60 Hz; size waits in 30-flip (1 s) multiples. No built-in fast-forward key exists; use control-host pace instead.",
+        "Intro movie (`LMIINTRO.AVI`) refuses all keys and clicks before ~flip 440; `Space` is ignored for the entire intro (use `Escape` or click from ~flip 440).",
+        "In Training Area (`M0010`), Tee Vee (`T0001`) locks picking to only the flashing step target after each spoken line finishes whole (Direction Tile `U0179` unlocks at step `220a`).",
+        "Keep display Options at `640x480` 16-bit; raising resolution or switching to 32-bit BPP breaks display output (`Game.txt` stores the override).",
     ],
     goals: &[
         Goal {
+            id: "boot-main-menu",
+            name: "Boot to Main Menu",
+            milestone: Milestone::FirstLight,
+            description: "Boot `lego-alpha-team`, skip `LMIINTRO.AVI` from ~flip 440 (or wait to flip 1631), clear the attract screen with `Space`, and reach Main Menu (`MM.PUZ`).",
+        },
+        Goal {
             id: "training-area",
-            name: "Training Area",
+            name: "Training Area (M0010)",
             milestone: Milestone::Playable,
-            description: "Complete the Training Area mission following the coach's narration and return to the main menu.",
+            description: "Complete `M0010` following Tee Vee's steps: cycle cameras, drag Direction Tile `U0179` onto the blue pad, rotate via Unit Menu, press `GO` so Dash reaches the console, and return to HQ.",
         },
         Goal {
             id: "adventure-m1010",
-            name: "Adventure Mission 1 (M1010)",
+            name: "Adventure Mission 1: Mission One (M1010)",
+            milestone: Milestone::Playable,
+            description: "Open Select Adventure slot 1 (skip or finish training), place and orient Direction Tiles to guide Dash to the Plunger Lock in `M1010`, press `GO`, and clear the mission.",
+        },
+        Goal {
+            id: "adventure-m1020-compound-1",
+            name: "Mission 2+ & Ogel Island (M1020-M1140)",
             milestone: Milestone::Complete,
-            description: "Open Select Adventure and complete Mission 1 (`M1010`).",
+            description: "Complete Mission 2 (`M1020`, On the Right Path) with 4 Direction Tiles and progress through Ogel Island (`M1010`-`M1140`), rescuing Crunch (`M1070`) and Radia (`M1140`).",
+        },
+        Goal {
+            id: "full-adventure",
+            name: "Stop the Boggle Rocket (M4070 -> Credits)",
+            milestone: Milestone::Credits,
+            description: "Clear Goo Caverns (`M2010`-`M2160`, rescue Charge & Cam), Deep Sea Orb Factory (`M3010`-`M3100`, rescue Flex & shut off D.O.O.M.), and Arctic Command Base (`M4010`-`M4070`) to reach Credits.",
         },
     ],
     save_files: &["C:\\Program Files\\LEGO Media\\LEGO Alpha Team\\Game.txt"],
@@ -236,6 +284,9 @@ mod tests {
         let (sx, sy) = GUIDE.relative_steered_scale().expect("steered scale");
         assert!((sx - 2.0).abs() < 1e-12);
         assert!((sy - (1280.0 / 480.0)).abs() < 1e-12);
+        assert!(GUIDE.controls.len() >= 10);
+        assert!(GUIDE.hazards.len() >= 5);
+        assert!(GUIDE.goals.len() >= 4);
 
         for body in [
             format_meta_json(&LEGO_ALPHA_TEAM, &GUIDE),
@@ -245,6 +296,18 @@ mod tests {
             let v = parse_json(&body).expect("valid JSON");
             assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
         }
+
+        let goals_json = parse_json(&format_goals_json(&LEGO_ALPHA_TEAM, &GUIDE)).unwrap();
+        let goal_ids: Vec<&str> = goals_json.as_object().unwrap()["goals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g.as_object()?.get("id")?.as_str())
+            .collect();
+        assert!(goal_ids.contains(&"boot-main-menu"));
+        assert!(goal_ids.contains(&"training-area"));
+        assert!(goal_ids.contains(&"adventure-m1010"));
+        assert!(goal_ids.contains(&"adventure-m1020-compound-1"));
 
         let mut host = ControlHost::new(
             Headless::new(),
