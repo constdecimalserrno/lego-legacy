@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-10-21
 
+Adds the title-level agent playbook (`titles/lego-chess/AGENTS.md`) and enriches static `GUIDE: TitleGuide` metadata (#335): separates `click_poll` (UI buttons, green ticks, HUD icons, menus) from standard flip-held `click --hold-flips 3..6` (3D chessboard squares and Throne Room objects), documents live-verified 3D camera Rotate/Tilt controls (`(320,60)` expanded HUD arrows and `LeftShift+Arrow`), 2D/3D view toggling (`(440,60)` -> `(585,200)` with 2D HUD relocation and uniform `44×40` px grid), `F1` in-game Settings, Throne Room / Quick Game / Match HUD coordinates, 3D perspective rank heights, hazards, and five concrete agent goals. Strictly outside guest state; no route moved.
+
 Declares static `GUIDE: TitleGuide` metadata (`SoftwareAbsolute { requires_poll_release: true }`, 60 Hz, `PauseToThink`, `click_poll` / `Space` poll-release / 50 ms `WM_CHAR` typing debounce / mid-match close hazard, Quick Game & Pirates vs AI checkmate goals, and `profiles\prof1.lcp`/`profiles\1save.lcs` save paths) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
 
 On the roster (#143): `Lego Chess.exe`, V2.06, out of the Masterpiece pressing's `MAIN.Z`, an

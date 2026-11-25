@@ -130,7 +130,7 @@ pub const LEGO_CHESS: Title = Title {
 /// `/api/goals` (#311).
 pub const GUIDE: TitleGuide = TitleGuide {
     display_name: "LEGO Chess",
-    summary: "3D themed chess game with animated capture cartoons, tutorials, and computer AI.",
+    summary: "3D themed LEGO chess (Western, Pirates, Classic Staunton) with 3D capture cartoons, rotatable board camera, 2D/3D view toggle, tutorials, and Oxford Softworks AI.",
     resolution: (640, 480),
     bpp: 16,
     refresh_hz: 60,
@@ -145,43 +145,94 @@ pub const GUIDE: TitleGuide = TitleGuide {
     },
     controls: &[
         ControlHint {
-            input: "click_poll",
-            action: "Click UI buttons & chess squares",
-            notes: "Use `click_poll` (between-flip release) on UI buttons, green ticks, and menu clicks because release loops wait without flipping.",
+            input: "click_poll (--poll --hold-ms 150)",
+            action: "Click UI buttons, green ticks, menus, HUD icons & dialogs",
+            notes: "Required on UI controls because button release loops spin without presenting frames. Do NOT use on 3D chessboard squares.",
         },
         ControlHint {
-            input: "Space (poll release)",
-            action: "Skip intro / story movies",
-            notes: "Release `Space` between flips so the post-movie key-up wait (`0x0040D220`) does not stall.",
+            input: "click --hold-flips 3..6",
+            action: "Select & move pieces on 3D chessboard squares (and Throne Room objects)",
+            notes: "Standard flip-held click (NOT click_poll). On default 3D camera, rank centers compress upward: Rank 1 y=349, Rank 2 y=308, Rank 3 y=272, Rank 4 y=241, Rank 5 y=214, Rank 7 y=180.",
         },
         ControlHint {
-            input: "type_text (50 ms debounce)",
-            action: "Type profile & save names",
-            notes: "Text boxes require >= 50 ms declared time and key-up between characters (`WM_CHAR` debounce).",
+            input: "click_poll 320 60 -> HUD arrows or LeftShift+Arrow",
+            action: "Rotate & tilt 3D board camera (click 320 60 again to reset)",
+            notes: "Expand Rotate/Tilt HUD at (320,60), then hold standard click (15..30 flips) on arrows Left (282,60), Right (358,60), Up (320,24), Down (320,96), or hold chord LeftShift+Left/Right/Up/Down while expanded.",
         },
         ControlHint {
-            input: "Escape",
-            action: "Resign / menu back",
-            notes: "Opens the resignation prompt in a match or backs out of menus; does not quit the process.",
+            input: "click_poll 440 60 (3D->2D) / click_poll 585 200 (2D->3D)",
+            action: "Toggle 2D overhead board & 3D board view",
+            notes: "2D view shows an exact uniform 8x8 grid (x=144..496, y=24..344; 44x40 px squares) and moves ! Options to (48,200) and the 3D Knight toggle to (585,200).",
+        },
+        ControlHint {
+            input: "Space (hold_ms 150 poll release)",
+            action: "Skip intro, Story cutscenes & 3D capture cartoons",
+            notes: "Release Space between flips (`--hold-flips 3 --hold-ms 150`) so the post-movie key-up wait (`0x0040D220`) does not stall. Opening LEGO Media logo (flips 0..283) cannot be skipped.",
+        },
+        ControlHint {
+            input: "type_text (--flip-gap 4)",
+            action: "Type player profile & save slot names",
+            notes: "Text boxes require >= 50 ms declared time (4+ flips at 60 Hz) and key-up between characters (`WM_CHAR` debounce). Clear default `....` save labels with 4x Backspace.",
+        },
+        ControlHint {
+            input: "Escape (hold_ms 150 poll release)",
+            action: "Open Resign dialog mid-match / menu back",
+            notes: "Opens \"Are you sure you want to resign?\" (confirm green tick at (360,232) via click_poll) or backs out of menus; never quits the process.",
+        },
+        ControlHint {
+            input: "F1 (hold_ms 150)",
+            action: "Open in-game Settings menu",
+            notes: "Toggle Show cartoons, Instant move, Default board view, and Show notation mid-match (Detail Level, Show Reflections, and timers are locked mid-match).",
+        },
+        ControlHint {
+            input: "Arrows + Return / Tab / Delete",
+            action: "Board square navigation / HUD button cycle / profile delete",
+            notes: "Arrows move the board highlight and Return selects/places pieces (cannot open menus per README.TXT). Tab steps 6 HUD buttons via SetCursorPos (software cursor lags until WM_MOUSEMOVE, #235). Delete removes highlighted profile on register.",
+        },
+        ControlHint {
+            input: "Throne Room & Match HUD hotspots",
+            action: "Navigate hub, Quick Game setup, Advisor Help & ! Options",
+            notes: "Throne Room (move + wait 25 flips for camera pan): Chess Table (385,285)=Quick Game, Curtains=Story, Book=Tutorial, Crystal Ball=Settings, Trapdoor=Quit, Scrapbook/Scissors=Scrapbook, Chest=Load, Quill/Inkpot=Switch Player. Quick Game: Theme (320,70) cycles Western->Pirates->Classic, Black AI/Human (520,180), Start (590,410). Match 3D HUD: White Advisor Help (60,75) [Pointer/Moves/Hint/Undo], ! Options (200,60) [Save (282,258), Load (360,258), confirm (392,194)].",
         },
     ],
     hazards: &[
-        "Requires `click_poll` (between-flip release) on UI buttons and `Space` movie skips because release loops do not present new frames.",
-        "Text input boxes enforce a 50 ms declared-time `WM_CHAR` debounce and require each key to release before the next.",
-        "Never send `close` mid-match (it does not exit on `WM_QUIT` and hits the 5 s close grace); return to the Throne Room before closing.",
+        "UI buttons, menus, dialogs, and Space skips require poll-release (`click_poll` / `--hold-ms 150`) because release loops spin without flipping; 3D chessboard squares require standard `click --hold-flips 3..6` (NOT `click_poll`).",
+        "Never send `close` mid-match (the game ignores `WM_QUIT` and hits the 5 s close grace); resign via Escape -> green tick (360,232) or finish via checkmate green tick (320,232) to return to Quick Game / Throne Room first.",
+        "Default 3D camera foreshortens ranks sharply (Rank 1 y=349, Rank 2 y=308, Rank 3 y=272, Rank 4 y=241, Rank 5 y=214, Rank 7 y=180); toggle 2D view at (440,60) for uniform 44x40 px squares (return to 3D at (585,200)).",
+        "Throne Room camera tracks the mouse pointer — move to an object, wait ~25 flips for the pan to settle, observe, then click.",
+        "Text boxes enforce a >= 50 ms declared-time `WM_CHAR` debounce with key-up between characters (`type --flip-gap 4`); clear default `....` save labels with 4x Backspace before typing.",
+        "3D capture cartoons require `Show cartoons` enabled (`F1` -> Graphics) and matched Western or Pirates piece sets (mixing sets or Classic Staunton suppresses cartoons).",
     ],
     goals: &[
         Goal {
-            id: "quick-game-checkmate",
-            name: "Create profile & Quick Game checkmate",
+            id: "profile-and-throne-room",
+            name: "Create profile & enter Throne Room",
             milestone: Milestone::Playable,
-            description: "Create a player profile on the New Player form, enter the Throne Room, start a Quick Game, and win by checkmate.",
+            description: "Skip Krisalis' logo and intro with Space (poll-release), create a player profile on the New Player form (`type --flip-gap 4`), confirm (576,420) twice, and enter the Throne Room.",
         },
         Goal {
-            id: "pirates-vs-ai",
-            name: "Pirates 3D theme vs Computer AI checkmate",
+            id: "quick-game-checkmate",
+            name: "Play 3D Quick Game vs AI with capture cartoons to checkmate",
+            milestone: Milestone::Playable,
+            description: "Click the Throne Room Chess Table (385,285) -> Start (590,410), play legal 3D chess moves (`click --hold-flips 4`), trigger a 3D capture cartoon, and win by checkmate.",
+        },
+        Goal {
+            id: "camera-and-view-inspection",
+            name: "Orbit/tilt 3D camera & toggle 2D/3D view",
+            milestone: Milestone::Playable,
+            description: "Expand Rotate/Tilt at (320,60), rotate and tilt the 3D board via its HUD arrows or LeftShift+Arrow, snap back via (320,60), toggle 2D overhead view at (440,60), and return to 3D at (585,200).",
+        },
+        Goal {
+            id: "western-and-pirates-ai-checkmate",
+            name: "Checkmate Computer AI in Western & Pirates themes",
             milestone: Milestone::Complete,
-            description: "Select the Pirates 3D theme against the Computer AI and win by checkmate.",
+            description: "Win by checkmate against the Computer AI in both Western (default) and Pirates (1 click on Theme (320,70)) with matched sets and capture animations enabled.",
+        },
+        Goal {
+            id: "save-and-reload-match",
+            name: "Save & reload match across runs",
+            milestone: Milestone::Complete,
+            description: "Save an in-progress match via ! Options (200,60) -> Save Game (282,258) (`profiles\\1save.lcs`), resign cleanly, relaunch over the same `--data-root`, reload via Load Game (360,258), and continue playing.",
         },
     ],
     save_files: &["profiles\\prof1.lcp", "profiles\\1save.lcs"],
@@ -203,6 +254,24 @@ mod tests {
                 requires_poll_release: true
             }
         );
+        // Critical click distinction: UI uses click_poll, 3D squares use standard flip-held click.
+        assert!(GUIDE
+            .controls
+            .iter()
+            .any(|c| c.input.contains("click_poll") && c.notes.contains("Do NOT use on 3D")));
+        assert!(GUIDE
+            .controls
+            .iter()
+            .any(|c| c.input.contains("hold-flips 3..6") && c.action.contains("3D chessboard")));
+        assert!(GUIDE
+            .controls
+            .iter()
+            .any(|c| c.input.contains("320 60") && c.input.contains("LeftShift+Arrow")));
+        assert!(GUIDE
+            .controls
+            .iter()
+            .any(|c| c.input.contains("440 60") && c.input.contains("585 200")));
+        assert!(GUIDE.goals.len() >= 5);
         for body in [
             format_meta_json(&LEGO_CHESS, &GUIDE),
             format_controls_json(&LEGO_CHESS, &GUIDE),
