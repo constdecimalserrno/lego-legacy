@@ -127,10 +127,10 @@ pub const LEGO_ISLAND: Title = Title {
 };
 
 /// Static playability metadata served via `/api/meta`, `/api/controls`, and
-/// `/api/goals` (#311).
+/// `/api/goals` (#311, #333).
 pub const GUIDE: TitleGuide = TitleGuide {
     display_name: "LEGO Island",
-    summary: "First-person 3D exploration and minigame adventure set on LEGO Island.",
+    summary: "First-person 3D exploration, vehicle building, minigame adventure, and Brickster finale on LEGO Island.",
     resolution: (640, 480),
     bpp: 16,
     refresh_hz: 60,
@@ -140,58 +140,116 @@ pub const GUIDE: TitleGuide = TitleGuide {
     cadence: AgentCadence::BurstThenPause { burst_ms: 500 },
     controls: &[
         ControlHint {
-            input: "Up / Down / Left / Right",
-            action: "Drive / steer / walk",
-            notes: "Move forward/back and turn in first person or steer vehicles (bicycle, skateboard, race car).",
+            input: "Up / Down (or Keypad8 / Keypad2)",
+            action: "Walk forward/back & vehicle throttle/reverse",
+            notes: "Move on foot or accelerate/brake vehicles (bicycle, skateboard, race car, ambulance, tow truck, jetski, dune buggy, helicopter).",
         },
         ControlHint {
-            input: "Left click (quick)",
-            action: "Pick / interact / enter doors",
-            notes: "Quick click to pick objects, talk, enter buildings, sign the book, or skip intro scenes.",
+            input: "Left / Right (or Keypad4 / Keypad6)",
+            action: "Turn in place",
+            notes: "Rotates ~8 deg/flip on foot (~11-12 flips for a 90 deg turn). Hold LeftControl/RightControl with Left/Right for 4x sharper turning.",
         },
         ControlHint {
-            input: "Left hold (>= 1050 ms)",
-            action: "Walk-drag",
-            notes: "Holding Left button still for >= 1050 ms fires the 1-second `WM_TIMER` to start walk-drag movement.",
+            input: "chord Up,Left / chord Up,Right",
+            action: "Steer skateboard & vehicles while moving",
+            notes: "Skateboard and vehicle steering at speed requires holding Up simultaneously with Left or Right.",
         },
         ControlHint {
-            input: "Left drag",
-            action: "Build Race Car",
-            notes: "Drag and release vehicle pieces onto build slots in the Race Car workshop.",
+            input: "Left click (quick, hold_flips=2)",
+            action: "3D pick / interact / enter buildings & mount vehicles",
+            notes: "Keep clicks well under 1000 ms to pick 3D objects, talk to NPCs, enter visible buildings, mount bikes, pick portraits, use paint/mood tools, or click the floor to skip intro/welcome.",
+        },
+        ControlHint {
+            input: "Left hold still (>= 1050 ms / ~63 flips)",
+            action: "Mouse walk-drag",
+            notes: "Holding Left button still fires the 1-second `WM_TIMER` to enter continuous pointer-steered walking.",
+        },
+        ControlHint {
+            input: "Left drag (step_px=16)",
+            action: "Assemble vehicles in workshops",
+            notes: "Drag parts from the shelf onto highlighted slots in the Race Car, Dune Buggy, Jetski, and Helicopter workshops; click colour/decal/mood bricks to customise.",
+        },
+        ControlHint {
+            input: "Space",
+            action: "Skip cutscene / dialog",
+            notes: "Skips or cancels the active animation, cutscene, or dialog sequence.",
+        },
+        ControlHint {
+            input: "Escape",
+            action: "Return to Information Center / Quit prompt",
+            notes: "Returns to the Information Center from the Island or activities; inside Info Center opens the Quit confirmation (does not immediately quit).",
+        },
+        ControlHint {
+            input: "HUD (i) button A2 (38, 148)",
+            action: "Warp to Information Center",
+            notes: "Click the on-screen `(i)` HUD button at `(38, 148)` (or click the Info Center tower in 3D) to return inside.",
+        },
+        ControlHint {
+            input: "F12",
+            action: "Quicksave game",
+            notes: "Immediately saves `G0.GS` and `History.gsi` whenever a player is signed into the Registration Book.",
+        },
+        ControlHint {
+            input: "A-Z / Backspace + Tick (519, 135)",
+            action: "Sign Registration Book",
+            notes: "Click the blue book `(322, 294)`, type up to 7 letters, click green tick `(519, 135)` (or `(519, 163)` for row 2 saved player), then pick a portrait (Pepper `(322, 105)`, Nick `(372, 105)`).",
+        },
+        ControlHint {
+            input: "Info Center arrows (28, 310) -> (35, 140) -> Door (330, 220)",
+            action: "Exit to LEGO Island",
+            notes: "Navigate from Info Center main room to Elevator room, then Revolving Door; door unlocks only after signing and picking a portrait.",
         },
         ControlHint {
             input: "Quit Door (590, 260) -> Yes (210, 400)",
             action: "Save & quit",
-            notes: "Click the Information Center Quit Door at `(590, 260)`, then the green Yes brick at `(210, 400)` to save and exit.",
-        },
-        ControlHint {
-            input: "Space",
-            action: "Skip cutscene",
-            notes: "Skip dialog and cutscene sequences.",
+            notes: "Click the Information Center Quit Door `(590, 260)`, then the green Yes brick `(210, 400)` (or send clean `Close`) to save `G0.GS` + `History.gsi`, roll credits, and exit cleanly.",
         },
     ],
     hazards: &[
-        "You must sign the Information Center registration book and select a character portrait before the revolving door lets you onto the island.",
-        "Holding Left button still for >= 1000 ms starts continuous walk-drag; keep normal interaction clicks brief.",
+        "Revolving Door stays locked until you both sign the Registration Book AND click a character portrait (blue frame); a new name selects nobody by default.",
+        "Skateboard and vehicle steering requires holding Up simultaneously (`chord Up,Left` / `chord Up,Right`); bare Left/Right stalls or rotates in place (~11-12 flips per 90 deg).",
+        "Holding Left mouse button still for >= 1000 ms fires `WM_TIMER` and enters continuous walk-drag; keep normal pick clicks brief (`hold_flips=2`).",
+        "Signing writes only `Players.gsi` (shifting old `G0.GS` to `G1.GS`); progress (`G0.GS`, `History.gsi`) is only persisted on `F12`, Quit Door -> Yes, switching players, or clean `Close` — never force-kill before saving.",
+        "Each character delivers pizza to a different target: Pepper's Jail route is blocked by town roadworks (and triggers Act 2 once the Helicopter is built); pick Nick `(372, 105)` for the shortest direct delivery east+north to the Gas Station.",
+        "Vehicle Build drag-and-drop requires accurate shelf-to-slot coordinates and smooth motion (`step_px=16`); observe with `--grid --cursor` and verify each part snapped before dragging the next.",
+        "Cutscenes, spoken lines, and room transitions span 100-600+ flips while the hourglass cursor shows; wait for frames to settle or use `Space` / quick floor clicks instead of queueing blind clicks.",
     ],
     goals: &[
         Goal {
             id: "information-center",
-            name: "Sign in & explore Information Center",
+            name: "Sign in & exit Information Center",
             milestone: Milestone::FirstLight,
-            description: "Sign a player name in the registration book, pick a character portrait, and exit through the revolving door.",
+            description: "Skip intro, sign a player name in the Registration Book `(322, 294)`, pick a character portrait, and exit through the Revolving Door `(330, 220)`.",
+        },
+        Goal {
+            id: "island-exploration",
+            name: "Ride bicycle & explore LEGO Island",
+            milestone: Milestone::Playable,
+            description: "Mount the red bicycle outside the Information Center, steer roads using `Up` and `chord Up,Left`/`Up,Right`, and reach key island landmarks (Pizzeria, Gas Station, Hospital, Police Station, Beach, Race Track).",
         },
         Goal {
             id: "pizza-delivery",
-            name: "Pizza Delivery",
+            name: "Complete Pizza Delivery",
             milestone: Milestone::Playable,
-            description: "Take a pizza delivery job at the Pizzeria, deliver it on the skateboard, and save via the Quit Door.",
+            description: "Click the Pizzeria, click the pizza Papa Brickolini holds out, deliver it on the skateboard (Nick rides east then north to Nubby at the Gas Station for a Red score brick), and save.",
         },
         Goal {
-            id: "race-car-track",
-            name: "Build Race Car & win 2-lap Race Track",
+            id: "island-minigames",
+            name: "Complete Ambulance, Tow Truck, Race Track & Jetski Race",
+            milestone: Milestone::Playable,
+            description: "Finish the remaining island activities — Ambulance (Hospital), Tow Truck (Gas Station), 2-lap Race Track, and Jetski Race (Beach) — to earn Score Cube bricks.",
+        },
+        Goal {
+            id: "vehicle-builds",
+            name: "Build Race Car, Dune Buggy, Jetski & Helicopter",
             milestone: Milestone::Complete,
-            description: "Assemble the Race Car by dragging pieces in the workshop and win the 2-lap Race Track event.",
+            description: "Assemble all four custom vehicles by dragging parts onto workshop slots; building the Helicopter unlocks the Brickster finale.",
+        },
+        Goal {
+            id: "brickster-finale",
+            name: "Stop the Brickster (Acts 2 & 3) & reach credits",
+            milestone: Milestone::Credits,
+            description: "As Pepper with the Helicopter built, deliver pizza to the Jail to trigger Act 2 (recover stolen bricks) and Act 3 (fly the Helicopter, throw pizzas/donuts to capture the Brickster), then roll credits.",
         },
     ],
     save_files: &["Players.gsi", "History.gsi", "G0.GS"],
@@ -218,5 +276,16 @@ mod tests {
             let v = parse_json(&body).expect("valid JSON");
             assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
         }
+        assert!(GUIDE
+            .controls
+            .iter()
+            .any(|c| c.input.contains("chord Up,Left")));
+        assert!(GUIDE.controls.iter().any(|c| c.input == "F12"));
+        assert!(GUIDE.controls.iter().any(|c| c.input.contains("(38, 148)")));
+        assert_eq!(GUIDE.goals.len(), 6);
+        assert!(GUIDE
+            .goals
+            .iter()
+            .any(|g| g.id == "brickster-finale" && g.milestone == Milestone::Credits));
     }
 }

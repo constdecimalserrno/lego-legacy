@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-21
 
+Adds `titles/lego-island/AGENTS.md` agent playbook and enriches `GUIDE` (`controls`, `hazards`, `goals`) with verified `ISLE.EXE`/`LEGO1.DLL` movement chords (`chord Up,Left` / `chord Up,Right`, ~11–12 flips per 90° turn, `LeftControl`/`RightControl` sharp-turn modifier), keyboard shortcuts (`Space`, `Escape`, `F12` quicksave), HUD `(i)` hotspot `A2 (38, 148)`, Information Center & Registration Book coordinates, save persistence caveats, and the full progression ladder through the Brickster finale (#333). Strictly outside guest state; no route moved.
+
 Declares static `GUIDE: TitleGuide` metadata (`AbsoluteKept`, 60 Hz, `BurstThenPause`, arrow driving / quick click / `>= 1050 ms` walk-drag / Race Car workshop drag / Quit Door `(590,260)` -> Yes `(210,400)` controls, Information Center / Pizza Delivery / Race Track goals, and `Players.gsi`/`History.gsi`/`G0.GS` save paths) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.
 
 Took core 1.2.0's surface caps (#210): `GetSurfaceDesc` now writes the `ddsCaps` its description
