@@ -1,0 +1,19 @@
+[package]
+name = "lego-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "lego_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lego-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lego-ctrl = { path = "../ctrl", version = "=0.1.0" }

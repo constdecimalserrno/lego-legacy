@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "core",
     "launcher",
+    "tools/ctrl",
+    "tools/mcp",
     "titles/lego-rock-raiders",
     "titles/hotwheels-stunt-track-driver",
     "titles/lego-alpha-team",
