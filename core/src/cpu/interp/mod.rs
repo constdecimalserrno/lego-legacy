@@ -25,6 +25,8 @@ use x86_64 as native;
 
 use super::decode::{self, MAX_INSN};
 use super::insn::{FastInsn, FastOp, Insn, Kind, NO_REG};
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use super::ZERO_REG;
 use super::{exec, Cpu, CpuEngine, Mode, Stop, CS, FS};
 use crate::guest::{Arena, GuestMem};
 use crate::shim::Boundary;
@@ -131,6 +133,30 @@ pub(crate) struct FastCtx {
     pub outside_danger_start: u32,
     pub _pad: u32,
     pub fpu: *mut super::x87::X87,
+    /// Conservative `[code_min.saturating_sub(7), code_max)` range covering
+    /// every 1..=8-byte store that could overlap a marked code page (#283).
+    /// Packed as two adjacent `u32`s at 8-byte-aligned offset 176 so `aarch64`
+    /// loads both into `x21` in one 64-bit `ldr` and `x86_64` pins start in
+    /// `r9d` while comparing against `[rbp + 180]`. `(0, 0)` when empty.
+    pub code_bbox_start: u32,
+    pub code_bbox_len: u32,
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[inline(always)]
+fn encode_code_bbox(mem: &Arena) -> Option<(u32, u32)> {
+    let (code_min, code_max) = mem.code_bbox();
+    if code_min >= code_max {
+        return Some((0, 0));
+    }
+    let start = code_min.saturating_sub(7);
+    let end = if code_max == u32::MAX {
+        1u64 << 32
+    } else {
+        u64::from(code_max)
+    };
+    let len = end - u64::from(start);
+    u32::try_from(len).ok().map(|len| (start, len))
 }
 
 /// Sentinel [`FastInsn`] appended after non-transfer runs for `naked_asm!`.
@@ -257,6 +283,7 @@ impl Interp {
         if std::mem::take(&mut mem.code_written) {
             if std::mem::take(&mut mem.written_all) {
                 mem.written_code.clear();
+                mem.clear_code();
                 self.forget();
             } else {
                 for page in std::mem::take(&mut mem.written_code) {
@@ -294,6 +321,7 @@ impl Interp {
     pub(crate) fn run_at(&mut self, lin: u32, mem: &mut Arena) -> Result<Run, Stop> {
         self.flush_code_written(mem);
         if self.cached_insns > MOST_KEPT {
+            mem.clear_code();
             self.forget();
         }
         let (region, page, slot) = (
@@ -356,6 +384,10 @@ impl Interp {
             }
         }
         debug_assert!(u32::from(bytes) <= MAX_RUN_BYTES);
+        if !self.mode.real && count > 1 {
+            let start = first as usize;
+            promote_dead_flags(&mut self.fast_insns[start..start + usize::from(count)]);
+        }
         if !ends_with_transfer {
             self.fast_insns.push(END_RUN);
         }
@@ -418,8 +450,12 @@ impl Interp {
             return rust::run(self, cpu, mem, count, outside);
         }
 
+        // 9-element GPR window with permanent zero slot `fast_regs[ZERO_REG] == 0`
+        // so `run_fast_block` computes `disp + r[base] + (r[index] << scale)`
+        // branchlessly while leaving `Cpu::r: [u32; 8]` (and `state_digest`) unchanged (#283).
+        let mut fast_regs = [0u32; 9];
         let mut ctx = FastCtx {
-            regs: cpu.r.as_mut_ptr(),
+            regs: fast_regs.as_mut_ptr(),
             arena_base,
             code_bitmap,
             arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
@@ -447,6 +483,8 @@ impl Interp {
             outside_danger_start,
             _pad: 0,
             fpu: &raw mut cpu.fpu,
+            code_bbox_start: 0,
+            code_bbox_len: 0,
         };
 
         while retired < count && !outside.contains(&cpu.eip) {
@@ -460,8 +498,17 @@ impl Interp {
                     Err(stop) => return (retired, Err(stop)),
                 }
             }
+            let Some((code_bbox_start, code_bbox_len)) = encode_code_bbox(mem) else {
+                match rust::run_one_block(self, cpu, mem, count, &outside, &mut retired) {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(stop) => return (retired, Err(stop)),
+                }
+            };
 
-            ctx.regs = cpu.r.as_mut_ptr();
+            fast_regs[..8].copy_from_slice(&cpu.r);
+            fast_regs[ZERO_REG] = 0;
+            ctx.regs = fast_regs.as_mut_ptr();
             ctx.fpu = &raw mut cpu.fpu;
             ctx.fast_insns = self.fast_insns.as_mut_ptr();
             ctx.runs = self.runs.as_ptr();
@@ -474,11 +521,19 @@ impl Interp {
             ctx.fs_base = cpu.seg_base[FS];
             ctx.remaining = count - retired;
             ctx.retired = 0;
+            ctx.code_bbox_start = code_bbox_start;
+            ctx.code_bbox_len = code_bbox_len;
 
-            // Safety: `ctx` holds live pointers to `cpu.r`, `mem`, and `self`'s
-            // cache tables, `arena_len >= arena_floor + 4`, and `!mem.is_watching()`.
+            // Safety: `ctx` holds live pointers to `fast_regs` (9 elements with
+            // `fast_regs[8] == 0`), `mem`, and `self`'s cache tables,
+            // `arena_len >= arena_floor + 4`, and `!mem.is_watching()`.
             let status = unsafe { native::run_fast_block(&mut ctx) };
 
+            debug_assert_eq!(
+                fast_regs[ZERO_REG], 0,
+                "constant-zero NO_REG slot r[8] was mutated by run_fast_block"
+            );
+            cpu.r.copy_from_slice(&fast_regs[..8]);
             native::unpack_flags(ctx.flags, &mut cpu.flags);
             cpu.eip = ctx.eip;
             retired += ctx.retired;
@@ -535,6 +590,121 @@ impl Interp {
         }
         (retired, Ok(()))
     }
+}
+
+/// Conservative intra-block dead-flag promotion pass (#283).
+///
+/// Scans one flat32 run backwards and promotes register-only 32-bit ALU/shift
+/// ops to their `*Nf` variants ONLY when all six arithmetic flags (`CF`, `PF`,
+/// `AF`, `ZF`, `SF`, `OF`) are unconditionally overwritten by a later
+/// non-faulting, non-bailing, non-flag-reading op in the same run, with ZERO
+/// intervening flag reads, branches, `Slow`/`X87` ops, or potentially faulting
+/// memory ops.
+fn promote_dead_flags(run: &mut [FastInsn]) {
+    let mut flags_dead = false;
+    for insn in run.iter_mut().rev() {
+        if flags_dead {
+            if let Some(nf) = promote_no_flags(insn.op) {
+                insn.op = nf;
+                continue;
+            }
+        }
+        if overwrites_all_flags_unconditionally(insn.op) {
+            flags_dead = true;
+        } else if !is_pure_non_flag_op(insn.op) {
+            flags_dead = false;
+        }
+    }
+}
+
+#[inline(always)]
+fn promote_no_flags(op: FastOp) -> Option<FastOp> {
+    Some(match op {
+        FastOp::AddRegReg => FastOp::AddRegRegNf,
+        FastOp::AddRegImm => FastOp::AddRegImmNf,
+        FastOp::SubRegReg => FastOp::SubRegRegNf,
+        FastOp::SubRegImm => FastOp::SubRegImmNf,
+        FastOp::XorRegReg => FastOp::XorRegRegNf,
+        FastOp::XorRegImm => FastOp::XorRegImmNf,
+        FastOp::AndRegReg => FastOp::AndRegRegNf,
+        FastOp::AndRegImm => FastOp::AndRegImmNf,
+        FastOp::OrRegReg => FastOp::OrRegRegNf,
+        FastOp::OrRegImm => FastOp::OrRegImmNf,
+        FastOp::ShlRegImm => FastOp::ShlRegImmNf,
+        FastOp::ShrRegImm => FastOp::ShrRegImmNf,
+        FastOp::SarRegImm => FastOp::SarRegImmNf,
+        _ => return None,
+    })
+}
+
+/// Ops guaranteed to overwrite ALL 6 arithmetic flags (`CF, PF, AF, ZF, SF, OF`)
+/// without reading any flag, accessing memory, transferring control, or ever
+/// bailing to `STATUS_FALLBACK`.
+#[inline(always)]
+fn overwrites_all_flags_unconditionally(op: FastOp) -> bool {
+    matches!(
+        op,
+        FastOp::AddRegReg
+            | FastOp::AddRegImm
+            | FastOp::SubRegReg
+            | FastOp::SubRegImm
+            | FastOp::CmpRegReg
+            | FastOp::CmpRegImm
+            | FastOp::AndRegReg
+            | FastOp::AndRegImm
+            | FastOp::OrRegReg
+            | FastOp::OrRegImm
+            | FastOp::XorRegReg
+            | FastOp::XorRegImm
+            | FastOp::TestRegReg
+            | FastOp::TestRegImm
+            | FastOp::ShlRegImm
+            | FastOp::ShrRegImm
+            | FastOp::SarRegImm
+            | FastOp::Add8RegReg
+            | FastOp::Add8RegImm
+            | FastOp::Sub8RegReg
+            | FastOp::Sub8RegImm
+            | FastOp::Cmp8RegReg
+            | FastOp::Cmp8RegImm
+            | FastOp::And8RegReg
+            | FastOp::And8RegImm
+            | FastOp::Or8RegReg
+            | FastOp::Or8RegImm
+            | FastOp::Xor8RegReg
+            | FastOp::Xor8RegImm
+            | FastOp::Test8RegReg
+            | FastOp::Test8RegImm
+            | FastOp::Alu16RegReg
+            | FastOp::Alu16RegImm
+            | FastOp::Neg32Reg
+            | FastOp::Neg8Reg
+    )
+}
+
+/// Pure register/immediate ops that NEVER read or write flags, NEVER access
+/// memory, NEVER transfer control, and NEVER bail to `STATUS_FALLBACK`.
+#[inline(always)]
+fn is_pure_non_flag_op(op: FastOp) -> bool {
+    matches!(
+        op,
+        FastOp::Nop
+            | FastOp::MovRegReg
+            | FastOp::MovRegImm
+            | FastOp::Lea
+            | FastOp::ExtendReg
+            | FastOp::Mov8RegReg
+            | FastOp::Mov8RegImm
+            | FastOp::Mov16RegReg
+            | FastOp::Mov16RegImm
+            | FastOp::Cdq
+            | FastOp::Cwde
+            | FastOp::Not32Reg
+            | FastOp::Not8Reg
+            | FastOp::Xchg32RegReg
+            | FastOp::Xchg8RegReg
+            | FastOp::Extend16Reg
+    )
 }
 
 /// Whether an instruction can send the guest somewhere other than the next
@@ -682,7 +852,7 @@ mod tests {
         {
             assert_eq!(size_of::<crate::cpu::x87::X87>(), 72);
             assert_eq!(align_of::<crate::cpu::x87::X87>(), 8);
-            assert_eq!(size_of::<FastCtx>(), 176);
+            assert_eq!(size_of::<FastCtx>(), 184);
             assert_eq!(align_of::<FastCtx>(), 8);
             assert_eq!(offset_of!(FastCtx, regs), 0);
             assert_eq!(offset_of!(FastCtx, arena_base), 8);
@@ -711,6 +881,8 @@ mod tests {
             assert_eq!(offset_of!(FastCtx, outside_danger_len), 152);
             assert_eq!(offset_of!(FastCtx, outside_danger_start), 160);
             assert_eq!(offset_of!(FastCtx, fpu), 168);
+            assert_eq!(offset_of!(FastCtx, code_bbox_start), 176);
+            assert_eq!(offset_of!(FastCtx, code_bbox_len), 180);
         }
     }
 
@@ -2419,8 +2591,11 @@ mod tests {
                 cpu.r[ECX] = 50;
 
                 let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+                let (code_bbox_start, code_bbox_len) = encode_code_bbox(&mem).unwrap();
+                let mut fast_regs = [0u32; 9];
+                fast_regs[..8].copy_from_slice(&cpu.r);
                 let mut ctx = FastCtx {
-                    regs: cpu.r.as_mut_ptr(),
+                    regs: fast_regs.as_mut_ptr(),
                     arena_base,
                     code_bitmap,
                     arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
@@ -2448,9 +2623,13 @@ mod tests {
                     outside_danger_start: 0,
                     _pad: 0,
                     fpu: &raw mut cpu.fpu,
+                    code_bbox_start,
+                    code_bbox_len,
                 };
                 // All 50 iterations (850 instructions!) must finish in ONE call with STATUS_DONE!
                 let status = unsafe { native::run_fast_block(&mut ctx) };
+                assert_eq!(fast_regs[ZERO_REG], 0);
+                cpu.r.copy_from_slice(&fast_regs[..8]);
                 assert_eq!(
                     status, STATUS_DONE,
                     "hot scalar x87 loop fell back for ctrl={ctrl:#06x} (status={status})"
@@ -3098,8 +3277,11 @@ mod tests {
             cpu.r[ESI] = data;
 
             let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+            let (code_bbox_start, code_bbox_len) = encode_code_bbox(&mem).unwrap();
+            let mut fast_regs = [0u32; 9];
+            fast_regs[..8].copy_from_slice(&cpu.r);
             let mut ctx = FastCtx {
-                regs: cpu.r.as_mut_ptr(),
+                regs: fast_regs.as_mut_ptr(),
                 arena_base,
                 code_bitmap,
                 arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
@@ -3127,14 +3309,593 @@ mod tests {
                 outside_danger_start: 0,
                 _pad: 0,
                 fpu: &raw mut cpu.fpu,
+                code_bbox_start,
+                code_bbox_len,
             };
             let status = unsafe { native::run_fast_block(&mut ctx) };
+            assert_eq!(fast_regs[ZERO_REG], 0);
+            cpu.r.copy_from_slice(&fast_regs[..8]);
             assert_eq!(
                 status, STATUS_DONE,
                 "promoted integer ops loop fell back (status={status})"
             );
             assert_eq!(ctx.retired, 20 * 25);
             assert_eq!(cpu.r[ECX], 0);
+        }
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn branchless_ea_no_reg_8_sib_fs_and_base_specialized_movs() {
+        let code_at = 0x0018_0000u32;
+        let data = 0x0020_0000u32;
+        let fs_base = 0x0024_0000u32;
+
+        // Exercise every EA form:
+        //  - [disp32] (base=NO_REG, index=NO_REG) -> MovRegMemBase / MovMemRegBase
+        //  - [base] & [base + disp8] (index=NO_REG) -> MovRegMemBase / MovMemRegBase
+        //  - [index*scale + disp32] (base=NO_REG, scale=0/1/2/3) -> MovRegMem / MovMemReg
+        //  - [base + index*scale + disp] (scale=0/1/2/3)
+        //  - FS:[disp32], FS:[base + disp], FS:[base + index*4 + disp]
+        //  - FS: LEA (x86 ignores segment override on LEA!)
+        let mut prog = Vec::new();
+        // mov eax, [data + 0x00] (disp-only -> MovRegMemBase)
+        prog.extend_from_slice(&[0x8b, 0x05]);
+        prog.extend_from_slice(&data.to_le_bytes());
+        // mov [data + 0x40], eax (disp-only -> MovMemRegBase)
+        prog.extend_from_slice(&[0x89, 0x05]);
+        prog.extend_from_slice(&(data + 0x40).to_le_bytes());
+        // mov ebx, [esi] (base-only -> MovRegMemBase)
+        prog.extend_from_slice(&[0x8b, 0x1e]);
+        // mov [esi + 0x44], ebx (base+disp -> MovMemRegBase)
+        prog.extend_from_slice(&[0x89, 0x5e, 0x44]);
+        // mov ecx, [edx*1 + data] (index-only, scale=0)
+        prog.extend_from_slice(&[0x8b, 0x0c, 0x15]);
+        prog.extend_from_slice(&data.to_le_bytes());
+        // mov [edx*2 + data + 0x48], ecx (index-only, scale=1)
+        prog.extend_from_slice(&[0x89, 0x0c, 0x55]);
+        prog.extend_from_slice(&(data + 0x48).to_le_bytes());
+        // mov ecx, [edx*4 + data] (index-only, scale=2)
+        prog.extend_from_slice(&[0x8b, 0x0c, 0x95]);
+        prog.extend_from_slice(&data.to_le_bytes());
+        // mov [edx*8 + data + 0x50], ecx (index-only, scale=3)
+        prog.extend_from_slice(&[0x89, 0x0c, 0xd5]);
+        prog.extend_from_slice(&(data + 0x50).to_le_bytes());
+        // mov eax, [esi + edx*4 + 4] (base + index*4 + disp8)
+        prog.extend_from_slice(&[0x8b, 0x44, 0x96, 0x04]);
+        // mov [esi + edx*8 + 0x54], eax (base + index*8 + disp8)
+        prog.extend_from_slice(&[0x89, 0x44, 0xd6, 0x54]);
+        // FS:[0x08] -> MovRegMemBase with FLAG_FS
+        prog.extend_from_slice(&[0x64, 0x8b, 0x1d, 0x08, 0x00, 0x00, 0x00]);
+        // mov fs:[0x10], ebx -> MovMemRegBase with FLAG_FS
+        prog.extend_from_slice(&[0x64, 0x89, 0x1d, 0x10, 0x00, 0x00, 0x00]);
+        // mov eax, fs:[ebp + edx*4 + 4] -> MovRegMem with FLAG_FS + SIB
+        prog.extend_from_slice(&[0x64, 0x8b, 0x44, 0x95, 0x04]);
+        // mov fs:[ebp + edx*4 + 0x14], eax -> MovMemReg with FLAG_FS + SIB
+        prog.extend_from_slice(&[0x64, 0x89, 0x44, 0x95, 0x14]);
+        // fs: lea edi, [esi + edx*8 + 0x10] (must ignore FS:)
+        prog.extend_from_slice(&[0x64, 0x8d, 0x7c, 0xd6, 0x10]);
+        // lea ebx, [edx*4 + 0x20] (base=NO_REG=8)
+        prog.extend_from_slice(&[0x8d, 0x1c, 0x95, 0x20, 0x00, 0x00, 0x00]);
+        let body_insns = 16u64;
+        prog.push(0xf4); // hlt
+
+        let mut data_init = [0u8; 0x80];
+        for i in 0..16u32 {
+            let v = 0x1000_0001u32.wrapping_mul(i + 1);
+            data_init[(i * 4) as usize..(i * 4 + 4) as usize].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut fs_init = [0u8; 0x40];
+        for i in 0..8u32 {
+            let v = 0xf000_0010u32.wrapping_add(i * 0x1111);
+            fs_init[(i * 4) as usize..(i * 4 + 4) as usize].copy_from_slice(&v.to_le_bytes());
+        }
+
+        let mut cpu = Cpu {
+            eip: code_at,
+            ..Cpu::default()
+        };
+        cpu.r[ESI] = data;
+        cpu.r[EDX] = 2;
+        cpu.r[EBP] = 4;
+        cpu.seg_base[FS] = fs_base;
+
+        assert_native_matches_rust(
+            "branchless_ea_all_modes",
+            &prog,
+            cpu,
+            &[(data, &data_init), (fs_base, &fs_init)],
+            &[(data, 0x80), (fs_base, 0x40)],
+            100,
+            0..0,
+            DOS_MEMORY,
+        );
+
+        // Verify compile_fast specialized base-only forms AND run_fast_block runs all 16 ops with zero fallback + r[8]==0.
+        let mut h = Headless::new();
+        let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+        mem.write(code_at, &prog).unwrap();
+        mem.write(data, &data_init).unwrap();
+        mem.write(fs_base, &fs_init).unwrap();
+        let mut interp = Interp::new(Mode::FLAT);
+        let run = interp.run_at(code_at, &mut mem).unwrap();
+        let ops: Vec<FastOp> = interp.fast_insns
+            [run.first as usize..run.first as usize + usize::from(run.len)]
+            .iter()
+            .map(|i| i.op)
+            .collect();
+        assert_eq!(ops[0], FastOp::MovRegMemBase);
+        assert_eq!(ops[1], FastOp::MovMemRegBase);
+        assert_eq!(ops[2], FastOp::MovRegMemBase);
+        assert_eq!(ops[3], FastOp::MovMemRegBase);
+        assert_eq!(ops[4], FastOp::MovRegMem);
+        assert_eq!(ops[5], FastOp::MovMemReg);
+        // FS:-overridden loads/stores stay on MovRegMem/MovMemReg so Mov*Base skips FS: check!
+        assert_eq!(ops[10], FastOp::MovRegMem);
+        assert_eq!(ops[11], FastOp::MovMemReg);
+        assert_eq!(ops[12], FastOp::MovRegMem);
+        assert_eq!(ops[13], FastOp::MovMemReg);
+
+        let mut no_hlt = prog[..prog.len() - 1].to_vec();
+        no_hlt.extend_from_slice(&[0xeb, 0xfe]); // jmp $
+        let code2 = 0x0018_2000u32;
+        mem.write(code2, &no_hlt).unwrap();
+        let _ = interp.run_at(code2, &mut mem).unwrap();
+        let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+        let (code_bbox_start, code_bbox_len) = encode_code_bbox(&mem).unwrap();
+        let mut fast_regs = [0u32; 9];
+        fast_regs[..8].copy_from_slice(&cpu.r);
+        let mut ctx = FastCtx {
+            regs: fast_regs.as_mut_ptr(),
+            arena_base,
+            code_bitmap,
+            arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
+            remaining: body_insns + 1,
+            retired: 0,
+            fast_insns: interp.fast_insns.as_mut_ptr(),
+            runs: interp.runs.as_ptr(),
+            directory: interp.directory.as_ptr(),
+            region_ptrs: interp.region_ptrs.as_ptr(),
+            page_ptrs: interp.page_ptrs.as_ptr(),
+            fault_pc: core::ptr::null(),
+            run_first_pc: core::ptr::null(),
+            eip: code2,
+            flags: native::pack_flags(&cpu.flags),
+            fs_base,
+            arena_floor,
+            outside_start: 0,
+            outside_end: 0,
+            outside_len: 0,
+            run_start_eip: 0,
+            run_bytes: 0,
+            run_len: 0,
+            l1_cache: interp.l1.as_mut_ptr(),
+            outside_danger_len: 0,
+            outside_danger_start: 0,
+            _pad: 0,
+            fpu: &raw mut cpu.fpu,
+            code_bbox_start,
+            code_bbox_len,
+        };
+        let status = unsafe { native::run_fast_block(&mut ctx) };
+        assert_eq!(status, STATUS_DONE, "EA modes fell back (status={status})");
+        assert_eq!(ctx.retired, body_insns + 1);
+        assert_eq!(fast_regs[ZERO_REG], 0, "NO_REG=8 slot must remain zero");
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn code_bbox_fast_path_and_straddling_smc_boundaries() {
+        // Two code pages with a non-code hole between them:
+        //   page A: [0x0018_0000, 0x0018_1000)
+        //   hole:   [0x0018_1000, 0x0019_0000) (non-code inside bbox!)
+        //   page B: [0x0019_0000, 0x0019_1000)
+        // Bbox: [0x0018_0000, 0x0019_1000); padded start = 0x0017_fff9.
+        let code_a = 0x0018_0000u32;
+        let code_b = 0x0019_0000u32;
+
+        // 1. Direct run_fast_block checks: stores outside bbox (even page-crossing!)
+        //    and stores in the non-code hole stay in-block (STATUS_DONE), whereas
+        //    every store overlapping code_a or code_b (incl. straddling code_min - 1
+        //    and code_min - 7!) MUST return STATUS_FALLBACK!
+        // Store instructions to test:
+        //   - 1B: `mov byte [esi], al; jmp $`
+        //   - 2B: `mov word [esi], ax; jmp $`
+        //   - 4B: `mov dword [esi], eax; jmp $` (MovMemRegBase)
+        //   - 4B SIB: `mov dword [esi + edx*1], eax; jmp $` (MovMemReg)
+        //   - 8B: `fldz; fstp qword [esi]; jmp $` (X87Mem FstpM64)
+        let store_cases: &[(&str, &[u8], u32, u64)] = &[
+            ("store1", &[0x88, 0x06, 0xeb, 0xfe], 1, 2),
+            ("store2", &[0x66, 0x89, 0x06, 0xeb, 0xfe], 2, 2),
+            ("store4_base", &[0x89, 0x06, 0xeb, 0xfe], 4, 2),
+            ("store4_sib", &[0x89, 0x04, 0x16, 0xeb, 0xfe], 4, 2),
+            ("store8_f64", &[0xd9, 0xee, 0xdd, 0x1e, 0xeb, 0xfe], 8, 3),
+        ];
+        let test_addrs: &[u32] = &[
+            code_a - 0x1001, // page-crossing outside bbox below
+            code_a - 8,      // 8B ends at code_a (strictly outside!)
+            code_a - 7,      // 8B straddles into code_a; 1/2/4B strictly outside!
+            code_a - 4,      // 4B ends at code_a (outside); 8B straddles!
+            code_a - 3,      // 4B/8B straddle into code_a; 1/2B outside!
+            code_a - 1,      // 2B/4B/8B straddle into code_a; 1B outside!
+            code_a + 0x100,  // directly inside code page A!
+            code_a + 0x1000, // inside non-code hole within bbox
+            code_a + 0x1fff, // page-crossing inside non-code hole (4B/8B/2B cross page -> cold check!)
+            code_b - 1,      // 2B/4B/8B straddle into code page B!
+            code_b + 0x100,  // directly inside code page B!
+            code_b + 0x0fff, // 1B/2B/4B/8B all touch code page B's last byte!
+            code_b + 0x1000, // strictly above code_max!
+            code_b + 0x1fff, // page-crossing strictly above code_max!
+        ];
+
+        for &(name, prog, width, insns) in store_cases {
+            for &addr in test_addrs {
+                let mut h = Headless::new();
+                let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+                mem.write(code_a, prog).unwrap();
+                mem.write(code_b, &[0x90, 0xf4]).unwrap(); // nop; hlt
+                let mut interp = Interp::new(Mode::FLAT);
+                let _ = interp.run_at(code_a, &mut mem).unwrap();
+                let _ = interp.run_at(code_b, &mut mem).unwrap();
+                assert_eq!(mem.code_bbox(), (code_a, code_b + 0x1000));
+
+                let mut cpu = Cpu {
+                    eip: code_a,
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = 0x1122_3344;
+                cpu.r[ESI] = addr;
+                cpu.r[EDX] = 0;
+
+                let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+                let (code_bbox_start, code_bbox_len) = encode_code_bbox(&mem).unwrap();
+                let mut fast_regs = [0u32; 9];
+                fast_regs[..8].copy_from_slice(&cpu.r);
+                let mut ctx = FastCtx {
+                    regs: fast_regs.as_mut_ptr(),
+                    arena_base,
+                    code_bitmap,
+                    arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
+                    remaining: insns,
+                    retired: 0,
+                    fast_insns: interp.fast_insns.as_mut_ptr(),
+                    runs: interp.runs.as_ptr(),
+                    directory: interp.directory.as_ptr(),
+                    region_ptrs: interp.region_ptrs.as_ptr(),
+                    page_ptrs: interp.page_ptrs.as_ptr(),
+                    fault_pc: core::ptr::null(),
+                    run_first_pc: core::ptr::null(),
+                    eip: code_a,
+                    flags: native::pack_flags(&cpu.flags),
+                    fs_base: 0,
+                    arena_floor,
+                    outside_start: 0,
+                    outside_end: 0,
+                    outside_len: 0,
+                    run_start_eip: 0,
+                    run_bytes: 0,
+                    run_len: 0,
+                    l1_cache: interp.l1.as_mut_ptr(),
+                    outside_danger_len: 0,
+                    outside_danger_start: 0,
+                    _pad: 0,
+                    fpu: &raw mut cpu.fpu,
+                    code_bbox_start,
+                    code_bbox_len,
+                };
+                let status = unsafe { native::run_fast_block(&mut ctx) };
+                let end = addr + width;
+                let touches_code_a = addr < code_a + 0x1000 && end > code_a;
+                let touches_code_b = addr < code_b + 0x1000 && end > code_b;
+                let crosses_page_in_bbox = (addr.wrapping_sub(code_bbox_start) < code_bbox_len)
+                    && ((addr & 0xfff) + width > 0x1000);
+                if touches_code_a || touches_code_b {
+                    assert_eq!(
+                        status, STATUS_FALLBACK,
+                        "{name} at {addr:#x} (+{width}) overlaps code and MUST bail to STATUS_FALLBACK!"
+                    );
+                } else if !crosses_page_in_bbox {
+                    assert_eq!(
+                        status, STATUS_DONE,
+                        "{name} at {addr:#x} (+{width}) does not touch code and should stay in run_fast_block"
+                    );
+                }
+            }
+        }
+
+        // 2. Differential parity against rust::run when a 4-byte store straddling
+        //    `code_min - 3` rewrites the first byte of a cached function!
+        let caller = 0x0019_0000u32;
+        let target = 0x0018_0000u32; // target IS code_min!
+                                     // Target initially: `mov eax, 1; ret` (b8 01 00 00 00 c3)
+                                     // Caller: `call target; mov dword [target - 3], 0x90000000` (changes b8->90? Let's write 0x05_00_00_00? Wait: byte at target+0 is MSB of u32 at target-3!)
+                                     // At target - 3: bytes [target-3, target-2, target-1, target+0].
+                                     // Writing 0x40_00_00_00 to [target - 3] overwrites target[0] (0x90 nop -> 0x40 inc eax)!
+        let target_code: &[u8] = &[0x90, 0xc3]; // nop; ret -> becomes `inc eax; ret`!
+        let mut caller_code = Vec::new();
+        caller_code.push(0xe8);
+        caller_code.extend_from_slice(&target.wrapping_sub(caller + 5).to_le_bytes());
+        // mov dword [target - 3], 0x40000000
+        caller_code.extend_from_slice(&[0xc7, 0x05]);
+        caller_code.extend_from_slice(&(target - 3).to_le_bytes());
+        caller_code.extend_from_slice(&0x4000_0000u32.to_le_bytes());
+        caller_code.push(0xe8);
+        caller_code.extend_from_slice(&target.wrapping_sub(caller + 20).to_le_bytes());
+        caller_code.push(0xf4);
+
+        let mut cpu = Cpu {
+            eip: caller,
+            ..Cpu::default()
+        };
+        cpu.r[ESP] = 0x0030_0000;
+        assert_native_matches_rust(
+            "smc_straddling_code_min_minus_3",
+            &caller_code,
+            cpu,
+            &[(target, target_code)],
+            &[(target - 4, 8)],
+            200,
+            0..0,
+            DOS_MEMORY,
+        );
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn dead_flag_nf_promotion_is_conservative_and_exact() {
+        let code_at = 0x0018_0000u32;
+        let data = 0x0020_0000u32;
+
+        // 1. Verify ALL 13 ALU/shift ops promote to *Nf before an unconditional overwriter,
+        //    even across pure non-flag ops (`mov`, `lea`, `not`, `xchg`, `cdq`, `nop`).
+        let mut nf_prog = Vec::new();
+        nf_prog.extend_from_slice(&[0x01, 0xd8]); // add eax, ebx       -> AddRegRegNf
+        nf_prog.extend_from_slice(&[0x83, 0xc0, 0x05]); // add eax, 5   -> AddRegImmNf
+        nf_prog.extend_from_slice(&[0x29, 0xd8]); // sub eax, ebx       -> SubRegRegNf
+        nf_prog.extend_from_slice(&[0x83, 0xe8, 0x03]); // sub eax, 3   -> SubRegImmNf
+        nf_prog.extend_from_slice(&[0x31, 0xd8]); // xor eax, ebx       -> XorRegRegNf
+        nf_prog.extend_from_slice(&[0x83, 0xf0, 0x07]); // xor eax, 7   -> XorRegImmNf
+        nf_prog.extend_from_slice(&[0x21, 0xd8]); // and eax, ebx       -> AndRegRegNf
+        nf_prog.extend_from_slice(&[0x83, 0xe0, 0x7f]); // and eax, 0x7f-> AndRegImmNf
+        nf_prog.extend_from_slice(&[0x09, 0xd8]); // or eax, ebx        -> OrRegRegNf
+        nf_prog.extend_from_slice(&[0x83, 0xc8, 0x11]); // or eax, 0x11 -> OrRegImmNf
+        nf_prog.extend_from_slice(&[0xc1, 0xe0, 0x02]); // shl eax, 2   -> ShlRegImmNf
+        nf_prog.extend_from_slice(&[0xc1, 0xe8, 0x01]); // shr eax, 1   -> ShrRegImmNf
+        nf_prog.extend_from_slice(&[0xc1, 0xf8, 0x03]); // sar eax, 3   -> SarRegImmNf
+                                                        // Pure non-flag ops between SarRegImm and the final overwriter:
+        nf_prog.extend_from_slice(&[0x89, 0xc2]); // mov edx, eax
+        nf_prog.extend_from_slice(&[0x8d, 0x54, 0x9a, 0x04]); // lea edx, [edx + ebx*4 + 4]
+        nf_prog.extend_from_slice(&[0xf7, 0xd2]); // not edx
+        nf_prog.extend_from_slice(&[0x99]); // cdq
+        nf_prog.extend_from_slice(&[0x90]); // nop
+                                            // Unconditional all-6-flag overwriter:
+        nf_prog.extend_from_slice(&[0x39, 0xda]); // cmp edx, ebx (NOT promoted!)
+        nf_prog.push(0xf4); // hlt
+
+        let mut h = Headless::new();
+        let mut mem = Arena::new(&mut h, 1 << 22).unwrap().with_floor(DOS_MEMORY);
+        mem.write(code_at, &nf_prog).unwrap();
+        let mut interp = Interp::new(Mode::FLAT);
+        let run = interp.run_at(code_at, &mut mem).unwrap();
+        let ops: Vec<FastOp> = interp.fast_insns
+            [run.first as usize..run.first as usize + usize::from(run.len)]
+            .iter()
+            .map(|i| i.op)
+            .collect();
+        assert_eq!(
+            &ops[..13],
+            &[
+                FastOp::AddRegRegNf,
+                FastOp::AddRegImmNf,
+                FastOp::SubRegRegNf,
+                FastOp::SubRegImmNf,
+                FastOp::XorRegRegNf,
+                FastOp::XorRegImmNf,
+                FastOp::AndRegRegNf,
+                FastOp::AndRegImmNf,
+                FastOp::OrRegRegNf,
+                FastOp::OrRegImmNf,
+                FastOp::ShlRegImmNf,
+                FastOp::ShrRegImmNf,
+                FastOp::SarRegImmNf,
+            ]
+        );
+        assert_eq!(ops[18], FastOp::CmpRegReg);
+
+        // 2. Verify barrier ops BLOCK promotion (never promote across memory/faults,
+        //    flag readers, partial-flag writers, shift-by-CL, X87, or end-of-run).
+        let barrier_progs: &[(&str, &[u8])] = &[
+            ("mem_load", &[0x01, 0xd8, 0x8b, 0x0e, 0x39, 0xd8, 0xf4]), // add eax,ebx; mov ecx,[esi]; cmp eax,ebx
+            ("mem_store", &[0x01, 0xd8, 0x89, 0x06, 0x39, 0xd8, 0xf4]), // add eax,ebx; mov [esi],eax; cmp eax,ebx
+            ("adc", &[0x01, 0xd8, 0x11, 0xd8, 0x39, 0xd8, 0xf4]),       // add; adc; cmp
+            ("inc_partial", &[0x01, 0xd8, 0x41, 0x39, 0xd8, 0xf4]),     // add; inc ecx; cmp
+            ("setcc", &[0x01, 0xd8, 0x0f, 0x94, 0xc1, 0x39, 0xd8, 0xf4]), // add; sete cl; cmp
+            ("cmovcc", &[0x01, 0xd8, 0x0f, 0x44, 0xc1, 0x39, 0xd8, 0xf4]), // add; cmove eax,ecx; cmp
+            ("lahf", &[0x01, 0xd8, 0x9f, 0x39, 0xd8, 0xf4]),               // add; lahf; cmp
+            ("shift_cl", &[0x01, 0xd8, 0xd3, 0xe0, 0x39, 0xd8, 0xf4]),     // add; shl eax,cl; cmp
+            ("x87", &[0x01, 0xd8, 0xd9, 0xee, 0x39, 0xd8, 0xf4]),          // add; fldz; cmp
+            ("run_end", &[0x01, 0xd8, 0xf4]),                              // add; hlt
+        ];
+        for (i, &(label, bytes)) in barrier_progs.iter().enumerate() {
+            let at = code_at + 0x1000 + (i as u32) * 0x40;
+            mem.write(at, bytes).unwrap();
+            let r = interp.run_at(at, &mut mem).unwrap();
+            assert_eq!(
+                interp.fast_insns[r.first as usize].op,
+                FastOp::AddRegReg,
+                "barrier '{label}' MUST prevent *Nf promotion"
+            );
+        }
+
+        // 3. Differential exactness across EVERY budget 0..=20 (mid-run stops MUST
+        //    still observe exact intermediate flags via rust::finish_run_from!).
+        let mut init = Cpu {
+            eip: code_at,
+            flags: Flags::from_eflags(CF | PF | AF | ZF | SF | OF | DF),
+            ..Cpu::default()
+        };
+        init.r[EAX] = 0x8000_0001;
+        init.r[EBX] = 0x7fff_ffff;
+        for budget in 0..=20 {
+            assert_native_matches_rust(
+                "nf_mid_run_budget",
+                &nf_prog,
+                init,
+                &[],
+                &[],
+                budget,
+                0..0,
+                DOS_MEMORY,
+            );
+        }
+
+        // 4. Tight loop containing ALL 13 *Nf ops + MovRegMemBase + MovMemRegBase
+        //    must execute inside run_fast_block with ZERO STATUS_FALLBACK!
+        let mut loop_prog = Vec::new();
+        loop_prog.extend_from_slice(&[0x8b, 0x06]); // mov eax, [esi] (MovRegMemBase)
+        loop_prog.extend_from_slice(&nf_prog[..nf_prog.len() - 1]); // 13 *Nf + 5 pure + cmp
+        loop_prog.extend_from_slice(&[0x89, 0x06]); // mov [esi], eax (MovMemRegBase)
+        loop_prog.push(0x49); // dec ecx
+        let back = -(loop_prog.len() as i8 + 2);
+        loop_prog.extend_from_slice(&[0x75, back as u8]); // jnz loop_prog
+        let loop_at = code_at + 0x2000;
+        mem.write(loop_at, &loop_prog).unwrap();
+        mem.write_u32(data, 0x1234_5678).unwrap();
+        let r_loop = interp.run_at(loop_at, &mut mem).unwrap();
+        let insns_per_iter = u64::from(r_loop.len);
+        let mut cpu = Cpu {
+            eip: loop_at,
+            ..Cpu::default()
+        };
+        cpu.r[EBX] = 0x0102_0304;
+        cpu.r[ECX] = 16;
+        cpu.r[ESI] = data;
+        let (arena_base, arena_floor, arena_len, code_bitmap) = mem.raw_parts_mut();
+        let (code_bbox_start, code_bbox_len) = encode_code_bbox(&mem).unwrap();
+        let mut fast_regs = [0u32; 9];
+        fast_regs[..8].copy_from_slice(&cpu.r);
+        let mut ctx = FastCtx {
+            regs: fast_regs.as_mut_ptr(),
+            arena_base,
+            code_bitmap,
+            arena_limit4: (arena_len - arena_floor as usize - 4) as u64,
+            remaining: 16 * insns_per_iter,
+            retired: 0,
+            fast_insns: interp.fast_insns.as_mut_ptr(),
+            runs: interp.runs.as_ptr(),
+            directory: interp.directory.as_ptr(),
+            region_ptrs: interp.region_ptrs.as_ptr(),
+            page_ptrs: interp.page_ptrs.as_ptr(),
+            fault_pc: core::ptr::null(),
+            run_first_pc: core::ptr::null(),
+            eip: loop_at,
+            flags: native::pack_flags(&cpu.flags),
+            fs_base: 0,
+            arena_floor,
+            outside_start: 0,
+            outside_end: 0,
+            outside_len: 0,
+            run_start_eip: 0,
+            run_bytes: 0,
+            run_len: 0,
+            l1_cache: interp.l1.as_mut_ptr(),
+            outside_danger_len: 0,
+            outside_danger_start: 0,
+            _pad: 0,
+            fpu: &raw mut cpu.fpu,
+            code_bbox_start,
+            code_bbox_len,
+        };
+        let status = unsafe { native::run_fast_block(&mut ctx) };
+        assert_eq!(status, STATUS_DONE, "*Nf loop fell back (status={status})");
+        assert_eq!(ctx.retired, 16 * insns_per_iter);
+        assert_eq!(fast_regs[ZERO_REG], 0);
+        // Also check the entire loop matches rust::run bit-for-bit!
+        loop_prog.push(0xf4);
+        assert_native_matches_rust(
+            "nf_loop_parity",
+            &loop_prog,
+            cpu,
+            &[(data, &0x1234_5678u32.to_le_bytes())],
+            &[(data, 4)],
+            1000,
+            0..0,
+            DOS_MEMORY,
+        );
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn flag_capture_matches_all_64_states_and_x86_64_has_zero_pushfq() {
+        // Verify x86_64.rs has zero `pushfq` or `popfq` instructions in assembly strings.
+        let x86_src = include_str!("x86_64.rs");
+        for (idx, line) in x86_src.lines().enumerate() {
+            let code_part = line.split("//").next().unwrap_or("");
+            assert!(
+                !code_part.contains("pushfq") && !code_part.contains("popfq"),
+                "x86_64.rs line {} contains forbidden pushfq/popfq: {}",
+                idx + 1,
+                code_part.trim()
+            );
+        }
+
+        // Sweep ALL 64 arithmetic flag states through flag-preserving, flag-reading,
+        // partial-flag-updating, and full-flag-overwriting instructions.
+        let code_at = 0x0018_0000u32;
+        let progs: &[(&str, &[u8])] = &[
+            ("nop_preserve", &[0x90, 0xf4]),
+            ("inc_preserve_cf", &[0x40, 0xf4]),
+            ("dec_preserve_cf", &[0x48, 0xf4]),
+            ("adc_reads_cf", &[0x11, 0xd8, 0xf4]),
+            ("sbb_reads_cf", &[0x19, 0xd8, 0xf4]),
+            ("sbb8_reads_cf", &[0x18, 0xd8, 0xf4]),
+            ("lahf_reads_5", &[0x9f, 0xf4]),
+            ("sahf_writes_5_preserves_of", &[0x9e, 0xf4]),
+            ("rol_count_0", &[0xd3, 0xc0, 0xf4]),
+            ("rol_count_1", &[0xc1, 0xc0, 0x01, 0xf4]),
+            ("mul_preserves_szpa", &[0xf7, 0xe3, 0xf4]),
+            ("and_clears_cf_of", &[0x21, 0xd8, 0xf4]),
+            ("or_clears_cf_of", &[0x09, 0xd8, 0xf4]),
+            ("xor_clears_cf_of", &[0x31, 0xd8, 0xf4]),
+            ("test_clears_cf_of", &[0x85, 0xd8, 0xf4]),
+            ("neg_sets_all_6", &[0xf7, 0xd8, 0xf4]),
+            (
+                "fcomi_preserves_of_af_sf",
+                &[0xd9, 0xe8, 0xd9, 0xee, 0xdb, 0xf1, 0xf4],
+            ),
+        ];
+
+        for bits in 0u32..64 {
+            let mut eflags = 0x0002u32 | DF;
+            if bits & 1 != 0 {
+                eflags |= CF;
+            }
+            if bits & 2 != 0 {
+                eflags |= PF;
+            }
+            if bits & 4 != 0 {
+                eflags |= AF;
+            }
+            if bits & 8 != 0 {
+                eflags |= ZF;
+            }
+            if bits & 16 != 0 {
+                eflags |= SF;
+            }
+            if bits & 32 != 0 {
+                eflags |= OF;
+            }
+            for &(label, prog) in progs {
+                let mut cpu = Cpu {
+                    eip: code_at,
+                    flags: Flags::from_eflags(eflags),
+                    ..Cpu::default()
+                };
+                cpu.r[EAX] = 0x7fff_ff00 | ((bits << 2) & 0xff);
+                cpu.r[EBX] = 0x8000_000f;
+                cpu.r[ECX] = 0; // count == 0 for rol_count_0
+                assert_native_matches_rust(label, prog, cpu, &[], &[], 20, 0..0, DOS_MEMORY);
+            }
         }
     }
 }

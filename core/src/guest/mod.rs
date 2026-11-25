@@ -70,6 +70,10 @@ pub struct Arena {
     /// (ADR-0004). A write to one of them means what is cached for it is no
     /// longer what is there.
     code: Vec<u64>,
+    /// Page-aligned byte bounding box `[code_min, code_max)` covering every set
+    /// bit in `code`, or `(u32::MAX, 0)` when no code pages are marked (#283).
+    code_min: u32,
+    code_max: u32,
     /// Whether a write has landed on such a page since the engine last
     /// looked. Alpha Team loads its own DLLs out of its archives and calls
     /// them, so what is at an address changes under the cache (#58).
@@ -112,6 +116,8 @@ impl Arena {
     pub fn new(host: &mut dyn Host, len: usize) -> Result<Self, HostError> {
         Ok(Self {
             code: vec![0; (len / CODE_PAGE as usize).div_ceil(64) + 1],
+            code_min: u32::MAX,
+            code_max: 0,
             code_written: false,
             written_code: Vec::new(),
             written_all: false,
@@ -150,6 +156,14 @@ impl Arena {
             self.mapping.len(),
             self.code.as_ptr(),
         )
+    }
+
+    /// Page-aligned `[code_min, code_max)` bounding box covering all currently
+    /// marked code pages, or `(u32::MAX, 0)` when empty (#283).
+    #[inline(always)]
+    #[must_use]
+    pub(crate) fn code_bbox(&self) -> (u32, u32) {
+        (self.code_min, self.code_max)
     }
 
     /// One subtraction ahead of the one compare this always was: an address
@@ -584,6 +598,14 @@ impl Arena {
         let page = (addr / CODE_PAGE) as usize;
         if let Some(word) = self.code.get_mut(page / 64) {
             *word |= 1 << (page % 64);
+            let start = (page as u32) * CODE_PAGE;
+            let end = start.saturating_add(CODE_PAGE);
+            if start < self.code_min {
+                self.code_min = start;
+            }
+            if end > self.code_max {
+                self.code_max = end;
+            }
         }
     }
 
@@ -593,7 +615,41 @@ impl Arena {
         let page = (addr / CODE_PAGE) as usize;
         if let Some(word) = self.code.get_mut(page / 64) {
             *word &= !(1 << (page % 64));
+            let start = (page as u32) * CODE_PAGE;
+            let end = start.saturating_add(CODE_PAGE);
+            if start == self.code_min || end == self.code_max {
+                self.recompute_code_bbox();
+            }
         }
+    }
+
+    /// Clear every marked code page and reset the bounding box to empty
+    /// `(u32::MAX, 0)` (#283).
+    pub fn clear_code(&mut self) {
+        self.code.fill(0);
+        self.code_min = u32::MAX;
+        self.code_max = 0;
+    }
+
+    #[cold]
+    fn recompute_code_bbox(&mut self) {
+        let Some((first_w, &first_bits)) = self.code.iter().enumerate().find(|(_, &w)| w != 0)
+        else {
+            self.code_min = u32::MAX;
+            self.code_max = 0;
+            return;
+        };
+        let first_page = (first_w * 64 + first_bits.trailing_zeros() as usize) as u32;
+        let (last_w, &last_bits) = self
+            .code
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, &w)| w != 0)
+            .expect("first_w already found a non-zero bitmap word");
+        let last_page = (last_w * 64 + (63 - last_bits.leading_zeros() as usize)) as u32;
+        self.code_min = first_page * CODE_PAGE;
+        self.code_max = (last_page * CODE_PAGE).saturating_add(CODE_PAGE);
     }
 
     /// Remember which pages a write landed on. A write spanning more pages
@@ -632,6 +688,15 @@ impl Arena {
     /// and the single-page word index is within `self.code`.
     #[inline(always)]
     fn wrote_over_code(&self, addr: u32, len: usize) -> bool {
+        if self.code_min >= self.code_max {
+            return false;
+        }
+        if len > 0
+            && (addr >= self.code_max
+                || u64::from(addr).saturating_add(len as u64) <= u64::from(self.code_min))
+        {
+            return false;
+        }
         let first = (addr / CODE_PAGE) as usize;
         if (addr & (CODE_PAGE - 1)) as usize + len <= CODE_PAGE as usize {
             let word = first >> 6;
@@ -989,5 +1054,72 @@ mod tests {
         assert!(mem.wrote_over_code(10 * 4096 + 123, 150 * 4096));
         mem.unmark_code(64 * 4096);
         assert!(!mem.wrote_over_code(10 * 4096 + 123, 150 * 4096));
+    }
+
+    #[test]
+    fn code_bbox_tracks_mark_unmark_clear_and_straddling_writes() {
+        use super::GuestMem;
+        let mut mem = Arena::new(&mut Headless::new(), 1 << 20).expect("an arena");
+        assert_eq!(mem.code_bbox(), (u32::MAX, 0));
+
+        mem.mark_code(0x0002_0123);
+        assert_eq!(mem.code_bbox(), (0x0002_0000, 0x0002_1000));
+
+        mem.mark_code(0x0005_0000);
+        assert_eq!(mem.code_bbox(), (0x0002_0000, 0x0005_1000));
+
+        mem.mark_code(0x0003_0000);
+        assert_eq!(mem.code_bbox(), (0x0002_0000, 0x0005_1000));
+
+        // Unmarking interior page keeps bbox unchanged.
+        mem.unmark_code(0x0003_0000);
+        assert_eq!(mem.code_bbox(), (0x0002_0000, 0x0005_1000));
+
+        // Writes strictly outside [code_min, code_max) never trigger.
+        mem.write_u32(0x0001_fffc, 0xdead_beef).unwrap();
+        mem.write_u64(0x0001_fff8, 0x0123_4567_89ab_cdef).unwrap();
+        mem.write_u32(0x0005_1000, 0x1122_3344).unwrap();
+        assert!(!mem.code_written);
+
+        // Multi-byte writes straddling code_min - 1 and code_max - 1 MUST trigger.
+        mem.write_u16(0x0001_ffff, 0x1234).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [0x1f, 0x20]);
+        mem.code_written = false;
+        mem.written_code.clear();
+
+        mem.write_u32(0x0001_fffd, 0x1234_5678).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [0x1f, 0x20]);
+        mem.code_written = false;
+        mem.written_code.clear();
+
+        mem.write_u64(0x0001_fff9, 0x0102_0304_0506_0708).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [0x1f, 0x20]);
+        mem.code_written = false;
+        mem.written_code.clear();
+
+        mem.write_u32(0x0005_0ffe, 0x8765_4321).unwrap();
+        assert!(mem.code_written);
+        assert_eq!(mem.written_code, [0x50, 0x51]);
+        mem.code_written = false;
+        mem.written_code.clear();
+
+        // Unmarking min tightens code_min; unmarking max resets to empty.
+        mem.unmark_code(0x0002_0000);
+        assert_eq!(mem.code_bbox(), (0x0005_0000, 0x0005_1000));
+        mem.unmark_code(0x0005_0000);
+        assert_eq!(mem.code_bbox(), (u32::MAX, 0));
+
+        // clear_code wipes bitmap and resets bbox to empty.
+        mem.mark_code(0x0001_0000);
+        mem.mark_code(0x0008_0000);
+        assert_eq!(mem.code_bbox(), (0x0001_0000, 0x0008_1000));
+        mem.clear_code();
+        assert_eq!(mem.code_bbox(), (u32::MAX, 0));
+        mem.write_u32(0x0001_0000, 1).unwrap();
+        mem.write_u32(0x0008_0000, 2).unwrap();
+        assert!(!mem.code_written);
     }
 }

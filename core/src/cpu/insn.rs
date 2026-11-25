@@ -284,11 +284,17 @@ pub struct Insn {
 
 /// Sentinel register index meaning "no register in this addressing slot".
 ///
-/// Bit 7 is set so presence is a single sign/bit test (`(reg as i8) >= 0`).
-pub const NO_REG: u8 = 0xff;
+/// Maps directly to the constant-zero slot `r[8] == 0` in the 9-element GPR
+/// window passed to `run_fast_block`, turning `disp + r[base] + (r[index] << scale)`
+/// branchless (#283).
+pub const NO_REG: u8 = 8;
 
 /// Bit in [`FastInsn::scale`] indicating a memory operand adds `seg_base[FS]`.
-pub const FLAG_FS: u8 = 0x04;
+///
+/// Placed in bit 7 (`0x80`) so `scale & 31 == shift` with zero masking on both
+/// `aarch64` (`lsl w, w, w`) and `x86_64` (`shl r32, cl`), while `FLAG_FS` is
+/// a single sign/bit test (#283).
+pub const FLAG_FS: u8 = 0x80;
 
 /// Sub-operation selector in [`FastInsn::aux`] for [`FastOp::AluMemReg`] and
 /// [`FastOp::AluMemImm`].
@@ -506,6 +512,29 @@ pub enum FastOp {
     // Promoted 32-bit conditional move (`aux` = condition code `0..=15`, #282).
     Cmovcc32Reg = 129,
     Cmovcc32Mem = 130,
+
+    // Specialized `[base + disp]` / `[disp]` 32-bit moves (`index == NO_REG && scale == 0`, #283).
+    MovRegMemBase = 131,
+    MovMemRegBase = 132,
+
+    // Intra-block dead-flag register-only 32-bit ALU / shift ops (`*Nf`, #283).
+    // Promoted in `Interp::run_at()` ONLY when unconditionally overwritten later
+    // in the same run with zero intervening flag reads, branches, Slow/X87 ops,
+    // or potentially faulting memory ops. Pure-Rust `execute_straight` still
+    // computes exact flags so `CpuEngine::step()` and mid-run stops stay exact.
+    AddRegRegNf = 133,
+    AddRegImmNf = 134,
+    SubRegRegNf = 135,
+    SubRegImmNf = 136,
+    XorRegRegNf = 137,
+    XorRegImmNf = 138,
+    AndRegRegNf = 139,
+    AndRegImmNf = 140,
+    OrRegRegNf = 141,
+    OrRegImmNf = 142,
+    ShlRegImmNf = 143,
+    ShrRegImmNf = 144,
+    SarRegImmNf = 145,
 }
 
 impl FastOp {

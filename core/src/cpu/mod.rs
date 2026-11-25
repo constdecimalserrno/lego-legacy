@@ -26,6 +26,10 @@ pub const ESP: usize = 4;
 pub const EBP: usize = 5;
 pub const ESI: usize = 6;
 pub const EDI: usize = 7;
+/// Constant-zero sentinel slot (`r[8] == 0`) in the 9-element GPR window passed
+/// to `run_fast_block`, enabling branchless flat32 effective-address formation
+/// with `NO_REG = 8` while keeping `Cpu::r: [u32; 8]` unchanged (#283).
+pub const ZERO_REG: usize = 8;
 
 pub const REG_NAMES: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 

@@ -672,17 +672,31 @@ pub fn compile_fast(insn: &Insn, mode: Mode, slow_insns: &mut Vec<Insn>) -> Fast
             ..plain(FastOp::MovRegImm)
         },
         (Kind::Mov, Some(Op::Reg(d)), Some(Op::Mem(m))) => match encode_mem(m) {
-            Some(enc) => FastInsn {
-                dst: d,
-                ..mem_insn(FastOp::MovRegMem, enc)
-            },
+            Some(enc) => {
+                let op = if enc.1 == NO_REG && enc.2 == 0 {
+                    FastOp::MovRegMemBase
+                } else {
+                    FastOp::MovRegMem
+                };
+                FastInsn {
+                    dst: d,
+                    ..mem_insn(op, enc)
+                }
+            }
             None => make_slow(),
         },
         (Kind::Mov, Some(Op::Mem(m)), Some(Op::Reg(s))) => match encode_mem(m) {
-            Some(enc) => FastInsn {
-                src: s,
-                ..mem_insn(FastOp::MovMemReg, enc)
-            },
+            Some(enc) => {
+                let op = if enc.1 == NO_REG && enc.2 == 0 {
+                    FastOp::MovMemRegBase
+                } else {
+                    FastOp::MovMemReg
+                };
+                FastInsn {
+                    src: s,
+                    ..mem_insn(op, enc)
+                }
+            }
             None => make_slow(),
         },
         (Kind::Mov, Some(Op::Mem(m)), Some(Op::Imm(imm))) => match encode_mem(m) {
@@ -1133,16 +1147,20 @@ pub fn compile_fast(insn: &Insn, mode: Mode, slow_insns: &mut Vec<Insn>) -> Fast
 }
 
 /// Effective address for a flat32 [`FastInsn`], skipping `addr16`/`base_shift`
-/// and adding `seg_base[FS]` only when `FLAG_FS` is set.
+/// and adding `seg_base[FS]` only when `FLAG_FS` is set (`NO_REG = 8`).
 #[inline(always)]
 fn effective_flat32(cpu: &Cpu, insn: &FastInsn) -> u32 {
-    let mut addr = insn.disp as u32;
-    if (insn.base as i8) >= 0 {
-        addr = addr.wrapping_add(cpu.r[(insn.base & 7) as usize]);
-    }
-    if (insn.index as i8) >= 0 {
-        addr = addr.wrapping_add(cpu.r[(insn.index & 7) as usize] << (insn.scale & 3));
-    }
+    let base = if insn.base < NO_REG {
+        cpu.r[usize::from(insn.base)]
+    } else {
+        0
+    };
+    let index = if insn.index < NO_REG {
+        cpu.r[usize::from(insn.index)] << (insn.scale & 3)
+    } else {
+        0
+    };
+    let mut addr = (insn.disp as u32).wrapping_add(base).wrapping_add(index);
     if (insn.scale & FLAG_FS) != 0 {
         addr = addr.wrapping_add(cpu.seg_base[FS]);
     }
@@ -1325,12 +1343,12 @@ pub fn execute_straight(
             cpu.r[(insn.dst & 7) as usize] = insn.imm;
             Ok(())
         }
-        FastOp::MovRegMem => {
+        FastOp::MovRegMem | FastOp::MovRegMemBase => {
             let ea = effective_flat32(cpu, insn);
             cpu.r[(insn.dst & 7) as usize] = read32(mem, ea)?;
             Ok(())
         }
-        FastOp::MovMemReg => {
+        FastOp::MovMemReg | FastOp::MovMemRegBase => {
             let ea = effective_flat32(cpu, insn);
             let value = cpu.r[(insn.src & 7) as usize];
             write32(mem, ea, value)
@@ -1396,12 +1414,12 @@ pub fn execute_straight(
             let ea = effective_flat32(cpu, insn);
             write32(mem, ea, value)
         }
-        FastOp::AddRegReg => {
+        FastOp::AddRegReg | FastOp::AddRegRegNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = cpu.flags.add32(cpu.r[d], cpu.r[(insn.src & 7) as usize]);
             Ok(())
         }
-        FastOp::AddRegImm => {
+        FastOp::AddRegImm | FastOp::AddRegImmNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = cpu.flags.add32(cpu.r[d], insn.imm);
             Ok(())
@@ -1412,12 +1430,12 @@ pub fn execute_straight(
             cpu.r[d] = cpu.flags.add32(cpu.r[d], b);
             Ok(())
         }
-        FastOp::SubRegReg => {
+        FastOp::SubRegReg | FastOp::SubRegRegNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = cpu.flags.sub32(cpu.r[d], cpu.r[(insn.src & 7) as usize]);
             Ok(())
         }
-        FastOp::SubRegImm => {
+        FastOp::SubRegImm | FastOp::SubRegImmNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = cpu.flags.sub32(cpu.r[d], insn.imm);
             Ok(())
@@ -1444,14 +1462,14 @@ pub fn execute_straight(
             cpu.flags.sub32(cpu.r[(insn.dst & 7) as usize], b);
             Ok(())
         }
-        FastOp::AndRegReg => {
+        FastOp::AndRegReg | FastOp::AndRegRegNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] & cpu.r[(insn.src & 7) as usize];
             cpu.flags.logic32(r);
             cpu.r[d] = r;
             Ok(())
         }
-        FastOp::AndRegImm => {
+        FastOp::AndRegImm | FastOp::AndRegImmNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] & insn.imm;
             cpu.flags.logic32(r);
@@ -1465,14 +1483,14 @@ pub fn execute_straight(
             cpu.r[d] = r;
             Ok(())
         }
-        FastOp::OrRegReg => {
+        FastOp::OrRegReg | FastOp::OrRegRegNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] | cpu.r[(insn.src & 7) as usize];
             cpu.flags.logic32(r);
             cpu.r[d] = r;
             Ok(())
         }
-        FastOp::OrRegImm => {
+        FastOp::OrRegImm | FastOp::OrRegImmNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] | insn.imm;
             cpu.flags.logic32(r);
@@ -1486,14 +1504,14 @@ pub fn execute_straight(
             cpu.r[d] = r;
             Ok(())
         }
-        FastOp::XorRegReg => {
+        FastOp::XorRegReg | FastOp::XorRegRegNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] ^ cpu.r[(insn.src & 7) as usize];
             cpu.flags.logic32(r);
             cpu.r[d] = r;
             Ok(())
         }
-        FastOp::XorRegImm => {
+        FastOp::XorRegImm | FastOp::XorRegImmNf => {
             let d = (insn.dst & 7) as usize;
             let r = cpu.r[d] ^ insn.imm;
             cpu.flags.logic32(r);
@@ -1541,17 +1559,17 @@ pub fn execute_straight(
             let r = cpu.flags.dec32(before);
             write32(mem, ea, r)
         }
-        FastOp::ShlRegImm => {
+        FastOp::ShlRegImm | FastOp::ShlRegImmNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SHL, cpu.r[d], u32::from(insn.src));
             Ok(())
         }
-        FastOp::ShrRegImm => {
+        FastOp::ShrRegImm | FastOp::ShrRegImmNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SHR, cpu.r[d], u32::from(insn.src));
             Ok(())
         }
-        FastOp::SarRegImm => {
+        FastOp::SarRegImm | FastOp::SarRegImmNf => {
             let d = (insn.dst & 7) as usize;
             cpu.r[d] = shift32(&mut cpu.flags, SHIFT_SAR, cpu.r[d], u32::from(insn.src));
             Ok(())
@@ -3829,7 +3847,16 @@ mod tests {
                 &[0xba, 0x78, 0x56, 0x34, 0x12],
                 FastOp::MovRegImm,
             ),
-            ("mov eax, [ebx+4]", &[0x8b, 0x43, 0x04], FastOp::MovRegMem),
+            (
+                "mov eax, [ebx+4]",
+                &[0x8b, 0x43, 0x04],
+                FastOp::MovRegMemBase,
+            ),
+            (
+                "mov [ebx+4], ecx",
+                &[0x89, 0x4b, 0x04],
+                FastOp::MovMemRegBase,
+            ),
             (
                 "mov [ebx+esi*4+8], ecx",
                 &[0x89, 0x4c, 0xb3, 0x08],

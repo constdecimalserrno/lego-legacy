@@ -689,6 +689,103 @@ fn promoted_integer_ops_leave_div_idiv_fault_and_cmovcc_preserve_exact_state() {
 }
 
 #[test]
+fn smc_straddling_code_bbox_lower_edge_invalidates_cached_run() {
+    use lego_legacy_core::cpu::ESP;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    // Place `target` at a lower page than `caller` so `target == code_min`.
+    let target = 0x0040_0000u32;
+    let caller = 0x0041_0000u32;
+
+    // Target initially: `nop; ret` (0x90, 0xc3).
+    mem.write(target, &[0x90, 0xc3]).unwrap();
+    // Caller: `call target; mov dword [target - 3], 0x40000000; call target; hlt`
+    // The 4-byte store starts 3 bytes BELOW `code_min` and overwrites `target[0]`
+    // from `0x90` (`nop`) to `0x40` (`inc eax`).
+    let mut prog = Vec::new();
+    prog.push(0xe8);
+    prog.extend_from_slice(&target.wrapping_sub(caller + 5).to_le_bytes());
+    prog.extend_from_slice(&[0xc7, 0x05]);
+    prog.extend_from_slice(&(target - 3).to_le_bytes());
+    prog.extend_from_slice(&0x4000_0000u32.to_le_bytes());
+    prog.push(0xe8);
+    prog.extend_from_slice(&target.wrapping_sub(caller + 20).to_le_bytes());
+    prog.push(0xf4);
+    mem.write(caller, &prog).unwrap();
+
+    let mut regs = Cpu {
+        eip: caller,
+        ..Cpu::default()
+    };
+    regs.r[ESP] = 0x0050_0000;
+    let mut engine = Interp::new(Mode::FLAT);
+    let (_, res) = engine.run(&mut regs, &mut mem, 100, 0..0);
+    assert_eq!(res, Err(Stop::Halted));
+    assert_eq!(
+        regs.r[EAX], 1,
+        "4-byte store straddling code_min - 3 invalidated and re-decoded target"
+    );
+}
+
+#[test]
+fn step_and_mid_run_stops_observe_exact_flags_on_nf_promoted_runs() {
+    use lego_legacy_core::cpu::EBX;
+    let mut host = Headless::new();
+    let mut mem = Arena::new(&mut host, ARENA_BYTES).unwrap();
+    let code = 0x0040_0000u32;
+
+    // Straight-line run whose leading ALU/shift ops are promoted to `*Nf`:
+    //   add eax, ebx; sub eax, 1; xor eax, 0xff; shl eax, 1; cmp eax, ebx; hlt
+    let prog: &[u8] = &[
+        0x01, 0xd8, // add eax, ebx
+        0x83, 0xe8, 0x01, // sub eax, 1
+        0x83, 0xf0, 0x7f, // xor eax, 0x7f
+        0xc1, 0xe0, 0x01, // shl eax, 1
+        0x39, 0xd8, // cmp eax, ebx
+        0xf4, // hlt
+    ];
+    mem.write(code, prog).unwrap();
+
+    let mut start = Cpu {
+        eip: code,
+        ..Cpu::default()
+    };
+    start.r[EAX] = 0x7fff_ffff;
+    start.r[EBX] = 3;
+
+    // Warm the decode cache once so `*Nf` promotion is already in place for `step()`.
+    let mut stepped_engine = Interp::new(Mode::FLAT);
+    for budget in 0..=6 {
+        let mut stepped = start;
+        let mut steps = 0u64;
+        let mut step_res = Ok(());
+        while steps < budget {
+            match stepped_engine.step(&mut stepped, &mut mem) {
+                Ok(()) => steps += 1,
+                Err(stop) => {
+                    step_res = Err(stop);
+                    break;
+                }
+            }
+        }
+        let mut ran = start;
+        let mut run_engine = Interp::new(Mode::FLAT);
+        let (retired, run_res) = run_engine.run(&mut ran, &mut mem, budget, 0..0);
+        assert_eq!(
+            (retired, run_res, ran.eip, ran.r, ran.flags.to_eflags()),
+            (
+                steps,
+                step_res,
+                stepped.eip,
+                stepped.r,
+                stepped.flags.to_eflags()
+            ),
+            "budget={budget} must match step() bit-for-bit including intermediate flags"
+        );
+    }
+}
+
+#[test]
 #[ignore]
 fn bench_flat32_tight_loop() {
     use lego_legacy_core::cpu::{EBX, ECX, ESI, ESP};
