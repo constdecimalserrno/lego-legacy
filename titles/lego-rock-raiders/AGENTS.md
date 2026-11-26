@@ -7,7 +7,7 @@ Playable RTS guide for driving `lego-rock-raiders` via `lego-ctrl` or `lego-mcp`
 | Property | Value |
 | --- | --- |
 | Display | `640×480`, 16-bit, `60 Hz` (`1 flip = 16.67 ms` declared) |
-| Mouse | `AbsoluteKept`, `pointer_speed = (1.0, 1.0)` — standard `move`, `click`, `drag` work directly |
+| Mouse | `SoftwareAbsolute { requires_poll_release: false }`, `pointer_speed = (1.0, 1.0)` — hides OS cursor (`ShowCursor(FALSE)`) and draws its own software cursor at `WM_MOUSEMOVE` + `GetCursorPos` coords; standard `move`, `click`, `drag` work directly |
 | `Escape` | Safe (`escape_quits: false`): skips movies, backs out of menus, opens in-mission Pause Menu |
 | Movie skip | Left-click, `Space`, or `Escape` (`click_in_a_movie: None`, handled natively) |
 | Cadence | `BurstThenPause` (~`500 ms` / `30 flips` per burst) — observe/order while paused, step bursts to let Raiders work |

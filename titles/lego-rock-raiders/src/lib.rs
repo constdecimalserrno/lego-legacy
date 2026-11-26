@@ -88,7 +88,9 @@ pub const GUIDE: TitleGuide = TitleGuide {
     resolution: (640, 480),
     bpp: 16,
     refresh_hz: 60,
-    mouse_mode: MouseMode::AbsoluteKept,
+    mouse_mode: MouseMode::SoftwareAbsolute {
+        requires_poll_release: false,
+    },
     escape_quits: false,
     skip_keys: &["Escape", "Space"],
     cadence: AgentCadence::BurstThenPause { burst_ms: 500 },
@@ -236,6 +238,12 @@ mod tests {
         assert_eq!(GUIDE.resolution, (640, 480));
         assert_eq!(GUIDE.bpp, 16);
         assert_eq!(GUIDE.refresh_hz, 60);
+        assert_eq!(
+            GUIDE.mouse_mode,
+            MouseMode::SoftwareAbsolute {
+                requires_poll_release: false,
+            }
+        );
         assert!(GUIDE.controls.len() >= 10);
         assert!(GUIDE.hazards.len() >= 4);
         assert!(GUIDE.goals.len() >= 4);
@@ -277,13 +285,25 @@ mod tests {
             assert!(!hint.notes.is_empty());
         }
 
-        for body in [
-            format_meta_json(&ROCK_RAIDERS, &GUIDE),
-            format_controls_json(&ROCK_RAIDERS, &GUIDE),
-            format_goals_json(&ROCK_RAIDERS, &GUIDE),
-        ] {
-            let v = parse_json(&body).expect("valid JSON");
-            assert_eq!(v.as_object().unwrap()["ok"].as_bool(), Some(true));
-        }
+        let meta_v = parse_json(&format_meta_json(&ROCK_RAIDERS, &GUIDE)).expect("valid meta JSON");
+        let meta_obj = meta_v.as_object().unwrap();
+        assert_eq!(meta_obj["ok"].as_bool(), Some(true));
+        let meta_mm = meta_obj["guide"].as_object().unwrap()["mouse_mode"]
+            .as_object()
+            .unwrap();
+        assert_eq!(meta_mm["kind"].as_str(), Some("software_absolute"));
+        assert_eq!(meta_mm["requires_poll_release"].as_bool(), Some(false));
+
+        let controls_v =
+            parse_json(&format_controls_json(&ROCK_RAIDERS, &GUIDE)).expect("valid controls JSON");
+        let controls_obj = controls_v.as_object().unwrap();
+        assert_eq!(controls_obj["ok"].as_bool(), Some(true));
+        let ctrl_mm = controls_obj["mouse_mode"].as_object().unwrap();
+        assert_eq!(ctrl_mm["kind"].as_str(), Some("software_absolute"));
+        assert_eq!(ctrl_mm["requires_poll_release"].as_bool(), Some(false));
+
+        let goals_v =
+            parse_json(&format_goals_json(&ROCK_RAIDERS, &GUIDE)).expect("valid goals JSON");
+        assert_eq!(goals_v.as_object().unwrap()["ok"].as_bool(), Some(true));
     }
 }
