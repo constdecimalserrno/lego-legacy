@@ -79,29 +79,51 @@ pub enum Action {
     TypeText { text: String, flip_gap: u64 },
 }
 
+fn opt_coords_label(x: Option<i32>, y: Option<i32>) -> String {
+    match (x, y) {
+        (Some(x), Some(y)) => format!("({x}, {y})"),
+        _ => "in-place".to_owned(),
+    }
+}
+
+fn hold_label(hold_flips: u64, hold_ms: Option<u64>) -> String {
+    match hold_ms {
+        Some(ms) => format!("{hold_flips}f/{ms}ms"),
+        None => hold_flips.to_string(),
+    }
+}
+
 impl Action {
     /// Short human-readable summary for the bounded action feed.
     #[must_use]
     pub fn summary(&self) -> String {
         match self {
-            Self::Move { x, y, glide_flips } => format!("move ({x},{y}) glide={glide_flips}"),
+            Self::Move { x, y, glide_flips } => format!("move ({x}, {y}) glide={glide_flips}"),
             Self::MouseDelta { dx, dy, flips, .. } => {
-                format!("mouse_delta ({dx:.1},{dy:.1}) flips={flips}")
+                format!("mouse_delta ({dx:.1}, {dy:.1}) flips={flips}")
             }
             Self::Click {
                 x,
                 y,
                 button,
                 hold_flips,
+                hold_ms,
                 ..
-            } => format!("click {button:?} at ({x:?},{y:?}) hold={hold_flips}"),
+            } => format!(
+                "click {button:?} {} hold={}",
+                opt_coords_label(*x, *y),
+                hold_label(*hold_flips, *hold_ms),
+            ),
             Self::ClickPoll {
                 x,
                 y,
                 button,
                 hold_flips,
                 hold_ms,
-            } => format!("click_poll {button:?} at ({x:?},{y:?}) hold={hold_flips}f/{hold_ms}ms"),
+            } => format!(
+                "click_poll {button:?} {} hold={hold_flips}f/{hold_ms}ms",
+                opt_coords_label(*x, *y),
+            ),
             Self::Drag {
                 from_x,
                 from_y,
@@ -109,13 +131,21 @@ impl Action {
                 to_y,
                 button,
                 ..
-            } => format!("drag {button:?} ({from_x},{from_y})->({to_x},{to_y})"),
+            } => format!("drag {button:?} ({from_x}, {from_y}) -> ({to_x}, {to_y})"),
             Self::KeyHold {
-                key, hold_flips, ..
-            } => format!("key_hold {key} hold={hold_flips}"),
+                key,
+                hold_flips,
+                hold_ms,
+            } => format!("key_hold {key} hold={}", hold_label(*hold_flips, *hold_ms)),
             Self::Chord {
-                keys, hold_flips, ..
-            } => format!("chord [{}] hold={hold_flips}", keys.join("+")),
+                keys,
+                hold_flips,
+                hold_ms,
+            } => format!(
+                "chord [{}] hold={}",
+                keys.join("+"),
+                hold_label(*hold_flips, *hold_ms),
+            ),
             Self::TypeText { text, flip_gap } => {
                 format!("type_text len={} gap={flip_gap}", text.len())
             }
@@ -2015,5 +2045,133 @@ mod tests {
         assert_eq!(sr.drain_due(20, 0, 0), [Input::Down(Button::Right)]);
         assert_eq!(sr.drain_due(21, 0, 16), [Input::Up(Button::Right)]);
         assert!(sr.is_empty());
+    }
+
+    #[test]
+    fn action_summary_formats_cleanly_without_rust_debug_leaks() {
+        let cases: &[(Action, &str)] = &[
+            (
+                Action::Move {
+                    x: 120,
+                    y: 240,
+                    glide_flips: 3,
+                },
+                "move (120, 240) glide=3",
+            ),
+            (
+                Action::MouseDelta {
+                    dx: 12.5,
+                    dy: -4.0,
+                    flips: 2,
+                    scale_x: None,
+                    scale_y: None,
+                },
+                "mouse_delta (12.5, -4.0) flips=2",
+            ),
+            (
+                Action::Click {
+                    x: Some(508),
+                    y: Some(377),
+                    button: Button::Left,
+                    hold_flips: 2,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                "click Left (508, 377) hold=2",
+            ),
+            (
+                Action::Click {
+                    x: None,
+                    y: None,
+                    button: Button::Right,
+                    hold_flips: 3,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                "click Right in-place hold=3",
+            ),
+            (
+                Action::Click {
+                    x: Some(320),
+                    y: Some(240),
+                    button: Button::Left,
+                    hold_flips: 2,
+                    hold_ms: Some(150),
+                    settle_flips: 1,
+                },
+                "click Left (320, 240) hold=2f/150ms",
+            ),
+            (
+                Action::ClickPoll {
+                    x: Some(508),
+                    y: Some(377),
+                    button: Button::Left,
+                    hold_flips: 2,
+                    hold_ms: 150,
+                },
+                "click_poll Left (508, 377) hold=2f/150ms",
+            ),
+            (
+                Action::ClickPoll {
+                    x: None,
+                    y: None,
+                    button: Button::Right,
+                    hold_flips: 2,
+                    hold_ms: 120,
+                },
+                "click_poll Right in-place hold=2f/120ms",
+            ),
+            (
+                Action::Drag {
+                    from_x: 10,
+                    from_y: 20,
+                    to_x: 100,
+                    to_y: 200,
+                    button: Button::Left,
+                    step_px: 16,
+                },
+                "drag Left (10, 20) -> (100, 200)",
+            ),
+            (
+                Action::KeyHold {
+                    key: "Space".to_owned(),
+                    hold_flips: 4,
+                    hold_ms: None,
+                },
+                "key_hold Space hold=4",
+            ),
+            (
+                Action::KeyHold {
+                    key: "Return".to_owned(),
+                    hold_flips: 3,
+                    hold_ms: Some(150),
+                },
+                "key_hold Return hold=3f/150ms",
+            ),
+            (
+                Action::Chord {
+                    keys: vec!["LeftShift".to_owned(), "A".to_owned()],
+                    hold_flips: 2,
+                    hold_ms: None,
+                },
+                "chord [LeftShift+A] hold=2",
+            ),
+            (
+                Action::TypeText {
+                    text: "lego".to_owned(),
+                    flip_gap: 4,
+                },
+                "type_text len=4 gap=4",
+            ),
+        ];
+
+        for (action, expected) in cases {
+            let summary = action.summary();
+            assert_eq!(summary, *expected);
+            assert!(
+                !summary.contains("Some(") && !summary.contains("None"),
+                "Rust Debug artifact leaked in `{summary}`"
+            );
+        }
     }
 }

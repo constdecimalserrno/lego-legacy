@@ -466,6 +466,8 @@ fn sync_after_live_restore(
         .map_or(0, crate::route::Route::len);
     state.timeline.clear();
     state.timeline.reset_polled();
+    state.last_agent_action_flip = None;
+    state.agent_timeline_end_flip = None;
     state.timeline.set_pointer_shown(pointer_shown);
     if state.timeline.mouse_mode().is_relative() {
         state.timeline.set_pointer(hw_pointer.0, hw_pointer.1);

@@ -180,6 +180,8 @@ impl<H: Host> ControlHost<H> {
         let pace_sleep = self.pace_sleep_nanos();
         let mut state = self.bus.lock();
         state.timeline.reset_polled();
+        state.last_agent_action_flip = None;
+        state.agent_timeline_end_flip = None;
         state.telemetry.rebaseline(0, 0, 0, pace_sleep);
     }
 

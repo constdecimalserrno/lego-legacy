@@ -7,6 +7,7 @@
 //! [`AgentState`] without touching `Machine`.
 
 use super::inspect::{execute_inspect, BookmarkData, InspectQuery, InspectReply};
+use super::observe::STUCK_LOOP_THRESHOLD;
 use super::snapshot::{
     execute_snapshot_op, SnapshotOp, SnapshotReply, SnapshotSlot, SnapshotSummary,
 };
@@ -417,6 +418,8 @@ pub(crate) struct BusState {
     pub telemetry: Telemetry,
     pub audio_underruns: Option<u64>,
     pub timeline: Timeline,
+    pub last_agent_action_flip: Option<u64>,
+    pub agent_timeline_end_flip: Option<u64>,
     pub agent_state: AgentState,
     pub feed_seq: u64,
     pub machine_attached: bool,
@@ -473,6 +476,8 @@ impl BusState {
             telemetry: Telemetry::new(config.flip_cost),
             audio_underruns: None,
             timeline,
+            last_agent_action_flip: None,
+            agent_timeline_end_flip: None,
             agent_state: AgentState::default(),
             feed_seq: 0,
             machine_attached: false,
@@ -490,6 +495,44 @@ impl BusState {
 
     pub(crate) fn current_flip(&self) -> u64 {
         self.last_meta.map_or(0, |m| m.flip)
+    }
+
+    pub(crate) fn observed_flip(&self) -> u64 {
+        self.last_meta
+            .map(|m| m.flip)
+            .or_else(|| self.latest_frame.as_ref().map(|f| f.flip))
+            .unwrap_or(0)
+    }
+
+    /// Whether the agent is actively driving (queued agent actions or a recent
+    /// agent action at/after the current unchanged-frame streak began), used to
+    /// suppress false `stuck_loop` warnings on static menu idle or Human Take Over (#350).
+    pub(crate) fn is_agent_driving(&self) -> bool {
+        if self.owner == InputOwner::Human || self.last_meta.is_some_and(|m| m.route_active) {
+            return false;
+        }
+        let current_flip = self.observed_flip();
+        if !self.timeline.is_empty()
+            && self
+                .agent_timeline_end_flip
+                .is_some_and(|end| end >= current_flip)
+        {
+            return true;
+        }
+        let Some(act_flip) = self.last_agent_action_flip else {
+            return false;
+        };
+        let unchanged_streak = self
+            .latest_frame
+            .as_ref()
+            .map_or(0, |f| f.diff.unchanged_streak);
+        let streak_start = current_flip.saturating_sub(unchanged_streak);
+        let last_active = self
+            .agent_timeline_end_flip
+            .map_or(act_flip, |end| act_flip.max(end.min(current_flip)));
+        act_flip <= current_flip
+            && act_flip >= streak_start
+            && current_flip.saturating_sub(last_active) <= STUCK_LOOP_THRESHOLD
     }
 
     pub(crate) fn current_declared_ms(&self) -> u64 {
@@ -1153,6 +1196,8 @@ impl ControlBus {
         state.held_keys.clear();
         state.timeline.clear();
         state.timeline.reset_polled();
+        state.last_agent_action_flip = None;
+        state.agent_timeline_end_flip = None;
         let mode = state.guide.mouse_mode;
         let res = state.guide.resolution;
         state.timeline.configure_mode(mode, res);
@@ -1282,8 +1327,18 @@ impl ControlBus {
     /// safety guards such as [`TitleGuide::escape_quits`] (#311).
     #[must_use]
     pub fn dispatch_forced(&self, cmd: Command, force: bool) -> Response {
+        self.dispatch_forced_with_source(cmd, force, None)
+    }
+
+    #[must_use]
+    pub(crate) fn dispatch_forced_with_source(
+        &self,
+        cmd: Command,
+        force: bool,
+        source: Option<&'static str>,
+    ) -> Response {
         let mut state = self.lock();
-        let (resp, wake) = apply_command(&mut state, cmd, force);
+        let (resp, wake) = apply_command(&mut state, cmd, force, source);
         drop(state);
         if wake {
             self.notify_host();
@@ -1306,6 +1361,17 @@ impl ControlBus {
         &self,
         cmd: Command,
         force: bool,
+        timeout: Option<Duration>,
+    ) -> Response {
+        self.dispatch_sync_forced_with_source(cmd, force, None, timeout)
+    }
+
+    #[must_use]
+    pub(crate) fn dispatch_sync_forced_with_source(
+        &self,
+        cmd: Command,
+        force: bool,
+        source: Option<&'static str>,
         timeout: Option<Duration>,
     ) -> Response {
         enum SyncKind {
@@ -1340,7 +1406,7 @@ impl ControlBus {
             _ => SyncKind::None,
         };
 
-        let (mut resp, wake) = apply_command(&mut state, cmd, force);
+        let (mut resp, wake) = apply_command(&mut state, cmd, force, source);
         if !resp.ok {
             drop(state);
             return resp;
@@ -1488,7 +1554,12 @@ fn apply_guide_action_hints(guide: &TitleGuide, action: &Action) -> Action {
 const ESCAPE_QUITS_ERROR: &str =
     "Escape immediately quits this title (`escape_quits: true`); pass `force: true` to confirm exit";
 
-fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, bool) {
+fn apply_command(
+    state: &mut BusState,
+    cmd: Command,
+    force: bool,
+    source_override: Option<&'static str>,
+) -> (Response, bool) {
     match cmd {
         Command::Status => (ok_response(state, ResponseData::None), false),
         Command::FrameInfo => match &state.latest_frame {
@@ -1552,9 +1623,22 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             let flip = state.current_flip();
             let ms = state.current_declared_ms();
             let summary = effective.summary();
+            let source = source_override.unwrap_or(if state.owner == InputOwner::Human {
+                "human"
+            } else {
+                "agent"
+            });
             match state.timeline.schedule(&effective, flip, ms) {
                 Ok(report) => {
-                    state.push_feed("agent", summary);
+                    if source == "agent" && report.events_scheduled > 0 {
+                        state.last_agent_action_flip = Some(state.observed_flip());
+                        state.agent_timeline_end_flip = Some(
+                            state
+                                .agent_timeline_end_flip
+                                .map_or(report.end_flip, |prev| prev.max(report.end_flip)),
+                        );
+                    }
+                    state.push_feed(source, summary);
                     let wake = if auto_step && report.required_flips > 0 {
                         state.step_budget = state.step_budget.max(report.required_flips);
                         true
@@ -1582,21 +1666,40 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             }
             let flip = state.current_flip();
             let ms = state.current_declared_ms();
+            let source = source_override.unwrap_or(if state.owner == InputOwner::Human {
+                "human"
+            } else {
+                "agent"
+            });
+            let mut staged = state.timeline.clone();
+            let mut summaries = Vec::with_capacity(actions.len());
             let mut total_events = 0usize;
             let mut max_end = flip;
             let mut max_req = 0u64;
             for action in &actions {
                 let effective = apply_guide_action_hints(state.guide, action);
                 let summary = effective.summary();
-                match state.timeline.schedule(&effective, flip, ms) {
+                match staged.schedule(&effective, flip, ms) {
                     Ok(report) => {
-                        state.push_feed("agent", summary);
+                        summaries.push(summary);
                         total_events += report.events_scheduled;
                         max_end = max_end.max(report.end_flip);
                         max_req = max_req.max(report.required_flips);
                     }
                     Err(err) => return (err_response(state, err.to_string()), false),
                 }
+            }
+            state.timeline = staged;
+            if source == "agent" && total_events > 0 {
+                state.last_agent_action_flip = Some(state.observed_flip());
+                state.agent_timeline_end_flip = Some(
+                    state
+                        .agent_timeline_end_flip
+                        .map_or(max_end, |prev| prev.max(max_end)),
+                );
+            }
+            for summary in summaries {
+                state.push_feed(source, summary);
             }
             let wake = if auto_step && max_req > 0 {
                 state.step_budget = state.step_budget.max(max_req);
@@ -1627,6 +1730,14 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
             let flip = state.current_flip();
             match state.timeline.pipe_route(&route_text, flip, relative) {
                 Ok(report) => {
+                    if state.owner != InputOwner::Human && report.events_scheduled > 0 {
+                        state.last_agent_action_flip = Some(state.observed_flip());
+                        state.agent_timeline_end_flip = Some(
+                            state
+                                .agent_timeline_end_flip
+                                .map_or(report.end_flip, |prev| prev.max(report.end_flip)),
+                        );
+                    }
                     state.push_feed(
                         "pipe",
                         format!(
@@ -1671,7 +1782,13 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
                 target_ms,
             });
             state.last_wait_result = None;
-            state.push_feed("control", format!("wait flips={flips:?} ms={ms:?}"));
+            let wait_summary = match (flips.map(|f| f.max(1)), ms) {
+                (Some(f), Some(m)) => format!("wait {f}f/{m}ms"),
+                (Some(f), None) => format!("wait {f}f"),
+                (None, Some(m)) => format!("wait {m}ms"),
+                (None, None) => "wait 1f".to_owned(),
+            };
+            state.push_feed("control", wait_summary);
             (ok_response(state, ResponseData::None), true)
         }
         Command::WaitUntilChange {
@@ -1760,6 +1877,10 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
         }
         Command::SetOwner(owner) => {
             state.owner = owner;
+            if owner == InputOwner::Human {
+                state.last_agent_action_flip = None;
+                state.agent_timeline_end_flip = None;
+            }
             state.push_feed("control", format!("owner {}", owner.as_str()));
             (ok_response(state, ResponseData::None), false)
         }
@@ -1772,6 +1893,8 @@ fn apply_command(state: &mut BusState, cmd: Command, force: bool) -> (Response, 
         Command::ClearQueue => {
             state.timeline.clear();
             state.active_wait = None;
+            state.last_agent_action_flip = None;
+            state.agent_timeline_end_flip = None;
             state.push_feed("control", "clear_queue".to_owned());
             (ok_response(state, ResponseData::None), false)
         }
@@ -2116,5 +2239,105 @@ mod tests {
             auto_step: false,
         });
         assert!(resp.ok);
+    }
+
+    #[test]
+    fn action_feed_labels_human_source_when_owner_human_and_formats_wait_cleanly() {
+        let bus = ControlBus::new(ControlConfig {
+            owner: InputOwner::Agent,
+            ..ControlConfig::default()
+        });
+
+        // Agent owner -> "agent" source.
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::Click {
+                    x: Some(100),
+                    y: Some(200),
+                    button: crate::host::Button::Left,
+                    hold_flips: 2,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        let last = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(last.source, "agent");
+        assert_eq!(last.summary, "click Left (100, 200) hold=2");
+
+        // Switch owner to human -> Act & Batch record "human" source.
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Human)).ok);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::KeyHold {
+                    key: "Space".to_owned(),
+                    hold_flips: 3,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        let last = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(last.source, "human");
+        assert_eq!(last.summary, "key_hold Space hold=3");
+
+        assert!(
+            bus.dispatch(Command::Batch {
+                actions: vec![Action::Click {
+                    x: None,
+                    y: None,
+                    button: crate::host::Button::Right,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 1,
+                }],
+                auto_step: false,
+            })
+            .ok
+        );
+        let last = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(last.source, "human");
+        assert_eq!(last.summary, "click Right in-place hold=1");
+
+        // Command::Wait formats cleanly without Rust Debug Some(...)/None (flips=0 clamps to 1f).
+        for (flips, ms, expected) in [
+            (Some(10), None, "wait 10f"),
+            (Some(0), None, "wait 1f"),
+            (None, Some(250), "wait 250ms"),
+            (Some(5), Some(100), "wait 5f/100ms"),
+            (None, None, "wait 1f"),
+        ] {
+            assert!(bus.dispatch(Command::Wait { flips, ms }).ok);
+            let entry = bus.agent_state().action_feed.back().cloned().unwrap();
+            assert_eq!(entry.summary, expected);
+            assert!(!entry.summary.contains("Some(") && !entry.summary.contains("None"));
+        }
+
+        // Batch failure is atomic: timeline, action_feed, and last_agent_action_flip stay unchanged.
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Agent)).ok);
+        assert!(bus.dispatch(Command::ClearQueue).ok);
+        let feed_before = bus.agent_state().action_feed.len();
+        let failed = bus.dispatch(Command::Batch {
+            actions: vec![
+                Action::KeyHold {
+                    key: "Space".to_owned(),
+                    hold_flips: 2,
+                    hold_ms: None,
+                },
+                Action::KeyHold {
+                    key: "NotARealKey".to_owned(),
+                    hold_flips: 2,
+                    hold_ms: None,
+                },
+            ],
+            auto_step: false,
+        });
+        assert!(!failed.ok);
+        assert_eq!(bus.status().pending_actions, 0);
+        assert_eq!(bus.agent_state().action_feed.len(), feed_before);
+        assert!(!bus.lock().is_agent_driving());
     }
 }
