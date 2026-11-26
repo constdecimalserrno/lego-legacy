@@ -13,6 +13,7 @@ use crate::guest::GuestMem;
 pub const SHIMS: &[Shim] = &[
     stdcall("ADVAPI32", "RegCreateKeyA", 3, reg_create_key),
     stdcall("ADVAPI32", "RegCreateKeyExA", 9, reg_create_key_ex),
+    stdcall("ADVAPI32", "RegOpenKeyA", 3, reg_open_key),
     stdcall("ADVAPI32", "RegOpenKeyExA", 5, reg_open_key_ex),
     stdcall("ADVAPI32", "RegQueryValueExA", 6, reg_query_value_ex),
     stdcall("ADVAPI32", "RegSetValueExA", 6, reg_set_value_ex),
@@ -60,6 +61,11 @@ fn reg_create_key_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             .map_err(Stop::Fault)?;
     }
     Ok(ERROR_SUCCESS)
+}
+
+fn reg_open_key(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // RegOpenKeyA(hKey, lpSubKey, phkResult): legacy 3-arg form of RegOpenKeyExA.
+    reg_open_key_ex(ctx, &[args[0], args[1], 0, 0, args[2]])
 }
 
 fn reg_open_key_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -134,4 +140,42 @@ fn reg_set_value_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn reg_close_key(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.state.close(args[0]);
     Ok(ERROR_SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reg_close_key, reg_open_key, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, REG_SZ};
+    use crate::guest::GuestMem;
+    use crate::win32::tests::with_test_ctx;
+
+    #[test]
+    fn reg_open_key_opens_seeded_key_and_refuses_missing() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let sub_at = 0x1000u32;
+            let out_at = 0x1100u32;
+            ctx.mem.write(sub_at, b"Software\\Test\\Key\0").unwrap();
+
+            assert_eq!(
+                reg_open_key(ctx, &[0x8000_0002, sub_at, out_at]).unwrap(),
+                ERROR_FILE_NOT_FOUND
+            );
+
+            ctx.state.set_registry_value(
+                "HKLM\\Software\\Test\\Key",
+                "Val",
+                REG_SZ,
+                b"ok\0".to_vec(),
+            );
+            assert_eq!(
+                reg_open_key(ctx, &[0x8000_0002, sub_at, out_at]).unwrap(),
+                ERROR_SUCCESS
+            );
+            let handle = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(
+                ctx.state.key_of(handle).as_deref(),
+                Some("HKLM\\Software\\Test\\Key")
+            );
+            assert_eq!(reg_close_key(ctx, &[handle]).unwrap(), ERROR_SUCCESS);
+        });
+    }
 }

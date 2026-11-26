@@ -5,6 +5,15 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-11-26
 
+First light to rendered Main Menu under `--guest-args -novideo` (#370): commits
+`routes/first-light.route` (`flip 330 close`, exiting 0 cleanly at 331 flips after the LEGO Media
+splash fades into the animated 3D Captain Redbeard Main Menu) alongside real-disc integration tests
+proving non-uniform splash + animated 3D Main Menu rendering, exact replay determinism
+(`assert_same_machine`), and bit-exact `LLSNAP v2` cold snapshot round-trip at flip 305. Default
+unflagged boot stops deterministically at `ole32.dll!CoCreateInstance` for DirectShow
+`CLSID_FilterGraph` (owned by #372); multimedia timer callback dispatch for `.tun` music follows in
+#371. Observed software cursor (`MENUDATA/ARROW.BMP`) starting at `(0, 0)` on Main Menu for #374.
+
 On the roster (#369): `LEGORacers.exe` (`987,222` B, linked 2001-01-12, unwrapped, statically
 linked CRT) out of the Masterpiece pressing's InstallShield 5 cabinet (`DATA1.HDR` + `DATA1.CAB`,
 56 entries at the install root, `C:\Program Files\LEGO Media\Games\LEGO Racers`), beside

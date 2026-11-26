@@ -3021,19 +3021,22 @@ impl Machine {
 mod tests {
     /// Every other call core has written in USER32 and DirectInput: none of
     /// them reads what a person did (#215).
-    const NOT_POLLS: &str = "RegisterClassA CreateWindowExA DestroyWindow ShowWindow UpdateWindow \
-        InvalidateRect BeginPaint EndPaint SetFocus TranslateAcceleratorA LoadAcceleratorsA \
-        FindWindowA GetActiveWindow TranslateMessage DispatchMessageA DefWindowProcA \
-        PostQuitMessage GetSystemMetrics ShowCursor SetWindowsHookExA UnhookWindowsHookEx \
-        CallNextHookEx SetCursor LoadCursorA LoadIconA GetClientRect GetWindowRect \
-        AdjustWindowRect AdjustWindowRectEx SetWindowPos SetWindowLongA GetWindowLongA \
-        MessageBoxA GetDC ReleaseDC SetCursorPos ClipCursor GetClipCursor DialogBoxParamA \
-        EndDialog GetDlgItem SendMessageA GetDesktopWindow PostMessageA SetActiveWindow SetTimer \
-        KillTimer ClientToScreen MoveWindow EnableWindow SetWindowTextA IsWindow SetCapture \
-        ReleaseCapture wsprintfA SystemParametersInfoA DirectInputCreateA QueryInterface AddRef \
-        Release CreateDevice EnumDevices GetDeviceStatus RunControlPanel Initialize \
-        GetCapabilities EnumObjects GetProperty SetProperty Acquire Unacquire SetDataFormat \
-        SetEventNotification SetCooperativeLevel GetObjectInfo GetDeviceInfo";
+    const NOT_POLLS: &str = "RegisterClassA CreateWindowExA DestroyWindow ShowWindow \
+        BringWindowToTop UpdateWindow InvalidateRect GetUpdateRect FillRect BeginPaint EndPaint \
+        SetFocus TranslateAcceleratorA LoadAcceleratorsA FindWindowA GetActiveWindow \
+        GetForegroundWindow GetWindowThreadProcessId EnumDisplaySettingsA ChangeDisplaySettingsA \
+        TranslateMessage DispatchMessageA DefWindowProcA PostQuitMessage GetSystemMetrics \
+        ShowCursor SetWindowsHookExA UnhookWindowsHookEx CallNextHookEx SetCursor LoadCursorA \
+        LoadIconA GetClientRect GetWindowRect AdjustWindowRect AdjustWindowRectEx SetWindowPos \
+        SetWindowLongA GetWindowLongA MessageBoxA GetDC ReleaseDC SetCursorPos ClipCursor \
+        GetClipCursor DialogBoxParamA EndDialog GetDlgItem SendMessageA GetDesktopWindow \
+        PostMessageA SetActiveWindow SetTimer KillTimer ClientToScreen MoveWindow EnableWindow \
+        SetWindowTextA IsWindow SetCapture ReleaseCapture wsprintfA SystemParametersInfoA \
+        DirectInputCreateA QueryInterface AddRef Release CreateDevice EnumDevices GetDeviceStatus \
+        RunControlPanel Initialize GetCapabilities EnumObjects GetProperty SetProperty Acquire \
+        Unacquire SetDataFormat SetEventNotification SetCooperativeLevel GetObjectInfo \
+        GetDeviceInfo CreateEffect EnumEffects GetEffectInfo GetForceFeedbackState \
+        SendForceFeedbackCommand EnumCreatedEffectObjects Escape Poll SendDeviceData";
 
     /// Every USER32 and DirectInput call core has written is a poll or named
     /// as not one, so a reader written later cannot be left off `POLLS`, and

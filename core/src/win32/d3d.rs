@@ -517,12 +517,12 @@ pub static DEVICE3: Interface = Interface {
         QUERY_INTERFACE,
         ADD_REF,
         RELEASE,
-        wall("GetCaps", 2),
+        method("GetCaps", 2, get_caps3),
         wall("GetStats", 1),
         method("AddViewport", 1, add_viewport),
         wall("DeleteViewport", 1),
         wall("NextViewport", 3),
-        wall("EnumTextureFormats", 2),
+        method("EnumTextureFormats", 2, enum_texture_formats7),
         method("BeginScene", 0, begin_scene),
         method("EndScene", 0, end_scene),
         method("GetDirect3D", 1, get_direct3d3),
@@ -571,7 +571,7 @@ pub static D3D3: Interface = Interface {
         method("CreateMaterial", 2, create_material),
         method("CreateViewport", 2, create_viewport),
         wall("FindDevice", 2),
-        wall("CreateDevice", 4),
+        method("CreateDevice", 4, create_device3),
         method("CreateVertexBuffer", 3, create_vertex_buffer),
         method("EnumZBufferFormats", 3, enum_z_buffer_formats),
         wall("EvictManagedTextures", 0),
@@ -940,6 +940,47 @@ fn enum_devices7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
     Ok(S_OK)
 }
 
+/// DirectX 6's `IDirect3DDevice3::GetCaps(lpD3DHWDevDesc, lpD3DHELDevDesc)` (#370).
+fn get_caps3(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+    let size_for = |ctx: &Ctx<'_>, at: u32| -> Result<Option<u32>, Stop> {
+        let caller = ctx.mem.read_u32(at).map_err(Stop::Fault)?;
+        Ok(match caller {
+            0 | DEVICE_DESC6_BYTES => Some(DEVICE_DESC6_BYTES),
+            DEVICE_DESC_BYTES => Some(DEVICE_DESC_BYTES),
+            _ => None,
+        })
+    };
+    let hw_size = if args[0] != 0 {
+        let Some(size) = size_for(ctx, args[0])? else {
+            return Ok(DDERR_INVALIDPARAMS);
+        };
+        Some(size)
+    } else {
+        None
+    };
+    let hel_size = if args[1] != 0 {
+        let Some(size) = size_for(ctx, args[1])? else {
+            return Ok(DDERR_INVALIDPARAMS);
+        };
+        Some(size)
+    } else {
+        None
+    };
+    if let Some(size) = hw_size {
+        write_device_desc(ctx, args[0], size)?;
+    }
+    if let Some(size) = hel_size {
+        ctx.mem
+            .write(
+                args[1],
+                &[0u8; DEVICE_DESC6_BYTES as usize][..size as usize],
+            )
+            .map_err(Stop::Fault)?;
+        ctx.mem.write_u32(args[1], size).map_err(Stop::Fault)?;
+    }
+    Ok(S_OK)
+}
+
 /// The same description, asked of the device the title already made.
 fn get_caps7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     write_device_desc7(ctx, args[0])?;
@@ -1158,8 +1199,8 @@ fn texture_formats() -> [crate::raster::PixelFormat; 6] {
     ]
 }
 
-/// DirectX 7's, each format a `DDPIXELFORMAT`.
-fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
+/// DirectX 6/7's, each format a `DDPIXELFORMAT`.
+fn enum_texture_formats7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // EnumTextureFormats(callback, context).
     if args[0] == 0 {
         return Ok(DDERR_INVALIDPARAMS);
@@ -1170,8 +1211,13 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<
         super::ddraw::write_pixel_format(ctx, at, format)?;
         calls.push(vec![at, args[1]]);
     }
+    let label = if ctx.state.interface_of(this) == Some(DEVICE3.name) {
+        "d3d3"
+    } else {
+        "d3d7"
+    };
     ctx.log
-        .line(&format!("d3d7 texture formats: {} of them", calls.len()));
+        .line(&format!("{label} texture formats: {} of them", calls.len()));
     super::call_each(ctx, args[0], &calls, true)?;
     Ok(S_OK)
 }
@@ -1241,6 +1287,36 @@ fn create_device2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3d2 device at {object:#010x} drawing into surface {surface:#010x}"
+    ));
+    Ok(S_OK)
+}
+
+/// DirectX 6's device, over the back buffer a title made for it: the one
+/// device `EnumDevices` offered, or a wall naming the one asked for (#370).
+fn create_device3(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // CreateDevice(rclsid, lpDDS, lplpD3DDevice, pUnkOuter).
+    if let Some(refused) = aggregated(args[3]) {
+        return Ok(refused);
+    }
+    if args[0] == 0 || args[1] == 0 || args[2] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    let asked = crate::com::read_iid(ctx, args[0])?;
+    if asked != HAL_DEVICE {
+        return Err(unwritten(format!(
+            "IDirect3D3::CreateDevice: device {}, which was never offered",
+            crate::com::iid_text(&asked)
+        )));
+    }
+    let surface = args[1];
+    let object =
+        State::make_com(ctx, &DEVICE3, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    if this != 0 {
+        device(ctx, object).direct3d = this;
+    }
+    ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
+    ctx.log.line(&format!(
+        "d3d3 device at {object:#010x} drawing into surface {surface:#010x}"
     ));
     Ok(S_OK)
 }
@@ -1575,8 +1651,8 @@ fn stage_state_at_start(state: u32, stage: u32) -> Option<u32> {
         (4, _) => 1,
         (5, _) => 2,
         (6, _) => 1,
-        // D3DTSS_ADDRESSU and ADDRESSV: wrap.
-        (13 | 14, _) => 1,
+        // D3DTSS_ADDRESS, ADDRESSU and ADDRESSV: wrap.
+        (12..=14, _) => 1,
         // D3DTSS_MAGFILTER and MINFILTER: point. MIPFILTER: none.
         (16..=18, _) => 1,
         _ => return None,
@@ -1584,7 +1660,13 @@ fn stage_state_at_start(state: u32, stage: u32) -> Option<u32> {
 }
 
 fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let (stage, state) = (args[0], args[1]);
+    let stage = args[0];
+    // D3DTSS_ADDRESS (12) aliases ADDRESSU (13) on readback in DirectX 6.
+    let state = if args[1] == tss::ADDRESS {
+        tss::ADDRESSU
+    } else {
+        args[1]
+    };
     let Some(value) = device(ctx, this).get_stage(stage, state) else {
         ctx.log.line(&format!(
             "d3d texture stage {stage} state {state} read before it was set, \
@@ -1600,7 +1682,13 @@ fn get_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result
 }
 
 fn set_texture_stage_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    device(ctx, this).set_stage(args[0], args[1], args[2]);
+    let dev = device(ctx, this);
+    dev.set_stage(args[0], args[1], args[2]);
+    // D3DTSS_ADDRESS (12) sets both U and V addressing on DirectX 6 (#370).
+    if args[1] == tss::ADDRESS {
+        dev.set_stage(args[0], tss::ADDRESSU, args[2]);
+        dev.set_stage(args[0], tss::ADDRESSV, args[2]);
+    }
     Ok(S_OK)
 }
 
@@ -2175,6 +2263,7 @@ mod tss {
     pub const ALPHAOP: u32 = 4;
     pub const ALPHAARG1: u32 = 5;
     pub const ALPHAARG2: u32 = 6;
+    pub const ADDRESS: u32 = 12;
     pub const ADDRESSU: u32 = 13;
     pub const ADDRESSV: u32 = 14;
     pub const MAGFILTER: u32 = 16;
@@ -2553,15 +2642,13 @@ fn draw(
             {
                 pipeline::Viewport::whole(x, y, w, h)
             }
-            // What LEGO Chess's DirectX plugin needs of a viewport it describes
-            // with `SetViewport2` and draws vertices already on the screen
-            // through, on its DirectX 5 device (#210): the rectangle they are
-            // cut to, which `D3DVIEWPORT` and `D3DVIEWPORT2` both start with.
-            // Projecting through one a title described is not written, nor
-            // is this on a later device.
-            Some(ComState::Viewport { .. })
-                if dx5 && format & fvf::POSITION_MASK == fvf::XYZRHW =>
-            {
+            // A viewport the title described itself (`SetViewport` /
+            // `SetViewport2`) used with already-transformed screen-space
+            // (`XYZRHW`) vertices on DirectX 5 (`DEVICE2`, #210) or DirectX 6
+            // (`DEVICE3`, #370): only the screen rectangle (`dwX`, `dwY`,
+            // `dwWidth`, `dwHeight`) is needed. Projecting untransformed `XYZ`
+            // vertices through a title-described viewport still walls below.
+            Some(ComState::Viewport { .. }) if format & fvf::POSITION_MASK == fvf::XYZRHW => {
                 let bytes = &ctx.state.immediate.viewports[&ctx.state.identity(viewport)];
                 let field = |o: usize| {
                     u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
@@ -3619,5 +3706,184 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[a0].1.render_value(rs::CULLMODE), 1);
         assert_eq!(devices[b0].1.render_value(rs::CULLMODE), 3);
+    }
+
+    #[test]
+    fn d3d3_create_device_get_caps_enum_formats_and_tss_address() {
+        use super::{
+            create_device3, enum_texture_formats7, get_caps3, set_texture_stage_state, tss,
+            DEVICE3, DEVICE_DESC6_BYTES, HAL_DEVICE,
+        };
+        use crate::com::S_OK;
+        use crate::cpu::Stop;
+        use crate::guest::GuestMem;
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let guid_at = 0x1000u32;
+            let out_at = 0x1040u32;
+            ctx.mem.write(guid_at, &HAL_DEVICE).unwrap();
+
+            // Aggregation and null arguments are refused.
+            assert_eq!(
+                create_device3(ctx, 0, &[guid_at, 0x2000, out_at, 1]).unwrap(),
+                0x8004_0110
+            );
+            assert_eq!(
+                create_device3(ctx, 0, &[0, 0x2000, out_at, 0]).unwrap(),
+                0x8007_0057
+            );
+            assert_eq!(
+                create_device3(ctx, 0, &[guid_at, 0, out_at, 0]).unwrap(),
+                0x8007_0057
+            );
+            assert_eq!(
+                create_device3(ctx, 0, &[guid_at, 0x2000, 0, 0]).unwrap(),
+                0x8007_0057
+            );
+            // Unknown device GUID walls.
+            ctx.mem.write(guid_at, &[0u8; 16]).unwrap();
+            assert!(matches!(
+                create_device3(ctx, 0, &[guid_at, 0x2000, out_at, 0]),
+                Err(Stop::NotWritten { .. })
+            ));
+            // HAL_DEVICE succeeds, produces IDirect3DDevice3, and records parent IDirect3D3.
+            let d3d3 =
+                crate::win32::State::make_com(ctx, &super::D3D3, crate::win32::ComState::None)
+                    .unwrap();
+            ctx.mem.write(guid_at, &HAL_DEVICE).unwrap();
+            assert_eq!(
+                create_device3(ctx, d3d3, &[guid_at, 0x2000, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let dev = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(ctx.state.interface_of(dev), Some(DEVICE3.name));
+            assert_eq!(super::get_direct3d3(ctx, dev, &[out_at]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.read_u32(out_at).unwrap(), d3d3);
+
+            // GetCaps writes DX6/DX5 hardware desc, zeroed HEL desc, and rejects bogus dwSize.
+            let hw = 0x1200u32;
+            let hel = 0x1400u32;
+            ctx.mem.write_u32(hw, 172).unwrap();
+            assert_eq!(get_caps3(ctx, dev, &[hw, 0]).unwrap(), 0x8007_0057);
+            ctx.mem.write_u32(hw, super::DEVICE_DESC_BYTES).unwrap();
+            assert_eq!(get_caps3(ctx, dev, &[hw, 0]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.read_u32(hw).unwrap(), super::DEVICE_DESC_BYTES);
+
+            ctx.mem.write_u32(hw, DEVICE_DESC6_BYTES).unwrap();
+            ctx.mem.write_u32(hel, DEVICE_DESC6_BYTES).unwrap();
+            assert_eq!(get_caps3(ctx, dev, &[hw, hel]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.read_u32(hw).unwrap(), DEVICE_DESC6_BYTES);
+            assert_eq!(ctx.mem.read_u32(hw + 0x08).unwrap(), 2); // D3DCOLOR_RGB
+            assert_eq!(ctx.mem.read_u32(hel).unwrap(), DEVICE_DESC6_BYTES);
+            assert_eq!(ctx.mem.read_u32(hel + 0x08).unwrap(), 0);
+
+            // EnumTextureFormats rejects null callback and queues formats for non-null callback.
+            assert_eq!(
+                enum_texture_formats7(ctx, dev, &[0, 0]).unwrap(),
+                0x8007_0057
+            );
+            assert_eq!(
+                enum_texture_formats7(ctx, dev, &[0x4000, 0x1234]).unwrap(),
+                S_OK
+            );
+            assert!(ctx.call_guest.is_some());
+
+            // D3DTSS_ADDRESS (12) propagates to ADDRESSU (13) and ADDRESSV (14),
+            // and reads alias ADDRESSU so independent U updates are reflected.
+            assert_eq!(
+                set_texture_stage_state(ctx, dev, &[0, tss::ADDRESS, 3]).unwrap(),
+                S_OK
+            );
+            let d = super::device(ctx, dev);
+            assert_eq!(d.get_stage(0, tss::ADDRESSU), Some(3));
+            assert_eq!(d.get_stage(0, tss::ADDRESSV), Some(3));
+            assert_eq!(
+                set_texture_stage_state(ctx, dev, &[0, tss::ADDRESSU, 1]).unwrap(),
+                S_OK
+            );
+            assert_eq!(
+                super::get_texture_stage_state(ctx, dev, &[0, tss::ADDRESS, out_at]).unwrap(),
+                S_OK
+            );
+            assert_eq!(ctx.mem.read_u32(out_at).unwrap(), 1);
+
+            // DEVICE3 draws XYZRHW triangles through a title-described SetViewport2 viewport.
+            let pixels = ctx.state.heap.alloc(16 * 16 * 2);
+            let surface = crate::win32::State::make_com(
+                ctx,
+                &crate::win32::ddraw::DIRECT_DRAW_SURFACE4,
+                crate::win32::ComState::Surface {
+                    pixels,
+                    width: 16,
+                    height: 16,
+                    pitch: 32,
+                    format: crate::raster::PixelFormat::RGB565,
+                    palette: 0,
+                    primary: false,
+                    back: 0,
+                    caps: 0,
+                    owned_pixels: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                create_device3(ctx, d3d3, &[guid_at, surface, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let draw_dev = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(
+                super::create_viewport(ctx, d3d3, &[out_at, 0]).unwrap(),
+                S_OK
+            );
+            let vp = ctx.mem.read_u32(out_at).unwrap();
+            let vp_desc = 0x1600u32;
+            ctx.mem.write(vp_desc, &[0u8; 44]).unwrap();
+            ctx.mem.write_u32(vp_desc, 44).unwrap();
+            ctx.mem.write_u32(vp_desc + 12, 16).unwrap();
+            ctx.mem.write_u32(vp_desc + 16, 16).unwrap();
+            assert_eq!(super::set_viewport(ctx, vp, &[vp_desc]).unwrap(), S_OK);
+            assert_eq!(super::add_viewport(ctx, draw_dev, &[vp]).unwrap(), S_OK);
+            assert_eq!(
+                super::set_current_viewport(ctx, draw_dev, &[vp]).unwrap(),
+                S_OK
+            );
+            assert_eq!(super::begin_scene(ctx, draw_dev, &[]).unwrap(), S_OK);
+            // Disable culling and depth test for a flat red XYZRHW triangle.
+            assert_eq!(
+                super::set_render_state(ctx, draw_dev, &[22, 1]).unwrap(),
+                S_OK
+            );
+            assert_eq!(
+                super::set_render_state(ctx, draw_dev, &[7, 0]).unwrap(),
+                S_OK
+            );
+            let verts = 0x1700u32;
+            let tri: [[f32; 4]; 3] = [
+                [0.0, 0.0, 0.5, 1.0],
+                [16.0, 0.0, 0.5, 1.0],
+                [0.0, 16.0, 0.5, 1.0],
+            ];
+            for (i, pos) in tri.iter().enumerate() {
+                let base = verts + (i as u32) * 32;
+                for (j, f) in pos.iter().enumerate() {
+                    ctx.mem
+                        .write_u32(base + (j as u32) * 4, f.to_bits())
+                        .unwrap();
+                }
+                ctx.mem.write_u32(base + 16, 0xffff_0000).unwrap(); // diffuse red
+                ctx.mem.write_u32(base + 20, 0).unwrap();
+                ctx.mem.write_u32(base + 24, 0).unwrap();
+                ctx.mem.write_u32(base + 28, 0).unwrap();
+            }
+            assert_eq!(
+                super::draw_primitive(ctx, draw_dev, &[4, 0x1c4, verts, 3, 0x1c]).unwrap(),
+                S_OK
+            );
+            assert_eq!(super::end_scene(ctx, draw_dev, &[]).unwrap(), S_OK);
+            // Top-left pixel inside triangle should now be non-zero red (RGB565 0xf800).
+            let px = u16::from_le_bytes(ctx.mem.slice(pixels + 34, 2).unwrap().try_into().unwrap());
+            assert_eq!(px, 0xf800);
+        });
     }
 }

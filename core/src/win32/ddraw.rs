@@ -13,6 +13,7 @@ use crate::raster::PixelFormat;
 pub const SHIMS: &[Shim] = &[
     stdcall("DDRAW", "DirectDrawCreate", 3, create),
     stdcall("DDRAW", "DirectDrawCreateEx", 4, create_ex),
+    stdcall("DDRAW", "DirectDrawCreateClipper", 3, create_clipper_export),
     stdcall("DDRAW", "DirectDrawEnumerateA", 2, enumerate),
 ];
 
@@ -42,6 +43,19 @@ fn create_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!("ddraw7 created at {object:#010x}"));
     Ok(S_OK)
+}
+
+fn create_clipper_export(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // DirectDrawCreateClipper(dwFlags, lplpDDClipper, pUnkOuter).
+    const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
+    const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+    if args[2] != 0 {
+        return Ok(CLASS_E_NOAGGREGATION);
+    }
+    if args[1] == 0 {
+        return Ok(DDERR_INVALIDPARAMS);
+    }
+    create_clipper(ctx, 0, args)
 }
 
 fn enumerate(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -370,7 +384,7 @@ fn set_display_mode(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, 
 /// How often the declared display refreshes: the title's own declaration when
 /// its flips wait for one, and otherwise sixty a second, what a monitor of the
 /// era ran a 640x480 desktop at.
-fn refresh_hz(ctx: &Ctx<'_>) -> u64 {
+pub(super) fn refresh_hz(ctx: &Ctx<'_>) -> u64 {
     match ctx.title.flip_cost {
         crate::clock::FlipCost::Refresh(hz) => hz.max(1),
         _ => 60,
@@ -2878,6 +2892,29 @@ mod tests {
             assert_eq!((RELEASE.run)(ctx, bound2, &[]).unwrap(), 1);
             assert_eq!(set_tex(ctx, dev2, &[0, 0]).unwrap(), S_OK);
             assert!(surface_of(ctx, bound2).is_none());
+        });
+    }
+
+    #[test]
+    fn directdraw_create_clipper_export_creates_clipper_and_validates_args() {
+        use super::{create_clipper_export, DIRECT_DRAW_CLIPPER};
+        use crate::com::S_OK;
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let out = 0x1000u32;
+            assert_eq!(
+                create_clipper_export(ctx, &[0, out, 1]).unwrap(),
+                0x8004_0110
+            );
+            assert_eq!(create_clipper_export(ctx, &[0, 0, 0]).unwrap(), 0x8007_0057);
+            assert_eq!(create_clipper_export(ctx, &[0, out, 0]).unwrap(), S_OK);
+            let clipper = ctx.mem.read_u32(out).unwrap();
+            assert_ne!(clipper, 0);
+            assert_eq!(
+                ctx.state.interface_of(clipper),
+                Some(DIRECT_DRAW_CLIPPER.name)
+            );
         });
     }
 }

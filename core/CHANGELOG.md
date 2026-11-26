@@ -5,6 +5,13 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Direct3D 3 Immediate Mode, DirectInput 2 `Poll`, and Win32 boot shims for LEGO Racers first light (`core/src/{cli,run,com,machine}.rs`, `core/src/win32/{mod,advapi32,ddraw,d3d,dinput,gdi32,kernel32,user32,winmm}.rs`, #370), all strictly generic and true to Windows with zero title-keyed behavior and exhaustive `LLSNAP v2` `Snap` coverage:
+
+- **Win32 boot shims:** Adds `ADVAPI32!RegOpenKeyA`, `DDRAW!DirectDrawCreateClipper`, `KERNEL32!SetPriorityClass`, `KERNEL32!SetEnvironmentVariableA` (with case-insensitive per-process overrides/deletions in `State::environment` honored by `GetEnvironmentVariableA` and `GetEnvironmentStringsA`/`W`), `USER32!{BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, EnumDisplaySettingsA, ChangeDisplaySettingsA, GetUpdateRect, FillRect}`, `GDI32!{CreateSolidBrush, DeleteObject}`, `WNDCLASSA.cbWndExtra` byte storage across `SetWindowLongA`/`GetWindowLongA` (readable through `WM_DESTROY`/`WM_NCDESTROY`), and `WINMM!{timeSetEvent, timeKillEvent}` timer ID registration/cancellation (periodic callback dispatch owned by #371).
+- **Direct3D 3 IM & COM:** Adds `IDirectDraw -> IDirect3D3` `QueryInterface` routing in `com::FACES`, implements `IDirect3D3::CreateDevice` (slot 8), `IDirect3DDevice3::GetCaps` (slot 3), `IDirect3DDevice3::EnumTextureFormats` (slot 8), `D3DTSS_ADDRESS (12)` propagation to `ADDRESSU (13)`/`ADDRESSV (14)`, and title-described viewport clipping for pre-transformed `XYZRHW` vertices on `IDirect3DDevice3`.
+- **DirectInput 2:** Extends `IDirectInputDeviceA` vtable through `IDirectInputDevice2A` slots 18–26 (`CreateEffect`..`SendDeviceData`) with `Poll` at slot 25 (`+0x64`) returning `DI_OK`, classified cleanly in `machine::tests::NOT_POLLS`.
+- **Guest command-line arguments:** Adds `--guest-args <args>` on `Cli` threaded into `State::guest_args` and `GetCommandLineA`/`W` (unchanged when empty), snapshotted in `LLSNAP v2` alongside `environment`, `window_extra`, and `mm_timers`.
+
 LEGO Racers joins the roster as its sixth entry (`roster::LEGO_RACERS` at `ROSTER[5]`, #369):
 
 - **`core/src/roster.rs` & `core/src/testkit.rs`:** Declares `roster::LEGO_RACERS` (`key: "lego-racers"`, `pressing: "masterpiece-racers"`, `path: "LEGORacers.exe"`, `Kept::Cabinet`, `red_book: None`, `bank: &[]`) and `testkit::LEGO_RACERS_WRAPPED` pointing at the SafeDisc v1 wrapped 1999 `racers` pressing, with cabinet SafeDisc refusal coverage in `core/tests/roster.rs`.

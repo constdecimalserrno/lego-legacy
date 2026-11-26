@@ -6,7 +6,7 @@
 //! now.
 
 use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, ok, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -39,9 +39,12 @@ pub static DIRECT_INPUT: Interface = Interface {
     ],
 };
 
-/// `IDirectInputDeviceA`, in slot order. Its reads of what a person did,
-/// `GetDeviceState` and `GetDeviceData`, are input polls, and are named in
-/// `machine::POLLS` as well (#215).
+/// `IDirectInputDeviceA` / `IDirectInputDevice2A`, in slot order. Its reads of
+/// what a person did, `GetDeviceState` and `GetDeviceData`, are input polls,
+/// and are named in `machine::POLLS` as well (#215). Slots 18-26 extend the
+/// vtable to DirectX 5/6's `IDirectInputDevice2A` (`QueryInterface` already
+/// hands out this table for `IID_IDirectInputDevice2A`), with `Poll` at slot
+/// 25 (`+0x64`, #370).
 pub static DIRECT_INPUT_DEVICE: Interface = Interface {
     name: "IDirectInputDeviceA",
     methods: &[
@@ -63,6 +66,15 @@ pub static DIRECT_INPUT_DEVICE: Interface = Interface {
         method("GetDeviceInfo", 1, ok),
         method("RunControlPanel", 2, ok),
         method("Initialize", 3, ok),
+        wall("CreateEffect", 4),
+        wall("EnumEffects", 3),
+        wall("GetEffectInfo", 2),
+        wall("GetForceFeedbackState", 1),
+        wall("SendForceFeedbackCommand", 1),
+        wall("EnumCreatedEffectObjects", 3),
+        wall("Escape", 1),
+        method("Poll", 0, ok),
+        wall("SendDeviceData", 4),
     ],
 };
 
@@ -245,6 +257,22 @@ mod tests {
             assert_eq!(ctx.mem.read_u32(count_at).unwrap(), 0);
             let err = device_data(ctx, kbd, &[16, 0x1100, oob, 0]).unwrap_err();
             assert!(matches!(err, Stop::Fault(Fault { write: false, .. })));
+        });
+    }
+
+    #[test]
+    fn device2_vtable_exposes_poll_at_slot_25() {
+        let poll = DIRECT_INPUT_DEVICE.method(25).expect("slot 25 (+0x64)");
+        assert_eq!(poll.name, "Poll");
+        assert_eq!(poll.args, 0);
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let mouse = State::make_com(
+                ctx,
+                &DIRECT_INPUT_DEVICE,
+                ComState::Device { keyboard: false },
+            )
+            .expect("mouse device");
+            assert_eq!((poll.run)(ctx, mouse, &[]).unwrap(), DI_OK);
         });
     }
 }

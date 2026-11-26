@@ -181,7 +181,13 @@ const FACES: &[(&str, [u8; 16], &str)] = &[
         "IDirect3D7",
     ),
     // DirectX 6's, which Rock Raiders' mode dialog asks its DirectDraw object
-    // for, as Windows 98 with DirectX 6 hands it back (#132).
+    // for, as Windows 98 with DirectX 6 hands it back (#132). Any DirectDraw
+    // face on the same object answers QueryInterface for IDirect3D3 (#370).
+    (
+        "IDirectDraw",
+        parse_iid("bb223240-e72b-11d0-a9b4-00aa00c0993e"),
+        "IDirect3D3",
+    ),
     (
         "IDirectDraw4",
         parse_iid("bb223240-e72b-11d0-a9b4-00aa00c0993e"),
@@ -687,13 +693,19 @@ mod tests {
             let dd = State::make_com(ctx, &crate::win32::ddraw::DIRECT_DRAW, ComState::None)
                 .expect("make_com");
 
-            // 1. Face upgrade: IDirectDraw -> IDirectDraw4.
+            // 1. Face upgrade: IDirectDraw -> IDirectDraw4 and IDirect3D3.
             let dd4_iid = parse_iid("9c59509a-39bd-11d1-8c4a-00c04fd930c5");
             ctx.mem.write(iid_at, &dd4_iid).unwrap();
             assert_eq!(query_interface(ctx, dd, &[iid_at, out_at]).unwrap(), S_OK);
             let dd4 = ctx.mem.read_u32(out_at).unwrap();
             assert_ne!(dd4, dd);
             assert_eq!(ctx.state.interface_of(dd4), Some("IDirectDraw4"));
+
+            let d3d3_iid = parse_iid("bb223240-e72b-11d0-a9b4-00aa00c0993e");
+            ctx.mem.write(iid_at, &d3d3_iid).unwrap();
+            assert_eq!(query_interface(ctx, dd, &[iid_at, out_at]).unwrap(), S_OK);
+            let d3d3 = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(ctx.state.interface_of(d3d3), Some("IDirect3D3"));
 
             // 2. IUnknown on secondary face returns primary identity.
             ctx.mem.write(iid_at, &IUNKNOWN).unwrap();

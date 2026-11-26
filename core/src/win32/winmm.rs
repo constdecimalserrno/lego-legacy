@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 pub const SHIMS: &[Shim] = &[
     stdcall("WINMM", "timeGetTime", 0, time_get_time),
     stdcall("WINMM", "timeGetSystemTime", 2, time_get_system_time),
+    stdcall("WINMM", "timeSetEvent", 5, time_set_event),
+    stdcall("WINMM", "timeKillEvent", 1, time_kill_event),
     stdcall("WINMM", "mixerGetNumDevs", 0, mixer_devices),
     stdcall("WINMM", "mmioOpenA", 3, mmio_open),
     stdcall("WINMM", "mmioDescend", 4, mmio_descend),
@@ -1528,9 +1530,75 @@ fn mmio_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     })
 }
 
+/// `TIMERR_NOERROR` from `mmsystem.h`.
+const TIMERR_NOERROR: u32 = 0;
+/// `TIME_CALLBACK_EVENT_SET` (0x10) | `TIME_CALLBACK_EVENT_PULSE` (0x20).
+const TIME_CALLBACK_EVENT_MASK: u32 = 0x30;
+
+// ponytail: registers the timer ID without firing the callback on the declared
+// clock yet; #371 wires periodic callback dispatch.
+fn time_set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // timeSetEvent(uDelay, uResolution, lpTimeProc, dwUser, fuEvent).
+    let (delay_ms, resolution_ms, callback, user, flags) =
+        (args[0], args[1], args[2], args[3], args[4]);
+    if flags & TIME_CALLBACK_EVENT_MASK != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("WINMM.dll!timeSetEvent: event callback flags {flags:#x}"),
+            caller: 0,
+        });
+    }
+    if delay_ms == 0 || callback == 0 {
+        return Ok(0);
+    }
+    let id = ctx.state.next_mm_timer;
+    ctx.state.next_mm_timer = ctx.state.next_mm_timer.wrapping_add(1).max(1);
+    ctx.state.mm_timers.push(id);
+    ctx.log.line(&format!(
+        "winmm timer {id}: delay {delay_ms}ms res {resolution_ms}ms cb {callback:#010x} user {user:#010x} flags {flags:#x}"
+    ));
+    Ok(id)
+}
+
+fn time_kill_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let id = args[0];
+    let before = ctx.state.mm_timers.len();
+    ctx.state.mm_timers.retain(|&t| t != id);
+    if ctx.state.mm_timers.len() < before {
+        ctx.log.line(&format!("winmm timer {id} killed"));
+        Ok(TIMERR_NOERROR)
+    } else {
+        Ok(MMSYSERR_INVALPARAM)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{find_chunk, Chunk, Find};
+    use super::{
+        find_chunk, time_kill_event, time_set_event, Chunk, Find, MMSYSERR_INVALPARAM,
+        TIMERR_NOERROR,
+    };
+    use crate::cpu::Stop;
+    use crate::win32::tests::with_test_ctx;
+
+    #[test]
+    fn time_set_and_kill_event_track_timer_ids_like_winmm() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            assert_eq!(time_set_event(ctx, &[0, 0, 0x1000, 0, 1]).unwrap(), 0);
+            assert_eq!(time_set_event(ctx, &[100, 10, 0, 0, 1]).unwrap(), 0);
+            assert!(matches!(
+                time_set_event(ctx, &[100, 10, 0x120, 0, 0x10]),
+                Err(Stop::NotWritten { .. })
+            ));
+            let id1 = time_set_event(ctx, &[100, 100, 0x4bd5e0, 0x1234, 1]).unwrap();
+            let id2 = time_set_event(ctx, &[50, 10, 0x4bd5e0, 0x5678, 1]).unwrap();
+            assert_ne!(id1, 0);
+            assert_ne!(id1, id2);
+            assert_eq!(ctx.state.mm_timers, vec![id1, id2]);
+            assert_eq!(time_kill_event(ctx, &[id1]).unwrap(), TIMERR_NOERROR);
+            assert_eq!(time_kill_event(ctx, &[id1]).unwrap(), MMSYSERR_INVALPARAM);
+            assert_eq!(ctx.state.mm_timers, vec![id2]);
+        });
+    }
 
     #[test]
     fn a_wave_files_chunks_are_found_by_form_and_by_id() {
