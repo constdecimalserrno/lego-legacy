@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Fixes live-verified playbook and `GUIDE` inaccuracies (#351): `R` rotates 90° counter-clockwise (CCW) and needs `~0.5s` settle after opening the Unit Menu; `Z` zooms out cleanly (`PageDown` does not zoom out), `Q`/`W` orbit, arrows pan, and camera keys recenter the cursor; `Escape` opens the Mission Menu in normal missions (`M1010`/`M1020`) but is disabled during `M0010` Training Area (click Menu `(61, 430)`); documents piped relative-drag math (`0.5 px/raw_x`, `0.375 px/raw_y`; carry Action Bricks at `<= 8 screen px/flip` = `16 raw px/flip`). Strictly outside guest state; no route moved.
+
 Adds `AGENTS.md` agent playbook and enriches `GUIDE` (`controls`, `hazards`, `goals`) with verified `RelativeSteered` cursor clamping/in-place-click rules, Unit Menu & brick-drag controls, right-drag/keyboard/edge-scroll camera controls, HUD coordinates, specialist roster, and a 5-stage progression ladder (#337). Strictly outside guest state; no route moved.
 
 Declares static `GUIDE: TitleGuide` metadata (`RelativeSteered` `(1280,1280)` / `(320,240)` / `(0,480)` with automatic `mouse_delta` scaling, 30 Hz, `PauseToThink`, `Tab`/`R`/`Space` controls, Training Area & Adventure Mission 1 `M1010` goals, and `Game.txt` save path) and threads it through `run::main_with_guide` for `/api/meta`, `/api/controls`, and `/api/goals` (#311, core 1.2.0). Strictly outside guest state; no route moved.

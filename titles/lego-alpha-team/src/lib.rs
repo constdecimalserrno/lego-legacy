@@ -173,12 +173,12 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Left click (in-place)",
             action: "Click UI / open Unit Menu",
-            notes: "Omit `x`/`y` (or pass `320, 240`) so no absolute jump occurs. Clicks menu/HUD buttons; clicking and releasing a movable Action Brick opens its Unit Menu (`RotateCW`, `RotateCCW`, `Info`, `Hint`, plus Belt/Cord/Rope attach or Mirror toggle). Clicks during the intro translate to `Escape` (`click_in_a_movie`).",
+            notes: "Omit `x`/`y` (or pass `320, 240`) so no absolute jump occurs. Clicks menu/HUD buttons; clicking and releasing a movable Action Brick opens its Unit Menu (`RotateCW`, `RotateCCW`, `Info`, `Hint`, plus Belt/Cord/Rope attach or Mirror toggle — wait ~0.5s / ~15 flips to settle before pressing `R` for 90 deg CCW). Clicks during the intro translate to `Escape` (`click_in_a_movie`).",
         },
         ControlHint {
             input: "Left hold + relative drag",
             action: "Move Action Brick",
-            notes: "Hold Left on a movable brick (Direction Tile, Jump Tile, Stairs, Slide, Trampoline, Platform, Mirror, See-Saw, Bomb) and pipe small relative moves (~8-16 raw px/flip from `320, 240`) to carry it onto a valid pad, then release.",
+            notes: "Hold Left on a movable brick (Direction Tile, Jump Tile, Stairs, Slide, Trampoline, Platform, Mirror, See-Saw, Bomb) and pipe small relative moves from `(320, 240)` using verified scaling `0.5 px/raw_x`, `0.375 px/raw_y` (carry Action Bricks at `<= 8 screen px/flip` = `16 raw px/flip`) onto a valid pad, then release.",
         },
         ControlHint {
             input: "Right hold + relative drag",
@@ -193,7 +193,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "HUD bar (y=428)",
             action: "Menu / Camera / Specialists / GO-Stop",
-            notes: "Planning: Menu `(66,428)`, `PrevCam (215)`, `Nav_InOut (283)`, `Nav_Pivot (348)`, `NextCam (412)`, `GO/Stop (573)`. Running: follow-cams Flex `(170)`, Cam `(220)`, Charge `(270)`, Radia `(320)`, Crunch `(370)`, Dash `(419)`, `ICam (470)`, `SmartCam (534,433)`, `Stop (573)`.",
+            notes: "Planning: Menu `(61,430)` (required in `M0010` where `Escape` is disabled), `PrevCam (215)`, `Nav_InOut (283)`, `Nav_Pivot (348)`, `NextCam (412)`, `GO/Stop (573)`. Running: follow-cams Flex `(170)`, Cam `(220)`, Charge `(270)`, Radia `(320)`, Crunch `(370)`, Dash `(419)`, `ICam (470)`, `SmartCam (534,433)`, `Stop (573)`.",
         },
         ControlHint {
             input: "Space",
@@ -207,27 +207,28 @@ pub const GUIDE: TitleGuide = TitleGuide {
         },
         ControlHint {
             input: "R",
-            action: "RotateCW",
-            notes: "Rotates the selected Action Brick 90 degrees clockwise.",
+            action: "RotateCCW (90 deg CCW)",
+            notes: "Rotates the selected Action Brick 90 degrees counter-clockwise (CCW, not CW). Wait ~0.5s (~15 flips) settle after clicking a tile to open its Unit Menu before pressing `R`.",
         },
         ControlHint {
-            input: "Up / Down / Left / Right / PageUp / PageDown",
-            action: "Pan / elevate camera",
-            notes: "Moves/orbits the 3D mission camera while held (`A`/`Z`, `Q`/`W`, `S`/`X` also adjust camera zoom/orbit/pitch axes).",
+            input: "Z / Q / W / Up / Down / Left / Right",
+            action: "Zoom out / orbit / pan camera",
+            notes: "`Z` zooms out cleanly (`PageDown` does not zoom out), `Q`/`W` orbit, and arrow keys pan the 3D mission camera while held (`A`/`S`/`X`/`PageUp` adjust fine camera axes). Camera keys recenter the cursor, so re-verify cursor position before clicking.",
         },
         ControlHint {
             input: "Escape",
-            action: "Skip intro / Mission Menu",
-            notes: "Skips `LMIINTRO.AVI` from ~flip 440 onward (refused during the opening logo); opens/closes the in-mission menu (`Keep Playing`, `Start Over`, `Skip Training Mission`, `Return to HQ`) or cancels active selection. Never quits.",
+            action: "Skip intro / Mission Menu (normal missions)",
+            notes: "Skips `LMIINTRO.AVI` from ~flip 440 onward (refused during the opening logo); opens/closes the Mission Menu (`Keep Playing`, `Start Over`, `Return to HQ`) in normal missions (`M1010`/`M1020`) or cancels active selection. Disabled during `M0010` Training Area (click Menu button at `(61, 430)` instead). Never quits.",
         },
     ],
     hazards: &[
         "Absolute `move`/`drag` or `click` with non-`(320, 240)` coordinates knocks the software cursor off target because `DDMouse` re-centers to `(320, 240)` every flip; always steer with `mouse_delta` and click in place.",
         "Cursor clamping & drift (#332): a single flip clamps at `0..639 x 0..479` (max `+-159.5` visual px X, `+-89.6` Y per flip). Spread moves across `flips >= 4` and verify the drawn software cursor in a screenshot before every click.",
         "Leaving the software cursor within `16 px` of left/right or `12 px` of top/bottom edges continuously scrolls the mission camera.",
+        "Camera keys (`Z` zoom out, `Q`/`W` orbit, arrow keys pan) recenter the cursor; `PageDown` does not zoom out (use `Z`). Re-verify cursor position before clicking after using keyboard camera controls.",
         "Intended presentation rate is 30 Hz (33.3 ms per flip), not 60 Hz; size waits in 30-flip (1 s) multiples. No built-in fast-forward key exists; use control-host pace instead.",
         "Intro movie (`LMIINTRO.AVI`) refuses all keys and clicks before ~flip 440; `Space` is ignored for the entire intro (use `Escape` or click from ~flip 440).",
-        "In Training Area (`M0010`), Tee Vee (`T0001`) locks picking to only the flashing step target after each spoken line finishes whole (Direction Tile `U0179` unlocks at step `220a`).",
+        "In Training Area (`M0010`), `Escape` is disabled (click Menu button `(61, 430)` instead; `Escape` works in normal missions `M1010`/`M1020`), and Tee Vee (`T0001`) locks picking to only the flashing step target after each spoken line finishes whole (Direction Tile `U0179` unlocks at step `220a`).",
         "Keep display Options at `640x480` 16-bit; raising resolution or switching to 32-bit BPP breaks display output (`Game.txt` stores the override).",
     ],
     goals: &[
@@ -287,6 +288,52 @@ mod tests {
         assert!(GUIDE.controls.len() >= 10);
         assert!(GUIDE.hazards.len() >= 5);
         assert!(GUIDE.goals.len() >= 4);
+
+        let r_hint = GUIDE
+            .controls
+            .iter()
+            .find(|c| c.input == "R")
+            .expect("R hotkey hint");
+        assert!(
+            r_hint.action.contains("CCW")
+                && !r_hint.action.contains("RotateCW")
+                && r_hint.notes.contains("0.5s"),
+            "R hotkey must document 90 deg CCW and ~0.5s Unit Menu settle (#351)"
+        );
+
+        let cam_hint = GUIDE
+            .controls
+            .iter()
+            .find(|c| c.input.contains("Z") && c.input.contains("Q"))
+            .expect("camera key hint");
+        assert!(
+            cam_hint.notes.contains("PageDown` does not")
+                && cam_hint.notes.contains("recenter"),
+            "camera key hint must note Z zooms out (PageDown does not) and camera keys recenter cursor (#351)"
+        );
+
+        let esc_hint = GUIDE
+            .controls
+            .iter()
+            .find(|c| c.input == "Escape")
+            .expect("Escape hint");
+        assert!(
+            esc_hint.notes.contains("M0010") && esc_hint.notes.contains("(61, 430)"),
+            "Escape hint must note M0010 disables Escape and requires Menu button (61, 430) (#351)"
+        );
+
+        let drag_hint = GUIDE
+            .controls
+            .iter()
+            .find(|c| c.input.contains("relative drag") && c.action.contains("Action Brick"))
+            .expect("Action Brick relative drag hint");
+        assert!(
+            drag_hint.notes.contains("0.5 px/raw_x")
+                && drag_hint.notes.contains("0.375 px/raw_y")
+                && drag_hint.notes.contains("<= 8 screen px/flip")
+                && drag_hint.notes.contains("16 raw px/flip"),
+            "relative drag hint must document verified scaling and speed cap (#351)"
+        );
 
         for body in [
             format_meta_json(&LEGO_ALPHA_TEAM, &GUIDE),
