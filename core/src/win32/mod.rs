@@ -12,6 +12,7 @@ pub mod d3d;
 pub mod d3drm;
 pub mod ddraw;
 pub mod dinput;
+pub mod dshow;
 pub mod dsound;
 pub mod gdi32;
 pub mod kernel32;
@@ -356,6 +357,8 @@ pub struct State {
     pub sound: dsound::Sounds,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
+    /// DirectShow filter graphs (`CLSID_FilterGraph`) keyed by COM identity (#372).
+    pub filter_graphs: BTreeMap<u32, dshow::FilterGraph>,
     /// The movies a title has opened through AVIFile, by the file object it
     /// holds (#151).
     pub avi_files: BTreeMap<u32, avifile::File>,
@@ -513,6 +516,7 @@ impl State {
             waited_millis: 0,
             yielded: false,
             players: BTreeMap::new(),
+            filter_graphs: BTreeMap::new(),
             avi_files: BTreeMap::new(),
             movie_bytes: BTreeMap::new(),
             frame_getters: BTreeMap::new(),
@@ -987,7 +991,7 @@ impl State {
     }
 
     /// Whether any face sharing `identity` still holds a live reference.
-    fn has_live_refs(&self, identity: u32) -> bool {
+    pub(super) fn has_live_refs(&self, identity: u32) -> bool {
         self.face_entries(identity)
             .any(|(_, addr)| self.com.get(&addr).is_some_and(|o| o.refs > 0))
     }
@@ -1216,6 +1220,8 @@ pub enum ComState {
     Palette { store: u32 },
     /// A multimedia stream: a movie player, whose state is in the players.
     MultiMediaStream,
+    /// A DirectShow filter graph (`CLSID_FilterGraph`), whose state is in `State::filter_graphs` (#372).
+    FilterGraph,
     /// One stream of a player's movie.
     MediaStream { owner: u32, video: bool },
     /// A sample that a player's video is updated into: the surface it wraps.
@@ -1670,6 +1676,7 @@ const INTERFACE_SETS: &[&[&crate::com::Interface]] = &[
     d3drm::INTERFACES,
     d3d::INTERFACES,
     amstream::INTERFACES,
+    dshow::INTERFACES,
     avifile::INTERFACES,
 ];
 
@@ -2088,6 +2095,7 @@ impl crate::snap::Snap for ComState {
             Self::UserVisual { .. } => 13u8,
             Self::RetainedDevice { .. } => 14u8,
             Self::Viewport { .. } => 15u8,
+            Self::FilterGraph => 16u8,
         };
         v.u8(&mut tag);
         if v.is_reading() {
@@ -2226,11 +2234,12 @@ impl crate::snap::Snap for ComState {
                         immediate,
                     };
                 }
+                16 => *self = Self::FilterGraph,
                 _ => v.mark_corrupt("win32::ComState tag"),
             }
         } else {
             match self {
-                Self::None | Self::Sound | Self::MultiMediaStream => {}
+                Self::None | Self::Sound | Self::MultiMediaStream | Self::FilterGraph => {}
                 Self::Device { keyboard } => v.bool(keyboard),
                 Self::Surface {
                     pixels,
@@ -2391,6 +2400,7 @@ impl crate::snap::Snap for State {
             mixer,
             sound,
             players,
+            filter_graphs,
             avi_files,
             movie_bytes: _,
             frame_getters,
@@ -2560,6 +2570,7 @@ impl crate::snap::Snap for State {
         mixer.snap(v);
         sound.snap(v);
         crate::snap::snap_btree_map(v, players, |k, v| v.u32(k), |p, v| p.snap(v));
+        crate::snap::snap_btree_map(v, filter_graphs, |k, v| v.u32(k), |g, v| g.snap(v));
         crate::snap::snap_btree_map_with(
             v,
             avi_files,

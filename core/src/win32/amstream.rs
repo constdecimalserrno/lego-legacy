@@ -100,19 +100,9 @@ impl crate::snap::Snap for Player {
 }
 
 impl Movie {
-    /// How long one frame is on screen, in declared milliseconds, as a ratio.
-    fn frame_millis(&self) -> (u64, u64) {
-        let stream = &self.avi.streams[self.video];
-        (
-            u64::from(stream.scale) * 1000,
-            u64::from(stream.rate.max(1)),
-        )
-    }
-
     /// When frame `n` is due, in declared milliseconds after the start.
     fn due(&self, n: usize) -> u64 {
-        let (num, den) = self.frame_millis();
-        n as u64 * num / den
+        self.avi.streams[self.video].due_millis(n)
     }
 
     fn frames(&self) -> usize {
@@ -121,20 +111,12 @@ impl Movie {
 
     /// The movie's sound track, decoded for the mix, if it has one.
     fn sound(&self) -> Result<Option<Vec<i16>>, Stop> {
-        let Some(stream) = self.avi.streams.iter().find(|s| s.is_audio()) else {
-            return Ok(None);
-        };
-        let refuse = |e: crate::sound::Error| Stop::NotWritten {
-            what: format!("IAMMultiMediaStream::SetState: {}: {e}", self.name),
-            caller: 0,
-        };
-        let format = crate::sound::Format::parse(&stream.format).map_err(refuse)?;
-        let data: Vec<u8> = stream
-            .chunks
-            .iter()
-            .flat_map(|(at, len)| self.bytes[*at..at + len].iter().copied())
-            .collect();
-        format.decode(&data).map(Some).map_err(refuse)
+        self.avi
+            .decode_audio(&self.bytes)
+            .map_err(|e| Stop::NotWritten {
+                what: format!("IAMMultiMediaStream::SetState: {}: {e}", self.name),
+                caller: 0,
+            })
     }
 }
 
@@ -563,6 +545,30 @@ fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
+/// Write a decoded `iv50::Picture` into a guest RGB565 surface buffer.
+pub(super) fn write_rgb565(
+    mem: &mut crate::guest::Arena,
+    picture: &crate::iv50::Picture,
+    pixels: u32,
+    width: u32,
+    height: u32,
+    pitch: u32,
+) -> Result<(), Stop> {
+    let w = (width as usize).min(picture.width);
+    let h = (height as usize).min(picture.height);
+    let mut row = vec![0u8; w * 2];
+    for y in 0..h {
+        for x in 0..w {
+            let (r, g, b) = picture.rgb(x, y);
+            let pixel = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
+            row[x * 2..x * 2 + 2].copy_from_slice(&pixel.to_le_bytes());
+        }
+        mem.write(pixels + y as u32 * pitch, &row)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(())
+}
+
 /// Write a decoded picture into a guest surface, in the surface's format.
 fn put_picture(
     ctx: &mut Ctx<'_>,
@@ -590,20 +596,7 @@ fn put_picture(
             caller: 0,
         });
     }
-    let w = (width as usize).min(picture.width);
-    let h = (height as usize).min(picture.height);
-    let mut row = vec![0u8; w * 2];
-    for y in 0..h {
-        for x in 0..w {
-            let (r, g, b) = picture.rgb(x, y);
-            let pixel = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
-            row[x * 2..x * 2 + 2].copy_from_slice(&pixel.to_le_bytes());
-        }
-        ctx.mem
-            .write(pixels + y as u32 * pitch, &row)
-            .map_err(Stop::Fault)?;
-    }
-    Ok(())
+    write_rgb565(ctx.mem, picture, pixels, width, height, pitch)
 }
 
 fn get_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -656,6 +649,10 @@ impl State {
         self.players
             .values()
             .any(|p| p.movie.as_ref().is_some_and(|m| m.running_since.is_some()))
+            || self
+                .filter_graphs
+                .values()
+                .any(super::dshow::FilterGraph::is_running)
     }
 }
 

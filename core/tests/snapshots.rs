@@ -553,3 +553,114 @@ fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2(
     let bad_thread = m.snapshot_v2().expect("serialize OOB thread");
     assert!(restored.restore_v2(&bad_thread).is_err());
 }
+
+#[test]
+fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_bytes() {
+    use lego_legacy_core::avi;
+    use lego_legacy_core::win32::dshow::{FilterGraph, GraphMovie, EC_COMPLETE};
+    use lego_legacy_core::win32::Object;
+
+    let mut strh = vec![0u8; 56];
+    strh[0..4].copy_from_slice(b"vids");
+    strh[4..8].copy_from_slice(b"IV50");
+    strh[20..24].copy_from_slice(&1u32.to_le_bytes());
+    strh[24..28].copy_from_slice(&15u32.to_le_bytes());
+    let mut strf = vec![0u8; 40];
+    strf[0..4].copy_from_slice(&40u32.to_le_bytes());
+    strf[4..8].copy_from_slice(&16u32.to_le_bytes());
+    strf[8..12].copy_from_slice(&16u32.to_le_bytes());
+    strf[16..20].copy_from_slice(b"IV50");
+    let mut avi_bytes = Vec::new();
+    let chunk = |id: &[u8; 4], body: &[u8]| {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    };
+    let list = |kind: &[u8; 4], parts: &[Vec<u8>]| {
+        let mut body = kind.to_vec();
+        for p in parts {
+            body.extend_from_slice(p);
+        }
+        chunk(b"LIST", &body)
+    };
+    let strl = list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)]);
+    let hdrl = list(b"hdrl", &[strl]);
+    let movi = list(b"movi", &[chunk(b"00dc", &[])]);
+    let mut riff = b"AVI ".to_vec();
+    riff.extend_from_slice(&hdrl);
+    riff.extend_from_slice(&movi);
+    avi_bytes.extend_from_slice(&chunk(b"RIFF", &riff));
+    let parsed = avi::parse(&avi_bytes).expect("valid synthetic avi");
+
+    let (mut m, _host) = machine_at(4);
+    m.tree.declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
+    let ev = m.state.give(Object::Named {
+        kind: "event",
+        name: String::new(),
+        signalled: true,
+        manual: true,
+        held: None,
+    });
+    let mut movie = GraphMovie::new(
+        "intro.avi".to_owned(),
+        "C:\\GAME\\INTRO.AVI".to_owned(),
+        std::rc::Rc::from(avi_bytes.clone()),
+        parsed,
+        0,
+    );
+    movie.next = 1;
+    movie.running_since = Some(66);
+    let mut graph = FilterGraph {
+        event_handle: ev,
+        window_style: 0x0603_0000,
+        owner: 0x10010,
+        message_drain: 0x10010,
+        visible: true,
+        fullscreen: true,
+        cursor_hidden: true,
+        position: [0, 0, 640, 480],
+        frame_buffer: 0,
+        movie: Some(movie),
+        ..FilterGraph::default()
+    };
+    graph.events.push_back((EC_COMPLETE, 0, 0));
+    m.state.filter_graphs.insert(0x2000_0000, graph);
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    let mut host = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host).expect("machine");
+    restored.load_stub().expect("stub");
+    restored
+        .tree
+        .declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
+    restored.restore_v2(&snap).expect("cold restore v2");
+
+    let rg = restored
+        .state
+        .filter_graphs
+        .get(&0x2000_0000)
+        .expect("FilterGraph restored");
+    assert_eq!(rg.event_handle, ev);
+    assert_eq!(rg.window_style, 0x0603_0000);
+    assert_eq!(rg.owner, 0x10010);
+    assert_eq!(rg.message_drain, 0x10010);
+    assert!(rg.visible && rg.fullscreen && rg.cursor_hidden);
+    assert_eq!(rg.position, [0, 0, 640, 480]);
+    assert_eq!(rg.events.front(), Some(&(EC_COMPLETE, 0, 0)));
+    let rm = rg.movie.as_ref().expect("movie restored");
+    assert_eq!(rm.name, "intro.avi");
+    assert_eq!(rm.next, 1);
+    assert_eq!(rm.running_since, Some(66));
+    assert!(!rm.completed);
+    assert!(
+        restored
+            .state
+            .movie_bytes
+            .contains_key("C:\\GAME\\INTRO.AVI"),
+        "cold restore rehydrates immutable AVI bytes from Tree"
+    );
+}

@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-11-26
 
+Unflagged DirectShow intro movies (`lmicmp.avi`, `hvscmp.avi`, `introcmp.avi`) through Main Menu (#372): sets `click_in_a_movie: Some(0x39)` (Space `WM_KEYUP` skip for mouse clicks during movies), updates `routes/first-light.route` to run unflagged without `-novideo` (playing unskippable `lmicmp.avi`, skipping `hvscmp.avi` via Space and `introcmp.avi` via click, reaching the animated 3D Captain Redbeard Main Menu with live `theme.tun` music and exiting 0 at 581 flips), and adds real-disc integration tests verifying full unflagged playback of all 3 intro AVIs (including 1,080 scalable-mode IV50 frames of `introcmp.avi`), non-silent PCM intro + Main Menu audio, exact replay determinism, and bit-exact `LLSNAP v2` cold snapshot round-trips both mid-movie (flip 100) and on Main Menu (flip 555).
+
 Deterministic `.tun` ADPCM music streaming on the declared clock via `WINMM!timeSetEvent` / `timeKillEvent` (#371): real-disc integration tests in `titles/lego-racers/tests/lego_racers.rs` prove non-silent stereo PCM (`theme.tun`, 28,672 samples, RMS 5,216.4, peak 27,562 across 11 active blocks on `first-light.route`), fresh decoded PCM past the 2.04 s (`0x2c000` B) circular DirectSound buffer wrap (`26` 100 ms periodic callbacks over 461 flips, `22,045/22,050` distinct samples vs. lap 1), bit-exact audio determinism across independent runs, clean `timeKillEvent` teardown, and bit-exact `LLSNAP v2` cold snapshot/restore parity including audio.
 
 First light to rendered Main Menu under `--guest-args -novideo` (#370): commits

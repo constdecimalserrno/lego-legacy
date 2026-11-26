@@ -59,8 +59,9 @@ pub const LEGO_RACERS: Title = Title {
     registry: &[],
     // Where the official README and installer place it under Program Files.
     install_dir: "C:\\Program Files\\LEGO Media\\Games\\LEGO Racers",
-    // Not yet measured: ActiveMovie intro playback waits on bringup (#370+).
-    click_in_a_movie: None,
+    // `LEGORacers.exe`'s ActiveMovie loop skips skippable movies on `WM_KEYUP`;
+    // translating mouse clicks during movies to Space (`0x39`) lets clicks skip too (#372).
+    click_in_a_movie: Some(0x39),
     // One for one: in fullscreen `LEGORacers.exe` hides the OS cursor and
     // accumulates buffered DirectInput `GUID_SysMouse` relative deltas at 1:1
     // scale (`0x4bc900` / `0x4bca40`). Empirical cursor calibration follows in

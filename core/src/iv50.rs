@@ -4,14 +4,14 @@
 
 //! Indeo Video Interactive 5, the codec the roster's movies are written in.
 //!
-//! Rock Raiders' movies are all IV50 (#9). The format: a little-endian
+//! The roster's movies are IV50 (#9, #372). The format: a little-endian
 //! bitstream of pictures, each three planes at 4:1:0 (a luma plane and two
-//! chroma planes a quarter its size each way). A plane is one band; the
-//! scalable mode, which splits luma into four wavelet bands, is refused. A
-//! band is tiles of macroblocks of 8x8 (luma) or 4x4 (chroma)
-//! blocks: run-value coded coefficients through per-band codebooks,
-//! dequantised, inverse slant transformed, and motion compensated at half a
-//! pixel against sixteen-bit reference planes kept between pictures.
+//! chroma planes a quarter its size each way). A plane is one band, or four
+//! 5/3 wavelet luma bands in scalable mode. A band is tiles of macroblocks of
+//! 8x8 (luma) or 4x4 (chroma) blocks: run-value coded coefficients through
+//! per-band codebooks, dequantised, inverse slant transformed, and motion
+//! compensated at half a pixel against sixteen-bit reference planes kept
+//! between pictures.
 //!
 //! Written against FFmpeg's decoder read as the format's reference; the
 //! constants are in `tables`. What a stream asks for that this does not
@@ -255,10 +255,35 @@ struct Tile {
 }
 
 /// Which inverse transform a band's coefficients go through.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transform {
     Slant8x8,
+    RowSlant8x8,
+    ColSlant8x8,
+    PutPixels8x8,
     Slant4x4,
+}
+
+impl Transform {
+    const fn is_2d(self) -> bool {
+        matches!(self, Self::Slant8x8 | Self::Slant4x4)
+    }
+
+    const fn scan(self) -> &'static [u8] {
+        match self {
+            Self::Slant8x8 => &tables::SCAN_ZIGZAG_8X8,
+            Self::RowSlant8x8 => &tables::SCAN_VERTICAL_8X8,
+            Self::ColSlant8x8 | Self::PutPixels8x8 => &tables::SCAN_HORIZONTAL_8X8,
+            Self::Slant4x4 => &tables::SCAN_DIRECT_4X4,
+        }
+    }
+
+    const fn size(self) -> usize {
+        match self {
+            Self::Slant4x4 => 4,
+            Self::Slant8x8 | Self::RowSlant8x8 | Self::ColSlant8x8 | Self::PutPixels8x8 => 8,
+        }
+    }
 }
 
 struct Band {
@@ -266,12 +291,14 @@ struct Band {
     height: usize,
     pitch: usize,
     aligned_height: usize,
-    /// The reference planes, kept between pictures: two that trade places.
-    planes: [Vec<i16>; 2],
+    /// The reference planes, kept between pictures: two for standard mode plus
+    /// a third used by scalable droppable inter frames.
+    planes: [Vec<i16>; 3],
     halfpel: bool,
     mb_size: usize,
     blk_size: usize,
     transform: Transform,
+    quant_mat: u8,
     scan: &'static [u8],
     intra_base: &'static [u16],
     inter_base: &'static [u16],
@@ -287,18 +314,39 @@ impl Band {
             height,
             pitch: width.div_ceil(align) * align,
             aligned_height: height.div_ceil(align) * align,
-            planes: [Vec::new(), Vec::new()],
+            planes: [Vec::new(), Vec::new(), Vec::new()],
             halfpel: false,
             mb_size: 0,
             blk_size: 0,
             transform: Transform::Slant8x8,
+            quant_mat: 0,
             scan: &tables::SCAN_ZIGZAG_8X8,
-            intra_base: &tables::BASE_QUANT_8X8_INTRA,
-            inter_base: &tables::BASE_QUANT_8X8_INTER,
-            intra_scale: &tables::SCALE_QUANT_8X8_INTRA,
-            inter_scale: &tables::SCALE_QUANT_8X8_INTER,
+            intra_base: &tables::BASE_QUANT_8X8_INTRA[0],
+            inter_base: &tables::BASE_QUANT_8X8_INTER[0],
+            intra_scale: &tables::SCALE_QUANT_8X8_INTRA[0],
+            inter_scale: &tables::SCALE_QUANT_8X8_INTER[0],
             tiles: Vec::new(),
         }
+    }
+
+    fn apply_tables(&mut self) -> bool {
+        self.scan = self.transform.scan();
+        if self.blk_size == 8 {
+            let idx = usize::from(self.quant_mat);
+            if idx >= 5 {
+                return false;
+            }
+            self.intra_base = &tables::BASE_QUANT_8X8_INTRA[idx];
+            self.inter_base = &tables::BASE_QUANT_8X8_INTER[idx];
+            self.intra_scale = &tables::SCALE_QUANT_8X8_INTRA[idx];
+            self.inter_scale = &tables::SCALE_QUANT_8X8_INTER[idx];
+        } else {
+            self.intra_base = &tables::BASE_QUANT_4X4_INTRA;
+            self.inter_base = &tables::BASE_QUANT_4X4_INTER;
+            self.intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
+            self.inter_scale = &tables::SCALE_QUANT_4X4_INTER;
+        }
+        true
     }
 }
 
@@ -338,6 +386,7 @@ struct Layout {
     height: usize,
     tile_width: usize,
     tile_height: usize,
+    luma_bands: usize,
 }
 
 /// One stream's decoder. Pictures depend on the ones before them, so a stream
@@ -346,6 +395,8 @@ pub struct Decoder {
     layout: Option<Layout>,
     gop_valid: bool,
     decoded_any: bool,
+    is_scalable: bool,
+    inter_scal: bool,
     gop_flags: u32,
     frame_flags: u32,
     frame_type: u8,
@@ -353,10 +404,11 @@ pub struct Decoder {
     switch: usize,
     dst: usize,
     reference: usize,
+    ref2: usize,
     mb_book: Option<Codebook>,
-    /// Luma's band and the two chroma planes', once a GOP header has said
-    /// what they are.
-    planes: Vec<Band>,
+    /// Three planes: luma (1 or 4 bands) and the two chroma planes (1 band
+    /// each), once a GOP header has said what they are.
+    planes: [Vec<Band>; 3],
 }
 
 impl Default for Decoder {
@@ -372,11 +424,13 @@ impl crate::snap::Snap for Layout {
             height,
             tile_width,
             tile_height,
+            luma_bands,
         } = self;
         v.usize(width);
         v.usize(height);
         v.usize(tile_width);
         v.usize(tile_height);
+        v.usize(luma_bands);
     }
 }
 
@@ -451,48 +505,33 @@ impl crate::snap::Snap for Band {
             mb_size,
             blk_size,
             transform,
-            scan,
-            intra_base,
-            inter_base,
-            intra_scale,
-            inter_scale,
+            quant_mat,
+            scan: _,
+            intra_base: _,
+            inter_base: _,
+            intra_scale: _,
+            inter_scale: _,
             tiles,
         } = self;
         v.usize(width);
         v.usize(height);
         v.usize(pitch);
         v.usize(aligned_height);
-        crate::snap::snap_i16_vec(v, &mut planes[0]);
-        crate::snap::snap_i16_vec(v, &mut planes[1]);
+        for plane in planes {
+            crate::snap::snap_i16_vec(v, plane);
+        }
         v.bool(halfpel);
         v.usize(mb_size);
         v.usize(blk_size);
         let mut t_tag = match transform {
             Transform::Slant8x8 => 0u8,
-            Transform::Slant4x4 => 1u8,
+            Transform::RowSlant8x8 => 1u8,
+            Transform::ColSlant8x8 => 2u8,
+            Transform::PutPixels8x8 => 3u8,
+            Transform::Slant4x4 => 4u8,
         };
         v.u8(&mut t_tag);
-        if v.is_reading() {
-            match t_tag {
-                0 => {
-                    *transform = Transform::Slant8x8;
-                    *scan = &tables::SCAN_ZIGZAG_8X8;
-                    *intra_base = &tables::BASE_QUANT_8X8_INTRA;
-                    *inter_base = &tables::BASE_QUANT_8X8_INTER;
-                    *intra_scale = &tables::SCALE_QUANT_8X8_INTRA;
-                    *inter_scale = &tables::SCALE_QUANT_8X8_INTER;
-                }
-                1 => {
-                    *transform = Transform::Slant4x4;
-                    *scan = &tables::SCAN_DIRECT_4X4;
-                    *intra_base = &tables::BASE_QUANT_4X4_INTRA;
-                    *inter_base = &tables::BASE_QUANT_4X4_INTER;
-                    *intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
-                    *inter_scale = &tables::SCALE_QUANT_4X4_INTER;
-                }
-                _ => v.mark_corrupt("iv50::Transform tag"),
-            }
-        }
+        v.u8(quant_mat);
         crate::snap::snap_vec_with(
             v,
             tiles,
@@ -505,6 +544,24 @@ impl crate::snap::Snap for Band {
             },
             |t, v| t.snap(v),
         );
+        if v.is_reading() {
+            match t_tag {
+                0 => self.transform = Transform::Slant8x8,
+                1 => self.transform = Transform::RowSlant8x8,
+                2 => self.transform = Transform::ColSlant8x8,
+                3 => self.transform = Transform::PutPixels8x8,
+                4 => self.transform = Transform::Slant4x4,
+                _ => {
+                    v.mark_corrupt("iv50::Transform tag");
+                    return;
+                }
+            }
+            if (self.blk_size != 0 && self.transform.size() != self.blk_size)
+                || !self.apply_tables()
+            {
+                v.mark_corrupt("iv50::Band quant_mat or blk_size");
+            }
+        }
     }
 }
 
@@ -514,6 +571,8 @@ impl crate::snap::Snap for Decoder {
             layout,
             gop_valid,
             decoded_any,
+            is_scalable,
+            inter_scal,
             gop_flags,
             frame_flags,
             frame_type,
@@ -521,12 +580,15 @@ impl crate::snap::Snap for Decoder {
             switch,
             dst,
             reference,
+            ref2,
             mb_book,
             planes,
         } = self;
         crate::snap::snap_option(v, layout, |l, v| l.snap(v));
         v.bool(gop_valid);
         v.bool(decoded_any);
+        v.bool(is_scalable);
+        v.bool(inter_scal);
         v.u32(gop_flags);
         v.u32(frame_flags);
         v.u8(frame_type);
@@ -534,6 +596,7 @@ impl crate::snap::Snap for Decoder {
         v.usize(switch);
         v.usize(dst);
         v.usize(reference);
+        v.usize(ref2);
         crate::snap::snap_option_with(
             v,
             mb_book,
@@ -545,7 +608,12 @@ impl crate::snap::Snap for Decoder {
             },
             |b, v| b.snap(v),
         );
-        crate::snap::snap_vec_with(v, planes, || Band::new(0, 0, 1), |b, v| b.snap(v));
+        for plane in planes {
+            crate::snap::snap_vec_with(v, plane, || Band::new(0, 0, 1), |b, v| b.snap(v));
+        }
+        if v.is_reading() && (*dst >= 3 || *reference >= 3 || *ref2 >= 3) {
+            v.mark_corrupt("iv50::Decoder buffer index");
+        }
     }
 }
 
@@ -556,6 +624,8 @@ impl Decoder {
             layout: None,
             gop_valid: false,
             decoded_any: false,
+            is_scalable: false,
+            inter_scal: false,
             gop_flags: 0,
             frame_flags: 0,
             frame_type: INTRA,
@@ -563,8 +633,9 @@ impl Decoder {
             switch: 0,
             dst: 0,
             reference: 1,
+            ref2: 0,
             mb_book: None,
-            planes: Vec::new(),
+            planes: [Vec::new(), Vec::new(), Vec::new()],
         }
     }
 
@@ -595,8 +666,7 @@ impl Decoder {
             self.gop_header(&mut bits)?;
             self.gop_valid = true;
         }
-        // A GOP header refuses the scalable mode, so its pictures never come.
-        if self.frame_type == INTER_SCALABLE {
+        if self.frame_type == INTER_SCALABLE && !self.is_scalable {
             self.frame_type = INTER;
             return Err(Error("a scalable picture in a stream that is not"));
         }
@@ -629,6 +699,9 @@ impl Decoder {
         self.switch_buffers();
 
         if self.frame_type == NULL {
+            if self.is_scalable {
+                return Err(Error("a null picture in scalable mode"));
+            }
             if !self.decoded_any {
                 return Err(Error("a null picture with nothing to repeat"));
             }
@@ -636,29 +709,42 @@ impl Decoder {
         }
 
         let book = self.mb_book.ok_or(Error("no macroblock codebook"))?;
+        let base_mb_size = self.planes[0][0].mb_size;
         for plane in 0..3 {
-            let reference: Option<Vec<Vec<Macroblock>>> = (plane != 0).then(|| {
-                self.planes[0]
-                    .tiles
-                    .iter()
-                    .map(|t| t.blocks.clone())
-                    .collect()
-            });
-            let context = Context {
-                plane,
-                frame_flags: self.frame_flags,
-                frame_type: self.frame_type,
-                base_mb_size: self.planes[0].mb_size,
-                dst: self.dst,
-                reference: self.reference,
-            };
-            decode_band(
-                &mut bits,
-                &mut self.planes[plane],
-                reference.as_deref(),
-                &book,
-                &context,
-            )?;
+            let num_bands = self.planes[plane].len();
+            for band_idx in 0..num_bands {
+                let context = Context {
+                    plane,
+                    band: band_idx,
+                    is_scalable: self.is_scalable,
+                    frame_flags: self.frame_flags,
+                    frame_type: self.frame_type,
+                    base_mb_size,
+                    dst: self.dst,
+                    reference: self.reference,
+                };
+                if plane == 0 && band_idx == 0 {
+                    decode_band(&mut bits, &mut self.planes[0][0], None, &book, &context)?;
+                } else if plane == 0 {
+                    let (head, tail) = self.planes[0].split_at_mut(band_idx);
+                    decode_band(
+                        &mut bits,
+                        &mut tail[0],
+                        Some(&head[0].tiles),
+                        &book,
+                        &context,
+                    )?;
+                } else {
+                    let (head, tail) = self.planes.split_at_mut(plane);
+                    decode_band(
+                        &mut bits,
+                        &mut tail[0][band_idx],
+                        Some(&head[0][0].tiles),
+                        &book,
+                        &context,
+                    )?;
+                }
+            }
         }
         self.decoded_any = true;
 
@@ -668,31 +754,59 @@ impl Decoder {
         out.y.resize(layout.width * layout.height, 0);
         out.u.resize(cw * ch, 0);
         out.v.resize(cw * ch, 0);
-        copy_plane(
-            &self.planes[0],
-            self.dst,
-            &mut out.y,
-            layout.width,
-            layout.height,
-        );
+        if self.is_scalable {
+            recompose53(
+                &self.planes[0],
+                self.dst,
+                &mut out.y,
+                layout.width,
+                layout.height,
+            );
+        } else {
+            copy_plane(
+                &self.planes[0][0],
+                self.dst,
+                &mut out.y,
+                layout.width,
+                layout.height,
+            );
+        }
         // The first chroma plane in the stream is V, the second U.
-        copy_plane(&self.planes[2], self.dst, &mut out.u, cw, ch);
-        copy_plane(&self.planes[1], self.dst, &mut out.v, cw, ch);
+        copy_plane(&self.planes[2][0], self.dst, &mut out.u, cw, ch);
+        copy_plane(&self.planes[1][0], self.dst, &mut out.v, cw, ch);
         Ok(true)
     }
 
     fn switch_buffers(&mut self) {
-        if matches!(self.previous_type, INTRA | INTER) {
-            self.switch ^= 1;
-            self.dst = self.switch;
-            self.reference = self.switch ^ 1;
-        }
-        if matches!(self.frame_type, INTRA | INTER) {
-            if self.frame_type == INTRA {
-                self.switch = 0;
+        match self.previous_type {
+            INTRA | INTER => {
+                self.switch ^= 1;
+                self.dst = self.switch;
+                self.reference = self.switch ^ 1;
             }
-            self.dst = self.switch;
-            self.reference = self.switch ^ 1;
+            INTER_SCALABLE => {
+                if !self.inter_scal {
+                    self.ref2 = 2;
+                    self.inter_scal = true;
+                }
+                std::mem::swap(&mut self.dst, &mut self.ref2);
+                self.reference = self.ref2;
+            }
+            _ => {}
+        }
+        match self.frame_type {
+            INTRA => {
+                self.switch = 0;
+                self.inter_scal = false;
+                self.dst = self.switch;
+                self.reference = self.switch ^ 1;
+            }
+            INTER => {
+                self.inter_scal = false;
+                self.dst = self.switch;
+                self.reference = self.switch ^ 1;
+            }
+            _ => {}
         }
     }
 
@@ -712,14 +826,10 @@ impl Decoder {
         if tile_size > 256 {
             return Err(Error("a tile larger than 256"));
         }
-        // Luma's bands and chroma's, each written as a third of one less than
-        // the count. One each is all this decodes: four luma bands are the
-        // scalable mode, whose wavelet recomposition is not written.
-        let (luma_bands, chroma_bands) = (bits.bits(2)?, bits.bits(1)?);
-        if luma_bands != 0 {
-            return Err(Error("the scalable mode"));
-        }
-        if chroma_bands != 0 {
+        let luma_bands = bits.bits(2)? as usize * 3 + 1;
+        let chroma_bands = bits.bits(1)? as usize * 3 + 1;
+        let is_scalable = luma_bands != 1 || chroma_bands != 1;
+        if is_scalable && (luma_bands != 4 || chroma_bands != 1) {
             return Err(Error("a band subdivision other than the scalable one"));
         }
         let size = bits.bits(4)? as usize;
@@ -742,68 +852,81 @@ impl Decoder {
             height,
             tile_width: if tile_size == 0 { width } else { tile_size },
             tile_height: if tile_size == 0 { height } else { tile_size },
+            luma_bands,
         };
         let reconfigured = self.layout != Some(layout);
         if reconfigured {
+            let (lw, lh) = if luma_bands == 1 {
+                (width, height)
+            } else {
+                (width.div_ceil(2), height.div_ceil(2))
+            };
             let (cw, ch) = (width.div_ceil(4), height.div_ceil(4));
-            self.planes = vec![
-                Band::new(width, height, 16),
-                Band::new(cw, ch, 8),
-                Band::new(cw, ch, 8),
+            self.planes = [
+                (0..luma_bands).map(|_| Band::new(lw, lh, 16)).collect(),
+                vec![Band::new(cw, ch, 8)],
+                vec![Band::new(cw, ch, 8)],
             ];
             self.layout = Some(layout);
+            self.is_scalable = is_scalable;
         }
 
-        // As the reference does: whether the tiles are rebuilt follows the
-        // last band read, and a new layout always rebuilds them.
         let mut rebuild = reconfigured;
         for plane in 0..2 {
-            let band = &mut self.planes[plane];
-            band.halfpel = bits.bit()?;
-            let mb_bit = bits.bits(1)?;
-            let blk_size = 8usize >> bits.bits(1)?;
-            let mb_size = blk_size << (mb_bit ^ 1);
-            if plane == 0 && blk_size == 4 {
-                return Err(Error("4x4 luma blocks"));
-            }
-            rebuild = mb_size != band.mb_size || blk_size != band.blk_size;
-            band.mb_size = mb_size;
-            band.blk_size = blk_size;
-            if bits.bit()? {
-                return Err(Error("extended transform information"));
-            }
-            let (transform, scan, size): (Transform, &'static [u8], usize) = if plane == 0 {
-                (Transform::Slant8x8, &tables::SCAN_ZIGZAG_8X8, 8)
-            } else {
-                (Transform::Slant4x4, &tables::SCAN_DIRECT_4X4, 4)
-            };
-            if size != blk_size {
-                return Err(Error("a transform the size of no block"));
-            }
-            band.transform = transform;
-            band.scan = scan;
-            if blk_size == 8 {
-                band.intra_base = &tables::BASE_QUANT_8X8_INTRA;
-                band.inter_base = &tables::BASE_QUANT_8X8_INTER;
-                band.intra_scale = &tables::SCALE_QUANT_8X8_INTRA;
-                band.inter_scale = &tables::SCALE_QUANT_8X8_INTER;
-            } else {
-                band.intra_base = &tables::BASE_QUANT_4X4_INTRA;
-                band.inter_base = &tables::BASE_QUANT_4X4_INTER;
-                band.intra_scale = &tables::SCALE_QUANT_4X4_INTRA;
-                band.inter_scale = &tables::SCALE_QUANT_4X4_INTER;
-            }
-            if bits.bits(2)? != 0 {
-                return Err(Error("a band description without its end marker"));
+            let count = if plane == 0 { luma_bands } else { 1 };
+            for i in 0..count {
+                let band = &mut self.planes[plane][i];
+                band.halfpel = bits.bit()?;
+                let mb_bit = bits.bits(1)?;
+                let blk_size = 8usize >> bits.bits(1)?;
+                let mb_size = blk_size << (mb_bit ^ 1);
+                if plane == 0 && blk_size == 4 {
+                    return Err(Error("4x4 luma blocks"));
+                }
+                rebuild |=
+                    mb_size != band.mb_size || blk_size != band.blk_size || band.tiles.is_empty();
+                band.mb_size = mb_size;
+                band.blk_size = blk_size;
+                if bits.bit()? {
+                    return Err(Error("extended transform information"));
+                }
+                let transform = match (plane, i) {
+                    (0, 0) => Transform::Slant8x8,
+                    (0, 1) => Transform::RowSlant8x8,
+                    (0, 2) => Transform::ColSlant8x8,
+                    (0, 3) => Transform::PutPixels8x8,
+                    (1, 0) => Transform::Slant4x4,
+                    _ => return Err(Error("unsupported plane/band transform")),
+                };
+                if transform.size() != blk_size {
+                    return Err(Error("a transform the size of no block"));
+                }
+                band.transform = transform;
+                band.quant_mat = if plane == 0 {
+                    if luma_bands > 1 {
+                        (i + 1) as u8
+                    } else {
+                        0
+                    }
+                } else {
+                    5
+                };
+                if !band.apply_tables() {
+                    return Err(Error("quantisation matrix out of range"));
+                }
+                if bits.bits(2)? != 0 {
+                    return Err(Error("a band description without its end marker"));
+                }
             }
         }
         // The second chroma plane is described by the first.
         let (first, second) = self.planes.split_at_mut(2);
-        let (from, to) = (&first[1], &mut second[0]);
+        let (from, to) = (&first[1][0], &mut second[0][0]);
         to.halfpel = from.halfpel;
         to.mb_size = from.mb_size;
         to.blk_size = from.blk_size;
         to.transform = from.transform;
+        to.quant_mat = from.quant_mat;
         to.scan = from.scan;
         to.intra_base = from.intra_base;
         to.inter_base = from.inter_base;
@@ -831,7 +954,7 @@ impl Decoder {
 
     fn build_tiles(&mut self, layout: Layout) -> Result<()> {
         for plane in 0..3 {
-            let (tile_width, tile_height) = if plane == 0 {
+            let (mut tile_width, mut tile_height) = if plane == 0 {
                 (layout.tile_width, layout.tile_height)
             } else {
                 (
@@ -839,34 +962,47 @@ impl Decoder {
                     layout.tile_height.div_ceil(4),
                 )
             };
-            let band = &self.planes[plane];
-            let mut tiles = Vec::new();
-            for y in (0..band.height).step_by(tile_height) {
-                for x in (0..band.width).step_by(tile_width) {
-                    let width = tile_width.min(band.width - x);
-                    let height = tile_height.min(band.height - y);
-                    let count = width.div_ceil(band.mb_size) * height.div_ceil(band.mb_size);
-                    tiles.push(Tile {
-                        x,
-                        y,
-                        width,
-                        height,
-                        blocks: vec![Macroblock::default(); count],
-                    });
+            if plane == 0 && layout.luma_bands == 4 {
+                if !tile_width.is_multiple_of(2) || !tile_height.is_multiple_of(2) {
+                    return Err(Error("odd tile dimensions in scalable mode"));
                 }
+                tile_width >>= 1;
+                tile_height >>= 1;
             }
-            if plane != 0 {
-                let base = &self.planes[0].tiles;
-                if base.len() != tiles.len()
-                    || base
-                        .iter()
-                        .zip(&tiles)
-                        .any(|(a, b)| a.blocks.len() != b.blocks.len())
-                {
-                    return Err(Error("a band whose tiles do not line up with luma's"));
+            if tile_width == 0 || tile_height == 0 {
+                return Err(Error("zero tile dimensions"));
+            }
+            let num_bands = self.planes[plane].len();
+            for b in 0..num_bands {
+                let band = &self.planes[plane][b];
+                let mut tiles = Vec::new();
+                for y in (0..band.height).step_by(tile_height) {
+                    for x in (0..band.width).step_by(tile_width) {
+                        let width = tile_width.min(band.width - x);
+                        let height = tile_height.min(band.height - y);
+                        let count = width.div_ceil(band.mb_size) * height.div_ceil(band.mb_size);
+                        tiles.push(Tile {
+                            x,
+                            y,
+                            width,
+                            height,
+                            blocks: vec![Macroblock::default(); count],
+                        });
+                    }
                 }
+                if plane != 0 || b != 0 {
+                    let base = &self.planes[0][0].tiles;
+                    if base.len() != tiles.len()
+                        || base
+                            .iter()
+                            .zip(&tiles)
+                            .any(|(a, b)| a.blocks.len() != b.blocks.len())
+                    {
+                        return Err(Error("a band whose tiles do not line up with luma's"));
+                    }
+                }
+                self.planes[plane][b].tiles = tiles;
             }
-            self.planes[plane].tiles = tiles;
         }
         Ok(())
     }
@@ -875,6 +1011,8 @@ impl Decoder {
 /// What a band is decoded against.
 struct Context {
     plane: usize,
+    band: usize,
+    is_scalable: bool,
     frame_flags: u32,
     frame_type: u8,
     base_mb_size: usize,
@@ -884,17 +1022,23 @@ struct Context {
 
 impl Context {
     fn is_base(&self) -> bool {
-        self.plane == 0
+        self.plane == 0 && self.band == 0
     }
 }
 
 fn decode_band(
     bits: &mut Bits<'_>,
     band: &mut Band,
-    reference: Option<&[Vec<Macroblock>]>,
+    reference: Option<&[Tile]>,
     mb_book: &Codebook,
     cx: &Context,
 ) -> Result<()> {
+    if cx.dst == cx.reference {
+        return Err(Error("destination and reference buffers alias"));
+    }
+    if !cx.is_scalable && (cx.dst == 2 || cx.reference == 2) {
+        return Err(Error("scalable buffer in non-scalable stream"));
+    }
     for i in [cx.dst, cx.reference] {
         if band.planes[i].is_empty() {
             band.planes[i] = vec![0; band.pitch * band.aligned_height];
@@ -964,10 +1108,10 @@ fn decode_band(
             return Err(Error("a band with larger macroblocks than luma's"));
         }
         let reference = match reference {
-            Some(r) if r[t].len() != band.tiles[t].blocks.len() => {
+            Some(r) if r[t].blocks.len() != band.tiles[t].blocks.len() => {
                 return Err(Error("a tile unlike its reference"));
             }
-            Some(r) => Some(&r[t][..]),
+            Some(r) => Some(&r[t].blocks[..]),
             None => None,
         };
         if bits.bit()? {
@@ -1206,7 +1350,7 @@ fn halfpel_split(halfpel: bool, mv_x: i32, mv_y: i32) -> (i32, i32, i32) {
     }
 }
 
-fn two_planes(planes: &mut [Vec<i16>; 2], dst: usize, src: usize) -> (&mut [i16], &[i16]) {
+fn two_planes(planes: &mut [Vec<i16>; 3], dst: usize, src: usize) -> (&mut [i16], &[i16]) {
     let (low, high) = planes.split_at_mut(dst.max(src));
     if dst < src {
         (&mut low[dst], &high[0])
@@ -1273,7 +1417,7 @@ fn blocks(
                     &mut coeffs,
                     &mut columns,
                 )?;
-                if intra {
+                if intra && transform.is_2d() {
                     prev_dc += coeffs[0];
                     coeffs[0] = prev_dc;
                     columns[0] |= prev_dc != 0;
@@ -1285,7 +1429,7 @@ fn blocks(
                     )?;
                 }
             } else if intra {
-                dc_only(prev_dc, &mut dst[offset..], pitch, blk_size);
+                dc_only(transform, prev_dc, &mut dst[offset..], pitch, blk_size);
             } else {
                 motion(
                     dst, src, offset, mv_x, mv_y, kind, pitch, height, blk_size, false,
@@ -1425,6 +1569,41 @@ fn inverse(
                 }
             }
         }
+        Transform::RowSlant8x8 => {
+            for row in 0..8 {
+                let line: [i32; 8] = std::array::from_fn(|k| c[8 * row + k]);
+                let at = row * pitch;
+                if line == [0; 8] {
+                    out[at..at + 8].fill(0);
+                } else {
+                    for (k, v) in slant8(line, true).into_iter().enumerate() {
+                        out[at + k] = v as i16;
+                    }
+                }
+            }
+        }
+        Transform::ColSlant8x8 => {
+            for i in 0..8 {
+                if columns[i] {
+                    let column = slant8(std::array::from_fn(|k| c[i + 8 * k]), true);
+                    for (k, v) in column.into_iter().enumerate() {
+                        out[k * pitch + i] = v as i16;
+                    }
+                } else {
+                    for k in 0..8 {
+                        out[k * pitch + i] = 0;
+                    }
+                }
+            }
+        }
+        Transform::PutPixels8x8 => {
+            for row in 0..8 {
+                let at = row * pitch;
+                for k in 0..8 {
+                    out[at + k] = c[8 * row + k] as i16;
+                }
+            }
+        }
         Transform::Slant4x4 => {
             let mut tmp = [0i32; 16];
             for i in (0..4).filter(|i| columns[*i]) {
@@ -1449,11 +1628,35 @@ fn inverse(
 }
 
 /// An intra block with no coefficients: the running DC, spread over the
-/// block as either slant transform spreads it.
-fn dc_only(dc: i32, out: &mut [i16], pitch: usize, size: usize) {
+/// block as the band's transform spreads it.
+fn dc_only(transform: Transform, dc: i32, out: &mut [i16], pitch: usize, size: usize) {
     let half = ((dc + 1) >> 1) as i16;
-    for row in 0..size {
-        out[row * pitch..row * pitch + size].fill(half);
+    match transform {
+        Transform::Slant8x8 | Transform::Slant4x4 => {
+            for row in 0..size {
+                out[row * pitch..row * pitch + size].fill(half);
+            }
+        }
+        Transform::RowSlant8x8 => {
+            out[..size].fill(half);
+            for row in 1..size {
+                out[row * pitch..row * pitch + size].fill(0);
+            }
+        }
+        Transform::ColSlant8x8 => {
+            for row in 0..size {
+                let at = row * pitch;
+                out[at] = half;
+                out[at + 1..at + size].fill(0);
+            }
+        }
+        Transform::PutPixels8x8 => {
+            out[0] = dc as i16;
+            out[1..size].fill(0);
+            for row in 1..size {
+                out[row * pitch..row * pitch + size].fill(0);
+            }
+        }
     }
 }
 
@@ -1513,9 +1716,127 @@ fn copy_plane(band: &Band, dst: usize, out: &mut [u8], width: usize, height: usi
     }
 }
 
+/// Recompose four 5/3 wavelet luma bands (LL, HL, LH, HH) into full-resolution
+/// 8-bit pixels (`ff_ivi_recompose53` in FFmpeg's `ivi_dsp.c`).
+fn recompose53(bands: &[Band], dst: usize, out: &mut [u8], width: usize, height: usize) {
+    let pitch = bands[0].pitch;
+    let b0 = &bands[0].planes[dst];
+    let b1 = &bands[1].planes[dst];
+    let b2 = &bands[2].planes[dst];
+    let b3 = &bands[3].planes[dst];
+
+    for y in (0..height).step_by(2) {
+        let row_idx = y / 2;
+        let y_cur = row_idx * pitch;
+        let y_prev = if row_idx == 0 { y_cur } else { y_cur - pitch };
+        let y_next = if y + 2 >= height {
+            y_cur
+        } else {
+            y_cur + pitch
+        };
+
+        let mut b0_1 = i32::from(b0[y_cur]);
+        let mut b0_2 = i32::from(b0[y_next]);
+
+        let mut b1_1 = i32::from(b1[y_prev]);
+        let mut b1_2 = i32::from(b1[y_cur]);
+        let mut b1_3 = b1_1 - b1_2 * 6 + i32::from(b1[y_next]);
+
+        let mut b2_2 = i32::from(b2[y_cur]);
+        let mut b2_3 = b2_2;
+        let mut b2_5 = i32::from(b2[y_next]);
+        let mut b2_6 = b2_5;
+
+        let mut b3_2 = i32::from(b3[y_prev]);
+        let mut b3_3 = b3_2;
+        let mut b3_5 = i32::from(b3[y_cur]);
+        let mut b3_6 = b3_5;
+        let mut b3_8 = b3_2 - b3_5 * 6 + i32::from(b3[y_next]);
+        let mut b3_9 = b3_8;
+
+        for x in (0..width).step_by(2) {
+            let col = x / 2;
+            let next_col = if x + 2 >= width { col } else { col + 1 };
+
+            let b2_1 = b2_2;
+            b2_2 = b2_3;
+            let b2_4 = b2_5;
+            b2_5 = b2_6;
+            let b3_1 = b3_2;
+            b3_2 = b3_3;
+            let b3_4 = b3_5;
+            b3_5 = b3_6;
+            let b3_7 = b3_8;
+            b3_8 = b3_9;
+
+            // LL band: LPF vertically and horizontally.
+            let tmp0 = b0_1;
+            let tmp2 = b0_2;
+            b0_1 = i32::from(b0[y_cur + next_col]);
+            b0_2 = i32::from(b0[y_next + next_col]);
+            let tmp1 = tmp0 + b0_1;
+
+            let mut p0 = tmp0 * 16;
+            let mut p1 = tmp1 * 8;
+            let mut p2 = (tmp0 + tmp2) * 8;
+            let mut p3 = (tmp1 + tmp2 + b0_2) * 4;
+
+            // HL band: HPF vertically, LPF horizontally.
+            let tmp0 = b1_2;
+            let tmp1 = b1_1;
+            b1_2 = i32::from(b1[y_cur + next_col]);
+            b1_1 = i32::from(b1[y_prev + next_col]);
+            let tmp2 = b1_3;
+            b1_3 = b1_1 - b1_2 * 6 + i32::from(b1[y_next + next_col]);
+
+            p0 += (tmp0 + tmp1) * 8;
+            p1 += (tmp0 + tmp1 + b1_1 + b1_2) * 4;
+            p2 += tmp2 * 4;
+            p3 += (tmp2 + b1_3) * 2;
+
+            // LH band: LPF vertically, HPF horizontally.
+            b2_3 = i32::from(b2[y_cur + next_col]);
+            b2_6 = i32::from(b2[y_next + next_col]);
+            let tmp0 = b2_1 + b2_2;
+            let tmp1 = b2_1 - b2_2 * 6 + b2_3;
+
+            p0 += tmp0 * 8;
+            p1 += tmp1 * 4;
+            p2 += (tmp0 + b2_4 + b2_5) * 4;
+            p3 += (tmp1 + b2_4 - b2_5 * 6 + b2_6) * 2;
+
+            // HH band: HPF vertically and horizontally.
+            b3_6 = i32::from(b3[y_cur + next_col]);
+            b3_3 = i32::from(b3[y_prev + next_col]);
+            let tmp0 = b3_1 + b3_4;
+            let tmp1 = b3_2 + b3_5;
+            let tmp2 = b3_3 + b3_6;
+            b3_9 = b3_3 - b3_6 * 6 + i32::from(b3[y_next + next_col]);
+
+            p0 += (tmp0 + tmp1) * 4;
+            p1 += (tmp0 - tmp1 * 6 + tmp2) * 2;
+            p2 += (b3_7 + b3_8) * 2;
+            p3 += b3_7 - b3_8 * 6 + b3_9;
+
+            let row0 = y * width + x;
+            out[row0] = ((p0 >> 6) + 128).clamp(0, 255) as u8;
+            if x + 1 < width {
+                out[row0 + 1] = ((p1 >> 6) + 128).clamp(0, 255) as u8;
+            }
+            if y + 1 < height {
+                let row1 = (y + 1) * width + x;
+                out[row1] = ((p2 >> 6) + 128).clamp(0, 255) as u8;
+                if x + 1 < width {
+                    out[row1 + 1] = ((p3 >> 6) + 128).clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bt601, signed, Bits, Codebook, Decoder, Picture};
+    use super::{bt601, signed, Band, Bits, Codebook, Decoder, Picture};
 
     #[test]
     fn studio_black_and_white_are_the_ends_of_the_range_and_grey_has_no_colour() {
@@ -1588,5 +1909,170 @@ mod tests {
         let mut decoder = Decoder::new();
         let mut out = Picture::default();
         assert!(decoder.decode(&[0x1f | (4 << 5), 0], &mut out).is_err());
+    }
+
+    #[test]
+    fn scalable_recompose53_reconstructs_dc_and_detail_bands() {
+        let mut bands: Vec<Band> = (0..4).map(|_| Band::new(2, 2, 16)).collect();
+        for b in &mut bands {
+            b.planes[0] = vec![0; b.pitch * b.aligned_height];
+        }
+        // Uniform LL = 16 with zero high-frequency bands: p0..p3 = 16*16 = 256 -> (256 >> 6) + 128 = 132.
+        for row in 0..2 {
+            let at = row * bands[0].pitch;
+            bands[0].planes[0][at] = 16;
+            bands[0].planes[0][at + 1] = 16;
+        }
+        let mut out = vec![0u8; 16];
+        super::recompose53(&bands, 0, &mut out, 4, 4);
+        assert_eq!(out, vec![132u8; 16]);
+
+        // Constant HL = 16 with zero LL/LH/HH must be zero-DC vertically:
+        // even rows +4 (132), odd rows -4 (124) across every column.
+        for b in &mut bands {
+            b.planes[0].fill(0);
+        }
+        for row in 0..2 {
+            let at = row * bands[1].pitch;
+            bands[1].planes[0][at] = 16;
+            bands[1].planes[0][at + 1] = 16;
+        }
+        super::recompose53(&bands, 0, &mut out, 4, 4);
+        assert_eq!(
+            out,
+            vec![132, 132, 132, 132, 124, 124, 124, 124, 132, 132, 132, 132, 124, 124, 124, 124]
+        );
+    }
+
+    #[test]
+    fn scalable_1d_transforms_and_dc_spread_match_band_orientation() {
+        let mut coeffs = [0i32; 64];
+        coeffs[0] = 4;
+        let mut cols = [false; 8];
+        cols[0] = true;
+
+        let mut row_out = [0i16; 64];
+        super::inverse(
+            super::Transform::RowSlant8x8,
+            &coeffs,
+            &mut row_out,
+            8,
+            &cols,
+        );
+        assert!(row_out[..8].iter().all(|&v| v == 2));
+        assert!(row_out[8..].iter().all(|&v| v == 0));
+
+        let mut row_dc = [0i16; 64];
+        super::dc_only(super::Transform::RowSlant8x8, 4, &mut row_dc, 8, 8);
+        assert_eq!(row_out, row_dc);
+
+        let mut col_out = [0i16; 64];
+        super::inverse(
+            super::Transform::ColSlant8x8,
+            &coeffs,
+            &mut col_out,
+            8,
+            &cols,
+        );
+        for r in 0..8 {
+            assert_eq!(col_out[r * 8], 2);
+            assert!(col_out[r * 8 + 1..r * 8 + 8].iter().all(|&v| v == 0));
+        }
+        let mut col_dc = [0i16; 64];
+        super::dc_only(super::Transform::ColSlant8x8, 4, &mut col_dc, 8, 8);
+        assert_eq!(col_out, col_dc);
+
+        let mut pix_out = [0i16; 64];
+        super::inverse(
+            super::Transform::PutPixels8x8,
+            &coeffs,
+            &mut pix_out,
+            8,
+            &cols,
+        );
+        assert_eq!(pix_out[0], 4);
+        assert!(pix_out[1..].iter().all(|&v| v == 0));
+        let mut pix_dc = [0i16; 64];
+        super::dc_only(super::Transform::PutPixels8x8, 4, &mut pix_dc, 8, 8);
+        assert_eq!(pix_out, pix_dc);
+    }
+
+    #[test]
+    fn scalable_inter_buffer_switching_uses_third_buffer_and_snaps_cleanly() {
+        use crate::snap::{Reader, Snap, Writer};
+
+        let mut dec = Decoder::new();
+        // INTRA -> dst=0, ref=1
+        dec.previous_type = super::INTRA;
+        dec.frame_type = super::INTRA;
+        dec.switch_buffers();
+        assert_eq!((dec.dst, dec.reference, dec.inter_scal), (0, 1, false));
+
+        // First INTER_SCALABLE -> dst=1, ref=0
+        dec.previous_type = super::INTRA;
+        dec.frame_type = super::INTER_SCALABLE;
+        dec.switch_buffers();
+        assert_eq!((dec.dst, dec.reference, dec.inter_scal), (1, 0, false));
+
+        // Second INTER_SCALABLE -> swaps into buffer 2 (dst=2, ref=1, inter_scal=true)
+        dec.previous_type = super::INTER_SCALABLE;
+        dec.frame_type = super::INTER_SCALABLE;
+        dec.switch_buffers();
+        assert_eq!((dec.dst, dec.reference, dec.inter_scal), (2, 1, true));
+
+        // Third INTER_SCALABLE -> swaps back (dst=1, ref=2)
+        dec.previous_type = super::INTER_SCALABLE;
+        dec.frame_type = super::INTER_SCALABLE;
+        dec.switch_buffers();
+        assert_eq!((dec.dst, dec.reference, dec.inter_scal), (1, 2, true));
+
+        // Populate 4 scalable luma bands with all 4 transforms + snap round-trip.
+        dec.is_scalable = true;
+        dec.planes[0] = [
+            super::Transform::Slant8x8,
+            super::Transform::RowSlant8x8,
+            super::Transform::ColSlant8x8,
+            super::Transform::PutPixels8x8,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut b = Band::new(16, 16, 16);
+            b.blk_size = 8;
+            b.mb_size = 16;
+            b.transform = t;
+            b.quant_mat = (i + 1) as u8;
+            assert!(b.apply_tables());
+            b.planes[2] = vec![(i as i16) + 7; 4];
+            b
+        })
+        .collect();
+
+        let mut writer = Writer::new();
+        dec.snap(&mut writer);
+
+        let mut restored = Decoder::new();
+        let mut reader = Reader::new(&writer.out);
+        restored.snap(&mut reader);
+        reader.finish("iv50").expect("clean scalable iv50 snapshot");
+
+        assert!(restored.is_scalable);
+        assert!(restored.inter_scal);
+        assert_eq!((restored.dst, restored.reference, restored.ref2), (1, 2, 2));
+        assert_eq!(restored.planes[0].len(), 4);
+        assert_eq!(
+            restored.planes[0][1].transform,
+            super::Transform::RowSlant8x8
+        );
+        assert_eq!(
+            restored.planes[0][2].transform,
+            super::Transform::ColSlant8x8
+        );
+        assert_eq!(
+            restored.planes[0][3].transform,
+            super::Transform::PutPixels8x8
+        );
+        assert_eq!(restored.planes[0][3].quant_mat, 4);
+        assert_eq!(restored.planes[0][3].planes[2], vec![10; 4]);
     }
 }

@@ -44,6 +44,12 @@ pub const SHIMS: &[Shim] = &[
         change_display_settings,
     ),
     stdcall("USER32", "WaitMessage", 0, wait_message),
+    stdcall(
+        "USER32",
+        "MsgWaitForMultipleObjects",
+        5,
+        msg_wait_for_multiple_objects,
+    ),
     stdcall("USER32", "PeekMessageA", 5, peek_message),
     stdcall("USER32", "GetMessageA", 4, get_message),
     stdcall("USER32", "TranslateMessage", 1, translate_message),
@@ -1678,6 +1684,131 @@ fn wait_message(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+fn has_wake_message(ctx: &Ctx<'_>, mask: u32) -> bool {
+    const QS_KEY: u32 = 0x0001;
+    const QS_MOUSEMOVE: u32 = 0x0002;
+    const QS_MOUSEBUTTON: u32 = 0x0004;
+    const QS_POSTMESSAGE: u32 = 0x0008;
+    const QS_TIMER: u32 = 0x0010;
+    const QS_PAINT: u32 = 0x0020;
+    if mask == 0 {
+        return false;
+    }
+    let me = super::kernel32::running_thread(ctx);
+    if mask & QS_POSTMESSAGE != 0 && ctx.state.quit.is_some_and(|(t, _)| t == me) {
+        return true;
+    }
+    if me != ctx.state.window_thread {
+        return false;
+    }
+    for m in &ctx.state.messages {
+        let bit = match m.message {
+            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_CHAR => QS_KEY,
+            WM_MOUSEMOVE => QS_MOUSEMOVE,
+            0x0201..=0x020d => QS_MOUSEBUTTON,
+            _ => QS_POSTMESSAGE,
+        };
+        if mask & bit != 0 {
+            return true;
+        }
+    }
+    if mask & QS_PAINT != 0 && ctx.state.window_made && ctx.state.paint_erase.is_some() {
+        return true;
+    }
+    if mask & QS_TIMER != 0 && ctx.state.timers.iter().any(|t| t.due <= ctx.clock_millis) {
+        return true;
+    }
+    false
+}
+
+/// `MsgWaitForMultipleObjects(nCount, pHandles, fWaitAll, dwMilliseconds, dwWakeMask)` (#372).
+fn msg_wait_for_multiple_objects(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const MAXIMUM_WAIT_OBJECTS: usize = 64;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const WAIT_FAILED: u32 = 0xffff_ffff;
+    const INFINITE: u32 = 0xffff_ffff;
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    let count = args[0] as usize;
+    let handles_ptr = args[1];
+    let wait_all = args[2] != 0;
+    let timeout = args[3];
+    let wake_mask = args[4];
+
+    if count >= MAXIMUM_WAIT_OBJECTS || (count > 0 && handles_ptr == 0) {
+        ctx.state.last_error = ERROR_INVALID_PARAMETER;
+        super::kernel32::unpark(ctx);
+        return Ok(WAIT_FAILED);
+    }
+    let mut handle_buf = [0u32; MAXIMUM_WAIT_OBJECTS];
+    for (i, slot) in handle_buf.iter_mut().take(count).enumerate() {
+        let Some(addr) = handles_ptr.checked_add((i as u32) * 4) else {
+            ctx.state.last_error = ERROR_INVALID_PARAMETER;
+            super::kernel32::unpark(ctx);
+            return Ok(WAIT_FAILED);
+        };
+        *slot = ctx.mem.read_u32(addr).map_err(Stop::Fault)?;
+    }
+    let handles = &handle_buf[..count];
+    if handles.iter().any(|h| ctx.state.object(*h).is_none()) {
+        ctx.state.last_error = ERROR_INVALID_HANDLE;
+        super::kernel32::unpark(ctx);
+        return Ok(WAIT_FAILED);
+    }
+    if wait_all && (1..count).any(|i| handles[..i].contains(&handles[i])) {
+        ctx.state.last_error = ERROR_INVALID_PARAMETER;
+        super::kernel32::unpark(ctx);
+        return Ok(WAIT_FAILED);
+    }
+
+    if wait_all {
+        if handles.iter().all(|h| super::kernel32::ready(ctx, *h))
+            && (wake_mask == 0 || has_wake_message(ctx, wake_mask))
+        {
+            for &h in handles {
+                super::kernel32::claim(ctx, h);
+            }
+            super::kernel32::unpark(ctx);
+            return Ok(0);
+        }
+    } else {
+        if let Some(i) = handles.iter().position(|h| super::kernel32::claim(ctx, *h)) {
+            super::kernel32::unpark(ctx);
+            return Ok(u32::try_from(i).unwrap_or(0));
+        }
+        if has_wake_message(ctx, wake_mask) {
+            super::kernel32::unpark(ctx);
+            return Ok(u32::try_from(count).unwrap_or(0));
+        }
+        if let Some(step) = super::dshow::advance_for_wait(ctx, handles, timeout)? {
+            super::kernel32::unpark(ctx);
+            return Ok(match step {
+                super::dshow::WaitStep::FrameStaged if wake_mask != 0 => {
+                    u32::try_from(count).unwrap_or(0)
+                }
+                super::dshow::WaitStep::FrameStaged | super::dshow::WaitStep::TimedOut => {
+                    WAIT_TIMEOUT
+                }
+                super::dshow::WaitStep::Completed(idx) => u32::try_from(idx).unwrap_or(0),
+            });
+        }
+    }
+
+    if timeout == 0 {
+        super::kernel32::unpark(ctx);
+        return Ok(WAIT_TIMEOUT);
+    }
+    if wake_mask == 0 && ctx.state.threads.len() >= 2 && !handles.is_empty() {
+        return super::kernel32::wait_blocked(ctx, handles, timeout);
+    }
+    if timeout != INFINITE {
+        ctx.state.waited_millis += u64::from(timeout);
+        return Ok(WAIT_TIMEOUT);
+    }
+    Ok(u32::try_from(count).unwrap_or(0))
+}
+
 /// PostQuitMessage(code): the thread that asks is handed `WM_QUIT` with the
 /// code, once nothing posted to it is left waiting (#140).
 fn post_quit(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1762,6 +1893,9 @@ fn load_resource(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 /// before the cursors were (#139).
 pub const ARROW: u32 = 0x0001_0020;
 
+/// Windows' own wait/hourglass cursor, `LoadCursorA(NULL, IDC_WAIT)` (#372).
+pub const WAIT_CURSOR: u32 = 0x0001_0021;
+
 /// Where the handles of the cursors a title loads out of its own modules
 /// start, one after another as they are loaded.
 const CURSORS: u32 = 0x0003_0000;
@@ -1776,6 +1910,7 @@ const CURSORS: u32 = 0x0003_0000;
 /// `ISLE.EXE` (#139).
 fn load_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const IDC_ARROW: u32 = 32512;
+    const IDC_WAIT: u32 = 32514;
     const RT_CURSOR: u32 = 1;
     const RT_GROUP_CURSOR: u32 = 12;
     let (module, name) = (args[0], args[1]);
@@ -1785,6 +1920,9 @@ fn load_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     };
     if module == 0 && name == IDC_ARROW {
         return Ok(ARROW);
+    }
+    if module == 0 && name == IDC_WAIT {
+        return Ok(WAIT_CURSOR);
     }
     if module == 0 || name > 0xffff {
         return Err(wall(format!("cursor {name:#x} of module {module:#x}")));
@@ -1942,7 +2080,7 @@ fn set_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let loaded = cursor
         .checked_sub(CURSORS)
         .is_some_and(|i| (i as usize) < ctx.state.cursors.len());
-    if !(cursor == 0 || cursor == ARROW || loaded) {
+    if !(cursor == 0 || cursor == ARROW || cursor == WAIT_CURSOR || loaded) {
         return Err(Stop::NotWritten {
             what: format!("USER32.dll!SetCursor: {cursor:#x}, which is not a cursor"),
             caller: 0,
@@ -1957,7 +2095,7 @@ fn set_cursor(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 pub fn shape(state: &super::State, cursor: u32) -> Option<crate::host::Cursor> {
     match cursor {
         0 => Some(crate::host::Cursor::none()),
-        ARROW => None,
+        ARROW | WAIT_CURSOR => None,
         _ => state
             .cursors
             .get(cursor.wrapping_sub(CURSORS) as usize)
@@ -2912,6 +3050,95 @@ mod tests {
             assert!(super::window_long(ctx, &[WINDOW, 8]).is_err());
             assert_eq!(super::destroy_window(ctx, &[WINDOW]).unwrap(), 1);
             assert_eq!(super::window_long(ctx, &[WINDOW, 0]).unwrap(), 0x1234_5678);
+        });
+    }
+
+    #[test]
+    fn msg_wait_for_multiple_objects_and_idc_wait_cursor_match_win32() {
+        use super::{
+            deliver, load_cursor, msg_wait_for_multiple_objects, set_cursor, shape, ARROW,
+            WAIT_CURSOR,
+        };
+        use crate::guest::GuestMem;
+        use crate::host::Input;
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::Object;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            // IDC_WAIT returns a distinct system cursor accepted by SetCursor.
+            let h_wait = load_cursor(ctx, &[0, 32514]).unwrap();
+            assert_eq!(h_wait, WAIT_CURSOR);
+            assert_ne!(h_wait, ARROW);
+            assert_eq!(set_cursor(ctx, &[h_wait]).unwrap(), 0);
+            assert!(shape(ctx.state, h_wait).is_none());
+
+            ctx.state.window_made = true;
+            let ev_at = 0x1200u32;
+            let h_ev = ctx.state.give(Object::Named {
+                kind: "event",
+                name: String::new(),
+                signalled: false,
+                manual: true,
+                held: None,
+            });
+            ctx.mem.write_u32(ev_at, h_ev).unwrap();
+
+            // Zero timeout with unsignalled event and empty queue returns WAIT_TIMEOUT (0x102).
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 0, 0xff]).unwrap(),
+                0x102
+            );
+            // Finite timeout advances waited_millis and returns WAIT_TIMEOUT.
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 25, 0xff]).unwrap(),
+                0x102
+            );
+            assert_eq!(ctx.state.waited_millis, 25);
+            ctx.state.waited_millis = 0;
+
+            // Queued key message wakes with WAIT_OBJECT_0 + nCount when QS_KEY is in mask.
+            deliver(
+                ctx.state,
+                Input::Key {
+                    code: 0x39,
+                    down: false,
+                },
+                10,
+            );
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 0, 0x0002]).unwrap(),
+                0x102,
+                "QS_MOUSEMOVE alone does not wake for WM_KEYUP"
+            );
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 0, 0x0001]).unwrap(),
+                1,
+                "QS_KEY wakes with WAIT_OBJECT_0 + nCount"
+            );
+
+            // Signalled event takes precedence and returns WAIT_OBJECT_0 (0).
+            if let Some(Object::Named { signalled, .. }) = ctx.state.object_mut(h_ev) {
+                *signalled = true;
+            }
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 0, 0xff]).unwrap(),
+                0
+            );
+
+            // Invalid handle returns WAIT_FAILED (0xffff_ffff) and ERROR_INVALID_HANDLE (6).
+            ctx.mem.write_u32(ev_at, 0xdead).unwrap();
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[1, ev_at, 0, 0, 0xff]).unwrap(),
+                u32::MAX
+            );
+            assert_eq!(ctx.state.last_error, 6);
+
+            // Invalid count >= 64 returns WAIT_FAILED and ERROR_INVALID_PARAMETER (87).
+            assert_eq!(
+                msg_wait_for_multiple_objects(ctx, &[64, ev_at, 0, 0, 0xff]).unwrap(),
+                u32::MAX
+            );
+            assert_eq!(ctx.state.last_error, 87);
         });
     }
 }

@@ -20,8 +20,9 @@ use lego_racers::LEGO_RACERS as RACERS;
 use std::path::PathBuf;
 
 const ROOT: &str = RACERS.install_dir;
-const BOOT_BUDGET: u64 = 100_000;
+const BOOT_BUDGET: u64 = 60_000;
 const FIRST_LIGHT_BUDGET: u64 = 200_000_000;
+const FULL_INTRO_BUDGET: u64 = 250_000_000;
 
 fn route_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -29,23 +30,24 @@ fn route_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The default unflagged boot path, run once and shared by the boot assertions
-/// and determinism gate (stops at DirectShow `CLSID_FilterGraph` until #372).
+/// The default unflagged boot path, run once for 60k instructions to verify
+/// cabinet loading, DirectInput setup, and the start of `lmicmp.avi` playback.
 fn boot() -> Option<&'static testkit::Ran> {
     static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let cli = Cli {
         trace: Trace::Shims,
         ..Cli::default()
     };
-    testkit::replay(&RAN, scratch, &RACERS, &cli, &[], BOOT_BUDGET)
+    testkit::replay(&RAN, scratch, &RACERS, &cli, &[0, 5], BOOT_BUDGET)
 }
 
-/// The `-novideo` first-light route to Main Menu and clean exit (#370).
+/// The unflagged first-light route: plays unskippable `lmicmp.avi`, skips
+/// `hvscmp.avi` (Space) and `introcmp.avi` (mouse click), lands on the
+/// animated 3D Main Menu, and exits cleanly (#370, #372).
 fn first_light() -> Option<&'static testkit::Ran> {
     static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let cli = Cli {
         route: Some(route_path("first-light.route")),
-        guest_args: Some("-novideo".to_owned()),
         ..Cli::default()
     };
     testkit::replay(
@@ -53,7 +55,7 @@ fn first_light() -> Option<&'static testkit::Ran> {
         scratch,
         &RACERS,
         &cli,
-        &[60, 300, 330],
+        &[80, 239, 245, 300, 550, 580],
         FIRST_LIGHT_BUDGET,
     )
 }
@@ -234,11 +236,11 @@ fn the_entry_image_loads_from_the_cabinet_and_starts_calling() {
         .assert_logged("base 0x00400000")
         .assert_logged("imports 147")
         .assert_logged("installed 56 files")
-        .assert_logged("ole32.dll!CoCreateInstance: class e436ebb3-524f-11ce-9f53-0020af0ba770");
+        .assert_logged("dshow lmicmp.avi rendered: 640x480 IV50, 237 frames")
+        .assert_logged("dshow lmicmp.avi running");
     assert!(
-        ran.finish.cursor > 100,
-        "the run should get past its own entry code, not stop at {}",
-        ran.finish.cursor
+        ran.finish.flips > 0,
+        "unflagged boot should decode and present lmicmp.avi frames"
     );
 }
 
@@ -261,32 +263,58 @@ fn first_light_reaches_main_menu_and_exits_cleanly() {
         return;
     };
     ran.assert_exited(0)
-        .assert_flips(331)
+        .assert_flips(581)
+        .assert_logged("dshow lmicmp.avi rendered: 640x480 IV50, 237 frames")
+        .assert_logged("dshow hvscmp.avi rendered: 640x480 IV50, 337 frames")
+        .assert_logged("dshow introcmp.avi rendered: 640x480 IV50, 1080 frames")
+        .assert_logged("dshow introcmp.avi released")
         .assert_logged("load library GolDP.DLL")
         .assert_logged("d3d3 device at")
         .assert_logged("winmm timer 1:")
         .assert_logged("winmm timer 1 killed");
 
-    // Flip 60 is the LEGO Media splash; flips 300 and 330 are the animated 3D
-    // Captain Redbeard Main Menu. All three are non-uniform, and the 3D scene
-    // changes from splash -> menu and animates across Main Menu flips.
-    let splash = ran.host.frame(60).expect("flip 60 kept");
-    let menu_start = ran.host.frame(300).expect("flip 300 kept");
-    let menu_end = ran.host.frame(330).expect("flip 330 kept");
+    // Verify visible decoded video frames across all three intro movies plus
+    // splash and the animated 3D Captain Redbeard Main Menu.
+    let lmicmp = ran.host.frame(80).expect("lmicmp flip 80 kept");
+    let hvscmp = ran.host.frame(239).expect("hvscmp flip 239 kept");
+    let introcmp = ran.host.frame(245).expect("introcmp flip 245 kept");
+    let splash = ran.host.frame(300).expect("splash flip 300 kept");
+    let menu_start = ran.host.frame(550).expect("menu flip 550 kept");
+    let menu_end = ran.host.frame(580).expect("menu flip 580 kept");
+    assert_eq!((lmicmp.width, lmicmp.height), (640, 480));
     assert_eq!((menu_start.width, menu_start.height), (640, 480));
-    assert!(!splash.is_uniform(), "splash frame 60 is non-uniform");
+    assert!(!lmicmp.is_uniform(), "lmicmp.avi frame 80 is non-uniform");
+    assert!(!hvscmp.is_uniform(), "hvscmp.avi frame 239 is non-uniform");
+    assert!(
+        !introcmp.is_uniform(),
+        "introcmp.avi frame 245 is non-uniform"
+    );
+    assert!(!splash.is_uniform(), "splash frame 300 is non-uniform");
     assert!(
         !menu_start.is_uniform(),
-        "main menu flip 300 is non-uniform"
+        "main menu flip 550 is non-uniform"
     );
-    assert!(!menu_end.is_uniform(), "main menu flip 330 is non-uniform");
+    assert!(!menu_end.is_uniform(), "main menu flip 580 is non-uniform");
     assert_ne!(
         splash.pixels, menu_start.pixels,
         "splash transitions cleanly into main menu"
     );
     assert_ne!(
         menu_start.pixels, menu_end.pixels,
-        "3D main menu animates across flips 300..330"
+        "3D main menu animates across flips 550..580"
+    );
+
+    // Intro movies must mix non-silent PCM audio into the declared mixer.
+    let intro_audio_nonzero = ran
+        .host
+        .audio_blocks
+        .iter()
+        .zip(&ran.host.audio_flips)
+        .filter(|(_, &flip)| flip < 247)
+        .any(|(block, _)| block.iter().any(|&s| s != 0));
+    assert!(
+        intro_audio_nonzero,
+        "DirectShow intro movies should mix non-silent PCM audio"
     );
 }
 
@@ -305,7 +333,7 @@ fn first_light_streams_non_silent_tun_audio_on_main_menu() {
     let Some(ran) = first_light() else {
         return;
     };
-    let menu_samples = pcm_from(ran, 299);
+    let menu_samples = pcm_from(ran, 547);
     assert!(
         menu_samples.len() >= 10_000,
         "expected >= 10,000 stereo PCM samples on Main Menu, got {}",
@@ -321,7 +349,7 @@ fn first_light_streams_non_silent_tun_audio_on_main_menu() {
     let rms = (sum_sq / n).sqrt();
     let variance = sum_sq / n - mean * mean;
     let active_blocks = ran
-        .loudness(299, 332)
+        .loudness(547, 582)
         .into_iter()
         .filter(|&r| r > 100.0)
         .count();
@@ -407,7 +435,6 @@ fn first_light_replays_to_the_same_machine_every_time() {
     };
     let cli = Cli {
         route: Some(route_path("first-light.route")),
-        guest_args: Some("-novideo".to_owned()),
         ..Cli::default()
     };
     let second = testkit::run_headless(&RACERS, &cli, FIRST_LIGHT_BUDGET);
@@ -419,7 +446,65 @@ fn first_light_replays_to_the_same_machine_every_time() {
 }
 
 #[test]
-fn first_light_main_menu_snapshot_round_trips_bit_exact() {
+fn all_three_intro_movies_play_to_completion_and_land_on_main_menu() {
+    if !scratch() {
+        return;
+    }
+    // Space during unskippable lmicmp.avi (flip 100) must NOT skip it; all 3
+    // movies then play through completion (237 + 337 + 1080 = 1654 frames)
+    // before landing on Main Menu and exiting cleanly.
+    let route = Route::parse(
+        "#lego-legacy-route 1\nflip 100 key Space down\nflip 101 key Space up\nflip 1985 close\n",
+    )
+    .expect("parse full intro route");
+    let mut host = Headless::new().keeping(&[80, 340, 700, 1100, 1500, 1980]);
+    let mut machine = Machine::new(&RACERS, &mut host).expect("machine");
+    machine.load_title(&RACERS).expect("load title");
+    machine.route = Some(route);
+    let mut log = RunLog::create("lego-racers-full-intro", Trace::Off).expect("log");
+    let dir = log.dir().to_path_buf();
+    let finish = machine.run(&mut host, &mut log, FULL_INTRO_BUDGET);
+    drop(log);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        finish.outcome,
+        lego_legacy_core::machine::Outcome::Exited { code: 0 }
+    );
+    assert_eq!(finish.flips, 1986);
+    for (label, flip) in [
+        ("lmicmp.avi", 80),
+        ("hvscmp.avi", 340),
+        ("introcmp.avi early", 700),
+        ("introcmp.avi mid", 1100),
+        ("introcmp.avi late", 1500),
+        ("Main Menu", 1980),
+    ] {
+        let frame = host
+            .frame(flip)
+            .unwrap_or_else(|| panic!("{label} flip {flip} kept"));
+        assert_eq!((frame.width, frame.height), (640, 480));
+        assert!(!frame.is_uniform(), "{label} flip {flip} is non-uniform");
+    }
+    assert_ne!(
+        host.frame(700).unwrap().pixels,
+        host.frame(1500).unwrap().pixels,
+        "scalable introcmp.avi advances across frames"
+    );
+    let introcmp_audio_nonzero = host
+        .audio_blocks
+        .iter()
+        .zip(&host.audio_flips)
+        .filter(|(_, &flip)| (574..1654).contains(&flip))
+        .any(|(block, _)| block.iter().any(|&s| s != 0));
+    assert!(
+        introcmp_audio_nonzero,
+        "introcmp.avi should mix non-silent PCM audio"
+    );
+}
+
+#[test]
+fn first_light_mid_movie_and_main_menu_snapshots_round_trip_bit_exact() {
     let Some(baseline) = first_light() else {
         return;
     };
@@ -427,54 +512,58 @@ fn first_light_main_menu_snapshot_round_trips_bit_exact() {
     let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("racers-snap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_root);
-    let profile_a = data_root.join("profile-a");
-    let profile_b = data_root.join("profile-b");
 
-    // 1. Run to flip 305 (live on Main Menu) and capture LLSNAP v2.
-    let mut host_a = Headless::new();
-    let mut machine_a = Machine::new(&RACERS, &mut host_a).expect("machine");
-    machine_a.load_title(&RACERS).expect("load title");
-    machine_a.state.guest_args = "-novideo".to_owned();
-    machine_a.route = Some(route.clone());
-    machine_a.tree.set_profile(profile_a);
-    let mut log_a = RunLog::create("lego-racers-snap-a", Trace::Off).expect("log");
-    let dir_a = log_a.dir().to_path_buf();
-    while machine_a.flips() < 305 {
-        assert!(
-            machine_a
-                .step(&mut host_a, &mut log_a, FIRST_LIGHT_BUDGET, true)
-                .is_none(),
-            "should reach flip 305 without ending"
+    for (label, snap_flip) in [("mid-movie", 100u64), ("main-menu", 555u64)] {
+        let profile_a = data_root.join(format!("{label}-a"));
+        let profile_b = data_root.join(format!("{label}-b"));
+
+        let mut host_a = Headless::new();
+        let mut machine_a = Machine::new(&RACERS, &mut host_a).expect("machine");
+        machine_a.load_title(&RACERS).expect("load title");
+        machine_a.route = Some(route.clone());
+        machine_a.tree.set_profile(profile_a);
+        let mut log_a =
+            RunLog::create(&format!("lego-racers-snap-{label}-a"), Trace::Off).expect("log");
+        let dir_a = log_a.dir().to_path_buf();
+        while machine_a.flips() < snap_flip {
+            assert!(
+                machine_a
+                    .step(&mut host_a, &mut log_a, FIRST_LIGHT_BUDGET, true)
+                    .is_none(),
+                "should reach {label} flip {snap_flip} without ending"
+            );
+        }
+        let snap = machine_a.snapshot_v2().expect("capture LLSNAP v2");
+
+        let mut host_b = Headless::new();
+        let mut machine_b = Machine::new(&RACERS, &mut host_b).expect("machine");
+        machine_b.load_title(&RACERS).expect("load title");
+        machine_b.route = Some(route.clone());
+        machine_b.tree.set_profile(profile_b);
+        machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
+        let mut log_b =
+            RunLog::create(&format!("lego-racers-snap-{label}-b"), Trace::Off).expect("log");
+        let dir_b = log_b.dir().to_path_buf();
+        let finish_b = machine_b.run(&mut host_b, &mut log_b, FIRST_LIGHT_BUDGET);
+
+        assert_eq!(finish_b.outcome, baseline.finish.outcome, "{label} outcome");
+        assert_eq!(finish_b.cursor, baseline.finish.cursor, "{label} cursor");
+        assert_eq!(finish_b.flips, baseline.finish.flips, "{label} flips");
+        assert_eq!(
+            finish_b.declared_millis, baseline.finish.declared_millis,
+            "{label} declared_millis"
         );
+        assert_eq!(machine_b.state_digest(), baseline.digest, "{label} digest");
+        host_a.audio_blocks.extend(host_b.audio_blocks);
+        assert_eq!(
+            host_a.audio_blocks, baseline.host.audio_blocks,
+            "{label} mixed PCM audio before + after LLSNAP v2 restore is bit-exact"
+        );
+
+        drop(log_a);
+        drop(log_b);
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_b);
     }
-    let snap = machine_a.snapshot_v2().expect("capture LLSNAP v2");
-
-    // 2. Cold-restore into a fresh Machine and finish to flip 330 close.
-    let mut host_b = Headless::new();
-    let mut machine_b = Machine::new(&RACERS, &mut host_b).expect("machine");
-    machine_b.load_title(&RACERS).expect("load title");
-    machine_b.state.guest_args = "-novideo".to_owned();
-    machine_b.route = Some(route);
-    machine_b.tree.set_profile(profile_b);
-    machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
-    let mut log_b = RunLog::create("lego-racers-snap-b", Trace::Off).expect("log");
-    let dir_b = log_b.dir().to_path_buf();
-    let finish_b = machine_b.run(&mut host_b, &mut log_b, FIRST_LIGHT_BUDGET);
-
-    assert_eq!(finish_b.outcome, baseline.finish.outcome);
-    assert_eq!(finish_b.cursor, baseline.finish.cursor);
-    assert_eq!(finish_b.flips, baseline.finish.flips);
-    assert_eq!(finish_b.declared_millis, baseline.finish.declared_millis);
-    assert_eq!(machine_b.state_digest(), baseline.digest);
-    host_a.audio_blocks.extend(host_b.audio_blocks);
-    assert_eq!(
-        host_a.audio_blocks, baseline.host.audio_blocks,
-        "mixed PCM audio before + after LLSNAP v2 restore is bit-exact"
-    );
-
-    drop(log_a);
-    drop(log_b);
-    let _ = std::fs::remove_dir_all(dir_a);
-    let _ = std::fs::remove_dir_all(dir_b);
     let _ = std::fs::remove_dir_all(data_root);
 }
