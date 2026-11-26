@@ -1023,7 +1023,7 @@ mod tests {
             assert!(st.paused);
             assert_eq!(st.flip, Some(0));
 
-            // Move + click on flip 0..2.
+            // Move + click on flip 0..3 (move @ 0, settle @ 1 down, up @ 2).
             let r = driver_bus.dispatch_sync(
                 Command::Act {
                     action: Action::Click {
@@ -1032,15 +1032,16 @@ mod tests {
                         button: Button::Left,
                         hold_flips: 1,
                         hold_ms: None,
+                        settle_flips: 1,
                     },
                     auto_step: true,
                 },
                 Some(Duration::from_secs(5)),
             );
             assert!(r.ok);
-            assert_eq!(r.status.flip, Some(2));
+            assert_eq!(r.status.flip, Some(3));
 
-            // Wait until change (flip 2->3 mutates pixel 0).
+            // Wait until change (flip 3->4 mutates pixel 0).
             let r = driver_bus.dispatch_sync(
                 Command::WaitUntilChange {
                     max_flips: 5,
@@ -1058,7 +1059,7 @@ mod tests {
                 })
             ));
 
-            // Chord + key hold via batch (flips 3..6).
+            // Chord + key hold via batch (flips 4..7).
             let r = driver_bus.dispatch_sync(
                 Command::Batch {
                     actions: vec![
@@ -1079,7 +1080,7 @@ mod tests {
             );
             assert!(r.ok);
 
-            // Pipe a relative #lego-legacy-route 1 snippet (flips 6..9).
+            // Pipe a relative #lego-legacy-route 1 snippet (flips 7..10).
             let r = driver_bus.dispatch_sync(
                 Command::PipeRoute {
                     route_text: "#lego-legacy-route 1\nflip 0 move 10 15\nflip 1 down right\nflip 2 up right\n".into(),

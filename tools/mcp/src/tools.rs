@@ -174,6 +174,7 @@ pub const fn tools_list_json() -> &'static str {
         "button": { "type": "string", "enum": ["left", "right"] },
         "hold_flips": { "type": "integer" },
         "hold_ms": { "type": "integer" },
+        "settle_flips": { "type": "integer", "minimum": 0, "description": "Flips between Move and Down on `click` when coordinates are given (default 1; 0 to opt out)." },
         "glide_flips": { "type": "integer" },
         "flips": { "type": "integer" },
         "step_px": { "type": "integer" },

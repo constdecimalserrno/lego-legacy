@@ -30,6 +30,7 @@ lego-ctrl screenshot --grid --cursor -o frame.png
 lego-ctrl screenshot --crop 160,120,320,240 -o zoom.png
 
 # Drive inputs & pipe routes / JSONL
+lego-ctrl click 320 240                      # 1-flip settle between move and down (--settle-flips 0 to opt out)
 lego-ctrl click 320 240 --poll --hold-flips 2
 lego-ctrl move 120 80
 lego-ctrl delta -12 8

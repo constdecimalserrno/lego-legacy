@@ -1852,7 +1852,8 @@ mod tests {
             assert_eq!(code, 200);
             assert!(std::str::from_utf8(&body).unwrap().contains("verify http"));
 
-            // 6. POST /api/act with observe_after (include_png: true) -> advances to flip 2
+            // 6. POST /api/act with observe_after (include_png: true) -> advances to flip 3
+            //    (move @ 0, default 1-flip settle -> down @ 1, up @ 2).
             let (code, _, body) = tcp_call(
                 addr,
                 "POST",
@@ -1869,9 +1870,9 @@ mod tests {
                 .as_str()
                 .is_some_and(|s| !s.is_empty()));
 
-            // 7. POST /api/bookmark at flip 2
+            // 7. POST /api/bookmark at flip 3
             let (code, _, body) =
-                tcp_call(addr, "POST", "/api/bookmark", &auth, br#"{"name":"at2"}"#);
+                tcp_call(addr, "POST", "/api/bookmark", &auth, br#"{"name":"at3"}"#);
             assert_eq!(code, 200);
             let bmj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
             let bm_flip = bmj.as_object().unwrap()["flip"].as_u64().unwrap();
@@ -1879,9 +1880,9 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            assert_eq!(bm_flip, 2);
+            assert_eq!(bm_flip, 3);
 
-            // 8. POST /api/pipe (raw route) + POST /api/step + POST /api/wait -> advance to flip 5
+            // 8. POST /api/pipe (raw route) + POST /api/step + POST /api/wait -> advance to flip 6
             let (code, _, _) = tcp_call(
                 addr,
                 "POST",
@@ -1903,12 +1904,12 @@ mod tests {
                 .unwrap()
                 .starts_with("#lego-legacy-route 1"));
 
-            // 9. POST /api/rewind back to "at2" -> verifies instant LLSNAP v2 + exact digest_match == true!
+            // 9. POST /api/rewind back to "at3" -> verifies instant LLSNAP v2 + exact digest_match == true!
             let (code, _, body) =
-                tcp_call(addr, "POST", "/api/rewind", &auth, br#"{"name":"at2"}"#);
+                tcp_call(addr, "POST", "/api/rewind", &auth, br#"{"name":"at3"}"#);
             assert_eq!(code, 200);
             let rwj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
-            assert_eq!(rwj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(rwj.as_object().unwrap()["flip"].as_u64(), Some(3));
             assert_eq!(
                 rwj.as_object().unwrap()["digest"].as_str(),
                 Some(bm_digest.as_str())
@@ -1930,7 +1931,7 @@ mod tests {
                 tcp_call(addr, "POST", "/api/snapshot", &auth, snap_req.as_bytes());
             assert_eq!(code, 200);
             let spj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
-            assert_eq!(spj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(spj.as_object().unwrap()["flip"].as_u64(), Some(3));
             assert_eq!(
                 spj.as_object().unwrap()["digest"].as_str(),
                 Some(bm_digest.as_str())
@@ -1949,7 +1950,7 @@ mod tests {
                 tcp_call(addr, "POST", "/api/restore", &auth, br#"{"name":"slot2"}"#);
             assert_eq!(code, 200);
             let rsj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
-            assert_eq!(rsj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(rsj.as_object().unwrap()["flip"].as_u64(), Some(3));
             assert_eq!(
                 rsj.as_object().unwrap()["digest"].as_str(),
                 Some(bm_digest.as_str())
@@ -1974,7 +1975,7 @@ mod tests {
                 tcp_call(addr, "POST", "/api/restore", &auth, restore_req.as_bytes());
             assert_eq!(code, 200);
             let rpj = parse_json(std::str::from_utf8(&body).unwrap()).unwrap();
-            assert_eq!(rpj.as_object().unwrap()["flip"].as_u64(), Some(2));
+            assert_eq!(rpj.as_object().unwrap()["flip"].as_u64(), Some(3));
             assert_eq!(
                 rpj.as_object().unwrap()["digest"].as_str(),
                 Some(bm_digest.as_str())

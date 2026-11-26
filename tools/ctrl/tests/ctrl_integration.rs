@@ -319,7 +319,30 @@ fn cli_parses_all_commands_and_friendly_actions() {
         assert_eq!(map["action"].as_str(), Some("click_poll"));
         assert_eq!(map["button"].as_str(), Some("right"));
         assert_eq!(map["hold_flips"].as_u64(), Some(4));
+        assert!(!map.contains_key("settle_flips"));
     }
+
+    // Friendly click supports `--settle-flips`, validates values, and rejects `--poll`.
+    let p = parse_args(["click", "320", "222", "--settle-flips", "0"]).unwrap();
+    let CliCommand::ActRaw { json } = p.command else {
+        panic!("expected ActRaw");
+    };
+    let obj = parse_json(&json).unwrap();
+    let map = obj.as_object().unwrap();
+    assert_eq!(map["action"].as_str(), Some("click"));
+    assert_eq!(map["settle_flips"].as_u64(), Some(0));
+
+    for bad in [
+        vec!["click", "320", "222", "--poll", "--settle-flips", "1"],
+        vec!["click", "320", "222", "--settle-flips", "0", "--poll"],
+    ] {
+        let err = parse_args(bad).unwrap_err();
+        assert!(
+            err.contains("--settle-flips") && err.contains("--poll"),
+            "unexpected error: {err}"
+        );
+    }
+    assert!(parse_args(["click", "320", "222", "--settle-flips", "-1"]).is_err());
 
     let p = parse_args(["chord", "LeftControl, A", "--hold-flips", "2"]).unwrap();
     let CliCommand::ActRaw { json } = p.command else {
