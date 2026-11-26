@@ -502,6 +502,8 @@ fn truncated_v1_and_route_mismatched_snapshots_are_handled_cleanly() {
 
 #[test]
 fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2() {
+    use lego_legacy_core::win32::winmm::MmTimer;
+
     let (mut m, _host) = machine_at(4);
     m.state.guest_args = "-novideo -window".to_owned();
     m.state
@@ -509,8 +511,17 @@ fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2(
         .insert("=C:".to_owned(), Some("C:\\Save".to_owned()));
     m.state.environment.insert("TZ".to_owned(), None);
     m.state.window_extra = vec![0x44, 0xf4, 0x4e, 0x00, 0x11, 0x22, 0x33, 0x44];
-    m.state.mm_timers.push(7);
+    let timer = MmTimer {
+        id: 7,
+        delay_ms: 100,
+        callback: 0x004b_d5e0,
+        user: 0x0123_4567,
+        periodic: true,
+        due_ms: 5_200,
+    };
+    m.state.mm_timers.push(timer);
     m.state.next_mm_timer = 8;
+    m.state.mm_timer_thread = Some(0);
 
     let snap = m.snapshot_v2().expect("snapshot v2");
     let mut host = Headless::new();
@@ -528,6 +539,17 @@ fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2(
         restored.state.window_extra,
         vec![0x44, 0xf4, 0x4e, 0x00, 0x11, 0x22, 0x33, 0x44]
     );
-    assert_eq!(restored.state.mm_timers, vec![7]);
+    assert_eq!(restored.state.mm_timers, vec![timer]);
     assert_eq!(restored.state.next_mm_timer, 8);
+    assert_eq!(restored.state.mm_timer_thread, Some(0));
+
+    // Corrupt snapshot validation: zero delay_ms and OOB mm_timer_thread are refused.
+    m.state.mm_timers[0].delay_ms = 0;
+    let bad_delay = m.snapshot_v2().expect("serialize bad delay");
+    assert!(restored.restore_v2(&bad_delay).is_err());
+
+    m.state.mm_timers[0].delay_ms = 100;
+    m.state.mm_timer_thread = Some(99);
+    let bad_thread = m.snapshot_v2().expect("serialize OOB thread");
+    assert!(restored.restore_v2(&bad_thread).is_err());
 }

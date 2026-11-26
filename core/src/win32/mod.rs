@@ -370,9 +370,11 @@ pub struct State {
     /// The MIDI out's player and the stream on it, once a title has opened
     /// one (#154).
     pub midi: Option<winmm::Midi>,
-    /// Active multimedia timer IDs registered via `WINMM!timeSetEvent` (#370, #371).
-    pub mm_timers: Vec<u32>,
+    /// Active multimedia timers registered via `WINMM!timeSetEvent` (#371),
+    /// and the WINMM timer thread that dispatches their callbacks.
+    pub mm_timers: Vec<winmm::MmTimer>,
     pub next_mm_timer: u32,
+    pub mm_timer_thread: Option<usize>,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// Which virtual keys have gone down since the guest last asked
@@ -518,6 +520,7 @@ impl State {
             midi: None,
             mm_timers: Vec::new(),
             next_mm_timer: 1,
+            mm_timer_thread: None,
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
             installed_files: 0,
@@ -2395,6 +2398,7 @@ impl crate::snap::Snap for State {
             midi,
             mm_timers,
             next_mm_timer,
+            mm_timer_thread,
             keys_down,
             keys_pressed,
             keys_read,
@@ -2574,8 +2578,13 @@ impl crate::snap::Snap for State {
         );
         cd.snap(v);
         crate::snap::snap_option_with(v, midi, winmm::Midi::empty_for_snap, |m, v| m.snap(v));
-        crate::snap::snap_u32_vec(v, mm_timers);
+        crate::snap::snap_vec(v, mm_timers, |t, v| t.snap(v));
         v.u32(next_mm_timer);
+        crate::snap::snap_option(v, mm_timer_thread, |t, v| v.usize(t));
+        if v.is_reading() && !v.failed() && mm_timer_thread.is_some_and(|idx| idx >= threads.len())
+        {
+            v.mark_corrupt("mm_timer_thread");
+        }
         crate::snap::snap_u32_vec(v, keys_down);
         crate::snap::snap_u32_vec(v, keys_pressed);
         crate::snap::snap_u32_vec(v, keys_read);

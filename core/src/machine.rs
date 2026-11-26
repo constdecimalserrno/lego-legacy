@@ -651,15 +651,25 @@ impl Machine {
             // A time-critical thread waits only at its own turn. Inside
             // a callback the machine runs on it, the title's threads
             // would run in the middle of the callback, and the calls the
-            // machine has parked are one stack for every thread (#154).
-            // ponytail: a wall; a title whose MIDI callback waits wants
-            // each thread's parked calls kept apart.
+            // machine has parked are one stack for every thread (#154, #371).
+            // ponytail: a wall; a title whose callback waits wants each
+            // thread's parked calls kept apart.
             Stop::Blocked
                 if self.state.threads[self.state.thread].time_critical
-                    && self.boundary.at(self.cpu.eip) != Some(&crate::shim::Entry::MidiPlayer) =>
+                    && self.boundary.at(self.cpu.eip)
+                        != Some(if self.state.mm_timer_thread == Some(self.state.thread) {
+                            &crate::shim::Entry::MmTimer
+                        } else {
+                            &crate::shim::Entry::MidiPlayer
+                        }) =>
             {
+                let who = if self.state.mm_timer_thread == Some(self.state.thread) {
+                    "WINMM's timer thread"
+                } else {
+                    "WINMM's MIDI player"
+                };
                 Some(Outcome::Wall {
-                    what: "a callback WINMM's MIDI player made waits for another thread".to_owned(),
+                    what: format!("a callback {who} made waits for another thread"),
                 })
             }
             // Waiting for another thread: the machine leaves the call
@@ -1061,6 +1071,7 @@ enum Bound {
     Return,
     ThreadEnd,
     MidiPlayer,
+    MmTimer,
     Shim {
         shim: Option<&'static win32::Shim>,
         flags: u8,
@@ -1385,6 +1396,7 @@ impl Machine {
             Some(Entry::Return) => Bound::Return,
             Some(Entry::ThreadEnd) => Bound::ThreadEnd,
             Some(Entry::MidiPlayer) => Bound::MidiPlayer,
+            Some(Entry::MmTimer) => Bound::MmTimer,
             // The exception walk ran out of handlers (#54).
             Some(Entry::Unhandled { what }) => {
                 return Err(Stop::NotWritten {
@@ -1497,6 +1509,7 @@ impl Machine {
                 return Err(Stop::ThreadEnded);
             }
             Bound::MidiPlayer => return self.midi_player(log),
+            Bound::MmTimer => return self.mm_timer(log),
             Bound::Method {
                 interface,
                 slot,
@@ -2608,18 +2621,23 @@ impl Machine {
         }
         let now = self.clock.millis();
         // A time-critical thread runs ahead of every other whenever it can,
-        // and so keeps the processor until it waits: a callback the machine
-        // runs on one is never interleaved with the title's own code (#154).
-        let next = self
-            .state
-            .threads
-            .iter()
-            .position(|t| t.time_critical && runnable_at(t, now))
-            .or_else(|| {
-                (1..=count)
-                    .map(|step| (running + step) % count)
-                    .find(|i| runnable_at(&self.state.threads[*i], now))
-            });
+        // and keeps the processor until it waits (including against another
+        // time-critical thread, so a running callback never interleaves on the
+        // shared continuation stack, #154, #371).
+        let next = (self.state.threads[running].time_critical
+            && runnable_at(&self.state.threads[running], now))
+        .then_some(running)
+        .or_else(|| {
+            self.state
+                .threads
+                .iter()
+                .position(|t| t.time_critical && runnable_at(t, now))
+        })
+        .or_else(|| {
+            (1..=count)
+                .map(|step| (running + step) % count)
+                .find(|i| runnable_at(&self.state.threads[*i], now))
+        });
         let Some(next) = next else {
             // Nothing else can run; whoever was running carries on, and if it
             // has ended too the run is over by its own exit.
@@ -2748,18 +2766,30 @@ impl Machine {
         Ok(())
     }
 
-    /// WINMM's MIDI stream player takes its turn (#154): it calls the title's
-    /// callback on its own thread, coming back here when the callback
-    /// returns, or it waits until its stream's next event is due.
-    fn midi_player(&mut self, log: &mut RunLog) -> Result<(), Stop> {
-        let here = self.cpu.eip;
-        let mut ctx = self.ctx(log);
-        let Some((callback, args)) = win32::winmm::player_turn(&mut ctx)? else {
+    /// Dispatch the next callback for a machine-owned WINMM thread (`MidiPlayer`
+    /// or `MmTimer`), or park the thread until its next event is due (#154, #371).
+    fn winmm_turn(&mut self, next: Option<(u32, [u32; 5])>) -> Result<(), Stop> {
+        let Some((callback, args)) = next else {
             return Err(Stop::Blocked);
         };
+        let here = self.cpu.eip;
         self.call_guest(callback, &args, here, 0)?;
         self.clock.retire();
         Ok(())
+    }
+
+    /// WINMM's MIDI stream player takes its turn (#154).
+    fn midi_player(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let mut ctx = self.ctx(log);
+        let next = win32::winmm::player_turn(&mut ctx)?;
+        self.winmm_turn(next)
+    }
+
+    /// WINMM's multimedia timer thread takes its turn (#371).
+    fn mm_timer(&mut self, log: &mut RunLog) -> Result<(), Stop> {
+        let mut ctx = self.ctx(log);
+        let next = win32::winmm::timer_turn(&mut ctx);
+        self.winmm_turn(next)
     }
 
     /// Run guest code and give the guest what it answers with, rather than

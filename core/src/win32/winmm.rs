@@ -1532,27 +1532,100 @@ fn mmio_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 /// `TIMERR_NOERROR` from `mmsystem.h`.
 const TIMERR_NOERROR: u32 = 0;
-/// `TIME_CALLBACK_EVENT_SET` (0x10) | `TIME_CALLBACK_EVENT_PULSE` (0x20).
-const TIME_CALLBACK_EVENT_MASK: u32 = 0x30;
+/// `TIME_PERIODIC` (0x0001) and `TIME_KILL_SYNCHRONOUS` (0x0100) from `mmsystem.h`.
+/// `TIME_ONESHOT` and `TIME_CALLBACK_FUNCTION` are both 0.
+const TIME_PERIODIC: u32 = 0x0001;
+const TIME_KILL_SYNCHRONOUS: u32 = 0x0100;
+const TIME_SUPPORTED_FLAGS: u32 = TIME_PERIODIC | TIME_KILL_SYNCHRONOUS;
 
-// ponytail: registers the timer ID without firing the callback on the declared
-// clock yet; #371 wires periodic callback dispatch.
+/// One active multimedia timer registered via `WINMM!timeSetEvent` (#371).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MmTimer {
+    pub id: u32,
+    pub delay_ms: u32,
+    pub callback: u32,
+    pub user: u32,
+    pub periodic: bool,
+    /// Declared millisecond at which this timer next fires.
+    pub due_ms: u64,
+}
+
+impl crate::snap::Snap for MmTimer {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            id,
+            delay_ms,
+            callback,
+            user,
+            periodic,
+            due_ms,
+        } = self;
+        v.u32(id);
+        v.u32(delay_ms);
+        v.u32(callback);
+        v.u32(user);
+        v.bool(periodic);
+        v.u64(due_ms);
+        if v.is_reading() && !v.failed() && (*id == 0 || *delay_ms == 0 || *callback == 0) {
+            v.mark_corrupt("mm_timer");
+        }
+    }
+}
+
+/// Update the WINMM timer thread's wake hour to the earliest active timer,
+/// unless that thread is currently running a callback (it sets its own wake
+/// hour when it returns to [`timer_turn`]).
+fn sync_timer_thread_wake(state: &mut super::State) {
+    let Some(runner) = state.mm_timer_thread else {
+        return;
+    };
+    if state.thread == runner {
+        return;
+    }
+    state.threads[runner].wake_at = state
+        .mm_timers
+        .iter()
+        .map(|t| t.due_ms)
+        .min()
+        .unwrap_or(u64::MAX);
+}
+
 fn time_set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // timeSetEvent(uDelay, uResolution, lpTimeProc, dwUser, fuEvent).
     let (delay_ms, resolution_ms, callback, user, flags) =
         (args[0], args[1], args[2], args[3], args[4]);
-    if flags & TIME_CALLBACK_EVENT_MASK != 0 {
-        return Err(Stop::NotWritten {
-            what: format!("WINMM.dll!timeSetEvent: event callback flags {flags:#x}"),
-            caller: 0,
-        });
+    if flags & !TIME_SUPPORTED_FLAGS != 0 {
+        return not_written(format!(
+            "WINMM.dll!timeSetEvent: unsupported flags {flags:#x}"
+        ));
     }
     if delay_ms == 0 || callback == 0 {
         return Ok(0);
     }
-    let id = ctx.state.next_mm_timer;
-    ctx.state.next_mm_timer = ctx.state.next_mm_timer.wrapping_add(1).max(1);
-    ctx.state.mm_timers.push(id);
+    if ctx.state.mm_timer_thread.is_none() {
+        let start = ctx.boundary.bind_mm_timer();
+        if super::kernel32::spawn(ctx, 0, start, 0, false)?.is_none() {
+            return Ok(0);
+        }
+        let runner = ctx.state.threads.len() - 1;
+        ctx.state.threads[runner].time_critical = true;
+        ctx.state.mm_timer_thread = Some(runner);
+    }
+    let mut id = ctx.state.next_mm_timer.max(1);
+    while ctx.state.mm_timers.iter().any(|t| t.id == id) {
+        id = id.wrapping_add(1).max(1);
+    }
+    ctx.state.next_mm_timer = id.wrapping_add(1).max(1);
+    let periodic = flags & TIME_PERIODIC != 0;
+    let due_ms = ctx.clock_millis.saturating_add(u64::from(delay_ms));
+    ctx.state.mm_timers.push(MmTimer {
+        id,
+        delay_ms,
+        callback,
+        user,
+        periodic,
+        due_ms,
+    });
+    sync_timer_thread_wake(ctx.state);
     ctx.log.line(&format!(
         "winmm timer {id}: delay {delay_ms}ms res {resolution_ms}ms cb {callback:#010x} user {user:#010x} flags {flags:#x}"
     ));
@@ -1562,8 +1635,9 @@ fn time_set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 fn time_kill_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let id = args[0];
     let before = ctx.state.mm_timers.len();
-    ctx.state.mm_timers.retain(|&t| t != id);
+    ctx.state.mm_timers.retain(|t| t.id != id);
     if ctx.state.mm_timers.len() < before {
+        sync_timer_thread_wake(ctx.state);
         ctx.log.line(&format!("winmm timer {id} killed"));
         Ok(TIMERR_NOERROR)
     } else {
@@ -1571,32 +1645,116 @@ fn time_kill_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
 }
 
+/// WINMM's multimedia timer thread takes its turn (#371): dispatches the
+/// earliest timer due at `ctx.clock_millis` with stdcall arguments
+/// `(uTimerID, uMsg=0, dwUser, dw1=0, dw2=0)`, or parks until the next timer
+/// comes due (or `u64::MAX` when none are active).
+pub(crate) fn timer_turn(ctx: &mut Ctx<'_>) -> Option<(u32, [u32; 5])> {
+    let now = ctx.clock_millis;
+    let running = ctx.state.thread;
+    ctx.state.threads[running].wake_at = 0;
+
+    let Some((idx, timer)) = ctx
+        .state
+        .mm_timers
+        .iter()
+        .enumerate()
+        .min_by_key(|(idx, t)| (t.due_ms, *idx))
+        .map(|(idx, &t)| (idx, t))
+    else {
+        return wait(ctx, u64::MAX);
+    };
+    if timer.due_ms > now {
+        return wait(ctx, timer.due_ms);
+    }
+
+    if timer.periodic {
+        let delay = u64::from(timer.delay_ms.max(1));
+        let steps = (now.saturating_sub(timer.due_ms) / delay) + 1;
+        ctx.state.mm_timers[idx].due_ms = timer.due_ms.saturating_add(steps.saturating_mul(delay));
+    } else {
+        ctx.state.mm_timers.remove(idx);
+    }
+
+    ctx.log.at(crate::cli::Trace::Shims, || {
+        format!(
+            "winmm timer {} calls {:#010x} user {:#010x} at {now} ms",
+            timer.id, timer.callback, timer.user
+        )
+    });
+    Some((timer.callback, [timer.id, 0, timer.user, 0, 0]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        find_chunk, time_kill_event, time_set_event, Chunk, Find, MMSYSERR_INVALPARAM,
-        TIMERR_NOERROR,
+        find_chunk, time_kill_event, time_set_event, Chunk, Find, MmTimer, MMSYSERR_INVALPARAM,
+        TIMERR_NOERROR, TIME_KILL_SYNCHRONOUS, TIME_PERIODIC,
     };
     use crate::cpu::Stop;
     use crate::win32::tests::with_test_ctx;
 
     #[test]
     fn time_set_and_kill_event_track_timer_ids_like_winmm() {
-        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x20_0000, |ctx| {
             assert_eq!(time_set_event(ctx, &[0, 0, 0x1000, 0, 1]).unwrap(), 0);
             assert_eq!(time_set_event(ctx, &[100, 10, 0, 0, 1]).unwrap(), 0);
-            assert!(matches!(
-                time_set_event(ctx, &[100, 10, 0x120, 0, 0x10]),
-                Err(Stop::NotWritten { .. })
-            ));
-            let id1 = time_set_event(ctx, &[100, 100, 0x4bd5e0, 0x1234, 1]).unwrap();
-            let id2 = time_set_event(ctx, &[50, 10, 0x4bd5e0, 0x5678, 1]).unwrap();
+            for bad_flags in [0x10, 0x20, 0x30, 0x02, 0x40] {
+                assert!(
+                    matches!(
+                        time_set_event(ctx, &[100, 10, 0x120, 0, bad_flags]),
+                        Err(Stop::NotWritten { .. })
+                    ),
+                    "flags {bad_flags:#x} must wall"
+                );
+            }
+            ctx.clock_millis = 1_000;
+            let id1 = time_set_event(
+                ctx,
+                &[
+                    100,
+                    100,
+                    0x4bd5e0,
+                    0x1234,
+                    TIME_PERIODIC | TIME_KILL_SYNCHRONOUS,
+                ],
+            )
+            .unwrap();
+            let id2 =
+                time_set_event(ctx, &[50, 10, 0x4bd5e0, 0x5678, TIME_KILL_SYNCHRONOUS]).unwrap();
             assert_ne!(id1, 0);
             assert_ne!(id1, id2);
-            assert_eq!(ctx.state.mm_timers, vec![id1, id2]);
+            assert_eq!(
+                ctx.state.mm_timers,
+                vec![
+                    MmTimer {
+                        id: id1,
+                        delay_ms: 100,
+                        callback: 0x4bd5e0,
+                        user: 0x1234,
+                        periodic: true,
+                        due_ms: 1_100,
+                    },
+                    MmTimer {
+                        id: id2,
+                        delay_ms: 50,
+                        callback: 0x4bd5e0,
+                        user: 0x5678,
+                        periodic: false,
+                        due_ms: 1_050,
+                    },
+                ]
+            );
+            let runner = ctx.state.mm_timer_thread.expect("timer thread spawned");
+            assert!(ctx.state.threads[runner].time_critical);
+            assert_eq!(ctx.state.threads[runner].wake_at, 1_050);
+
+            assert_eq!(time_kill_event(ctx, &[id2]).unwrap(), TIMERR_NOERROR);
+            assert_eq!(time_kill_event(ctx, &[id2]).unwrap(), MMSYSERR_INVALPARAM);
+            assert_eq!(ctx.state.threads[runner].wake_at, 1_100);
             assert_eq!(time_kill_event(ctx, &[id1]).unwrap(), TIMERR_NOERROR);
-            assert_eq!(time_kill_event(ctx, &[id1]).unwrap(), MMSYSERR_INVALPARAM);
-            assert_eq!(ctx.state.mm_timers, vec![id2]);
+            assert!(ctx.state.mm_timers.is_empty());
+            assert_eq!(ctx.state.threads[runner].wake_at, u64::MAX);
         });
     }
 

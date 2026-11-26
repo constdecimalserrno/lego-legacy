@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-11-26
 
+Deterministic `.tun` ADPCM music streaming on the declared clock via `WINMM!timeSetEvent` / `timeKillEvent` (#371): real-disc integration tests in `titles/lego-racers/tests/lego_racers.rs` prove non-silent stereo PCM (`theme.tun`, 28,672 samples, RMS 5,216.4, peak 27,562 across 11 active blocks on `first-light.route`), fresh decoded PCM past the 2.04 s (`0x2c000` B) circular DirectSound buffer wrap (`26` 100 ms periodic callbacks over 461 flips, `22,045/22,050` distinct samples vs. lap 1), bit-exact audio determinism across independent runs, clean `timeKillEvent` teardown, and bit-exact `LLSNAP v2` cold snapshot/restore parity including audio.
+
 First light to rendered Main Menu under `--guest-args -novideo` (#370): commits
 `routes/first-light.route` (`flip 330 close`, exiting 0 cleanly at 331 flips after the LEGO Media
 splash fades into the animated 3D Captain Redbeard Main Menu) alongside real-disc integration tests
