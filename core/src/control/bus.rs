@@ -2153,6 +2153,7 @@ mod tests {
                 keys: vec!["LeftShift".into(), "Escape".into()],
                 hold_flips: 1,
                 hold_ms: None,
+                lead_flips: 1,
             },
             auto_step: false,
         });

@@ -36,7 +36,7 @@ lego-ctrl move 120 80
 lego-ctrl delta -12 8
 lego-ctrl drag 100 100 300 240
 lego-ctrl key Space --hold-flips 3
-lego-ctrl chord LeftControl,A --hold-flips 2
+lego-ctrl chord LeftControl,A --hold-flips 2 # 1-flip prefix lead/trail (--lead-flips 0 to opt out)
 lego-ctrl type "PLAYER1"
 lego-ctrl wait 30
 lego-ctrl wait-change 60

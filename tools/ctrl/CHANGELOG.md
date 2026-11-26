@@ -12,5 +12,5 @@ Initial zero-crate `lego-ctrl` CLI and shared HTTP/1.1 + UDS client library (#31
 - Live session discovery in `~/.local/state/lego-legacy/sessions/` with stale PID pruning,
   `--url` / `LEGO_CTRL_URL` / `--title` resolution, and `launch` helper waiting for control readiness.
 - Full CLI surface for status, metadata, controls, goals, fps, watch URL, PNG screenshots,
-  action primitives (including `click --settle-flips N`, #344), route/JSONL piping, read-only memory/CPU/Win32/file inspection,
+  action primitives (including `click --settle-flips N`, #344, and `chord --lead-flips N`, #348), route/JSONL piping, read-only memory/CPU/Win32/file inspection,
   bookmarks/rewind/snapshot/restore/route export, agent state, and execution mode control.

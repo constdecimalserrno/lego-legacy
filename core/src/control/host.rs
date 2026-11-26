@@ -1061,7 +1061,7 @@ mod tests {
                 })
             ));
 
-            // Chord + key hold via batch (flips 4..7).
+            // Chord + key hold via batch.
             let r = driver_bus.dispatch_sync(
                 Command::Batch {
                     actions: vec![
@@ -1069,6 +1069,7 @@ mod tests {
                             keys: vec!["LeftShift".into(), "A".into()],
                             hold_flips: 1,
                             hold_ms: None,
+                            lead_flips: 1,
                         },
                         Action::KeyHold {
                             key: "Space".into(),
@@ -1082,7 +1083,7 @@ mod tests {
             );
             assert!(r.ok);
 
-            // Pipe a relative #lego-legacy-route 1 snippet (flips 7..10).
+            // Pipe a relative #lego-legacy-route 1 snippet.
             let r = driver_bus.dispatch_sync(
                 Command::PipeRoute {
                     route_text: "#lego-legacy-route 1\nflip 0 move 10 15\nflip 1 down right\nflip 2 up right\n".into(),
@@ -2109,5 +2110,23 @@ mod tests {
             step(&mut host, 701),
             [key(0x2c, false), key(DIK_LSHIFT, false)]
         );
+
+        // Live-mode mid-frame chord after poll_input(701) preserves 1-flip prefix lead/trail (#348).
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::Chord {
+                    keys: vec!["F2".into(), "W".into()],
+                    hold_flips: 1,
+                    hold_ms: None,
+                    lead_flips: 1,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        assert_eq!(step(&mut host, 702), [key(0x3c, true)]);
+        assert_eq!(step(&mut host, 703), [key(0x11, true)]);
+        assert_eq!(step(&mut host, 704), [key(0x11, false)]);
+        assert_eq!(step(&mut host, 705), [key(0x3c, false)]);
     }
 }

@@ -498,6 +498,19 @@ pub fn opt_i32(obj: &BTreeMap<String, JsonValue>, key: &str) -> Result<Option<i3
     }
 }
 
+fn opt_u64_default(
+    obj: &BTreeMap<String, JsonValue>,
+    key: &str,
+    default: u64,
+) -> Result<u64, String> {
+    match obj.get(key) {
+        None | Some(JsonValue::Null) => Ok(default),
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| format!("`{key}` must be a non-negative integer")),
+    }
+}
+
 /// Parse a high-level [`Action`] from a JSON object and action kind name.
 ///
 /// # Errors
@@ -534,12 +547,7 @@ pub fn parse_action_obj(kind: &str, obj: &BTreeMap<String, JsonValue>) -> Result
                 .and_then(JsonValue::as_u64)
                 .unwrap_or(1),
             hold_ms: obj.get("hold_ms").and_then(JsonValue::as_u64),
-            settle_flips: match obj.get("settle_flips") {
-                None | Some(JsonValue::Null) => 1,
-                Some(v) => v
-                    .as_u64()
-                    .ok_or_else(|| "`settle_flips` must be a non-negative integer".to_owned())?,
-            },
+            settle_flips: opt_u64_default(obj, "settle_flips", 1)?,
         }),
         "click_poll" => {
             if matches!(obj.get("settle_flips"), Some(v) if !matches!(v, JsonValue::Null)) {
@@ -605,6 +613,7 @@ pub fn parse_action_obj(kind: &str, obj: &BTreeMap<String, JsonValue>) -> Result
                     .and_then(JsonValue::as_u64)
                     .unwrap_or(1),
                 hold_ms: obj.get("hold_ms").and_then(JsonValue::as_u64),
+                lead_flips: opt_u64_default(obj, "lead_flips", 1)?,
             })
         }
         "type_text" => {

@@ -5,6 +5,10 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Control timeline chord prefix lead stagger (#348) strictly outside guest state (`core/src/control/{timeline,json}.rs`):
+
+- **Default 1-flip prefix lead/trail on multi-key `Action::Chord`:** Adds `lead_flips` (default `1` via JSON/CLI/MCP; `0` to opt out) so earlier prefix keys assert at `start_flip`, the final key asserts at `start_flip + lead_flips` and releases at `+ hold_flips`, and prefix keys release in reverse order `lead_flips` later (omitted for single-key or deduplicated-to-1 chords), advances `start_flip` past `last_polled_flip` so mid-frame `Live`-mode chords never collapse onto one flip (while preserving static poll-loop delivery for `lead_flips: 0` with `hold_ms`), arms `hold_ms` release windows at the final key's press flip (`Due::AfterFlipOrMs` with `min_poll` guard), and rejects negative/non-integer `lead_flips`.
+
 `/watch` spectator & `action_feed` polish (#350) strictly outside guest state (`core/src/control/{bus,host,http,observe,snapshot,spectator,timeline,watch.html}`), leaving every run's cursor, flips, declared milliseconds, and `state_digest()` unchanged:
 
 - **Human Take Over `action_feed` source labeling:** `ControlBus` labels `Command::Act`/`Command::Batch` (now atomic on partial failure) feed entries as `"human"` whenever `owner == InputOwner::Human` (and `"agent"` when `owner == InputOwner::Agent`), adds an optional `"source": "human" | "agent"` override on `POST /api/act`, and updates `watch.html` Take Over actions to send `source: 'human'` with `.src-human` styling and anchored non-duplicating click ripples.

@@ -141,7 +141,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "F2+W / F2+Q / F2+R / F2+E",
             action: "Drill / Clear Rubble / Reinforce / Dynamite",
-            notes: "Contextual wall and floor orders (all HUD menu chords require holding `F2`, or click the right-sidebar icon). `F2+G` cancels drilling; `F2+E` also places Electric Fences.",
+            notes: "Contextual wall and floor orders: select a drillable wall or rubble tile (not a Raider), wait ~15 flips for the right sidebar to finish sliding in, then send `chord F2,<Key>` (or click the right-sidebar icon). `F2+G` cancels drilling; `F2+E` also places Electric Fences.",
         },
         ControlHint {
             input: "F2+M / F2+C / F2+V / F2+A / F2+P",
@@ -181,7 +181,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
     ],
     hazards: &[
         "Keep the pointer inside the safe interior (`4..=635`, `4..=475`) when idle; entering the 4 px screen border (`x <= 3 || x >= 636 || y <= 3 || y >= 476`) triggers continuous edge-scrolling away from base.",
-        "All contextual HUD action hotkeys require holding `F2` (`chord F2,<Key>`), or clicking the sidebar icon; bare letter keys do not issue orders (bare `M` toggles music, bare `S` toggles SFX).",
+        "All contextual HUD action hotkeys require holding `F2` (`chord F2,<Key>`) after the right sidebar finishes sliding in (~15 flips after selecting a tile/unit), or clicking the sidebar icon; bare letter keys do not issue orders (bare `M` toggles music, bare `S` toggles SFX).",
         "Avoid `F2+S` with a Raider selected or `F2+D` with a building/vehicle selected unless intentionally teleporting them back to the L.M.S. Explorer.",
         "Retail `Lego.cfg` disables debug keys (`AllowDebugKeys FALSE`): `Keypad8`/`Keypad9` game-speed keys, `F6`, `Tab`, `Ctrl+F`, and `Ctrl+G` do not work; change Game Speed via Pause Menu -> Options.",
         "Buildings require adjacent Power Paths (`OnlyBuildOnPaths TRUE`); unstable walls trigger landslides unless reinforced (`F2+R`); oxygen-limited missions fail at 0% air unless a Support Station is built.",
