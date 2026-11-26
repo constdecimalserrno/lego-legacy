@@ -1499,5 +1499,10 @@ mod tests {
         assert!(WATCH_HTML.contains("box-sizing:content-box"));
         assert!(WATCH_HTML.contains("function fitViewport()"));
         assert!(WATCH_HTML.contains("ResizeObserver"));
+
+        assert!(WATCH_HTML.contains(".viewport.takeover.hide-cursor #stage{cursor:none}"));
+        assert!(WATCH_HTML.contains("function syncTakeoverCursor()"));
+        assert!(WATCH_HTML.contains("function enqueueAct(body)"));
+        assert!(!WATCH_HTML.contains("relCursor"));
     }
 }

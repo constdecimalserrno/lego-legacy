@@ -14,6 +14,7 @@ pub const SHIMS: &[Shim] = &[stdcall("DINPUT", "DirectInputCreateA", 4, create)]
 
 const DI_OK: u32 = S_OK;
 const DIERR_INVALIDPARAM: u32 = 0x8007_0057;
+const DISCL_EXCLUSIVE: u32 = 0x0000_0001;
 const DIDC_ATTACHED: u32 = 0x0000_0001;
 const DEVTYPE_MOUSE: u32 = 2 | (2 << 8);
 const DEVTYPE_KEYBOARD: u32 = 3 | (4 << 8);
@@ -200,13 +201,13 @@ pub static DIRECT_INPUT_DEVICE: Interface = Interface {
         method("EnumObjects", 3, enum_objects),
         method("GetProperty", 2, ok),
         method("SetProperty", 2, ok),
-        method("Acquire", 0, ok),
-        method("Unacquire", 0, ok),
+        method("Acquire", 0, acquire),
+        method("Unacquire", 0, unacquire),
         method("GetDeviceState", 2, device_state),
         method("GetDeviceData", 4, device_data),
         method("SetDataFormat", 1, ok),
         method("SetEventNotification", 1, ok),
-        method("SetCooperativeLevel", 2, ok),
+        method("SetCooperativeLevel", 2, set_cooperative_level),
         method("GetObjectInfo", 3, ok),
         method("GetDeviceInfo", 1, get_device_info),
         method("RunControlPanel", 2, ok),
@@ -247,8 +248,16 @@ fn create_device(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
         ));
         return Ok(0x8004_0154);
     }
-    let object = State::make_com(ctx, &DIRECT_INPUT_DEVICE, ComState::Device { keyboard })
-        .map_err(Stop::Fault)?;
+    let object = State::make_com(
+        ctx,
+        &DIRECT_INPUT_DEVICE,
+        ComState::Device {
+            keyboard,
+            exclusive: false,
+            acquired: false,
+        },
+    )
+    .map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "dinput {} at {object:#010x}",
@@ -270,8 +279,32 @@ fn device_status(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, S
 fn is_keyboard(ctx: &Ctx<'_>, this: u32) -> bool {
     matches!(
         ctx.state.com(this).map(|o| &o.state),
-        Some(ComState::Device { keyboard: true })
+        Some(ComState::Device { keyboard: true, .. })
     )
+}
+
+/// Acquiring `GUID_SysMouse` with `DISCL_EXCLUSIVE` hides the Windows system
+/// cursor until `Unacquire` or final `Release` (#374).
+fn set_cooperative_level(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    if let Some(ComState::Device { exclusive, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    {
+        *exclusive = args[1] & DISCL_EXCLUSIVE != 0;
+    }
+    Ok(DI_OK)
+}
+
+fn acquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    if let Some(ComState::Device { acquired, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+        *acquired = true;
+    }
+    Ok(DI_OK)
+}
+
+fn unacquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
+    if let Some(ComState::Device { acquired, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+        *acquired = false;
+    }
+    Ok(DI_OK)
 }
 
 /// `IDirectInputDeviceA::GetCapabilities(lpDIDevCaps)`.
@@ -520,7 +553,11 @@ mod tests {
             let kbd = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: true },
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .expect("keyboard device");
             let count_at = 0x1000u32;
@@ -563,7 +600,11 @@ mod tests {
             let mouse = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: false },
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .expect("mouse device");
             assert_eq!((poll.run)(ctx, mouse, &[]).unwrap(), DI_OK);
@@ -581,13 +622,21 @@ mod tests {
             let mouse = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: false },
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .unwrap();
             let kbd = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: true },
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .unwrap();
 
@@ -660,13 +709,21 @@ mod tests {
             let mouse = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: false },
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .unwrap();
             let kbd = State::make_com(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
-                ComState::Device { keyboard: true },
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .unwrap();
 
@@ -729,6 +786,83 @@ mod tests {
                 DIDFT_PSHBUTTON | (0x01 << 8)
             );
             assert_eq!(ctx.mem.slice(first_key + 0x20, 4).unwrap(), b"ESC\0");
+        });
+    }
+
+    #[test]
+    fn exclusive_mouse_acquire_hides_pointer_until_unacquire_or_release() {
+        use super::{acquire, set_cooperative_level, unacquire, DISCL_EXCLUSIVE};
+        use crate::snap::{Reader, Snap, Writer};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let mouse = State::make_com(
+                ctx,
+                &DIRECT_INPUT_DEVICE,
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: false,
+                    acquired: false,
+                },
+            )
+            .unwrap();
+            let kbd = State::make_com(
+                ctx,
+                &DIRECT_INPUT_DEVICE,
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
+            )
+            .unwrap();
+
+            assert!(ctx.state.pointer_shown());
+
+            assert_eq!(
+                set_cooperative_level(ctx, kbd, &[0x10010, DISCL_EXCLUSIVE | 0x8]).unwrap(),
+                DI_OK
+            );
+            assert_eq!(acquire(ctx, kbd, &[]).unwrap(), DI_OK);
+            assert!(ctx.state.pointer_shown());
+
+            assert_eq!(
+                set_cooperative_level(ctx, mouse, &[0x10010, 0x6]).unwrap(),
+                DI_OK
+            );
+            assert_eq!(acquire(ctx, mouse, &[]).unwrap(), DI_OK);
+            assert!(ctx.state.pointer_shown());
+            assert_eq!(unacquire(ctx, mouse, &[]).unwrap(), DI_OK);
+
+            assert_eq!(
+                set_cooperative_level(ctx, mouse, &[0x10010, DISCL_EXCLUSIVE | 0x8]).unwrap(),
+                DI_OK
+            );
+            assert_eq!(acquire(ctx, mouse, &[]).unwrap(), DI_OK);
+            assert!(!ctx.state.pointer_shown());
+            assert_eq!(ctx.state.cursor_shown, 0);
+
+            let mut w = Writer::new();
+            let mut dev = ctx.state.com(mouse).unwrap().state.clone();
+            dev.snap(&mut w);
+            let mut r = Reader::new(&w.out);
+            let mut restored = ComState::None;
+            restored.snap(&mut r);
+            assert_eq!(
+                restored,
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: true,
+                    acquired: true,
+                }
+            );
+
+            assert_eq!(unacquire(ctx, mouse, &[]).unwrap(), DI_OK);
+            assert!(ctx.state.pointer_shown());
+
+            assert_eq!(acquire(ctx, mouse, &[]).unwrap(), DI_OK);
+            assert!(!ctx.state.pointer_shown());
+            assert_eq!(ctx.state.com_ref(mouse, -1), 0);
+            assert!(ctx.state.pointer_shown());
         });
     }
 }

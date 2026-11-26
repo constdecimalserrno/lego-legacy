@@ -660,7 +660,7 @@ fn inspect_win32(machine: &Machine) -> String {
         st.pointer.1,
         st.last_move.0,
         st.last_move.1,
-        st.cursor_shown >= 0,
+        st.pointer_shown(),
         st.cursor_shown
     );
     match st.cursor {

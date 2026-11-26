@@ -407,7 +407,7 @@ fn sync_after_live_restore(
 ) {
     machine.sync_host_after_restore(host);
 
-    let pointer_shown = machine.state.cursor_shown >= 0;
+    let pointer_shown = machine.state.pointer_shown();
     let cursor_blank = machine.state.cursor.is_some_and(|c| {
         crate::win32::user32::shape(&machine.state, c).is_some_and(|s| s.is_blank())
     });
