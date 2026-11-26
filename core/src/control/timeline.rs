@@ -68,11 +68,15 @@ pub enum Action {
         hold_flips: u64,
         hold_ms: Option<u64>,
     },
-    /// Press and hold multiple keys simultaneously, releasing in reverse order.
+    /// Press and hold multiple keys, staggering earlier prefix keys `lead_flips`
+    /// ahead of the final key and releasing them `lead_flips` after (default `1`
+    /// via JSON/CLI/MCP; pass `0` for simultaneous press/release or static
+    /// non-flipping poll loops with `hold_ms`).
     Chord {
         keys: Vec<String>,
         hold_flips: u64,
         hold_ms: Option<u64>,
+        lead_flips: u64,
     },
     /// Type printable ASCII text (plus `\n`, `\t`, `\x08`) using `LeftShift`
     /// where needed, spaced by `flip_gap` flips between characters.
@@ -141,6 +145,7 @@ impl Action {
                 keys,
                 hold_flips,
                 hold_ms,
+                ..
             } => format!(
                 "chord [{}] hold={}",
                 keys.join("+"),
@@ -322,12 +327,13 @@ enum Due {
     },
     FlipOrMs {
         min_flip: u64,
+        min_poll: u64,
         flip: u64,
         declared_ms: u64,
     },
     /// Arms into `FlipOrMs` once `flip >= arm_flip`, measuring `hold_ms` from
-    /// the `declared_ms` observed when `arm_flip` arrives so a settle gap or
-    /// multi-flip relative move before `Down` never fires `Up` early.
+    /// the `declared_ms` observed when `arm_flip` arrives so a settle gap,
+    /// multi-flip relative move, or chord prefix lead never fires `Up` early.
     AfterFlipOrMs {
         arm_flip: u64,
         flip: u64,
@@ -345,11 +351,13 @@ impl Due {
             Self::Point { flip: f, poll: p } => (flip, poll) >= (f, p),
             Self::FlipOrMs {
                 min_flip,
+                min_poll,
                 flip: f,
                 declared_ms: ms,
             } => {
                 flip >= f
-                    || ((flip > min_flip || (flip == min_flip && poll > 0)) && declared_ms >= ms)
+                    || ((flip > min_flip || (flip == min_flip && poll > min_poll))
+                        && declared_ms >= ms)
             }
             Self::AfterFlipOrMs { .. } => false,
             Self::Ms {
@@ -762,10 +770,17 @@ impl Timeline {
     }
 
     /// Record that `flip` has entered `Host::poll_input` so `Action::TypeText`
-    /// scheduled mid-frame (e.g. `Live` mode between `deliver_input(N)` and
-    /// `observe_flip(N+1)`) advances past the already-polled flip (#345).
+    /// and `Action::Chord` scheduled mid-frame (e.g. `Live` mode between
+    /// `deliver_input(N)` and `observe_flip(N+1)`) advance past the already-polled
+    /// flip (#345, #348).
     pub(crate) fn note_polled(&mut self, flip: u64) {
         self.last_polled_flip = self.last_polled_flip.max(Some(flip));
+    }
+
+    fn next_unpolled_flip(&self, start_flip: u64) -> u64 {
+        self.last_polled_flip.map_or(start_flip, |polled| {
+            start_flip.max(polled.saturating_add(1))
+        })
     }
 
     /// Clear tracked polled-flip watermark across rewind or live snapshot restore.
@@ -925,6 +940,7 @@ impl Timeline {
                     (
                         Due::FlipOrMs {
                             min_flip: click_flip,
+                            min_poll: 0,
                             flip: rel_flip,
                             declared_ms: target_ms,
                         },
@@ -993,6 +1009,7 @@ impl Timeline {
                 let due = match hold_ms {
                     Some(ms) => Due::FlipOrMs {
                         min_flip: start_flip,
+                        min_poll: 0,
                         flip: rel_flip,
                         declared_ms: start_ms.saturating_add(*ms),
                     },
@@ -1008,6 +1025,7 @@ impl Timeline {
                 keys,
                 hold_flips,
                 hold_ms,
+                lead_flips,
             } => {
                 if keys.is_empty() {
                     return Err(ActionError::EmptyChord);
@@ -1019,26 +1037,50 @@ impl Timeline {
                         codes.push(code);
                     }
                 }
-                for &code in &codes {
+                let hold = (*hold_flips).max(1);
+                let lead = if codes.len() > 1 { *lead_flips } else { 0 };
+                // Preserve static non-flipping poll-loop delivery when caller opts
+                // out of lead stagger with `hold_ms`; otherwise advance past an
+                // already-polled flip so `Live`-mode chords never collapse.
+                if lead > 0 || hold_ms.is_none() {
+                    start_flip = self.next_unpolled_flip(start_flip);
+                }
+                let (&final_code, prefix_codes) =
+                    codes.split_last().expect("non-empty chord has final key");
+                for &code in prefix_codes {
                     self.push_input(start_flip, 0, Input::Key { code, down: true });
                 }
-                let hold = (*hold_flips).max(1);
-                let rel_flip = start_flip.saturating_add(hold);
-                let due = match hold_ms {
-                    Some(ms) => Due::FlipOrMs {
-                        min_flip: start_flip,
-                        flip: rel_flip,
-                        declared_ms: start_ms.saturating_add(*ms),
+                let action_down_flip = start_flip.saturating_add(lead);
+                self.push_input(
+                    action_down_flip,
+                    0,
+                    Input::Key {
+                        code: final_code,
+                        down: true,
                     },
-                    None => Due::Point {
-                        flip: rel_flip,
-                        poll: 0,
+                );
+                let action_rel_flip = action_down_flip.saturating_add(hold);
+                let prefix_rel_flip = action_rel_flip.saturating_add(lead);
+                let release_due = |flip: u64| match hold_ms {
+                    Some(ms) => Due::AfterFlipOrMs {
+                        arm_flip: action_down_flip,
+                        flip,
+                        hold_ms: *ms,
                     },
+                    None => Due::Point { flip, poll: 0 },
                 };
-                for &code in codes.iter().rev() {
-                    self.push(due, Payload::Input(Input::Key { code, down: false }));
+                self.push(
+                    release_due(action_rel_flip),
+                    Payload::Input(Input::Key {
+                        code: final_code,
+                        down: false,
+                    }),
+                );
+                let prefix_due = release_due(prefix_rel_flip);
+                for &code in prefix_codes.iter().rev() {
+                    self.push(prefix_due, Payload::Input(Input::Key { code, down: false }));
                 }
-                rel_flip
+                prefix_rel_flip
             }
             Action::TypeText { text, flip_gap } => {
                 let mut mapped = Vec::with_capacity(text.len());
@@ -1054,9 +1096,7 @@ impl Timeline {
                     });
                 }
                 let gap = (*flip_gap).max(1);
-                start_flip = self.last_polled_flip.map_or(start_flip, |polled| {
-                    start_flip.max(polled.saturating_add(1))
-                });
+                start_flip = self.next_unpolled_flip(start_flip);
                 let mut cursor = start_flip;
                 let mut last_flip = start_flip;
                 for (shift, code) in mapped {
@@ -1162,6 +1202,7 @@ impl Timeline {
                 if flip >= arm_flip {
                     item.due = Due::FlipOrMs {
                         min_flip: flip,
+                        min_poll: poll,
                         flip: rel_flip,
                         declared_ms: declared_ms.saturating_add(hold_ms),
                     };
@@ -1450,6 +1491,7 @@ mod tests {
                     keys: vec!["LeftControl".into(), "A".into(), "0x39".into()],
                     hold_flips: 2,
                     hold_ms: None,
+                    lead_flips: 0,
                 },
                 5,
                 0,
@@ -1498,7 +1540,8 @@ mod tests {
                 &Action::Chord {
                     keys: vec![],
                     hold_flips: 1,
-                    hold_ms: None
+                    hold_ms: None,
+                    lead_flips: 1,
                 },
                 0,
                 0
@@ -2153,6 +2196,7 @@ mod tests {
                     keys: vec!["LeftShift".to_owned(), "A".to_owned()],
                     hold_flips: 2,
                     hold_ms: None,
+                    lead_flips: 1,
                 },
                 "chord [LeftShift+A] hold=2",
             ),
@@ -2172,6 +2216,179 @@ mod tests {
                 !summary.contains("Some(") && !summary.contains("None"),
                 "Rust Debug artifact leaked in `{summary}`"
             );
+        }
+    }
+
+    #[test]
+    fn chord_staggers_prefix_lead_and_trail_by_default_and_supports_opt_out_and_hold_ms() {
+        use crate::control::json::{parse_action_obj, parse_json};
+
+        let parse_chord = |raw: &str| {
+            let v = parse_json(raw).expect("valid json");
+            parse_action_obj("chord", v.as_object().expect("object")).expect("valid chord")
+        };
+        let key = |code: u32, down: bool| Input::Key { code, down };
+
+        // 1. Default 2-key chord (F2, W) staggers prefix lead/trail by 1 flip.
+        let mut tl = Timeline::new((1.0, 1.0));
+        let act = parse_chord(r#"{"keys":["F2","W"],"hold_flips":1}"#);
+        let report = tl.schedule(&act, 10, 1000).unwrap();
+        assert_eq!(report.events_scheduled, 4);
+        assert_eq!(report.end_flip, 13);
+        assert_eq!(report.required_flips, 4);
+        assert_eq!(tl.drain_due(10, 0, 1000), [key(0x3c, true)]);
+        assert_eq!(tl.drain_due(11, 0, 1016), [key(0x11, true)]);
+        assert_eq!(tl.drain_due(12, 0, 1032), [key(0x11, false)]);
+        assert_eq!(tl.drain_due(13, 0, 1048), [key(0x3c, false)]);
+        assert!(tl.is_empty());
+
+        // 2. Default 3-key chord presses earlier prefix keys together, leads final key,
+        //    releases final key first, then releases prefix keys in reverse order.
+        let act = parse_chord(r#"{"keys":["LeftControl","LeftShift","S"],"hold_flips":2}"#);
+        let report = tl.schedule(&act, 20, 2000).unwrap();
+        assert_eq!(report.events_scheduled, 6);
+        assert_eq!(report.end_flip, 24);
+        assert_eq!(report.required_flips, 5);
+        assert_eq!(
+            tl.drain_due(20, 0, 2000),
+            [key(0x1d, true), key(0x2a, true)]
+        );
+        assert_eq!(tl.drain_due(21, 0, 2016), [key(0x1f, true)]);
+        assert_eq!(tl.drain_due(22, 0, 2032), []);
+        assert_eq!(tl.drain_due(23, 0, 2048), [key(0x1f, false)]);
+        assert_eq!(
+            tl.drain_due(24, 0, 2064),
+            [key(0x2a, false), key(0x1d, false)]
+        );
+        assert!(tl.is_empty());
+
+        // 3. Explicit lead_flips: 0 opts out and keeps simultaneous press/release.
+        let act = parse_chord(r#"{"keys":["F2","Q"],"hold_flips":2,"lead_flips":0}"#);
+        let report = tl.schedule(&act, 30, 3000).unwrap();
+        assert_eq!(report.events_scheduled, 4);
+        assert_eq!(report.end_flip, 32);
+        assert_eq!(report.required_flips, 3);
+        assert_eq!(
+            tl.drain_due(30, 0, 3000),
+            [key(0x3c, true), key(0x10, true)]
+        );
+        assert_eq!(tl.drain_due(31, 0, 3016), []);
+        assert_eq!(
+            tl.drain_due(32, 0, 3032),
+            [key(0x10, false), key(0x3c, false)]
+        );
+        assert!(tl.is_empty());
+
+        // 4. Explicit lead_flips: 2 leaves idle flips around prefix lead and trail.
+        let act = parse_chord(r#"{"keys":["F2","W"],"hold_flips":1,"lead_flips":2}"#);
+        let report = tl.schedule(&act, 40, 4000).unwrap();
+        assert_eq!(report.end_flip, 45);
+        assert_eq!(report.required_flips, 6);
+        assert_eq!(tl.drain_due(40, 0, 4000), [key(0x3c, true)]);
+        assert_eq!(tl.drain_due(41, 0, 4016), []);
+        assert_eq!(tl.drain_due(42, 0, 4032), [key(0x11, true)]);
+        assert_eq!(tl.drain_due(43, 0, 4048), [key(0x11, false)]);
+        assert_eq!(tl.drain_due(44, 0, 4064), []);
+        assert_eq!(tl.drain_due(45, 0, 4080), [key(0x3c, false)]);
+        assert!(tl.is_empty());
+
+        // 5. Single-key chord and duplicate-key chord omit stagger.
+        for raw in [
+            r#"{"keys":["Space"],"hold_flips":1,"lead_flips":2}"#,
+            r#"{"keys":["F2","F2"],"hold_flips":1,"lead_flips":2}"#,
+        ] {
+            let mut single = Timeline::new((1.0, 1.0));
+            let act = parse_chord(raw);
+            let report = single.schedule(&act, 50, 5000).unwrap();
+            assert_eq!(report.events_scheduled, 2);
+            assert_eq!(report.end_flip, 51);
+            assert_eq!(report.required_flips, 2);
+            assert_eq!(single.drain_due(50, 0, 5000).len(), 1);
+            assert_eq!(single.drain_due(51, 0, 5016).len(), 1);
+            assert!(single.is_empty());
+        }
+
+        // 6. hold_ms with lead_flips > 0 never releases before final key presses,
+        //    and releases in order in a static poll loop when hold_ms elapses.
+        let act = parse_chord(r#"{"keys":["F2","W"],"hold_flips":4,"hold_ms":16,"lead_flips":2}"#);
+        let report = tl.schedule(&act, 60, 6000).unwrap();
+        assert_eq!(report.end_flip, 68);
+        assert_eq!(tl.drain_due(60, 0, 6000), [key(0x3c, true)]);
+        // Flip 61 is at 6020 ms (> 6000 + 16), before W presses at 62 -> must NOT release.
+        assert_eq!(tl.drain_due(61, 0, 6020), []);
+        // Flip 62 fires W down and arms 16 ms window from 6040 ms -> 6056 ms.
+        assert_eq!(tl.drain_due(62, 0, 6040), [key(0x11, true)]);
+        assert_eq!(tl.drain_due(62, 1, 6050), []);
+        assert_eq!(
+            tl.drain_due(62, 2, 6056),
+            [key(0x11, false), key(0x3c, false)]
+        );
+        assert!(tl.is_empty());
+
+        // 7. Mid-frame Live scheduling (start_flip already polled) advances to polled + 1
+        //    so lead stagger and non-zero hold never collapse onto one flip.
+        let mut live = Timeline::new((1.0, 1.0));
+        assert_eq!(live.drain_due(100, 0, 1600), []);
+        let act = parse_chord(r#"{"keys":["F2","W"],"hold_flips":1}"#);
+        let report = live.schedule(&act, 100, 1600).unwrap();
+        assert_eq!(report.end_flip, 104);
+        assert_eq!(report.required_flips, 4);
+        assert_eq!(live.drain_due(101, 0, 1616), [key(0x3c, true)]);
+        assert_eq!(live.drain_due(102, 0, 1632), [key(0x11, true)]);
+        assert_eq!(live.drain_due(103, 0, 1648), [key(0x11, false)]);
+        assert_eq!(live.drain_due(104, 0, 1664), [key(0x3c, false)]);
+        assert!(live.is_empty());
+
+        // 8. Static non-flipping poll loop with lead_flips: 0 and hold_ms (including 0)
+        //    fires on poll > 0 without deadlocking or collapsing Down+Up onto one poll.
+        for (ms, rel_ms) in [(150u64, 5150u64), (0u64, 5000u64)] {
+            let mut static_tl = Timeline::new((1.0, 1.0));
+            assert_eq!(static_tl.drain_due(80, 0, 5000), []);
+            let act = parse_chord(&format!(
+                r#"{{"keys":["F2","W"],"hold_flips":4,"hold_ms":{ms},"lead_flips":0}}"#
+            ));
+            let rep = static_tl.schedule(&act, 80, 5000).unwrap();
+            assert_eq!(rep.end_flip, 84);
+            assert_eq!(
+                static_tl.drain_due(80, 1, 5000),
+                [key(0x3c, true), key(0x11, true)],
+                "ms={ms}: down fires on poll 1 without collapsing up"
+            );
+            if ms > 0 {
+                assert_eq!(static_tl.drain_due(80, 2, 5100), []);
+                assert_eq!(
+                    static_tl.drain_due(80, 3, rel_ms),
+                    [key(0x11, false), key(0x3c, false)]
+                );
+            } else {
+                assert_eq!(
+                    static_tl.drain_due(80, 2, rel_ms),
+                    [key(0x11, false), key(0x3c, false)]
+                );
+            }
+            assert!(static_tl.is_empty());
+        }
+
+        // 9. Flip-driven trail stagger preserved when hold_ms exceeds flip hold window.
+        let act = parse_chord(r#"{"keys":["F2","W"],"hold_flips":1,"hold_ms":500,"lead_flips":1}"#);
+        let mut tlong = Timeline::new((1.0, 1.0));
+        assert_eq!(tlong.schedule(&act, 10, 1000).unwrap().end_flip, 13);
+        assert_eq!(tlong.drain_due(10, 0, 1000), [key(0x3c, true)]);
+        assert_eq!(tlong.drain_due(11, 0, 1016), [key(0x11, true)]);
+        assert_eq!(tlong.drain_due(12, 0, 1032), [key(0x11, false)]);
+        assert_eq!(tlong.drain_due(13, 0, 1048), [key(0x3c, false)]);
+        assert!(tlong.is_empty());
+
+        // 10. Invalid lead_flips values are rejected; null falls back to default 1.
+        let act_null = parse_chord(r#"{"keys":["F2","W"],"lead_flips":null}"#);
+        let mut tnull = Timeline::new((1.0, 1.0));
+        assert_eq!(tnull.schedule(&act_null, 0, 0).unwrap().end_flip, 3);
+        for bad in [
+            r#"{"keys":["F2","W"],"lead_flips":-1}"#,
+            r#"{"keys":["F2","W"],"lead_flips":"0"}"#,
+        ] {
+            let v = parse_json(bad).unwrap();
+            assert!(parse_action_obj("chord", v.as_object().unwrap()).is_err());
         }
     }
 }

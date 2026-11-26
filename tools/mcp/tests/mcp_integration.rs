@@ -201,6 +201,23 @@ fn tool_schema_json_is_valid_and_contains_all_nine_tools() {
             "game_mode",
         ]
     );
+
+    let act_tool = arr
+        .iter()
+        .find(|t| t.as_object().unwrap()["name"].as_str() == Some("game_act"))
+        .expect("game_act schema");
+    let props = act_tool.as_object().unwrap()["inputSchema"]
+        .as_object()
+        .unwrap()["properties"]
+        .as_object()
+        .unwrap();
+    let lead = props
+        .get("lead_flips")
+        .expect("game_act exposes lead_flips")
+        .as_object()
+        .unwrap();
+    assert_eq!(lead["type"].as_str(), Some("integer"));
+    assert_eq!(lead["minimum"].as_u64(), Some(0));
 }
 
 #[test]

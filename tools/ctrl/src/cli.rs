@@ -31,7 +31,7 @@ Actions & piping:
   delta <dx> <dy> [--flips N]
   drag <x1> <y1> <x2> <y2> [--right] [--step-px N]
   key <NAME> [--hold-flips N] [--hold-ms N]
-  chord <K1,K2,...> [--hold-flips N] [--hold-ms N]
+  chord <K1,K2,...> [--hold-flips N] [--hold-ms N] [--lead-flips N]
   type <TEXT> [--flip-gap N]
   step [flips]
   wait <flips> [--ms N]
@@ -711,6 +711,7 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
             }
             let mut hold_flips: Option<u64> = None;
             let mut hold_ms: Option<u64> = None;
+            let mut lead_flips: Option<u64> = None;
             let mut i = 1usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -721,6 +722,10 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
                     "--hold-ms" => {
                         i += 1;
                         hold_ms = Some(parse_u64_flag(args, i, "--hold-ms")?);
+                    }
+                    "--lead-flips" => {
+                        i += 1;
+                        lead_flips = Some(parse_u64_flag(args, i, "--lead-flips")?);
                     }
                     other => return Err(format!("unknown `chord` flag `{other}`")),
                 }
@@ -739,6 +744,9 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
             }
             if let Some(hm) = hold_ms {
                 let _ = write!(out, ",\"hold_ms\":{hm}");
+            }
+            if let Some(lf) = lead_flips {
+                let _ = write!(out, ",\"lead_flips\":{lf}");
             }
             out.push('}');
             Ok(CliCommand::ActRaw { json: out })

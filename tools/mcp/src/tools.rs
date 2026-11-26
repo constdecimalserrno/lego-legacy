@@ -175,6 +175,7 @@ pub const fn tools_list_json() -> &'static str {
         "hold_flips": { "type": "integer" },
         "hold_ms": { "type": "integer" },
         "settle_flips": { "type": "integer", "minimum": 0, "description": "Flips between Move and Down on `click` when coordinates are given (default 1; 0 to opt out)." },
+        "lead_flips": { "type": "integer", "minimum": 0, "description": "Flips prefix keys lead before the final key and linger after on multi-key `chord` (default 1; 0 for simultaneous press/release or static poll loops with `hold_ms`)." },
         "glide_flips": { "type": "integer" },
         "flips": { "type": "integer" },
         "step_px": { "type": "integer" },

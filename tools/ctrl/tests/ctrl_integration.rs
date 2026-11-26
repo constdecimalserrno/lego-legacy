@@ -359,6 +359,25 @@ fn cli_parses_all_commands_and_friendly_actions() {
             JsonValue::Str("A".to_owned())
         ]
     );
+    assert!(
+        !parse_json(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("lead_flips"),
+        "omitted --lead-flips leaves server default"
+    );
+
+    let p = parse_args(["chord", "F2,W", "--hold-flips", "2", "--lead-flips", "0"]).unwrap();
+    let CliCommand::ActRaw { json } = p.command else {
+        panic!("expected ActRaw");
+    };
+    let obj = parse_json(&json).unwrap();
+    let map = obj.as_object().unwrap();
+    assert_eq!(map["action"].as_str(), Some("chord"));
+    assert_eq!(map["hold_flips"].as_u64(), Some(2));
+    assert_eq!(map["lead_flips"].as_u64(), Some(0));
+    assert!(parse_args(["chord", "F2,W", "--lead-flips", "-1"]).is_err());
 
     let p = parse_args(["wait-settled", "90", "--stable-flips", "6"]).unwrap();
     let CliCommand::WaitRaw { json } = p.command else {

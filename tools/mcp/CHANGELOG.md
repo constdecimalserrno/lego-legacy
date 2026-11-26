@@ -10,5 +10,5 @@ Initial zero-crate `lego-mcp` stdio JSON-RPC 2.0 MCP server (#312):
 - Pure `std` newline-delimited JSON-RPC 2.0 server on `stdin`/`stdout` (logs strictly to `stderr`),
   implementing `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`.
 - Exposes 9 game control & introspection tools (`game_sessions`, `game_launch`, `game_meta`,
-  `game_observe`, `game_act` including `click` `settle_flips` #344, `game_inspect`, `game_goal`, `game_checkpoint`, `game_mode`),
+  `game_observe`, `game_act` including `click` `settle_flips` #344 and `chord` `lead_flips` #348, `game_inspect`, `game_goal`, `game_checkpoint`, `game_mode`),
   including native MCP `ImageContent` (`image/png`, base64) screenshots with grid/cursor/crop overlays.

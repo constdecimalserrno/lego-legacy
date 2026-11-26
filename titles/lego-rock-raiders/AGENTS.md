@@ -71,7 +71,7 @@ Select a Raider or Vehicle, switch view with `chord F2,1` (Eye View) or `chord F
 
 ### Contextual HUD Chords (`F2` + Key)
 
-`LegoRR.exe` (`0x0041C370`) gates **all** `Interface_MenuItem_*` hotkeys behind holding **`F2`**. Send them as `chord F2,<Key>` (2+ flips) while the relevant unit, tile, or menu is selected — or left-click the matching icon on the right sidebar.
+`LegoRR.exe` (`0x0041C370`) gates **all** `Interface_MenuItem_*` hotkeys behind three conditions: the right sidebar must have finished sliding in (`0x004DF1F8` bit `0x80` set — wait ~15 flips after clicking a tile or unit), **`F2`** must be held (`key_down[0x3C]`), and `<Key>` must show a rising edge. `chord F2,<Key>` defaults to a 1-flip prefix lead/trail (`--lead-flips 1`) so `F2` asserts before `<Key>` and releases after. Wall/floor orders (`F2+W`, `F2+Q`, `F2+R`, `F2+E`) require selecting the target drillable wall or rubble tile first (not a Raider; Solid Rock is un-selectable) — or left-click the matching icon on the right sidebar.
 
 | Context | Chords (`F2` + Key) |
 | --- | --- |
