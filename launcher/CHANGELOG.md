@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of the launcher's version 
 
 ## 1.2.0 — 2026-10-21
 
+Lists LEGO Racers as the sixth title via `core::roster::ROSTER` and starts it as `lego-legacy lego-racers` when its `masterpiece-racers` rip is present (#369).
+
 Took core 1.2.0: its window changes (#140) change nothing the launcher does, since it uses core
 only to find and check the rips and starts each title as a program of its own, and its roster
 lists LEGO Chess (#143).

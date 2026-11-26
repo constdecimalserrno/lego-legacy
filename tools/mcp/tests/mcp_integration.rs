@@ -233,6 +233,20 @@ fn tool_schema_json_is_valid_and_contains_all_nine_tools() {
         action_desc.contains("mouse_down") && action_desc.contains("mouse_up"),
         "game_act action schema must document mouse_down/mouse_up: {action_desc}"
     );
+
+    let launch_desc = arr[1].as_object().unwrap()["inputSchema"]
+        .as_object()
+        .unwrap()["properties"]
+        .as_object()
+        .unwrap()["title"]
+        .as_object()
+        .unwrap()["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        launch_desc.contains("lego-racers"),
+        "game_launch title examples must include lego-racers: {launch_desc}"
+    );
 }
 
 #[test]

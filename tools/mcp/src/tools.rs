@@ -107,7 +107,7 @@ pub const fn tools_list_json() -> &'static str {
     "inputSchema": {
       "type": "object",
       "properties": {
-        "title": { "type": "string", "description": "Title binary key (e.g. lego-chess, lego-island, lego-rock-raiders, lego-alpha-team, hotwheels-stunt-track-driver)." },
+        "title": { "type": "string", "description": "Title binary key (e.g. lego-chess, lego-island, lego-rock-raiders, lego-alpha-team, hotwheels-stunt-track-driver, lego-racers)." },
         "window": { "type": "boolean", "description": "Open a host window instead of running headless (default false)." },
         "headless": { "type": "boolean", "description": "Run headless (default true unless window=true)." },
         "bind": { "type": "string", "description": "HTTP bind address HOST:PORT (default 127.0.0.1:0)." },

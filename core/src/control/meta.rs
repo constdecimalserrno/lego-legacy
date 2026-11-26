@@ -451,6 +451,7 @@ mod tests {
             "lego-island",
             "lego-chess",
             "hotwheels-stunt-track-driver",
+            "lego-racers",
         ];
         let meta_src = include_str!("meta.rs");
         // Strip everything from `#[cfg(test)]` onward so this test's own list is

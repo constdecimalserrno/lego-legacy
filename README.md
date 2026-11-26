@@ -13,7 +13,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | LEGO Alpha Team | **Playable**: the Training Area plays to its end, and a person has signed it off |
 | LEGO Island | **Playable**: Nick Brick's pizza delivery plays from the intro to a save and its own exit, and a person has signed it off |
 | LEGO Chess | In progress ([#142](https://github.com/constdecimalserrno/lego-legacy/issues/142)): a route reaches its throne room, where the King speaks; typing a name waits on [#157](https://github.com/constdecimalserrno/lego-legacy/issues/157) |
-| LEGO Racers | On the roster, not started |
+| LEGO Racers | In progress ([#369](https://github.com/constdecimalserrno/lego-legacy/issues/369)): on the roster with its crate (`masterpiece-racers` pressing); first-light bringup is next |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
 retail executable: an x86 interpreter for the guest's code, and the Win32 and DirectX calls the
@@ -84,6 +84,8 @@ on an unmounted disc).
 | LEGO Island | `game-data/lego-island/lego-island/lego-island.iso` | The original 1997 pressing. |
 | LEGO Chess | `game-data/chess/masterpiece-chess/masterpiece-chess.iso` | The **Masterpiece** re-release, whose game is V2.06. The original pressing's V2.05 is a different executable and is not accepted. |
 | LEGO Chess music (optional) | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` or `game-data/racers/racers/racers.iso`, or either Rock Raiders image above | Roland's General MIDI bank, `GM16.DLS`, which LEGO Chess's music is played with. It lies loose on both pressings of LEGO Racers (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`) and of Rock Raiders (`DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS`), and is read there, checked by its SHA-256, and never copied out. Without it the game runs without music. |
+| LEGO Racers | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` | The **Masterpiece** re-release. The original 1999 pressing's cabinet-packed executable is wrapped in SafeDisc v1 copy protection beside `LEGORacers.icd`, which is recognised and refused, never bypassed ([ADR-0006](docs/adr/0006-a-title-may-be-two-pressings.md)). |
+| LEGO Racers original (tests only) | `game-data/racers/racers/racers.iso` | The original 1999 pressing's data track. Needed only by the tests that check its cabinet-packed SafeDisc wrapper is named and refused; the game never runs from it. |
 
 Roland licenses `GM16.DLS` "under Microsoft's End User License Agreement for use with Microsoft
 operating system products only. All other uses require a separate written license from Roland."

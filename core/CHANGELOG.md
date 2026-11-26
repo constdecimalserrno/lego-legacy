@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+LEGO Racers joins the roster as its sixth entry (`roster::LEGO_RACERS` at `ROSTER[5]`, #369):
+
+- **`core/src/roster.rs` & `core/src/testkit.rs`:** Declares `roster::LEGO_RACERS` (`key: "lego-racers"`, `pressing: "masterpiece-racers"`, `path: "LEGORacers.exe"`, `Kept::Cabinet`, `red_book: None`, `bank: &[]`) and `testkit::LEGO_RACERS_WRAPPED` pointing at the SafeDisc v1 wrapped 1999 `racers` pressing, with cabinet SafeDisc refusal coverage in `core/tests/roster.rs`.
+- **`core/src/control/meta.rs`:** Adds `"lego-racers"` to `forbidden_keys` in the Golden Rule 4 guard test so `core/` control-plane code remains keyed to no title.
+
 Control API ergonomics (#352) strictly outside guest state (`core/src/control/{bus,http,json,stdio,timeline}.rs`):
 
 - **Compact `POST /api/agent-state` ack:** `Command::SetAgentState` now returns `ResponseData::None` (avoiding cloning the 200-entry `action_feed` on every patch), and `POST /api/agent-state` returns a compact JSON ack (`{"ok":true,"flip":...,"mode":...,"owner":...,"paused":...}`) without `action_feed` bloat while `GET /api/agent-state` stays unchanged.
