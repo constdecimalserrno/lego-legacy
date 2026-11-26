@@ -609,8 +609,23 @@ impl Timeline {
     }
 
     /// Update whether the host pointer is shown (`false` means `Mouse::Steered`).
+    ///
+    /// On [`MouseMode::SoftwareRelative`], transitioning from OS-visible
+    /// (`true`) back to software-hidden (`false`) — e.g. when a title
+    /// unacquires and re-acquires `DISCL_EXCLUSIVE` DirectInput mouse across a
+    /// menu/gameplay transition — re-anchors `visual_cursor` to `start_pos`
+    /// while leaving always-hidden (`false -> false`) transitions untouched
+    /// (#374).
     pub fn set_pointer_shown(&mut self, shown: bool) {
+        let was_shown = self.pointer_shown;
         self.pointer_shown = shown;
+        if was_shown && !shown {
+            if let MouseMode::SoftwareRelative { start_pos, .. } = self.mouse_mode {
+                self.visual_cursor =
+                    self.clamp_visual(f64::from(start_pos.0), f64::from(start_pos.1));
+                self.owed_delta = (0.0, 0.0);
+            }
+        }
     }
 
     /// Update whether the active OS cursor shape is blank (`SetCursor(NULL)` /
@@ -835,6 +850,58 @@ impl Timeline {
         effective_start.saturating_add(steps - 1)
     }
 
+    /// Two-flip arrival move for settled clicks in [`MouseMode::SoftwareRelative`]:
+    /// lands within 1 px of `(target_x, target_y)` on `effective_start`, then
+    /// emits a 1-px arrival delta on `effective_start + 1` (or a ±1 px touch
+    /// when already at target) so menu loops that run hover hit-testing on the
+    /// prior frame's coordinates before integrating `(dx, dy)` still highlight
+    /// and accept the first click while landing at exact `(target_x, target_y)`
+    /// (#374).
+    fn schedule_software_relative_click_move(
+        &mut self,
+        target_x: i32,
+        target_y: i32,
+        start_flip: u64,
+    ) -> u64 {
+        let effective_start = self.next_relative_flip(start_flip);
+        let (tx, ty) = self.clamp_screen_i32(target_x, target_y);
+        let (cur_x, cur_y) = self.planned_visual();
+        let (sx, sy) = self.active_scale();
+        let raw_dx = (f64::from(tx) - cur_x) * sx;
+        let raw_dy = (f64::from(ty) - cur_y) * sy;
+        let steps = if raw_dx.abs() >= 2.0 || raw_dy.abs() >= 2.0 {
+            let (nx, ny) = if raw_dx.abs() >= raw_dy.abs() {
+                (raw_dx.signum(), 0.0)
+            } else {
+                (0.0, raw_dy.signum())
+            };
+            [(raw_dx - nx, raw_dy - ny), (nx, ny)]
+        } else {
+            let mut touch_mag = sx.ceil().max(1.0);
+            if ((raw_dx + touch_mag).fract().abs() - 0.5).abs() < 1e-9 {
+                touch_mag += 1.0;
+            }
+            let has_right_room = self.frame_size.0 == 0
+                || f64::from(tx) + touch_mag / sx <= f64::from(self.frame_size.0.saturating_sub(1));
+            let touch = if has_right_room {
+                touch_mag
+            } else {
+                -touch_mag
+            };
+            [(raw_dx + touch, raw_dy), (-touch, 0.0)]
+        };
+        for (i, (dx, dy)) in steps.into_iter().enumerate() {
+            self.push(
+                Due::Point {
+                    flip: effective_start.saturating_add(i as u64),
+                    poll: 0,
+                },
+                Payload::MouseDeltaStep { dx, dy },
+            );
+        }
+        effective_start.saturating_add(1)
+    }
+
     fn schedule_optional_move(&mut self, x: Option<i32>, y: Option<i32>, start_flip: u64) -> u64 {
         match (x, y) {
             (Some(x), Some(y)) if self.mouse_mode.is_relative() => {
@@ -1033,7 +1100,15 @@ impl Timeline {
                 hold_ms,
                 settle_flips,
             } => {
-                let move_flip = self.schedule_optional_move(*x, *y, start_flip);
+                let move_flip = match (*x, *y) {
+                    (Some(tx), Some(ty))
+                        if *settle_flips > 0
+                            && matches!(self.mouse_mode, MouseMode::SoftwareRelative { .. }) =>
+                    {
+                        self.schedule_software_relative_click_move(tx, ty, start_flip)
+                    }
+                    _ => self.schedule_optional_move(*x, *y, start_flip),
+                };
                 let down_flip = if x.is_some() && y.is_some() {
                     move_flip.saturating_add(*settle_flips)
                 } else {
@@ -2317,8 +2392,6 @@ mod tests {
         assert_eq!(rel.visual_cursor_pos(), (120, 360));
         assert!(rel.is_empty());
 
-        // 3. SoftwareRelative: single-flip unclamped move + 1-flip settle + Down + Up,
-        //    and in-place click omits settle gap.
         let mut sr = Timeline::new((1.0, 1.0));
         sr.configure_mode(
             MouseMode::SoftwareRelative {
@@ -2341,11 +2414,55 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert_eq!(r.end_flip, 12);
-        assert_eq!(sr.drain_due(10, 0, 0), [Input::Move { x: 100, y: 50 }]);
-        assert_eq!(sr.drain_due(11, 0, 16), [Input::Down(Button::Left)]);
-        assert_eq!(sr.drain_due(12, 0, 32), [Input::Up(Button::Left)]);
+        assert_eq!(r.end_flip, 13);
+        assert_eq!(sr.drain_due(10, 0, 0), [Input::Move { x: 101, y: 50 }]);
+        assert_eq!(sr.drain_due(11, 0, 16), [Input::Move { x: 100, y: 50 }]);
+        assert_eq!(sr.drain_due(12, 0, 32), [Input::Down(Button::Left)]);
+        assert_eq!(sr.drain_due(13, 0, 48), [Input::Up(Button::Left)]);
         assert_eq!(sr.visual_cursor_pos(), (100, 50));
+
+        let r_zero = sr
+            .schedule(
+                &Action::Click {
+                    x: Some(100),
+                    y: Some(50),
+                    button: Button::Left,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                15,
+                0,
+            )
+            .unwrap();
+        assert_eq!(r_zero.end_flip, 18);
+        assert_eq!(sr.drain_due(15, 0, 0), [Input::Move { x: 101, y: 50 }]);
+        assert_eq!(sr.drain_due(16, 0, 16), [Input::Move { x: 100, y: 50 }]);
+        assert_eq!(sr.drain_due(17, 0, 32), [Input::Down(Button::Left)]);
+        assert_eq!(sr.drain_due(18, 0, 48), [Input::Up(Button::Left)]);
+        assert_eq!(sr.visual_cursor_pos(), (100, 50));
+
+        let r_nosettle = sr
+            .schedule(
+                &Action::Click {
+                    x: Some(180),
+                    y: Some(90),
+                    button: Button::Left,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 0,
+                },
+                20,
+                0,
+            )
+            .unwrap();
+        assert_eq!(r_nosettle.end_flip, 21);
+        assert_eq!(
+            sr.drain_due(20, 0, 0),
+            [Input::Move { x: 180, y: 90 }, Input::Down(Button::Left)]
+        );
+        assert_eq!(sr.drain_due(21, 0, 16), [Input::Up(Button::Left)]);
+        assert_eq!(sr.visual_cursor_pos(), (180, 90));
 
         let r_in_place = sr
             .schedule(
@@ -2357,14 +2474,55 @@ mod tests {
                     hold_ms: None,
                     settle_flips: 1,
                 },
-                20,
+                25,
                 0,
             )
             .unwrap();
-        assert_eq!(r_in_place.end_flip, 21);
-        assert_eq!(sr.drain_due(20, 0, 0), [Input::Down(Button::Right)]);
-        assert_eq!(sr.drain_due(21, 0, 16), [Input::Up(Button::Right)]);
+        assert_eq!(r_in_place.end_flip, 26);
+        assert_eq!(sr.drain_due(25, 0, 0), [Input::Down(Button::Right)]);
+        assert_eq!(sr.drain_due(26, 0, 16), [Input::Up(Button::Right)]);
         assert!(sr.is_empty());
+
+        sr.set_pointer_shown(false);
+        assert_eq!(sr.visual_cursor_pos(), (180, 90));
+        sr.set_pointer_shown(true);
+        assert_eq!(sr.visual_cursor_pos(), (180, 90));
+        sr.set_pointer_shown(false);
+        assert_eq!(sr.visual_cursor_pos(), (320, 240));
+
+        // Sub-unit scale (`sx = 0.5`): zero-distance and half-integer clicks stay exact.
+        let mut sr_half = Timeline::new((0.5, 0.5));
+        sr_half.configure_mode(
+            MouseMode::SoftwareRelative {
+                virtual_span: (320, 240),
+                start_pos: (100, 100),
+            },
+            (640, 480),
+        );
+        let r_half = sr_half
+            .schedule(
+                &Action::Click {
+                    x: Some(100),
+                    y: Some(100),
+                    button: Button::Left,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                0,
+                0,
+            )
+            .unwrap();
+        assert_eq!(r_half.end_flip, 3);
+        assert_eq!(sr_half.drain_due(0, 0, 0), [Input::Move { x: 321, y: 240 }]);
+        assert_eq!(
+            sr_half.drain_due(1, 0, 16),
+            [Input::Move { x: 320, y: 240 }]
+        );
+        assert_eq!(sr_half.drain_due(2, 0, 32), [Input::Down(Button::Left)]);
+        assert_eq!(sr_half.drain_due(3, 0, 48), [Input::Up(Button::Left)]);
+        assert_eq!(sr_half.visual_cursor_pos(), (100, 100));
+        assert!(sr_half.is_empty());
     }
 
     #[test]

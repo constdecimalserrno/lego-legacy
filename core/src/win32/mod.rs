@@ -933,6 +933,23 @@ impl State {
         self.com.get_mut(&identity)
     }
 
+    /// True while `ShowCursor` is non-negative and no live `GUID_SysMouse`
+    /// holds a `DISCL_EXCLUSIVE` DirectInput acquisition (#374).
+    #[must_use]
+    pub fn pointer_shown(&self) -> bool {
+        self.cursor_shown >= 0
+            && !self.com.values().any(|o| {
+                matches!(
+                    o.state,
+                    ComState::Device {
+                        keyboard: false,
+                        exclusive: true,
+                        acquired: true,
+                    }
+                ) && self.has_live_refs(o.identity)
+            })
+    }
+
     /// Which interface a guest pointer is: the face itself, not the object.
     #[must_use]
     pub fn interface_of(&self, at: u32) -> Option<&'static str> {
@@ -1191,8 +1208,11 @@ pub struct ComObject {
 pub enum ComState {
     #[default]
     None,
-    /// An input device, and which one.
-    Device { keyboard: bool },
+    Device {
+        keyboard: bool,
+        exclusive: bool,
+        acquired: bool,
+    },
     /// A sound buffer, whose bytes and playing state DirectSound keeps
     /// (`dsound::Sounds`).
     Sound,
@@ -2102,9 +2122,15 @@ impl crate::snap::Snap for ComState {
             match tag {
                 0 => *self = Self::None,
                 1 => {
-                    let mut keyboard = false;
+                    let (mut keyboard, mut exclusive, mut acquired) = (false, false, false);
                     v.bool(&mut keyboard);
-                    *self = Self::Device { keyboard };
+                    v.bool(&mut exclusive);
+                    v.bool(&mut acquired);
+                    *self = Self::Device {
+                        keyboard,
+                        exclusive,
+                        acquired,
+                    };
                 }
                 2 => *self = Self::Sound,
                 3 => {
@@ -2240,7 +2266,15 @@ impl crate::snap::Snap for ComState {
         } else {
             match self {
                 Self::None | Self::Sound | Self::MultiMediaStream | Self::FilterGraph => {}
-                Self::Device { keyboard } => v.bool(keyboard),
+                Self::Device {
+                    keyboard,
+                    exclusive,
+                    acquired,
+                } => {
+                    v.bool(keyboard);
+                    v.bool(exclusive);
+                    v.bool(acquired);
+                }
                 Self::Surface {
                     pixels,
                     owned_pixels,
@@ -2880,7 +2914,11 @@ pub(crate) mod tests {
             let dd = State::make_com(
                 ctx,
                 &super::ddraw::DIRECT_DRAW,
-                ComState::Device { keyboard: true },
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
             )
             .expect("make_com");
             let dd4 = State::face(ctx, dd, &super::ddraw::DIRECT_DRAW4).expect("face");
@@ -2889,7 +2927,11 @@ pub(crate) mod tests {
             assert_eq!(ctx.state.com(dd4).map(|o| o.identity), Some(dd));
             assert_eq!(
                 ctx.state.com(dd4).map(|o| &o.state),
-                Some(&ComState::Device { keyboard: true })
+                Some(&ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                })
             );
             // Mutate through secondary face and observe via primary (and vice versa).
             ctx.state.com_mut(dd4).expect("face").app_data = 0x1234;

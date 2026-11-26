@@ -215,7 +215,11 @@ fn guest(host: &mut dyn Host, nap: u32, reader: Reader) -> Machine {
             machine.state.add_com(
                 KEYBOARD,
                 "IDirectInputDeviceA",
-                lego_legacy_core::win32::ComState::Device { keyboard: true },
+                lego_legacy_core::win32::ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
             );
             let table = machine.boundary.bind_interface("IDirectInputDeviceA", 18);
             [

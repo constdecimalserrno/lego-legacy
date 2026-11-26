@@ -2971,9 +2971,7 @@ impl Machine {
                 log.line(&format!("screenshot {} refused: {e}", self.flips));
             }
         }
-        // One pointer on the screen: the host stops drawing its own once the
-        // title has said it draws one itself (ShowCursor's count).
-        let shown = self.state.cursor_shown >= 0;
+        let shown = self.state.pointer_shown();
         if shown != self.pointer_shown {
             self.pointer_shown = shown;
             host.show_pointer(shown);
