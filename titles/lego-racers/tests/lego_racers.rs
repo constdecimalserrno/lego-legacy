@@ -290,6 +290,116 @@ fn first_light_reaches_main_menu_and_exits_cleanly() {
     );
 }
 
+fn pcm_from(ran: &testkit::Ran, from_flip: u64) -> Vec<i16> {
+    ran.host
+        .audio_blocks
+        .iter()
+        .zip(&ran.host.audio_flips)
+        .filter(|(_, &flip)| flip >= from_flip)
+        .flat_map(|(block, _)| block.iter().copied())
+        .collect()
+}
+
+#[test]
+fn first_light_streams_non_silent_tun_audio_on_main_menu() {
+    let Some(ran) = first_light() else {
+        return;
+    };
+    let menu_samples = pcm_from(ran, 299);
+    assert!(
+        menu_samples.len() >= 10_000,
+        "expected >= 10,000 stereo PCM samples on Main Menu, got {}",
+        menu_samples.len()
+    );
+
+    let (sum, sum_sq) = menu_samples.iter().fold((0.0f64, 0.0f64), |(s, sq), &x| {
+        let v = f64::from(x);
+        (s + v, sq + v * v)
+    });
+    let n = menu_samples.len() as f64;
+    let mean = sum / n;
+    let rms = (sum_sq / n).sqrt();
+    let variance = sum_sq / n - mean * mean;
+    let active_blocks = ran
+        .loudness(299, 332)
+        .into_iter()
+        .filter(|&r| r > 100.0)
+        .count();
+
+    assert!(
+        rms > 500.0,
+        "expected genuine non-silent theme.tun PCM audio (RMS > 500), got {rms:.1}"
+    );
+    assert!(
+        variance > 250_000.0,
+        "expected non-constant audio waveform (variance > 250,000), got {variance:.1}"
+    );
+    assert!(
+        active_blocks >= 4,
+        "expected sustained streaming music across >= 4 blocks, got {active_blocks}"
+    );
+}
+
+#[test]
+fn main_menu_music_streams_fresh_tun_pcm_past_the_circular_buffer_wrap() {
+    if !scratch() {
+        return;
+    }
+    // `theme.tun` pre-fills a ~2.04 s (0x2c000 B) looping DirectSound buffer
+    // at flip 299. Running 160+ flips past flip 299 (~2.7 s of Main Menu)
+    // crosses the circular buffer wrap: without periodic `WINMM!timeSetEvent`
+    // callbacks refilling the buffer, lap 2 would repeat lap 1 verbatim.
+    let mut host = Headless::new();
+    host.queue(vec![(460, lego_legacy_core::host::Input::Close)]);
+    let cli = Cli {
+        guest_args: Some("-novideo".to_owned()),
+        trace: Trace::Shims,
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(host, &RACERS, &cli, FIRST_LIGHT_BUDGET);
+    ran.assert_exited(0)
+        .assert_flips(461)
+        .assert_logged("winmm timer 1:")
+        .assert_logged("winmm timer 1 killed");
+
+    let callback_fires = ran
+        .log
+        .lines()
+        .filter(|l| l.contains("winmm timer 1 calls 0x004bd5e0"))
+        .count();
+    assert!(
+        callback_fires >= 20,
+        "expected >= 20 periodic 100 ms callback fires over ~2.7 s of Main Menu, got {callback_fires}"
+    );
+
+    // Buffer size is 0x2c000 bytes = 90,112 i16 stereo samples (~2.043 s at
+    // 22,050 Hz). Compare a 0.5 s window in lap 1 against lap 2 at the exact
+    // buffer-wrap offset.
+    let pcm = pcm_from(&ran, 299);
+    const SKIP_SAMPLES: usize = 4_096;
+    const WRAP_SAMPLES: usize = 0x2c000 / 2;
+    const WINDOW_SAMPLES: usize = 22_050;
+    assert!(
+        pcm.len() >= SKIP_SAMPLES + WRAP_SAMPLES + WINDOW_SAMPLES,
+        "expected PCM past the 0x2c000-byte wrap ({} samples), got {}",
+        SKIP_SAMPLES + WRAP_SAMPLES + WINDOW_SAMPLES,
+        pcm.len()
+    );
+    let lap1 = &pcm[SKIP_SAMPLES..SKIP_SAMPLES + WINDOW_SAMPLES];
+    let lap2 = &pcm[SKIP_SAMPLES + WRAP_SAMPLES..SKIP_SAMPLES + WRAP_SAMPLES + WINDOW_SAMPLES];
+    let lap2_rms =
+        (lap2.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>() / lap2.len() as f64).sqrt();
+    let diffs = lap1.iter().zip(lap2).filter(|(a, b)| a != b).count();
+    assert!(
+        lap2_rms > 500.0,
+        "expected non-silent streamed PCM after buffer wrap (RMS > 500), got {lap2_rms:.1}"
+    );
+    assert!(
+        diffs > WINDOW_SAMPLES / 2,
+        "expected fresh streamed PCM after circular wrap rather than stale loop repeat (diffs={diffs}/{WINDOW_SAMPLES})"
+    );
+}
+
 #[test]
 fn first_light_replays_to_the_same_machine_every_time() {
     let Some(first) = first_light() else {
@@ -302,6 +412,10 @@ fn first_light_replays_to_the_same_machine_every_time() {
     };
     let second = testkit::run_headless(&RACERS, &cli, FIRST_LIGHT_BUDGET);
     first.assert_same_machine(&second);
+    assert_eq!(
+        first.host.audio_blocks, second.host.audio_blocks,
+        "mixed PCM audio is bit-exact across independent runs"
+    );
 }
 
 #[test]
@@ -327,7 +441,9 @@ fn first_light_main_menu_snapshot_round_trips_bit_exact() {
     let dir_a = log_a.dir().to_path_buf();
     while machine_a.flips() < 305 {
         assert!(
-            machine_a.tick(&mut host_a, &mut log_a).is_none(),
+            machine_a
+                .step(&mut host_a, &mut log_a, FIRST_LIGHT_BUDGET, true)
+                .is_none(),
             "should reach flip 305 without ending"
         );
     }
@@ -350,6 +466,11 @@ fn first_light_main_menu_snapshot_round_trips_bit_exact() {
     assert_eq!(finish_b.flips, baseline.finish.flips);
     assert_eq!(finish_b.declared_millis, baseline.finish.declared_millis);
     assert_eq!(machine_b.state_digest(), baseline.digest);
+    host_a.audio_blocks.extend(host_b.audio_blocks);
+    assert_eq!(
+        host_a.audio_blocks, baseline.host.audio_blocks,
+        "mixed PCM audio before + after LLSNAP v2 restore is bit-exact"
+    );
 
     drop(log_a);
     drop(log_b);

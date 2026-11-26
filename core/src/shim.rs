@@ -46,6 +46,9 @@ pub enum Entry {
     /// Where WINMM's MIDI stream player thread stands between the callbacks
     /// it makes (#154): reaching it is the player's turn.
     MidiPlayer,
+    /// Where WINMM's multimedia timer thread stands between the callbacks it
+    /// makes (#371): reaching it is the timer thread's turn.
+    MmTimer,
 }
 
 /// The addresses a title's imports were bound to, and what stands behind each.
@@ -167,6 +170,15 @@ impl Boundary {
         self.push(Entry::MidiPlayer)
     }
 
+    /// Where WINMM's multimedia timer thread stands: bound once, for the
+    /// machine's timer callback runner (#371).
+    pub fn bind_mm_timer(&mut self) -> u32 {
+        if let Some(slot) = self.slots.iter().position(|e| *e == Entry::MmTimer) {
+            return address(slot);
+        }
+        self.push(Entry::MmTimer)
+    }
+
     /// Give an interface's slots addresses of their own, and hand back the
     /// address of each in slot order. What a vtable is filled with.
     pub fn bind_interface(&mut self, interface: &'static str, slots: usize) -> Vec<u32> {
@@ -198,6 +210,7 @@ impl crate::snap::Snap for Entry {
             Self::Unhandled { .. } => 4u8,
             Self::ThreadEnd => 5u8,
             Self::MidiPlayer => 6u8,
+            Self::MmTimer => 7u8,
         };
         v.u8(&mut tag);
         if v.is_reading() {
@@ -233,11 +246,12 @@ impl crate::snap::Snap for Entry {
                 }
                 5 => *self = Self::ThreadEnd,
                 6 => *self = Self::MidiPlayer,
+                7 => *self = Self::MmTimer,
                 _ => v.mark_corrupt("shim::Entry tag"),
             }
         } else {
             match self {
-                Self::Return | Self::ThreadEnd | Self::MidiPlayer => {}
+                Self::Return | Self::ThreadEnd | Self::MidiPlayer | Self::MmTimer => {}
                 Self::Import(imp) => imp.snap(v),
                 Self::Method { interface, slot } => {
                     crate::snap::snap_static_str(v, interface, "COM interface", |n| {

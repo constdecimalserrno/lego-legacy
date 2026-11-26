@@ -3672,11 +3672,16 @@ fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// The thread that is running says it is done. The machine takes it out of the
 /// rotation at the next switch.
 fn exit_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // WINMM's MIDI player is the machine's thread, not the title's: a
-    // callback the machine runs on it never ends it (#154).
+    // WINMM's MIDI player and timer threads belong to the machine, not the
+    // title: a callback the machine runs on either never ends it (#154, #371).
     if ctx.state.threads[ctx.state.thread].time_critical {
+        let who = if ctx.state.mm_timer_thread == Some(ctx.state.thread) {
+            "WINMM's timer thread"
+        } else {
+            "WINMM's MIDI player"
+        };
         return Err(Stop::NotWritten {
-            what: "KERNEL32.dll!ExitThread from a callback on WINMM's MIDI player".to_owned(),
+            what: format!("KERNEL32.dll!ExitThread from a callback on {who}"),
             caller: 0,
         });
     }
