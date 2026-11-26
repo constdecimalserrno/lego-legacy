@@ -1,8 +1,8 @@
 //! Unified action timeline and piped-route scheduler (#308).
 //!
-//! Compiles high-level control actions (`move`, `mouse_delta`, `click`,
-//! `click_poll`, `drag`, `key_hold`, `chord`, `type_text`, `pipe_route`) into
-//! deterministic [`crate::host::Input`] events delivered through
+//! Compiles high-level control actions (`move`, `mouse_delta`, `mouse_down`,
+//! `mouse_up`, `click`, `click_poll`, `drag`, `key_hold`, `chord`, `type_text`,
+//! `pipe_route`) into deterministic [`crate::host::Input`] events delivered through
 //! [`crate::host::Host::poll_input`], where `Machine::deliver` automatically
 //! records them into `#lego-legacy-route 1`.
 
@@ -28,6 +28,19 @@ pub enum Action {
         flips: u64,
         scale_x: Option<f64>,
         scale_y: Option<f64>,
+    },
+    /// Press and hold a mouse button without scheduling an automatic release
+    /// (optionally moving to `(x, y)` first).
+    MouseDown {
+        x: Option<i32>,
+        y: Option<i32>,
+        button: Button,
+    },
+    /// Release a held mouse button (optionally moving to `(x, y)` first).
+    MouseUp {
+        x: Option<i32>,
+        y: Option<i32>,
+        button: Button,
     },
     /// Press and release a mouse button, optionally moving first, settling for
     /// `settle_flips` (only when coordinates are given so hover state latches
@@ -105,6 +118,12 @@ impl Action {
             Self::Move { x, y, glide_flips } => format!("move ({x}, {y}) glide={glide_flips}"),
             Self::MouseDelta { dx, dy, flips, .. } => {
                 format!("mouse_delta ({dx:.1}, {dy:.1}) flips={flips}")
+            }
+            Self::MouseDown { x, y, button } => {
+                format!("mouse_down {button:?} {}", opt_coords_label(*x, *y))
+            }
+            Self::MouseUp { x, y, button } => {
+                format!("mouse_up {button:?} {}", opt_coords_label(*x, *y))
             }
             Self::Click {
                 x,
@@ -995,6 +1014,16 @@ impl Timeline {
                     self.owed_delta.1 + total_dy,
                 ));
                 start_flip.saturating_add(needed.saturating_sub(1))
+            }
+            Action::MouseDown { x, y, button } => {
+                let down_flip = self.schedule_optional_move(*x, *y, start_flip);
+                self.push_input(down_flip, 0, Input::Down(*button));
+                down_flip
+            }
+            Action::MouseUp { x, y, button } => {
+                let up_flip = self.schedule_optional_move(*x, *y, start_flip);
+                self.push_input(up_flip, 0, Input::Up(*button));
+                up_flip
             }
             Action::Click {
                 x,
@@ -2637,6 +2666,117 @@ mod tests {
         ] {
             let v = parse_json(bad).unwrap();
             assert!(parse_action_obj("chord", v.as_object().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn mouse_down_and_mouse_up_respect_buttons_coords_summaries_and_relative_mode() {
+        use crate::control::json::{parse_action_obj, parse_json};
+
+        let parse = |kind: &str, raw: &str| {
+            let v = parse_json(raw).expect("valid json");
+            parse_action_obj(kind, v.as_object().expect("object")).expect("valid action")
+        };
+
+        // 1. In-place default left down & right up + clean summaries.
+        let mut tl = Timeline::new((1.0, 1.0));
+        let down = parse("mouse_down", r#"{}"#);
+        assert_eq!(down.summary(), "mouse_down Left in-place");
+        let rep = tl.schedule(&down, 10, 160).unwrap();
+        assert_eq!(rep.events_scheduled, 1);
+        assert_eq!(rep.end_flip, 10);
+        assert_eq!(rep.required_flips, 1);
+        assert_eq!(tl.drain_due(10, 0, 160), [Input::Down(Button::Left)]);
+
+        let up = parse("mouse_up", r#"{"x":320,"y":240,"button":"right"}"#);
+        assert_eq!(up.summary(), "mouse_up Right (320, 240)");
+        let rep = tl.schedule(&up, 15, 240).unwrap();
+        assert_eq!(rep.events_scheduled, 2);
+        assert_eq!(rep.end_flip, 15);
+        assert_eq!(
+            tl.drain_due(15, 0, 240),
+            [Input::Move { x: 320, y: 240 }, Input::Up(Button::Right)]
+        );
+
+        // 2. RelativeSteered (#327): mouse_down with coords translates move first,
+        //    then emits Down on arrival flip; subsequent mouse_up waits for owed delta.
+        let mut rel = Timeline::new((2.0, 2.0));
+        rel.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (1280, 960),
+                recenter: (320, 240),
+                start_corner: (320, 240),
+            },
+            (640, 480),
+        );
+        let rel_down = parse("mouse_down", r#"{"x":420,"y":240,"button":"left"}"#);
+        let rep = rel.schedule(&rel_down, 20, 320).unwrap();
+        assert_eq!(rep.end_flip, 20);
+        rel.set_pointer(320, 240);
+        assert_eq!(
+            rel.drain_due(20, 0, 320),
+            [Input::Move { x: 520, y: 240 }, Input::Down(Button::Left)]
+        );
+        assert_eq!(rel.visual_cursor_pos(), (420, 240));
+
+        // Carry-over owed delta from a large relative delta delays in-place mouse_up.
+        rel.schedule(
+            &Action::MouseDelta {
+                dx: 200.0,
+                dy: 0.0,
+                flips: 1,
+                scale_x: None,
+                scale_y: None,
+            },
+            21,
+            336,
+        )
+        .unwrap();
+        rel.set_pointer(320, 240);
+        let _ = rel.drain_due(21, 0, 336);
+        assert!(rel.has_owed_delta());
+        let rel_up = parse("mouse_up", r#"{"button":"left"}"#);
+        let up_rep = rel.schedule(&rel_up, 22, 352).unwrap();
+        assert!(
+            up_rep.end_flip >= 23,
+            "mouse_up waits for owed_delta payback"
+        );
+        rel.set_pointer(320, 240);
+        let f22 = rel.drain_due(22, 0, 352);
+        assert!(f22.iter().all(|e| !matches!(e, Input::Up(_))));
+        rel.set_pointer(320, 240);
+        assert_eq!(
+            rel.drain_due(up_rep.end_flip, 0, 368),
+            [Input::Up(Button::Left)]
+        );
+
+        // 3. SoftwareRelative (#327): mouse_down with coords emits relative delta + Down.
+        let mut srel = Timeline::new((1.0, 1.0));
+        srel.configure_mode(
+            MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (100, 100),
+            },
+            (640, 480),
+        );
+        let sr_down = parse("mouse_down", r#"{"x":150,"y":120}"#);
+        srel.schedule(&sr_down, 30, 480).unwrap();
+        assert_eq!(
+            srel.drain_due(30, 0, 480),
+            [Input::Move { x: 370, y: 260 }, Input::Down(Button::Left)]
+        );
+        assert_eq!(srel.visual_cursor_pos(), (150, 120));
+
+        // 4. Invalid button, non-string button, and partial coords rejected.
+        for bad in [
+            r#"{"button":"middle"}"#,
+            r#"{"button":123}"#,
+            r#"{"x":100}"#,
+            r#"{"y":200}"#,
+        ] {
+            let v = parse_json(bad).unwrap();
+            assert!(parse_action_obj("mouse_down", v.as_object().unwrap()).is_err());
+            assert!(parse_action_obj("mouse_up", v.as_object().unwrap()).is_err());
         }
     }
 }

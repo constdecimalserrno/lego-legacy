@@ -1637,10 +1637,7 @@ fn apply_command(
             if let Some(v) = patch.user_hint {
                 state.agent_state.user_hint = v;
             }
-            (
-                ok_response(state, ResponseData::AgentState(state.agent_state.clone())),
-                false,
-            )
+            (ok_response(state, ResponseData::None), false)
         }
         Command::Step { flips } => {
             if flips > 0 {

@@ -151,14 +151,14 @@ pub const fn tools_list_json() -> &'static str {
   },
   {
     "name": "game_act",
-    "description": "Execute an input action primitive (move, mouse_delta, click, click_poll, drag, key_hold, chord, type_text), a batch of actions, step/wait, or a pipe route/JSONL script; optionally return a post-action PNG screenshot.",
+    "description": "Execute an input action primitive (move, mouse_delta, mouse_down, mouse_up, click, click_poll, drag, key_hold, chord, type_text), a batch of actions, step/wait, or a pipe route/JSONL script; optionally return a post-action PNG screenshot.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "url": { "type": "string" },
         "title": { "type": "string" },
         "token": { "type": "string" },
-        "action": { "type": "string", "description": "Action kind: move|mouse_delta|click|click_poll|drag|key_hold|chord|type_text|step|wait|wait_until_change|wait_until_settled|pipe|clear_queue." },
+        "action": { "type": "string", "description": "Action kind: move|mouse_delta|mouse_down|mouse_up|click|click_poll|drag|key_hold|chord|type_text|step|wait|wait_until_change|wait_until_settled|pipe|clear_queue." },
         "actions": { "type": "array", "description": "Batch of action objects to dispatch to /api/act." },
         "pipe": { "type": "string", "description": "#lego-legacy-route 1 text or JSONL commands to post to /api/pipe." },
         "route": { "type": "string", "description": "Alias for pipe route text." },

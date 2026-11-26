@@ -165,15 +165,18 @@ fn handle_one<S: Read + Write>(stream: &mut S) {
         | ("POST", "/api/clear-queue")
         | ("POST", "/api/agent-state")
         | ("POST", "/api/bookmark")
-        | ("POST", "/api/mode") => send(
-            stream,
-            "200 OK",
-            "application/json",
-            format!(
-                "{{\"ok\":true,\"target\":\"{target}\",\"cleared\":2,\"status\":{{\"flip\":8}}}}"
-            )
-            .as_bytes(),
-        ),
+        | ("POST", "/api/mode") => {
+            let body_echo = String::from_utf8_lossy(&body);
+            let mut reply = format!(
+                "{{\"ok\":true,\"target\":\"{target}\",\"cleared\":2,\"status\":{{\"flip\":8}}"
+            );
+            if path == "/api/act" && !body_echo.trim().is_empty() {
+                reply.push_str(",\"echo\":");
+                reply.push_str(body_echo.trim());
+            }
+            reply.push('}');
+            send(stream, "200 OK", "application/json", reply.as_bytes());
+        }
         _ => send(
             stream,
             "404 Not Found",
@@ -222,6 +225,14 @@ fn tool_schema_json_is_valid_and_contains_all_nine_tools() {
         .unwrap();
     assert_eq!(lead["type"].as_str(), Some("integer"));
     assert_eq!(lead["minimum"].as_u64(), Some(0));
+
+    let action_desc = props["action"].as_object().unwrap()["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        action_desc.contains("mouse_down") && action_desc.contains("mouse_up"),
+        "game_act action schema must document mouse_down/mouse_up: {action_desc}"
+    );
 }
 
 #[test]
@@ -387,6 +398,14 @@ fn lego_mcp_binary_handles_jsonrpc_over_piped_stdio() {
             14,
             r##"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"game_act","arguments":{"pipe":"#lego-legacy-route 1\nflip 100 down\n"}}}"##,
         ),
+        (
+            15,
+            r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"game_act","arguments":{"action":"mouse_down","x":120,"y":80,"button":"right"}}}"#,
+        ),
+        (
+            16,
+            r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"game_act","arguments":{"action":"mouse_up","button":"right"}}}"#,
+        ),
     ] {
         let r = send_recv(&mut stdin, &mut reader, payload);
         assert_eq!(r["id"].as_i64(), Some(id));
@@ -406,6 +425,20 @@ fn lego_mcp_binary_handles_jsonrpc_over_piped_stdio() {
                 body_text.contains("relative=0"),
                 "game_act pipe must default to relative=0 (absolute): {body_text}"
             );
+        }
+        if id == 15 {
+            let parsed = parse_json(body_text).unwrap();
+            let echo = parsed.as_object().unwrap()["echo"].as_object().unwrap();
+            assert_eq!(echo["action"].as_str(), Some("mouse_down"));
+            assert_eq!(echo["x"].as_i64(), Some(120));
+            assert_eq!(echo["y"].as_i64(), Some(80));
+            assert_eq!(echo["button"].as_str(), Some("right"));
+        }
+        if id == 16 {
+            let parsed = parse_json(body_text).unwrap();
+            let echo = parsed.as_object().unwrap()["echo"].as_object().unwrap();
+            assert_eq!(echo["action"].as_str(), Some("mouse_up"));
+            assert_eq!(echo["button"].as_str(), Some("right"));
         }
     }
 
