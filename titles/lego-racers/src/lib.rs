@@ -17,8 +17,11 @@ pub const LEGO_RACERS: Title = Title {
     key: ENTRY.key,
     version: env!("CARGO_PKG_VERSION"),
     // A flip waits for the declared display's next refresh, as DirectDraw's
-    // Flip does unless a title asks otherwise. Sixty a second is the roster's
-    // baseline; this title has not yet been seen to author another rate (#370).
+    // Flip does unless a title asks otherwise. Verified empirically across a
+    // full Imperial Grand Prix lap (#373): the 3-2-1-GO countdown advances at
+    // exact 60-flip (1.00 s) intervals and the in-race lap timer ticks at
+    // 60.00 Hz with zero clock-spin stalls (`guest_fps = 60.0`, ~0.68–1.25 M
+    // instructions/flip, well inside Pentium II 450's 7.5 M/flip budget).
     flip_cost: FlipCost::Refresh(60),
     image: ENTRY.image,
     red_book: ENTRY.red_book,
@@ -26,8 +29,9 @@ pub const LEGO_RACERS: Title = Title {
         // The roster's baseline: Masterpiece ships against Windows 98 SE and
         // DirectX 6.
         windows: WINDOWS_98_SE,
-        // The roster's baseline Pentium II 450 until first-light bringup (#370)
-        // measures whether the title spins on the clock.
+        // Pentium II 450 (450 MHz -> 7.5 M instructions per 60 Hz flip): a 3D
+        // race flip retires ~0.68–1.25 M instructions with zero clock spins and
+        // zero over-budget stalls on Imperial Grand Prix (#373).
         hz: lego_legacy_core::clock::DECLARED_HZ,
         processor: Processor::PentiumII,
         megabytes: 128,
@@ -44,9 +48,9 @@ pub const LEGO_RACERS: Title = Title {
         // C: and D: only; Masterpiece `LEGORacers.exe` performs no CD volume
         // or floppy-drive check.
         floppy: false,
-        why: "Windows 98 SE and the roster's baseline Pentium II 450, 128 MB, 640x480x16, \
-              and C:/D: without Joliet or a floppy drive; unmeasured against the title until \
-              first-light bringup (#370)",
+        why: "Windows 98 SE and Pentium II 450, 128 MB, 640x480x16 at 60 Hz refresh, \
+              and C:/D: without Joliet or a floppy drive; verified on Imperial Grand Prix \
+              at exact 60.0 Hz lap-timer cadence with zero clock-spin stalls (#373)",
     },
     // Nothing of the game lies loose on the disc: `LEGORacers.exe`,
     // `GolDP.dll`, `LEGO.JAM`, all 50 `.tun` tracks, and all 3 intro `.avi`
@@ -64,8 +68,7 @@ pub const LEGO_RACERS: Title = Title {
     click_in_a_movie: Some(0x39),
     // One for one: in fullscreen `LEGORacers.exe` hides the OS cursor and
     // accumulates buffered DirectInput `GUID_SysMouse` relative deltas at 1:1
-    // scale (`0x4bc900` / `0x4bca40`). Empirical cursor calibration follows in
-    // first-light bringup.
+    // scale (`0x4bc900` / `0x4bca40`). Full cursor alignment lands in #374.
     pointer_speed: (1.0, 1.0),
 };
 
@@ -74,8 +77,7 @@ pub const LEGO_RACERS: Title = Title {
 ///
 /// Controls, progression, and save paths are sourced from `MANUAL.PDF`,
 /// `README.TXT`, `LEGO.JAM` string tables, and `LEGORacers.exe` disassembly.
-/// Cursor `start_pos`, menu hotspots, and intro skip timing will be empirically
-/// verified once first light lands (#370+).
+/// Cursor `start_pos` and exact menu hotspot calibration follow in #374.
 pub const GUIDE: TitleGuide = TitleGuide {
     display_name: "LEGO Racers",
     summary: "3D LEGO kart racing with custom brick-built cars and drivers, stackable color + Power Plus brick power-ups, 6 circuits across 12 tracks (3 standard, 3 mirrored), Time Race vs Veronica Voltage, and Circuit 7 Rocket Racer Run.",
@@ -145,7 +147,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         "`Return` (Enter) activates power-ups and `Space` performs a Power Slide; pressing `Space` when expecting to fire a power-up triggers a drift instead.",
         "Holding `Up` during the 3-2-1 countdown loses the Turbo Start; wait until `GO` appears before accelerating.",
         "`VERSUS RACE` (2-player split-screen) requires a joystick/game controller attached (`MANUAL.PDF` p. 15) and is unavailable with keyboard/mouse alone.",
-        "In fullscreen, `LEGORacers.exe` hides the OS cursor (`ShowCursor(FALSE)`), never calls `SetCursorPos`, and drives its software arrow via 100% buffered DirectInput `GetDeviceData` relative deltas; initial `start_pos` and exact menu hotspots await empirical first-light calibration (#370+).",
+        "In fullscreen, `LEGORacers.exe` hides the OS cursor (`ShowCursor(FALSE)`), never calls `SetCursorPos`, and drives its software arrow from `(0, 0)` via buffered DirectInput `GetDeviceData` relative deltas; cursor alignment calibration lands in #374.",
     ],
     goals: &[
         Goal {
@@ -158,13 +160,13 @@ pub const GUIDE: TitleGuide = TitleGuide {
             id: "build-custom-racer",
             name: "Build Custom Driver & Car",
             milestone: Milestone::Playable,
-            description: "Enter `BUILD` -> `NEW RACER`, customize a driver, sign the license (`type_text`), assemble a car (Quick Build or custom brick placement), save to `Save\\LEGORac1`, and return to the Main Menu.",
+            description: "Enter `BUILD` -> `NEW RACER`, customize a driver, sign the license (`type_text`), assemble a car (Quick Build or custom brick placement), save to `Save\\0\\LEGORac1`, and return to the Main Menu.",
         },
         Goal {
             id: "single-race-win",
             name: "Win Single Race (Imperial Grand Prix)",
             milestone: Milestone::Playable,
-            description: "Enter `SINGLE RACE` on Imperial Grand Prix, nail Turbo Start on `GO`, collect and trigger an upgraded power-up (`Return`), finish all 3 laps in 1st place, and persist best times to `Save\\LEGORac1`.",
+            description: "Enter `SINGLE RACE` on Imperial Grand Prix, nail Turbo Start on `GO`, collect and trigger an upgraded power-up (`Return`), finish all 3 laps in 1st place, and persist best times to `Save\\0\\LEGORac1`.",
         },
         Goal {
             id: "circuit-1-redbeard",
@@ -179,7 +181,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
             description: "Clear Circuits 1-6 (Redbeard, Kahuka, Basil, Johnny Thunder, Baron von Barron, Gypsy Moth) and beat Rocket Racer on Circuit 7 (`Rocket Racer Run`) to win the campaign and reach Credits.",
         },
     ],
-    save_files: &["Save\\LEGORac1"],
+    save_files: &["Save\\0\\LEGORac1"],
 };
 
 #[cfg(test)]

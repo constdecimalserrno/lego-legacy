@@ -1,0 +1,83 @@
+#lego-legacy-route 1
+# LEGO Racers: unflagged cold boot -> Main Menu -> BUILD -> NEW RACER ->
+# Build Driver (MIX) -> Make License ("ADA") -> Quick Build -> 3D Brick Builder ->
+# DirectInput mouse click Exit Door -> FINISH -> save Save\0\LEGORac1 -> clean exit (#373).
+#
+# Sequence:
+# - Flips 0..247: plays unskippable lmicmp.avi, skips hvscmp.avi (Space) and
+#   introcmp.avi (mouse click).
+# - Flips 560..751: enters BUILD -> NEW RACER -> MIX driver -> MAKE LICENSE.
+# - Flips 840..1055: clears "PLAYER", types "ADA", confirms, enters BUILD CAR.
+# - Flips 1150..1397: QUICK BUILD assembles custom kart, enters 3D Brick Builder,
+#   uses DirectInput relative mouse to click the Exit Door at (68, 435), and
+#   selects FINISH to persist the custom driver & car into Save\0\LEGORac1.
+# - Flip 1500: closes cleanly (CloseHandle flushes Save\0\LEGORac1 to Tree::profile).
+flip 240 key Space down
+flip 241 key Space up
+flip 245 move 320 240
+flip 246 down left
+flip 247 up left
+flip 560 key Return down
+flip 561 key Return up
+flip 640 key Return down
+flip 641 key Return up
+flip 720 key Return down
+flip 721 key Return up
+flip 740 key Down down
+flip 741 key Down up
+flip 750 key Return down
+flip 751 key Return up
+flip 840 key Return down
+flip 841 key Return up
+flip 856 key BackSpace down
+flip 857 key BackSpace up
+flip 872 key BackSpace down
+flip 873 key BackSpace up
+flip 888 key BackSpace down
+flip 889 key BackSpace up
+flip 904 key BackSpace down
+flip 905 key BackSpace up
+flip 920 key BackSpace down
+flip 921 key BackSpace up
+flip 936 key BackSpace down
+flip 937 key BackSpace up
+flip 952 key BackSpace down
+flip 953 key BackSpace up
+flip 968 key A down
+flip 969 key A up
+flip 984 key D down
+flip 985 key D up
+flip 1000 key A down
+flip 1001 key A up
+flip 1016 key Return down
+flip 1017 key Return up
+flip 1030 key Down down
+flip 1031 key Down up
+flip 1042 key Down down
+flip 1043 key Down up
+flip 1054 key Return down
+flip 1055 key Return up
+flip 1150 key Down down
+flip 1151 key Down up
+flip 1162 key Return down
+flip 1163 key Return up
+flip 1220 key Up down
+flip 1221 key Up up
+flip 1232 key Up down
+flip 1233 key Up up
+flip 1244 key Return down
+flip 1245 key Return up
+flip 1286 move 0 0
+flip 1290 move 68 435
+flip 1292 move 69 435
+flip 1295 down left
+flip 1297 up left
+flip 1360 key Down down
+flip 1361 key Down up
+flip 1372 key Down down
+flip 1373 key Down up
+flip 1384 key Down down
+flip 1385 key Down up
+flip 1396 key Return down
+flip 1397 key Return up
+flip 1500 close

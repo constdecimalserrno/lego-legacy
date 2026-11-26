@@ -1043,9 +1043,9 @@ fn write_triangle_caps(
     put(at + 0x0c, 0x0000_008a)?; // dwZCmpCaps: less, less-or-equal, always
     put(at + 0x10, 0x0000_0033)?; // dwSrcBlendCaps: zero, one, source alpha and its inverse
     put(at + 0x14, 0x0000_0033)?; // dwDestBlendCaps: the same
-    put(at + 0x18, 0x0000_0080)?; // dwAlphaCmpCaps: always, which is no alpha test
+    put(at + 0x18, 0x0000_00ff)?; // dwAlphaCmpCaps: all eight compare functions
     put(at + 0x1c, 0x0000_440a)?; // dwShadeCaps: flat and Gouraud in colour, with alpha
-    put(at + 0x20, 0x0000_0001)?; // dwTextureCaps: perspective correction
+    put(at + 0x20, 0x0000_000d)?; // dwTextureCaps: perspective, alpha, and colour-key transparency
     put(at + 0x24, 0x0000_0001)?; // dwTextureFilterCaps: nearest, which is what it samples
     put(at + 0x28, 0x0000_0002)?; // dwTextureBlendCaps: modulate, less than it draws (#231)
     put(at + 0x2c, 0x0000_0001) // dwTextureAddressCaps: wrap
@@ -3775,6 +3775,8 @@ mod tests {
             assert_eq!(get_caps3(ctx, dev, &[hw, hel]).unwrap(), S_OK);
             assert_eq!(ctx.mem.read_u32(hw).unwrap(), DEVICE_DESC6_BYTES);
             assert_eq!(ctx.mem.read_u32(hw + 0x08).unwrap(), 2); // D3DCOLOR_RGB
+            assert_eq!(ctx.mem.read_u32(hw + 0x64 + 0x18).unwrap(), 0x0000_00ff);
+            assert_eq!(ctx.mem.read_u32(hw + 0x64 + 0x20).unwrap(), 0x0000_000d);
             assert_eq!(ctx.mem.read_u32(hel).unwrap(), DEVICE_DESC6_BYTES);
             assert_eq!(ctx.mem.read_u32(hel + 0x08).unwrap(), 0);
 
