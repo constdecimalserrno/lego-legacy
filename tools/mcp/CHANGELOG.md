@@ -15,3 +15,4 @@ Initial zero-crate `lego-mcp` stdio JSON-RPC 2.0 MCP server (#312):
   relative syntax #346), `game_inspect`, `game_goal`, `game_checkpoint`, `game_mode`),
   including native MCP `ImageContent` (`image/png`, base64) screenshots with grid/cursor/crop overlays.
 - Exposes raw `mouse_down` / `mouse_up` in the `game_act` tool schema (#352).
+- Adds `lego-racers` to `game_launch`'s `title` schema examples (#369).

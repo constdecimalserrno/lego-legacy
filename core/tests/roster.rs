@@ -354,3 +354,25 @@ fn the_bank_is_found_on_the_first_rip_that_holds_it() {
         )
     );
 }
+
+/// A SafeDisc-wrapped executable packed inside an InstallShield cabinet is
+/// named and refused before its bytes are hashed (ADR-0006, #369).
+#[test]
+fn a_cabinet_wrapped_pressing_is_named_rather_than_offered() {
+    if !testkit::rips(&testkit::LEGO_RACERS_WRAPPED) {
+        return;
+    }
+    let wrapped = Entry {
+        image: testkit::LEGO_RACERS_WRAPPED,
+        ..roster::LEGO_RACERS
+    };
+    let found = roster::look_for(&wrapped);
+    match &found {
+        Found::Wrapped { scheme, pressing } => {
+            assert_eq!(scheme, "SafeDisc");
+            assert_eq!(pressing, "racers");
+        }
+        other => panic!("found {other} instead of naming the wrapper"),
+    }
+    assert!(found.to_string().contains("will not be run"));
+}

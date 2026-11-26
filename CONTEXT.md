@@ -20,9 +20,9 @@ _Avoid_: game, ROM, image, guest as a synonym
 The exact set of six titles the emulator is for: `lego-rock-raiders`,
 `hotwheels-stunt-track-driver`, `lego-alpha-team`, `lego-island`, `lego-chess`, `lego-racers`.
 Four are supported, each by a crate of its own under `titles/`: v1 is the first three, and
-`lego-island` joined them at its own 1.0.0 (#112). `lego-chess` has its crate and is the one in
-progress (#142), and `lego-racers` has no crate yet. Support is per title, never
-inferred from a hardware standard.
+`lego-island` joined them at its own 1.0.0 (#112). `lego-chess` (#142) and `lego-racers` (#369)
+each have their crate and are in progress. Support is per title, never inferred from a hardware
+standard.
 _Avoid_: compatibility list, catalogue, platform support, the collection
 
 **Pressing**:

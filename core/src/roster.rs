@@ -223,15 +223,42 @@ pub const LEGO_CHESS: Entry = Entry {
     bank: &GM16,
 };
 
+/// LEGO Racers, the roster's sixth title (#369).
+pub const LEGO_RACERS: Entry = Entry {
+    key: "lego-racers",
+    name: "LEGO Racers",
+    image: EntryImage {
+        disc_dir: "racers",
+        pressing: "masterpiece-racers",
+        // Packed inside the pressing's InstallShield 5 cabinet (`DATA1.HDR` +
+        // `DATA1.CAB`), beside `GolDP.dll` and `LEGO.JAM`: nothing of the game
+        // itself lies loose on the disc (#369).
+        path: "LEGORacers.exe",
+        kept: Kept::Cabinet,
+        sha256: "dcaea5ff899a34e7fbf95f3daefed16f55a1c9cd091b246e9fe71d83a2bf6597",
+        why: "the original 1999 pressing packs a 239 KB SafeDisc v1 wrapper (LEGORacers.exe) \
+              beside an encrypted 802 KB LEGORacers.icd in DATA1.CAB with 9,248 bad sectors on \
+              disc; the Masterpiece pressing ships the 2001 unwrapped executable cleanly in \
+              DATA1.CAB with zero bad sectors and byte-identical music and movies (ADR-0006)",
+    },
+    // Neither pressing has Red Book audio tracks: music is 50 High Voltage
+    // Software ADPCM `.tun` files inside DATA1.CAB, and SFX are `.PCM` inside
+    // `LEGO.JAM`.
+    red_book: None,
+    bank: &[],
+};
+
 /// The roster's titles that have a crate, in the order they were taken: the
-/// three v1 titles, LEGO Island and LEGO Chess. A title joins when its own
-/// crate does, so the launcher never offers something that cannot be started.
+/// three v1 titles, LEGO Island, LEGO Chess and LEGO Racers. A title joins
+/// when its own crate does, so the launcher never offers something that cannot
+/// be started.
 pub const ROSTER: &[&Entry] = &[
     &ROCK_RAIDERS,
     &HOT_WHEELS,
     &ALPHA_TEAM,
     &LEGO_ISLAND,
     &LEGO_CHESS,
+    &LEGO_RACERS,
 ];
 
 /// What the launcher found when it went looking for a title.
