@@ -12,9 +12,10 @@ use super::http::{ExtraRoutes, HttpContext, HttpRequest, HttpResponse, StreamIo}
 use super::json::{write_agent_state, write_json_str, write_status, write_window_metrics};
 use super::observe::stuck_loop_warning;
 use super::ws::{
-    encode_binary_frame_with_pointer, encode_xor_rle, is_websocket_upgrade, read_client_frame,
-    write_handshake_response, write_ws_frame, WsClientFrame, FRAME_FLAG_PNG_KEYFRAME,
-    FRAME_FLAG_XOR_RLE_DELTA, OPCODE_BINARY, OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG,
+    encode_binary_frame_with_pointer_state, encode_xor_rle, is_websocket_upgrade,
+    read_client_frame, write_handshake_response, write_ws_frame, WsClientFrame,
+    FRAME_FLAG_PNG_KEYFRAME, FRAME_FLAG_XOR_RLE_DELTA, OPCODE_BINARY, OPCODE_CLOSE, OPCODE_PING,
+    OPCODE_PONG,
 };
 use std::io;
 use std::sync::Arc;
@@ -162,13 +163,14 @@ pub fn encode_stream_frame(
             if let Ok(rle) = encode_xor_rle(&p.bgra[..expected], curr_slice) {
                 if rle.len() <= MAX_DELTA_BYTES {
                     return (
-                        encode_binary_frame_with_pointer(
+                        encode_binary_frame_with_pointer_state(
                             FRAME_FLAG_XOR_RLE_DELTA,
                             curr.flip,
                             curr.width,
                             curr.height,
                             curr.pointer_pos,
                             curr.pointer_shown,
+                            curr.cursor_blank,
                             &rle,
                         ),
                         false,
@@ -180,13 +182,14 @@ pub fn encode_stream_frame(
 
     let png = crate::png::encode(curr.width, curr.height, curr_slice);
     (
-        encode_binary_frame_with_pointer(
+        encode_binary_frame_with_pointer_state(
             FRAME_FLAG_PNG_KEYFRAME,
             curr.flip,
             curr.width,
             curr.height,
             curr.pointer_pos,
             curr.pointer_shown,
+            curr.cursor_blank,
             &png,
         ),
         true,
@@ -202,7 +205,8 @@ fn is_new_snapshot(prev: Option<&FrameSnapshot>, curr: &FrameSnapshot) -> bool {
                     || p.height != curr.height
                     || p.frame_hash != curr.frame_hash
                     || p.pointer_pos != curr.pointer_pos
-                    || p.pointer_shown != curr.pointer_shown)
+                    || p.pointer_shown != curr.pointer_shown
+                    || p.cursor_blank != curr.cursor_blank)
         }
     }
 }
@@ -409,6 +413,8 @@ struct SseFingerprint {
     step_uncapped: bool,
     route_active: bool,
     pointer_pos: (i32, i32),
+    pointer_shown: bool,
+    cursor_blank: bool,
     held_keys: Vec<u32>,
     pending_actions: usize,
     unchanged_streak: u64,
@@ -434,6 +440,8 @@ impl SseFingerprint {
             step_uncapped: status.step_uncapped,
             route_active: status.route_active,
             pointer_pos: status.pointer_pos,
+            pointer_shown: status.pointer_shown,
+            cursor_blank: status.cursor_blank,
             held_keys: status.held_keys.clone(),
             pending_actions: status.pending_actions,
             unchanged_streak: status.diff.unchanged_streak,
@@ -698,6 +706,7 @@ mod tests {
                 assert!(resp.contains("<canvas"));
                 assert!(resp.contains("/api/stream"));
                 assert!(resp.contains("/api/events"));
+                assert!(resp.contains("pointerBlank"));
             }
 
             // B. GET /api/events streams valid SSE JSON and pushes agent_state updates immediately.
@@ -925,6 +934,7 @@ mod tests {
             uniform: true,
             pointer_pos: (10 + flip as i32, 20 + flip as i32),
             pointer_shown: flip.is_multiple_of(2),
+            cursor_blank: flip == 0,
         };
 
         let f0 = mk_snap(0, 16, 12, 0x10, 100.0);
@@ -934,6 +944,8 @@ mod tests {
         assert_eq!(h0.flags, FRAME_FLAG_PNG_KEYFRAME | FRAME_FLAG_HAS_POINTER);
         assert_eq!(h0.kind, FRAME_FLAG_PNG_KEYFRAME);
         assert_eq!(h0.pointer, Some(((10, 20), true)));
+        assert!(h0.pointer_blank);
+        assert!(!h0.cursor_visible());
 
         let f1 = mk_snap(1, 16, 12, 0x12, 5.0);
         let (bytes1, kf1) = encode_stream_frame(Some(&f0), &f1, 0);
@@ -942,6 +954,8 @@ mod tests {
         assert_eq!(h1.flags, FRAME_FLAG_XOR_RLE_DELTA | FRAME_FLAG_HAS_POINTER);
         assert_eq!(h1.kind, FRAME_FLAG_XOR_RLE_DELTA);
         assert_eq!(h1.pointer, Some(((11, 21), false)));
+        assert!(!h1.pointer_blank);
+        assert!(h1.cursor_visible());
 
         // Resize forces keyframe.
         let f_resize = mk_snap(2, 32, 24, 0x12, 5.0);
@@ -1040,6 +1054,7 @@ mod tests {
                 uniform: false,
                 pointer_pos: (320, 240),
                 pointer_shown: true,
+                cursor_blank: false,
             });
         };
 
@@ -1357,6 +1372,7 @@ mod tests {
                 uniform: false,
                 pointer_pos: (320, 240),
                 pointer_shown: true,
+                cursor_blank: false,
             });
         };
         let warnings = || -> Vec<String> {

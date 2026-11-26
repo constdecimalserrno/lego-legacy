@@ -4,7 +4,7 @@
 //! Strictly pure-`std` and integer-only (ADR-0001): implements RFC 3174 SHA-1
 //! (for `Sec-WebSocket-Accept`), RFC 6455 server/client framing, a 9-byte v1
 //! / 14-byte v2 pointer-locked binary frame envelope (`[1B flags][4B LE flip]
-//! [2B LE w][2B LE h][optional 2B i16 ptr_x + 2B i16 ptr_y + 1B ptr_shown]
+//! [2B LE w][2B LE h][optional 2B i16 ptr_x + 2B i16 ptr_y + 1B ptr_flags]
 //! [payload]`), and single-pass PackBits-RLE compression over BGRA XOR deltas.
 
 use super::http::HttpRequest;
@@ -24,7 +24,7 @@ pub const OPCODE_PONG: u8 = 0xA;
 /// Binary video frame v1 header size: `1B flags + 4B LE flip + 2B LE width + 2B LE height`.
 pub const FRAME_HEADER_LEN: usize = 9;
 /// Binary video frame v2 header size (when `FRAME_FLAG_HAS_POINTER` is set):
-/// v1 header (9B) + `2B LE i16 ptr_x + 2B LE i16 ptr_y + 1B ptr_shown`.
+/// v1 header (9B) + `2B LE i16 ptr_x + 2B LE i16 ptr_y + 1B ptr_flags`.
 pub const FRAME_HEADER_V2_LEN: usize = 14;
 /// Binary frame flag: payload is a complete PNG image keyframe.
 pub const FRAME_FLAG_PNG_KEYFRAME: u8 = 0;
@@ -34,6 +34,10 @@ pub const FRAME_FLAG_XOR_RLE_DELTA: u8 = 1;
 pub const FRAME_FLAG_KIND_MASK: u8 = 0x0f;
 /// High-bit flag indicating the 5-byte frame-locked pointer extension follows the 9B header (#327).
 pub const FRAME_FLAG_HAS_POINTER: u8 = 0x80;
+/// Pointer-status byte bit 0: host OS cursor is shown (`ShowCursor >= 0`).
+pub const POINTER_FLAG_SHOWN: u8 = 0x01;
+/// Pointer-status byte bit 1: active OS cursor shape is blank (`SetCursor(NULL)` / transparent).
+pub const POINTER_FLAG_BLANK: u8 = 0x02;
 
 /// Decoded spectator binary video frame header (v1 or v2 with frame-locked pointer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +48,21 @@ pub struct BinaryFrameHeader<'a> {
     pub width: u16,
     pub height: u16,
     pub pointer: Option<((i32, i32), bool)>,
+    pub pointer_blank: bool,
     pub payload: &'a [u8],
+}
+
+impl BinaryFrameHeader<'_> {
+    /// Whether the cursor overlay (`#reticle` / `--cursor`) should be drawn on
+    /// this frame: `false` only when the OS cursor is shown (`ShowCursor >= 0`)
+    /// with a blank cursor shape (`SetCursor(NULL)`).
+    #[must_use]
+    pub const fn cursor_visible(&self) -> bool {
+        match self.pointer {
+            Some((_, shown)) => !(shown && self.pointer_blank),
+            None => true,
+        }
+    }
 }
 
 /// Maximum client-to-server WebSocket frame payload accepted (64 KiB).
@@ -366,7 +384,7 @@ pub fn encode_binary_frame(
 
 /// Pack a spectator binary video frame (v2 header, 14 bytes) with frame-locked
 /// visual cursor coordinates:
-/// `[1B flags|0x80][4B LE flip][2B LE width][2B LE height][2B LE i16 ptr_x][2B LE i16 ptr_y][1B ptr_shown][payload]` (#327).
+/// `[1B flags|0x80][4B LE flip][2B LE width][2B LE height][2B LE i16 ptr_x][2B LE i16 ptr_y][1B ptr_flags][payload]` (#327).
 #[must_use]
 pub fn encode_binary_frame_with_pointer(
     kind: u8,
@@ -375,6 +393,33 @@ pub fn encode_binary_frame_with_pointer(
     height: u32,
     pointer_pos: (i32, i32),
     pointer_shown: bool,
+    payload: &[u8],
+) -> Vec<u8> {
+    encode_binary_frame_with_pointer_state(
+        kind,
+        flip,
+        width,
+        height,
+        pointer_pos,
+        pointer_shown,
+        false,
+        payload,
+    )
+}
+
+/// Pack a spectator binary video frame (v2 header, 14 bytes) carrying both
+/// `pointer_shown` (`POINTER_FLAG_SHOWN`) and `cursor_blank` (`POINTER_FLAG_BLANK`)
+/// in byte 13 (#327, #328).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_binary_frame_with_pointer_state(
+    kind: u8,
+    flip: u64,
+    width: u32,
+    height: u32,
+    pointer_pos: (i32, i32),
+    pointer_shown: bool,
+    cursor_blank: bool,
     payload: &[u8],
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(FRAME_HEADER_V2_LEN + payload.len());
@@ -390,13 +435,21 @@ pub fn encode_binary_frame_with_pointer(
         .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
     out.extend_from_slice(&px.to_le_bytes());
     out.extend_from_slice(&py.to_le_bytes());
-    out.push(u8::from(pointer_shown));
+    // Only emit `POINTER_FLAG_BLANK` while the OS cursor is shown so byte 13
+    // stays `0x00` whenever `!pointer_shown` (backwards-compatible with v2
+    // readers checking `data[13] != 0`).
+    let ptr_flags = if pointer_shown {
+        POINTER_FLAG_SHOWN | if cursor_blank { POINTER_FLAG_BLANK } else { 0 }
+    } else {
+        0
+    };
+    out.push(ptr_flags);
     out.extend_from_slice(payload);
     out
 }
 
 /// Unpack a spectator binary video frame (v1 9-byte or v2 14-byte with
-/// frame-locked pointer metadata) (#327).
+/// frame-locked pointer metadata) (#327, #328).
 #[must_use]
 pub fn decode_binary_frame(data: &[u8]) -> Option<BinaryFrameHeader<'_>> {
     if data.len() < FRAME_HEADER_LEN {
@@ -407,18 +460,20 @@ pub fn decode_binary_frame(data: &[u8]) -> Option<BinaryFrameHeader<'_>> {
     let flip = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
     let width = u16::from_le_bytes([data[5], data[6]]);
     let height = u16::from_le_bytes([data[7], data[8]]);
-    let (pointer, payload) = if (flags & FRAME_FLAG_HAS_POINTER) != 0 {
+    let (pointer, pointer_blank, payload) = if (flags & FRAME_FLAG_HAS_POINTER) != 0 {
         if data.len() < FRAME_HEADER_V2_LEN {
             return None;
         }
         let px = i32::from(i16::from_le_bytes([data[9], data[10]]));
         let py = i32::from(i16::from_le_bytes([data[11], data[12]]));
+        let pflags = data[13];
         (
-            Some(((px, py), data[13] != 0)),
+            Some(((px, py), (pflags & POINTER_FLAG_SHOWN) != 0)),
+            (pflags & POINTER_FLAG_BLANK) != 0,
             &data[FRAME_HEADER_V2_LEN..],
         )
     } else {
-        (None, &data[FRAME_HEADER_LEN..])
+        (None, false, &data[FRAME_HEADER_LEN..])
     };
     Some(BinaryFrameHeader {
         flags,
@@ -427,6 +482,7 @@ pub fn decode_binary_frame(data: &[u8]) -> Option<BinaryFrameHeader<'_>> {
         width,
         height,
         pointer,
+        pointer_blank,
         payload,
     })
 }
@@ -739,7 +795,38 @@ mod tests {
         assert_eq!(h2.kind, FRAME_FLAG_PNG_KEYFRAME);
         assert_eq!((h2.flip, h2.width, h2.height), (99, 640, 480));
         assert_eq!(h2.pointer, Some(((585, 430), false)));
+        assert!(!h2.pointer_blank);
+        assert!(h2.cursor_visible());
         assert_eq!(h2.payload, b"png!");
+        let env_blank = encode_binary_frame_with_pointer_state(
+            FRAME_FLAG_PNG_KEYFRAME,
+            456,
+            640,
+            480,
+            (320, 240),
+            true,
+            true,
+            b"png!",
+        );
+        let hb = decode_binary_frame(&env_blank).unwrap();
+        assert_eq!(hb.pointer, Some(((320, 240), true)));
+        assert!(hb.pointer_blank);
+        assert!(!hb.cursor_visible());
+        let env_sw_blank = encode_binary_frame_with_pointer_state(
+            FRAME_FLAG_PNG_KEYFRAME,
+            457,
+            640,
+            480,
+            (320, 240),
+            false,
+            true,
+            b"png!",
+        );
+        let hsb = decode_binary_frame(&env_sw_blank).unwrap();
+        assert_eq!(env_sw_blank[13], 0);
+        assert_eq!(hsb.pointer, Some(((320, 240), false)));
+        assert!(!hsb.pointer_blank);
+        assert!(hsb.cursor_visible());
         assert_eq!(
             decode_binary_frame_header(&env_v2),
             Some((FRAME_FLAG_PNG_KEYFRAME, 99, 640, 480, &b"png!"[..]))

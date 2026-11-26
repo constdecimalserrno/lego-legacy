@@ -159,6 +159,8 @@ pub struct FrameSnapshot {
     pub pointer_pos: (i32, i32),
     /// Frame-locked host cursor visibility (`ShowCursor >= 0`) at `flip` (#327).
     pub pointer_shown: bool,
+    /// Whether the active OS cursor shape is completely transparent (`SetCursor(NULL)`).
+    pub cursor_blank: bool,
 }
 
 /// Lightweight frame metadata returned by [`Command::FrameInfo`].
@@ -229,6 +231,8 @@ pub struct ControlStatus {
     /// Tracked Win32 hardware pointer anchor (`last_move`) (#327).
     pub hw_pointer_pos: (i32, i32),
     pub pointer_shown: bool,
+    /// Whether the active OS cursor shape is completely transparent (`SetCursor(NULL)`).
+    pub cursor_blank: bool,
     pub held_keys: Vec<u32>,
     pub pending_actions: usize,
     pub frame_width: u32,
@@ -626,6 +630,7 @@ impl BusState {
             pointer_pos: self.timeline.visual_cursor_pos(),
             hw_pointer_pos: self.timeline.last_pointer(),
             pointer_shown: self.timeline.pointer_shown(),
+            cursor_blank: self.timeline.cursor_blank(),
             held_keys: self.held_keys.clone(),
             pending_actions: self.timeline.pending_len(),
             frame_width,

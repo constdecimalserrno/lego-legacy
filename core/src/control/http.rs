@@ -2438,6 +2438,7 @@ mod tests {
                 uniform: false,
                 pointer_pos: (320, 240),
                 pointer_shown: true,
+                cursor_blank: false,
             });
         }
         let idle_resp = dispatch_http(

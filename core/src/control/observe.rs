@@ -113,7 +113,8 @@ pub fn render_frame_png(
         return Err("frame buffer truncated".to_owned());
     }
 
-    if !opts.grid && !opts.cursor && opts.crop.is_none() {
+    let draw_cursor = opts.cursor && !(snap.pointer_shown && snap.cursor_blank);
+    if !opts.grid && !draw_cursor && opts.crop.is_none() {
         return Ok(crate::png::encode(
             snap.width,
             snap.height,
@@ -125,7 +126,7 @@ pub fn render_frame_png(
     if opts.grid {
         draw_grid_overlay(&mut buf, snap.width, snap.height);
     }
-    if opts.cursor {
+    if draw_cursor {
         draw_cursor_crosshair(&mut buf, snap.width, snap.height, pointer_pos);
     }
 
@@ -417,8 +418,8 @@ pub fn format_frame_json(
     }
     let _ = write!(
         out,
-        ",\"unchanged_streak\":{},\"pointer_pos\":[{},{}],\"pointer_shown\":{},\"warnings\":[",
-        snap.diff.unchanged_streak, pointer_pos.0, pointer_pos.1, pointer_shown
+        ",\"unchanged_streak\":{},\"pointer_pos\":[{},{}],\"pointer_shown\":{},\"cursor_blank\":{},\"warnings\":[",
+        snap.diff.unchanged_streak, pointer_pos.0, pointer_pos.1, pointer_shown, snap.cursor_blank
     );
     for (i, w) in warnings.iter().enumerate() {
         if i > 0 {
@@ -484,6 +485,7 @@ mod tests {
             uniform,
             pointer_pos: (320, 240),
             pointer_shown: true,
+            cursor_blank: false,
         }
     }
 
