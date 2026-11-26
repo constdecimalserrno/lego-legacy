@@ -48,6 +48,8 @@ pub struct Pace {
     /// When true, `hold` skips sleeping and keeps alignment synced to the
     /// declared clock for fast-burst execution (#296).
     uncapped: bool,
+    /// Cumulative wall nanoseconds spent inside intentional pacing sleeps (#349).
+    slept_total_nanos: u64,
 }
 
 impl Pace {
@@ -68,6 +70,7 @@ impl Pace {
             paced_from: (0, 0),
             pace: 1.0,
             uncapped: false,
+            slept_total_nanos: 0,
         }
     }
 
@@ -228,13 +231,23 @@ impl Pace {
         u64::try_from(unpaused).unwrap_or(u64::MAX)
     }
 
+    /// Cumulative wall nanoseconds spent in intentional pacing sleeps (#349).
+    #[must_use]
+    pub fn slept_total_nanos(&self) -> u64 {
+        self.slept_total_nanos
+    }
+
     fn sleep(&mut self, nanos: u64) {
         #[cfg(test)]
         if let Some(wall) = &mut self.simulated {
             *wall += nanos;
+            self.slept_total_nanos = self.slept_total_nanos.saturating_add(nanos);
             return;
         }
+        let start = Instant::now();
         std::thread::sleep(std::time::Duration::from_nanos(nanos));
+        let slept = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.slept_total_nanos = self.slept_total_nanos.saturating_add(slept);
     }
 }
 
@@ -352,6 +365,11 @@ mod tests {
             assert_eq!(pace.hold(i * 16 * MS), 1.0);
         }
         assert_eq!(pace.wall_nanos(), 100 * MS, "no sleep while uncapped");
+        assert_eq!(
+            pace.slept_total_nanos(),
+            0,
+            "no sleep accumulated while uncapped"
+        );
 
         // Switch back to capped real-time: next frame sleeps only 15 ms, not 1.5 s.
         pace.set_uncapped(false);
@@ -359,5 +377,6 @@ mod tests {
         *pace.simulated.as_mut().unwrap() += MS;
         assert_eq!(pace.hold(101 * 16 * MS), 1.0);
         assert_eq!(pace.wall_nanos(), 116 * MS);
+        assert_eq!(pace.slept_total_nanos(), 15 * MS);
     }
 }

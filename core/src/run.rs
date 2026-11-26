@@ -161,6 +161,9 @@ pub fn run_digested_with_guide(
                 log.line(&format!("rewind replay {} events", route.len()));
                 machine.route = Some(route);
                 machine.recording = Some(crate::route::Route::new());
+                // Re-anchor pacing and telemetry after `setup()` finishes so
+                // disc/image reload time is not billed to flip 0 (#349).
+                control.reset_for_rewind();
             }
             let obs_bus = bus.clone();
             machine.set_flip_observer(Box::new(move |m, h| {
@@ -170,7 +173,6 @@ pub fn run_digested_with_guide(
             if let Some((_name, bm)) = bus.take_pending_rewind() {
                 match crate::route::Route::parse(&bm.route_text) {
                     Ok(route) => {
-                        control.reset_for_rewind();
                         rewind_route = Some(route);
                         continue;
                     }

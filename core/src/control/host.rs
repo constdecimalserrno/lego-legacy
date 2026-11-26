@@ -91,19 +91,6 @@ impl<H> ControlHost<H> {
         self
     }
 
-    /// Reset per-run staging/pacing anchors across an outer-loop Tier-1 rewind (#309).
-    pub fn reset_for_rewind(&mut self) {
-        self.last_clock_nanos = 0;
-        self.last_flip_observed = None;
-        self.polls_since_flip = 0;
-        self.pace_anchor_declared = 0;
-        self.pace_anchor_scaled = 0;
-        self.wall_pace_anchored = false;
-        self.staged_bgra.clear();
-        self.staged_size = (0, 0);
-        self.staged_valid = false;
-    }
-
     /// Clone a thread-safe handle to this host's [`ControlBus`].
     #[must_use]
     pub fn bus(&self) -> ControlBus {
@@ -178,6 +165,22 @@ impl<H> ControlHost<H> {
 }
 
 impl<H: Host> ControlHost<H> {
+    /// Reset per-run staging, pacing, and telemetry anchors across an
+    /// outer-loop Tier-1 rewind (#309, #349).
+    pub fn reset_for_rewind(&mut self) {
+        self.last_clock_nanos = 0;
+        self.last_flip_observed = None;
+        self.polls_since_flip = 0;
+        self.pace_anchor_declared = 0;
+        self.pace_anchor_scaled = 0;
+        self.wall_pace_anchored = false;
+        self.staged_bgra.clear();
+        self.staged_size = (0, 0);
+        self.staged_valid = false;
+        let pace_sleep = self.pace_sleep_nanos();
+        self.bus.lock().telemetry.rebaseline(0, 0, 0, pace_sleep);
+    }
+
     fn set_host_paused(&mut self, paused: bool) {
         if self.host_paused != paused {
             self.host_paused = paused;
@@ -474,6 +477,12 @@ impl<H: Host> Host for ControlHost<H> {
         self.inner.is_paced()
     }
 
+    fn pace_sleep_nanos(&self) -> u64 {
+        self.inner
+            .pace_sleep_nanos()
+            .saturating_add(self.wall_pace.slept_total_nanos())
+    }
+
     fn pump(&mut self) {
         self.inner.pump();
     }
@@ -489,6 +498,7 @@ impl<H: Host> Host for ControlHost<H> {
 
         self.inner.observe_flip(meta);
         let underruns = self.inner.audio_underruns();
+        let pace_sleep = self.pace_sleep_nanos();
 
         // Update frame snapshot, diff, telemetry, and active wait conditions.
         let mut notify_clients = false;
@@ -529,7 +539,7 @@ impl<H: Host> Host for ControlHost<H> {
                 true
             };
 
-            state.telemetry.record_flip(meta, uniform);
+            state.telemetry.record_flip(meta, uniform, pace_sleep);
 
             let latest_ref = state.latest_frame.clone();
             if evaluate_wait(&mut state, meta, latest_ref.as_ref()) {
@@ -1482,5 +1492,65 @@ mod tests {
         assert_eq!(host.wall_pace.wall_nanos(), 500 * MS);
         assert_eq!(host.pace(20 * SEC + 200 * MS), 1.0);
         assert_eq!(host.wall_pace.wall_nanos(), 550 * MS);
+    }
+
+    #[test]
+    fn live_pace_sleep_does_not_inflate_over_budget_flips() {
+        const MS: u64 = 1_000_000;
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                pace: 0.5,
+                flip_cost: crate::clock::FlipCost::Refresh(20),
+                ..ControlConfig::default()
+            },
+        );
+        let pixels = vec![0x33u8; 4 * 4 * 4];
+        let frame = Frame {
+            width: 4,
+            height: 4,
+            pitch: 16,
+            pixels: &pixels,
+        };
+
+        // 3 flips of 50 ms declared each at 0.5x live pace: intentional pacing
+        // sleeps ~100 ms per flip (> 50 ms declared budget) while actual compute
+        // is sub-millisecond. None of these flips are over compute budget.
+        for f in 0..3u64 {
+            let clock = (f + 1) * 50 * MS;
+            host.pace(clock);
+            host.present(&frame);
+            host.observe_flip(&FlipMeta {
+                flip: f,
+                clock_nanos: clock,
+                cursor: (f + 1) * 1000,
+                instructions_passed: 0,
+                pointer_shown: true,
+                pointer_pos: (0, 0),
+                route_active: false,
+                route_remaining: 0,
+            });
+        }
+
+        let m = host.telemetry_report(None).full;
+        assert_eq!(m.flips, 3);
+        assert!(
+            host.pace_sleep_nanos() >= 150 * MS,
+            "expected >=150 ms intentional pace sleep, got {} ms",
+            host.pace_sleep_nanos() / MS
+        );
+        assert!(
+            m.wall_nanos >= 150 * MS,
+            "wall_nanos must still include pacing sleep (got {} ms)",
+            m.wall_nanos / MS
+        );
+        assert_eq!(
+            m.over_budget_flips, 0,
+            "intentional pace sleep must not count as over-budget compute (got {} / {}, pct={:.1}%)",
+            m.over_budget_flips, m.flips, m.over_budget_pct
+        );
+        assert_eq!(m.over_budget_pct, 0.0);
     }
 }

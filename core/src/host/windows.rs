@@ -1175,6 +1175,10 @@ impl Host for WinWindow {
         true
     }
 
+    fn pace_sleep_nanos(&self) -> u64 {
+        self.pace.slept_total_nanos()
+    }
+
     fn pump(&mut self) {
         WinWindow::pump(self);
     }

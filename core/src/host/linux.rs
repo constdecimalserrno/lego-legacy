@@ -1142,6 +1142,10 @@ impl Host for LinuxWindow {
         true
     }
 
+    fn pace_sleep_nanos(&self) -> u64 {
+        self.pace.slept_total_nanos()
+    }
+
     fn pump(&mut self) {
         LinuxWindow::pump(self);
     }

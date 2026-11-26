@@ -382,6 +382,11 @@ pub trait Host {
         false
     }
 
+    /// Cumulative host wall nanoseconds spent in intentional pacing sleeps (#349).
+    fn pace_sleep_nanos(&self) -> u64 {
+        0
+    }
+
     /// Pump host window events without presenting a frame or polling guest
     /// input (#296). Keeps a window responsive while paused.
     fn pump(&mut self) {}
@@ -443,6 +448,10 @@ impl<H: Host + ?Sized> Host for &mut H {
 
     fn is_paced(&self) -> bool {
         (**self).is_paced()
+    }
+
+    fn pace_sleep_nanos(&self) -> u64 {
+        (**self).pace_sleep_nanos()
     }
 
     fn pump(&mut self) {
