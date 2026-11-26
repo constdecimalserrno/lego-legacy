@@ -159,6 +159,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 .warn-item{
   font-family:var(--mono);font-size:11px;padding:6px 8px;border-radius:4px;
   background:rgba(248,113,113,.14);border:1px solid rgba(248,113,113,.5);color:#fecaca;
+  word-break:break-word;
 }
 
 .hint-row{display:flex;gap:6px}
@@ -180,9 +181,38 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
 .feed .f-flip{color:var(--muted);flex:none}
 .feed .f-src{font-weight:700;flex:none}
 .feed .src-agent{color:var(--cyan)}
+.feed .src-human{color:var(--green)}
 .feed .src-control{color:var(--amber)}
 .feed .src-pipe{color:var(--purple)}
 .feed .f-sum{color:var(--text);word-break:break-word}
+
+/* Controls & Goals Reference Panel */
+#refBody{display:flex;flex-direction:column;gap:8px}
+.ref-chips{display:flex;flex-wrap:wrap;gap:4px}
+.ref-chip{
+  font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:4px;
+  background:rgba(11,14,20,.7);border:1px solid var(--border);color:var(--muted);
+}
+.ref-chip.warn{background:rgba(248,113,113,.14);border-color:rgba(248,113,113,.55);color:#fecaca}
+.ref-list{
+  list-style:none;display:flex;flex-direction:column;gap:5px;max-height:240px;overflow-y:auto;
+}
+.ref-item{
+  background:rgba(11,14,20,.55);border:1px solid rgba(38,48,70,.7);border-radius:4px;
+  padding:6px 8px;display:flex;flex-direction:column;gap:3px;
+}
+.ref-item-hdr{display:flex;align-items:baseline;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.ref-key{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--cyan);word-break:break-word}
+.ref-act{font-size:12px;font-weight:600;color:var(--text);line-height:1.3}
+.ref-note{font-size:11px;color:var(--muted);line-height:1.35;word-break:break-word}
+.ref-badge{
+  font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;
+  padding:1px 5px;border-radius:3px;border:1px solid var(--border);color:var(--amber);
+  background:rgba(245,184,46,.1);flex:none;
+}
+.ref-badge.ms-done{color:var(--green);border-color:rgba(52,211,153,.5);background:rgba(52,211,153,.1)}
+.ref-hazard-hdr{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;color:var(--red);letter-spacing:.05em}
+.ref-saves{font-family:var(--mono);font-size:10px;color:var(--muted);word-break:break-word}
 
 /* Inspect Drawer */
 details.inspect{background:var(--panel2);border:1px solid var(--border);border-radius:6px}
@@ -297,6 +327,17 @@ details.inspect summary::-webkit-details-marker{display:none}
       <ul class="feed" id="actionFeed"></ul>
     </section>
 
+    <details class="inspect" id="refDrawer">
+      <summary><span>Controls &amp; Goals</span><span class="muted" id="refSummaryCount">▾</span></summary>
+      <div class="inspect-body">
+        <div class="tabs">
+          <button class="btn active ref-tab" data-tab="controls" id="btnRefControls">Controls</button>
+          <button class="btn ref-tab" data-tab="goals" id="btnRefGoals">Goals</button>
+        </div>
+        <div id="refBody" class="muted">Loading title guide...</div>
+      </div>
+    </details>
+
     <details class="inspect" id="inspectDrawer">
       <summary><span>Inspect Drawer (CPU / Win32 / Saves / Auth)</span><span class="muted">▾</span></summary>
       <div class="inspect-body">
@@ -383,6 +424,11 @@ details.inspect summary::-webkit-details-marker{display:none}
   const tokenInput = document.getElementById('tokenInput');
   const inspectDrawer = document.getElementById('inspectDrawer');
   const inspectOut = document.getElementById('inspectOut');
+  const refDrawer = document.getElementById('refDrawer');
+  const refBody = document.getElementById('refBody');
+  const refSummaryCount = document.getElementById('refSummaryCount');
+  const btnRefControls = document.getElementById('btnRefControls');
+  const btnRefGoals = document.getElementById('btnRefGoals');
   const toastEl = document.getElementById('toast');
 
   // Offscreen canvas used strictly to extract pixel-exact ImageData from PNG keyframes
@@ -411,6 +457,11 @@ details.inspect summary::-webkit-details-marker{display:none}
   let localMouseBtn = null;
   let ripples = [];
   let inspectTab = 'cpu';
+  let refTab = 'controls';
+  let controlsGuide = null;
+  let goalsGuide = null;
+  let refLoaded = false;
+  let refLoading = false;
 
   let toastTimer = null;
   function showToast(msg) {
@@ -848,8 +899,13 @@ details.inspect summary::-webkit-details-marker{display:none}
     const feed = Array.isArray(ag.action_feed) ? ag.action_feed : [];
     for (const entry of feed) {
       if (entry.seq > lastFeedSeq) {
-        const m = /click.*\((?:Some\()?(\d+)\)?,(?:Some\()?(\d+)\)?\)/.exec(entry.summary || '');
-        if (m) spawnRipple(parseInt(m[1], 10), parseInt(m[2], 10), '#38bdf8');
+        if (entry.source === 'agent' || entry.source === 'human') {
+          const m = /^click(?:_poll)?\s+(?:Left|Right)\s+\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/.exec(entry.summary || '');
+          if (m && !(takeoverActive && entry.source === 'human')) {
+            const color = entry.source === 'human' ? '#f5b82e' : '#38bdf8';
+            spawnRipple(parseInt(m[1], 10), parseInt(m[2], 10), color);
+          }
+        }
         lastFeedSeq = entry.seq;
       }
     }
@@ -1058,12 +1114,12 @@ details.inspect summary::-webkit-details-marker{display:none}
       const dy = y - by;
       if (dx !== 0 || dy !== 0) {
         relCursor = [x, y];
-        apiPost('/api/act', { action: 'mouse_delta', dx, dy, flips: 1, wait: false, auto_step: false });
+        apiPost('/api/act', { action: 'mouse_delta', dx, dy, flips: 1, source: 'human', wait: false, auto_step: false });
       }
       return;
     }
     if (!wsPointerLocked) pointerPos = [x, y];
-    apiPost('/api/act', { action: 'move', x, y, glide_flips: 1, wait: false, auto_step: false });
+    apiPost('/api/act', { action: 'move', x, y, glide_flips: 1, source: 'human', wait: false, auto_step: false });
   });
 
   window.addEventListener('pointerup', ev => {
@@ -1078,30 +1134,30 @@ details.inspect summary::-webkit-details-marker{display:none}
       if (isRelativeMouse()) relCursor = [x, y];
       apiPost('/api/act', {
         action: 'drag', from_x: start.x, from_y: start.y, to_x: x, to_y: y,
-        button: start.button, step_px: 16, wait: false, auto_step: true
+        button: start.button, step_px: 16, source: 'human', wait: false, auto_step: true
       });
     } else if (isRelativeMouse()) {
       const [bx, by] = relCursor || pointerPos;
       relCursor = [x, y];
       if (x === bx && y === by) {
         apiPost('/api/act', {
-          action: 'click', button: start.button, hold_flips: 2, wait: false, auto_step: true
+          action: 'click', button: start.button, hold_flips: 2, source: 'human', wait: false, auto_step: true
         });
       } else {
         // Core translates absolute click target into multi-flip relative deltas
         // and sequences Button::Down on the arrival flip.
         apiPost('/api/act', {
-          action: 'click', x, y, button: start.button, hold_flips: 2, wait: false, auto_step: true
+          action: 'click', x, y, button: start.button, hold_flips: 2, source: 'human', wait: false, auto_step: true
         });
       }
     } else if (requiresPollRelease()) {
       apiPost('/api/act', {
         action: 'click_poll', x, y, button: start.button, hold_flips: 2, hold_ms: 150,
-        wait: false, auto_step: true
+        source: 'human', wait: false, auto_step: true
       });
     } else {
       apiPost('/api/act', {
-        action: 'click', x, y, button: start.button, hold_flips: 2, wait: false, auto_step: true
+        action: 'click', x, y, button: start.button, hold_flips: 2, source: 'human', wait: false, auto_step: true
       });
     }
   });
@@ -1118,7 +1174,7 @@ details.inspect summary::-webkit-details-marker{display:none}
     const routeKey = CODE_TO_ROUTE_KEY[ev.code];
     if (!routeKey) return;
     ev.preventDefault();
-    apiPost('/api/act', { action: 'key_hold', key: routeKey, hold_flips: 3, wait: false, auto_step: true });
+    apiPost('/api/act', { action: 'key_hold', key: routeKey, hold_flips: 3, source: 'human', wait: false, auto_step: true });
   });
 
   // Coach Hint form
@@ -1177,9 +1233,124 @@ details.inspect summary::-webkit-details-marker{display:none}
   document.getElementById('btnRefreshInspect').onclick = refreshInspect;
   inspectDrawer.addEventListener('toggle', () => { if (inspectDrawer.open) refreshInspect(); });
 
+  // Controls & Goals Reference Panel (/api/controls & /api/goals)
+  function mk(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  function renderReferencePanel() {
+    refBody.textContent = '';
+    const ctrls = controlsGuide && Array.isArray(controlsGuide.controls) ? controlsGuide.controls : [];
+    const hazards = controlsGuide && Array.isArray(controlsGuide.hazards) ? controlsGuide.hazards : [];
+    const goals = goalsGuide && Array.isArray(goalsGuide.goals) ? goalsGuide.goals : [];
+
+    btnRefControls.textContent = 'Controls' + (ctrls.length ? ' (' + ctrls.length + ')' : '');
+    btnRefGoals.textContent = 'Goals' + (goals.length ? ' (' + goals.length + ')' : '');
+    refSummaryCount.textContent = (ctrls.length || goals.length)
+      ? (ctrls.length + ' ctrl · ' + goals.length + ' goals ▾') : '▾';
+
+    if (refTab === 'controls') {
+      if (!controlsGuide) {
+        refBody.textContent = 'Controls guide unavailable.';
+        return;
+      }
+      const chips = mk('div', 'ref-chips');
+      if (controlsGuide.mouse_mode && controlsGuide.mouse_mode.kind) {
+        chips.appendChild(mk('span', 'ref-chip', 'mouse: ' + controlsGuide.mouse_mode.kind));
+      }
+      if (Array.isArray(controlsGuide.skip_keys) && controlsGuide.skip_keys.length) {
+        chips.appendChild(mk('span', 'ref-chip', 'skip: ' + controlsGuide.skip_keys.join(', ')));
+      }
+      if (controlsGuide.escape_quits) {
+        chips.appendChild(mk('span', 'ref-chip warn', '⚠ Escape quits'));
+      }
+      if (chips.childNodes.length) refBody.appendChild(chips);
+
+      if (ctrls.length) {
+        const ul = mk('ul', 'ref-list');
+        for (const c of ctrls) {
+          const li = mk('li', 'ref-item');
+          li.append(mk('div', 'ref-key', c.input || ''), mk('div', 'ref-act', c.action || ''));
+          if (c.notes) li.appendChild(mk('div', 'ref-note', c.notes));
+          ul.appendChild(li);
+        }
+        refBody.appendChild(ul);
+      } else {
+        refBody.appendChild(mk('div', 'ref-note', 'No controls documented for this title.'));
+      }
+
+      if (hazards.length) {
+        const hazBox = mk('div', 'warnings');
+        hazBox.appendChild(mk('div', 'ref-hazard-hdr', 'Hazards (' + hazards.length + ')'));
+        for (const h of hazards) hazBox.appendChild(mk('div', 'warn-item', '⚠ ' + h));
+        refBody.appendChild(hazBox);
+      }
+      return;
+    }
+
+    if (!goalsGuide) {
+      refBody.textContent = 'Goals guide unavailable.';
+      return;
+    }
+    if (goalsGuide.summary) refBody.appendChild(mk('div', 'ref-note', goalsGuide.summary));
+    if (goals.length) {
+      const ul = mk('ul', 'ref-list');
+      for (const g of goals) {
+        const li = mk('li', 'ref-item');
+        const hdr = mk('div', 'ref-item-hdr');
+        const ms = g.milestone || '';
+        const badgeCls = 'ref-badge' + ((ms === 'complete' || ms === 'credits') ? ' ms-done' : '');
+        hdr.append(mk('span', 'ref-act', g.name || g.id || ''), mk('span', badgeCls, ms || 'goal'));
+        li.appendChild(hdr);
+        if (g.description) li.appendChild(mk('div', 'ref-note', g.description));
+        ul.appendChild(li);
+      }
+      refBody.appendChild(ul);
+    } else {
+      refBody.appendChild(mk('div', 'ref-note', 'No goals documented for this title.'));
+    }
+    if (Array.isArray(goalsGuide.save_files) && goalsGuide.save_files.length) {
+      refBody.appendChild(mk('div', 'ref-saves', 'Saves: ' + goalsGuide.save_files.join(', ')));
+    }
+  }
+
+  async function loadReferenceData() {
+    if (refLoading) return;
+    refLoading = true;
+    try {
+      const [cRes, gRes] = await Promise.all([
+        fetch('/api/controls', { cache: 'no-store' }),
+        fetch('/api/goals', { cache: 'no-store' })
+      ]);
+      if (cRes.ok) controlsGuide = await cRes.json().catch(() => null);
+      if (gRes.ok) goalsGuide = await gRes.json().catch(() => null);
+      refLoaded = Boolean(controlsGuide && goalsGuide);
+      renderReferencePanel();
+    } catch (_) {
+      refBody.textContent = 'Failed to load Controls & Goals.';
+    } finally {
+      refLoading = false;
+    }
+  }
+
+  document.querySelectorAll('.ref-tab').forEach(btn => {
+    btn.onclick = () => {
+      refTab = btn.dataset.tab;
+      document.querySelectorAll('.ref-tab').forEach(b => b.classList.toggle('active', b === btn));
+      renderReferencePanel();
+    };
+  });
+  refDrawer.addEventListener('toggle', () => {
+    if (refDrawer.open && !refLoaded) loadReferenceData();
+  });
+
   // Boot streams
   fitViewport();
   loadMeta();
+  loadReferenceData();
   startWebSocket();
   startSse();
 })();

@@ -412,11 +412,18 @@ struct SseFingerprint {
     held_keys: Vec<u32>,
     pending_actions: usize,
     unchanged_streak: u64,
+    uniform: bool,
+    active_driving: bool,
     agent_state: AgentState,
 }
 
 impl SseFingerprint {
-    fn from_snapshot(status: &ControlStatus, agent_state: &AgentState) -> Self {
+    fn from_snapshot(
+        status: &ControlStatus,
+        agent_state: &AgentState,
+        uniform: bool,
+        active_driving: bool,
+    ) -> Self {
         Self {
             flip: status.flip,
             paused: status.paused,
@@ -430,6 +437,8 @@ impl SseFingerprint {
             held_keys: status.held_keys.clone(),
             pending_actions: status.pending_actions,
             unchanged_streak: status.diff.unchanged_streak,
+            uniform,
+            active_driving,
             agent_state: agent_state.clone(),
         }
     }
@@ -441,26 +450,36 @@ impl SseFingerprint {
             || self.owner != prev.owner
             || self.pace_bits != prev.pace_bits
             || self.step_uncapped != prev.step_uncapped
+            || self.uniform != prev.uniform
+            || self.active_driving != prev.active_driving
             || self.agent_state != prev.agent_state
     }
 }
 
-/// Format one SSE `data:` JSON payload combining live status, `#296` telemetry,
-/// `AgentState`, and stuck/uniform critic warnings.
-#[must_use]
-pub fn format_sse_event_json(ctx: &HttpContext) -> (String, ControlStatus, AgentState) {
-    let status = ctx.bus.status();
-    let agent = ctx.bus.agent_state();
-    let report = ctx.bus.telemetry_report(None);
-    let uniform = ctx.bus.latest_frame().is_some_and(|f| f.uniform);
+fn format_sse_event_with_fp(
+    ctx: &HttpContext,
+) -> (String, ControlStatus, AgentState, SseFingerprint) {
+    let (status, agent, report, uniform, active_driving) = {
+        let state = ctx.bus.lock();
+        let status = state.status();
+        let agent = state.agent_state.clone();
+        let report = state.telemetry.report(None, state.audio_underruns);
+        let uniform = state.latest_frame.as_ref().is_some_and(|f| f.uniform);
+        let active_driving = state.is_agent_driving();
+        (status, agent, report, uniform, active_driving)
+    };
+    let fp = SseFingerprint::from_snapshot(&status, &agent, uniform, active_driving);
 
     let mut warnings: Vec<String> = Vec::new();
     if uniform {
         warnings.push("uniform_frame: every pixel has the same color".to_owned());
     }
-    if let Some(w) =
-        stuck_loop_warning(status.diff.unchanged_streak, status.paused, status.finished)
-    {
+    if let Some(w) = stuck_loop_warning(
+        status.diff.unchanged_streak,
+        status.paused,
+        status.finished,
+        active_driving,
+    ) {
         warnings.push(w);
     }
 
@@ -479,6 +498,14 @@ pub fn format_sse_event_json(ctx: &HttpContext) -> (String, ControlStatus, Agent
         write_json_str(&mut out, w);
     }
     out.push_str("]}");
+    (out, status, agent, fp)
+}
+
+/// Format one SSE `data:` JSON payload combining live status, `#296` telemetry,
+/// `AgentState`, and stuck/uniform critic warnings.
+#[must_use]
+pub fn format_sse_event_json(ctx: &HttpContext) -> (String, ControlStatus, AgentState) {
+    let (out, status, agent, _) = format_sse_event_with_fp(ctx);
     (out, status, agent)
 }
 
@@ -504,9 +531,18 @@ fn serve_sse_events(ctx: &HttpContext, stream: &mut dyn StreamIo) -> io::Result<
     let mut last_heartbeat = Instant::now();
 
     loop {
-        let status = ctx.bus.status();
-        let agent = ctx.bus.agent_state();
-        let fp = SseFingerprint::from_snapshot(&status, &agent);
+        let (fp, mut finished) = {
+            let state = ctx.bus.lock();
+            let status = state.status();
+            let uniform = state.latest_frame.as_ref().is_some_and(|f| f.uniform);
+            let fp = SseFingerprint::from_snapshot(
+                &status,
+                &state.agent_state,
+                uniform,
+                state.is_agent_driving(),
+            );
+            (fp, status.finished)
+        };
         let now = Instant::now();
 
         let should_push = match &prev_fp {
@@ -517,10 +553,11 @@ fn serve_sse_events(ctx: &HttpContext, stream: &mut dyn StreamIo) -> io::Result<
         };
 
         if should_push {
-            let (payload, _, _) = format_sse_event_json(ctx);
+            let (payload, sent_status, _, sent_fp) = format_sse_event_with_fp(ctx);
             write!(stream, "event: state\ndata: {payload}\n\n")?;
             stream.flush()?;
-            prev_fp = Some(fp);
+            prev_fp = Some(sent_fp);
+            finished = sent_status.finished;
             last_send = Instant::now();
             last_heartbeat = last_send;
         } else if now.duration_since(last_heartbeat) >= KEEPALIVE_INTERVAL {
@@ -529,7 +566,7 @@ fn serve_sse_events(ctx: &HttpContext, stream: &mut dyn StreamIo) -> io::Result<
             last_heartbeat = Instant::now();
         }
 
-        if status.finished {
+        if finished {
             break;
         }
 
@@ -1033,8 +1070,19 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // 180+ flips in active play: warning emitted.
+        // 180+ flips in active play while agent is driving: warning emitted.
         set_streak(STUCK_LOOP_THRESHOLD, false, false);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: crate::control::timeline::Action::KeyHold {
+                    key: "Space".to_owned(),
+                    hold_flips: 1,
+                    hold_ms: None,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
         let (json, _, _) = format_sse_event_json(&ctx);
         let parsed = parse_json(&json).unwrap();
         let warnings = parsed.as_object().unwrap()["warnings"].as_array().unwrap();
@@ -1276,5 +1324,164 @@ mod tests {
             drop(ws_reader);
             server.stop();
         }
+    }
+
+    #[test]
+    fn sse_event_json_suppresses_stuck_loop_on_static_menu_idle_and_fires_when_agent_stuck() {
+        use crate::control::bus::FrameDiff;
+        use crate::control::observe::STUCK_LOOP_THRESHOLD;
+        use crate::control::timeline::Action;
+        use crate::host::Button;
+
+        let bus = ControlBus::new(ControlConfig {
+            mode: ExecMode::Live,
+            owner: InputOwner::Agent,
+            ..ControlConfig::default()
+        });
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+
+        let set_frame = |flip: u64, streak: u64| {
+            bus.lock().latest_frame = Some(FrameSnapshot {
+                flip,
+                width: 4,
+                height: 4,
+                bgra: Arc::new(vec![0u8; 64]),
+                frame_hash: "0123456789abcdef".to_owned(),
+                diff: FrameDiff {
+                    diff_pixels: 0,
+                    total_pixels: 16,
+                    diff_pct: 0.0,
+                    diff_bbox: None,
+                    unchanged_streak: streak,
+                },
+                uniform: false,
+                pointer_pos: (320, 240),
+                pointer_shown: true,
+            });
+        };
+        let warnings = || -> Vec<String> {
+            let (json, _, _) = format_sse_event_json(&ctx);
+            parse_json(&json).unwrap().as_object().unwrap()["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let click = Action::Click {
+            x: Some(100),
+            y: Some(100),
+            button: Button::Left,
+            hold_flips: 1,
+            hold_ms: None,
+            settle_flips: 1,
+        };
+
+        // 1. Static menu idle in live 1.0x (empty queue, no agent actions): suppressed even at 300 flips.
+        set_frame(300, 300);
+        assert!(warnings().is_empty(), "idle static menu must not warn");
+
+        // 2. Human Take Over (owner=shared, source="human") queued on static screen: suppressed!
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Shared)).ok);
+        assert!(
+            bus.dispatch_forced_with_source(
+                Command::Act {
+                    action: click.clone(),
+                    auto_step: false,
+                },
+                false,
+                Some("human"),
+            )
+            .ok
+        );
+        assert!(
+            warnings().is_empty(),
+            "Human Take Over queued action on static menu must not flash stuck_loop"
+        );
+        assert!(bus.dispatch(Command::ClearQueue).ok);
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Agent)).ok);
+
+        // 3. Agent acted BEFORE frame changed to static menu (action at flip 50, frame static since flip 55):
+        //    at flip 255 (streak 200), still idle -> suppressed.
+        set_frame(50, 0);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: click.clone(),
+                auto_step: false,
+            })
+            .ok
+        );
+        bus.lock().timeline.clear();
+        set_frame(255, 200);
+        assert!(
+            warnings().is_empty(),
+            "post-transition idle menu must not emit stuck_loop"
+        );
+
+        // 4. Agent acts right on transition flip K=55 (act_flip == streak_start) and stays stuck 180 flips:
+        //    must fire stuck_loop (no off-by-one miss)!
+        set_frame(55, 0);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: click.clone(),
+                auto_step: false,
+            })
+            .ok
+        );
+        bus.lock().timeline.clear();
+        set_frame(55 + STUCK_LOOP_THRESHOLD, STUCK_LOOP_THRESHOLD);
+        let w = warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("stuck_loop:"));
+
+        // 5. ClearQueue clears driving state and suppresses stuck_loop immediately.
+        assert!(bus.dispatch(Command::ClearQueue).ok);
+        assert!(warnings().is_empty());
+
+        // 6. Agent acts ON the unchanged static frame (flip 200, streak 145 -> flip 255, streak 200),
+        //    then stops past STUCK_LOOP_THRESHOLD flips (flip 200 + 181 = 381) -> clears automatically.
+        set_frame(200, 145);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: click.clone(),
+                auto_step: false,
+            })
+            .ok
+        );
+        bus.lock().timeline.clear();
+        set_frame(255, 200);
+        assert_eq!(warnings().len(), 1);
+        set_frame(200 + STUCK_LOOP_THRESHOLD + 1, 326);
+        assert!(warnings().is_empty());
+
+        // 7. While owner == Human, stuck_loop is suppressed even with queued actions.
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Human)).ok);
+        set_frame(400, 345);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: click,
+                auto_step: false,
+            })
+            .ok
+        );
+        assert!(warnings().is_empty());
+    }
+
+    #[test]
+    fn watch_html_includes_collapsible_controls_goals_panel_human_source_and_preserves_viewport() {
+        // Collapsible Controls & Goals reference drawer backed by /api/controls & /api/goals.
+        assert!(WATCH_HTML.contains("id=\"refDrawer\""));
+        assert!(WATCH_HTML.contains("Controls &amp; Goals"));
+        assert!(WATCH_HTML.contains("/api/controls"));
+        assert!(WATCH_HTML.contains("/api/goals"));
+
+        // Human Take Over action feed styling & source: 'human' tagging.
+        assert!(WATCH_HTML.contains(".src-human"));
+        assert!(WATCH_HTML.contains("source: 'human'"));
+
+        // Preserves #327 viewport sizing and ResizeObserver intact.
+        assert!(WATCH_HTML.contains("box-sizing:content-box"));
+        assert!(WATCH_HTML.contains("function fitViewport()"));
+        assert!(WATCH_HTML.contains("ResizeObserver"));
     }
 }

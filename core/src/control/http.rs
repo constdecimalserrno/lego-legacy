@@ -864,9 +864,6 @@ fn handle_frame_png(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
 }
 
 fn handle_frame_json(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
-    let Some(snap) = ctx.bus.latest_frame() else {
-        return HttpResponse::error_json(404, "no frame presented yet");
-    };
     let (cols, rows) = match req.query.get("grid") {
         None => (16, 12),
         Some(spec) => match parse_grid_dims(spec) {
@@ -874,15 +871,27 @@ fn handle_frame_json(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             Err(e) => return HttpResponse::error_json(400, &e),
         },
     };
-    let st = ctx.bus.status();
+    let (snap, paused, finished, active_driving) = {
+        let state = ctx.bus.lock();
+        let Some(snap) = state.latest_frame.clone() else {
+            return HttpResponse::error_json(404, "no frame presented yet");
+        };
+        (
+            snap,
+            state.is_paused,
+            state.finished,
+            state.is_agent_driving(),
+        )
+    };
     let json = format_frame_json(
         &snap,
         cols,
         rows,
         snap.pointer_pos,
         snap.pointer_shown,
-        st.paused,
-        st.finished,
+        paused,
+        finished,
+        active_driving,
     );
     HttpResponse::json(200, json)
 }
@@ -1036,6 +1045,18 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         .get("force")
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
+    let source = match obj.get("source") {
+        None | Some(JsonValue::Null) => None,
+        Some(JsonValue::Str(s)) if s == "human" => Some("human"),
+        Some(JsonValue::Str(s)) if s == "agent" => Some("agent"),
+        Some(JsonValue::Str(other)) => {
+            return HttpResponse::error_json(
+                400,
+                &format!("unknown source `{other}` (expected agent|human)"),
+            );
+        }
+        Some(_) => return HttpResponse::error_json(400, "`source` must be a string"),
+    };
     let auto_step = obj
         .get("auto_step")
         .and_then(JsonValue::as_bool)
@@ -1114,9 +1135,9 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
 
     let resp = if sync {
         ctx.bus
-            .dispatch_sync_forced(cmd, force, Some(DEFAULT_SYNC_TIMEOUT))
+            .dispatch_sync_forced_with_source(cmd, force, source, Some(DEFAULT_SYNC_TIMEOUT))
     } else {
-        ctx.bus.dispatch_forced(cmd, force)
+        ctx.bus.dispatch_forced_with_source(cmd, force, source)
     };
 
     let obs_json = if resp.ok {
@@ -2370,5 +2391,164 @@ mod tests {
             &ctx,
         );
         assert_eq!(pipe_forced.status, 200);
+    }
+
+    #[test]
+    fn http_act_source_labeling_and_frame_json_idle_stuck_loop_suppression() {
+        use crate::control::bus::{FrameDiff, FrameSnapshot};
+        use crate::control::observe::STUCK_LOOP_THRESHOLD;
+
+        let bus = ControlBus::new(ControlConfig {
+            mode: ExecMode::Live,
+            owner: InputOwner::Agent,
+            ..ControlConfig::default()
+        });
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+
+        // 1. Static menu idle (unchanged_streak >= 180, no actions) -> /api/frame.json emits NO stuck_loop.
+        {
+            let mut st = bus.lock();
+            st.latest_frame = Some(FrameSnapshot {
+                flip: STUCK_LOOP_THRESHOLD + 40,
+                width: 4,
+                height: 4,
+                bgra: Arc::new(vec![0u8; 64]),
+                frame_hash: "0123456789abcdef".to_owned(),
+                diff: FrameDiff {
+                    diff_pixels: 0,
+                    total_pixels: 16,
+                    diff_pct: 0.0,
+                    diff_bbox: None,
+                    unchanged_streak: STUCK_LOOP_THRESHOLD + 40,
+                },
+                uniform: false,
+                pointer_pos: (320, 240),
+                pointer_shown: true,
+            });
+        }
+        let idle_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/frame.json".to_owned(),
+                query: BTreeMap::from([("grid".to_owned(), "4x3".to_owned())]),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(idle_resp.status, 200);
+        let idle_json = parse_json(std::str::from_utf8(&idle_resp.body).unwrap()).unwrap();
+        assert!(
+            idle_json.as_object().unwrap()["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "static menu idle must not trigger stuck_loop: {}",
+            std::str::from_utf8(&idle_resp.body).unwrap()
+        );
+
+        // 2. Shared mode Take Over POST /api/act with explicit source="human" records "human"
+        //    and does NOT flash stuck_loop in /api/frame.json even while queued on timeline!
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Shared)).ok);
+        let human_act = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"click","x":508,"y":377,"hold_flips":2,"source":"human","wait":false,"auto_step":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(human_act.status, 200);
+        let entry = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(entry.source, "human");
+        assert_eq!(entry.summary, "click Left (508, 377) hold=2");
+
+        let takeover_frame = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/frame.json".to_owned(),
+                query: BTreeMap::from([("grid".to_owned(), "4x3".to_owned())]),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(takeover_frame.status, 200);
+        let takeover_json = parse_json(std::str::from_utf8(&takeover_frame.body).unwrap()).unwrap();
+        assert!(
+            takeover_json.as_object().unwrap()["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "Human Take Over queued action must not flash stuck_loop: {}",
+            std::str::from_utf8(&takeover_frame.body).unwrap()
+        );
+
+        // 3. Invalid source is rejected with 400.
+        let bad_src = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"click","source":"bot","wait":false,"auto_step":false}"#
+                    .to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(bad_src.status, 400);
+
+        // 4. Owner=human without explicit source also records "human".
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Human)).ok);
+        let owner_human_act = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"click_poll","x":320,"y":240,"hold_flips":2,"hold_ms":150,"wait":false,"auto_step":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(owner_human_act.status, 200);
+        let entry = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(entry.source, "human");
+        assert_eq!(entry.summary, "click_poll Left (320, 240) hold=2f/150ms");
+
+        // 5. Agent actively driving on unchanged frame triggers stuck_loop in /api/frame.json.
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Agent)).ok);
+        let agent_act = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"click","x":100,"y":100,"hold_flips":2,"wait":false,"auto_step":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(agent_act.status, 200);
+        let entry = bus.agent_state().action_feed.back().cloned().unwrap();
+        assert_eq!(entry.source, "agent");
+
+        let stuck_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/frame.json".to_owned(),
+                query: BTreeMap::from([("grid".to_owned(), "4x3".to_owned())]),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(stuck_resp.status, 200);
+        let stuck_json = parse_json(std::str::from_utf8(&stuck_resp.body).unwrap()).unwrap();
+        let warnings = stuck_json.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].as_str().unwrap().starts_with("stuck_loop:"));
     }
 }
