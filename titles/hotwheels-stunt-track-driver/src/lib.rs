@@ -100,7 +100,10 @@ pub const GUIDE: TitleGuide = TitleGuide {
     resolution: (640, 480),
     bpp: 8,
     refresh_hz: 60,
-    mouse_mode: MouseMode::AbsoluteKept,
+    mouse_mode: MouseMode::SoftwareRelative {
+        virtual_span: (640, 480),
+        start_pos: (320, 240),
+    },
     escape_quits: true,
     skip_keys: &["Space"],
     cadence: AgentCadence::MicroStep { flips_per_step: 8 },
@@ -143,7 +146,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Right click (270, 100)",
             action: "Unlock Secret Track WIRE",
-            notes: "Right-click (`--hold-flips 5`) the invisible Mattel \"TT\" hotspot at `(270, 100)` on Track Select after clearing Championship Tracks 1-6, then click Green GO. Visually verify cursor alignment if returning from a race (#329).",
+            notes: "Right-click (`--hold-flips 5`) the invisible Mattel \"TT\" hotspot at `(270, 100)` on Track Select after clearing Championship Tracks 1-6, then click Green GO.",
         },
         ControlHint {
             input: "P / Pause",
@@ -169,7 +172,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
     hazards: &[
         "NEVER press `Escape` unless intending immediate exit: this title quits unconditionally on `Escape` (guarded by `escape_quits: true`; requires `force: true`). Use `P` or `Pause` to pause a race.",
         "Menu clicks need `move` + settle and `--hold-flips 5` (or `5..6`); 1-flip clicks are frequently missed by DirectInput menu polling.",
-        "Post-race `SetCursorPos(320, 240)` cursor offset (#329): on race finish `STUNT.EXE` re-centers the Windows cursor while its internal DirectInput hand cursor integrates relative deltas; screenshot and steer with `delta` or offset-adjusted moves after any race.",
+        "Post-race `SetCursorPos(320, 240)` transitions (#329): `STUNT.EXE` re-centers the Windows cursor on race entry/exit while its software cursor integrates buffered DirectInput relative deltas; `MouseMode::SoftwareRelative` preserves visual cursor alignment automatically across races.",
         "Hold `Up` only on the green light for Rocket Start; revving on red/yellow loses launch speed.",
         "Release `LeftShift` / `LeftControl` early enough in mid-air to land wheels down; landing inverted causes a crash.",
     ],
@@ -229,6 +232,37 @@ mod tests {
         const { assert!(GUIDE.escape_quits) };
         assert_eq!(GUIDE.bpp, 8);
         assert_eq!(GUIDE.refresh_hz, 60);
+        assert_eq!(
+            GUIDE.mouse_mode,
+            MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (320, 240),
+            }
+        );
+
+        let meta_json = parse_json(&format_meta_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE))
+            .expect("valid meta JSON");
+        let meta_mm = meta_json.as_object().unwrap()["guide"].as_object().unwrap()["mouse_mode"]
+            .as_object()
+            .unwrap();
+        assert_eq!(meta_mm["kind"].as_str(), Some("software_relative"));
+        assert_eq!(
+            meta_mm["virtual_span"].as_array().unwrap()[0].as_u64(),
+            Some(640)
+        );
+        assert_eq!(
+            meta_mm["virtual_span"].as_array().unwrap()[1].as_u64(),
+            Some(480)
+        );
+        assert_eq!(
+            meta_mm["start_pos"].as_array().unwrap()[0].as_i64(),
+            Some(320)
+        );
+        assert_eq!(
+            meta_mm["start_pos"].as_array().unwrap()[1].as_i64(),
+            Some(240)
+        );
+        assert_eq!(meta_mm["recenter_every_flip"].as_bool(), Some(false));
 
         for body in [
             format_meta_json(&HOT_WHEELS_STUNT_TRACK_DRIVER, &GUIDE),
@@ -269,7 +303,7 @@ mod tests {
             hazards
                 .iter()
                 .any(|h| h.as_str().unwrap_or("").contains("#329")),
-            "missing #329 post-race cursor offset hazard"
+            "missing #329 post-race SetCursorPos transition note"
         );
         assert!(
             hazards

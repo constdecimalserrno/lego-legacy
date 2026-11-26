@@ -5,7 +5,7 @@ Agent playbook for driving `STUNT.EXE` via `lego-ctrl` or `lego-mcp`. For generi
 ## Runtime Facts
 
 - **Display:** `640×480`, 8bpp, 60 Hz (`FlipCost::Refresh(60)`), declared Pentium 166 MHz.
-- **Mouse regime:** `AbsoluteKept` (`1.0×` scale) with a post-race `SetCursorPos(320, 240)` offset caveat (`#329`, see Hazards).
+- **Mouse regime:** `SoftwareRelative { virtual_span: (640, 480), start_pos: (320, 240) }` (`1.0×` scale, `recenter_every_flip: false`): `STUNT.EXE` hides the OS cursor and steers its red-arrow software cursor via buffered DirectInput relative deltas; `ControlHost` keeps visual cursor tracking aligned across post-race `SetCursorPos(320, 240)` transitions (`#329`).
 - **Cadence:** `MicroStep { flips_per_step: 8 }` during races for tight steering and stunt timing; use `wait-change` / `wait-settled` in menus.
 - **Exit guard:** `escape_quits: true` — `Escape` immediately terminates `STUNT.EXE` (`exits 1`) and is blocked by the control plane unless `force: true`.
 
@@ -19,7 +19,7 @@ Work through goals in order; each ends on a verifiable state or save write:
 2. **Custom Garage Track Gold Medal (`custom-garage-gold`, Playable):** Open the Custom Garage Stunt Track Builder, place stunt track pieces onto the workbench slots, click the Green GO arrow, and earn a Gold Medal on the custom track.
 3. **Aerial Stunts (`aerial-stunts`, Playable):** Launch off ramps, execute mid-air barrel rolls (`LeftShift`) and flips (`LeftControl`), and release in time to land upright with zero crashes.
 4. **Championship Tracks 1–6 (`championship-tracks-1-6`, Complete):** Complete all 6 Championship tracks in sequence — 1 Living Room (`HOUS`), 2 Bedroom (`TOYS`), 3 Greenhouse (`ATRI`), 4 Attic (`ATIC`), 5 Sandbox (`SAND`), 6 Basement (`BASE`). Done when `saves\onoff.dat` (28 B) holds six `01 00 00 00` unlock dwords plus a trailing zero dword (written after Track 3 and Track 6).
-5. **Secret Track `WIRE` Gold Medal (`secret-track-wire-gold`, Complete):** With Tracks 1–6 unlocked, open Track Select, right-click the invisible Mattel `"TT"` hotspot at `(270, 100)` (verify drawn cursor position if returning from a race per `#329`), click Green GO to launch Secret Track 7 (`WIRE.JAM`, neon-green wireframe grid), and finish with a Gold Medal (`<= 1:10`).
+5. **Secret Track `WIRE` Gold Medal (`secret-track-wire-gold`, Complete):** With Tracks 1–6 unlocked, open Track Select, right-click the invisible Mattel `"TT"` hotspot at `(270, 100)`, click Green GO to launch Secret Track 7 (`WIRE.JAM`, neon-green wireframe grid), and finish with a Gold Medal (`<= 1:10`).
 
 ## Verified Controls (`STUNT.EXE` DirectInput)
 
@@ -67,7 +67,7 @@ Landing inverted or sideways triggers a crash and costs race time.
 
 - **`Escape` immediately quits:** Always pause with `P`/`Pause` and navigate with menu buttons. `ControlHost` blocks `Escape` unless `force: true`.
 - **1-flip clicks drop in menus:** Always `move` onto the button first (let the cursor settle 1–2 flips) and click with `--hold-flips 5` (or `5..6`). Every reliable menu click in `routes/first-race.route` and `routes/secret-track.route` uses 5–6 flip holds.
-- **Post-race `SetCursorPos(320, 240)` cursor offset (`#329`):** When a race finishes, `STUNT.EXE` calls `SetCursorPos(320, 240)`, resetting the host pointer origin while its internal DirectInput hand cursor (`0x5fc410`/`0x5fc414`) integrates relative deltas. After returning from any race, take a screenshot (`screenshot --grid --cursor`), compare the drawn in-game hand against your target, and steer with `delta` (or offset-adjusted `move`) instead of assuming raw absolute coordinates still align.
+- **Post-race `SetCursorPos(320, 240)` transitions (`#329`):** On race entry/exit, `STUNT.EXE` calls `SetCursorPos(320, 240)` while its internal software cursor continues integrating buffered DirectInput relative deltas. Because `GUIDE.mouse_mode` is `SoftwareRelative`, `ControlHost`, `--cursor`, and `/watch` Take Over preserve visual cursor alignment automatically across races (standard `move`/`click` coordinates stay aligned pre- and post-race).
 - **Early throttle breaks Rocket Start:** Wait until the starting light switches green before holding `Up`.
 - **Over-rotating aerial stunts crashes:** Start `LeftShift`/`LeftControl` immediately off the lip of a ramp and release before descent so the wheels level out for touchdown.
 
