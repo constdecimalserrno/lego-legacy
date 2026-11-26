@@ -304,6 +304,14 @@ pub enum MouseMode {
     /// `WM_MOUSEMOVE` coordinates; `requires_poll_release` flags titles whose
     /// UI loops wait for button or key release without flipping (`click_poll`).
     SoftwareAbsolute { requires_poll_release: bool },
+    /// Title hides the system cursor and steers its own software cursor by
+    /// relative deltas (e.g. buffered DirectInput `GetDeviceData`) without
+    /// recentering every flip; occasional `SetCursorPos` transitions update
+    /// the Win32 anchor without moving the rendered software cursor (#327).
+    SoftwareRelative {
+        virtual_span: (u32, u32),
+        start_pos: (i32, i32),
+    },
     /// Title re-centers the pointer each flip and steers a software cursor by
     /// relative deltas mapped onto `virtual_span`; `mouse_delta` scales by
     /// `(virtual_span.0 / resolution.0, virtual_span.1 / resolution.1)`.
@@ -312,6 +320,25 @@ pub enum MouseMode {
         recenter: (i32, i32),
         start_corner: (i32, i32),
     },
+}
+
+impl MouseMode {
+    /// Whether the title moves its visual cursor by relative deltas rather than
+    /// absolute Win32 coordinates (#327).
+    #[must_use]
+    pub const fn is_relative(self) -> bool {
+        matches!(
+            self,
+            Self::SoftwareRelative { .. } | Self::RelativeSteered { .. }
+        )
+    }
+
+    /// Whether the title calls `SetCursorPos` back to a fixed anchor on every
+    /// flip, requiring owed-delta chunking across recenter flips (#327).
+    #[must_use]
+    pub const fn recenters_every_flip(self) -> bool {
+        matches!(self, Self::RelativeSteered { .. })
+    }
 }
 
 /// Recommended observation/action cadence for an agent driving a title (#311).
@@ -443,12 +470,13 @@ impl TitleGuide {
     }
 
     /// Relative pointer scaling hint `(scale_x, scale_y)` derived from
-    /// `virtual_span / resolution` when [`Self::mouse_mode`] is
-    /// [`MouseMode::RelativeSteered`].
+    /// `virtual_span / resolution` when [`Self::mouse_mode`] is relative
+    /// ([`MouseMode::SoftwareRelative`] or [`MouseMode::RelativeSteered`]).
     #[must_use]
     pub const fn relative_steered_scale(&self) -> Option<(f64, f64)> {
         match self.mouse_mode {
-            MouseMode::RelativeSteered { virtual_span, .. }
+            MouseMode::SoftwareRelative { virtual_span, .. }
+            | MouseMode::RelativeSteered { virtual_span, .. }
                 if self.resolution.0 > 0
                     && self.resolution.1 > 0
                     && virtual_span.0 > 0
@@ -504,6 +532,26 @@ mod tests {
         let (sx, sy) = STEERED.relative_steered_scale().expect("steered scale");
         assert!((sx - 2.0).abs() < 1e-12);
         assert!((sy - (1280.0 / 480.0)).abs() < 1e-12);
+        assert!(STEERED.mouse_mode.is_relative());
+        assert!(STEERED.mouse_mode.recenters_every_flip());
+
+        const SOFT_REL: TitleGuide = TitleGuide {
+            display_name: "Software Relative Fixture",
+            resolution: (640, 480),
+            mouse_mode: MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (320, 240),
+            },
+            ..TitleGuide::EMPTY
+        };
+        assert!(SOFT_REL.mouse_mode.is_relative());
+        assert!(!SOFT_REL.mouse_mode.recenters_every_flip());
+        assert_eq!(SOFT_REL.relative_steered_scale(), Some((1.0, 1.0)));
+        assert!(!MouseMode::AbsoluteKept.is_relative());
+        assert!(!MouseMode::SoftwareAbsolute {
+            requires_poll_release: true
+        }
+        .is_relative());
     }
 
     #[test]

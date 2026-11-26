@@ -407,6 +407,9 @@ fn sync_after_live_restore(
 ) {
     machine.sync_host_after_restore(host);
 
+    let pointer_shown = machine.state.cursor_shown >= 0;
+    let pointer_pos = machine.state.pointer;
+    let hw_pointer = machine.state.last_move;
     if let Some(ref f) = restored_frame {
         let frame = Frame {
             width: f.width,
@@ -432,11 +435,11 @@ fn sync_after_live_restore(
             frame_hash,
             diff,
             uniform,
+            pointer_pos,
+            pointer_shown,
         });
     }
 
-    let pointer_shown = machine.state.cursor_shown >= 0;
-    let pointer_pos = machine.state.pointer;
     let route_remaining = machine.undelivered();
     let meta = FlipMeta {
         flip: machine.flips(),
@@ -451,20 +454,26 @@ fn sync_after_live_restore(
 
     let mut state = bus.lock();
     state.last_meta = Some(meta);
+    let restored_visual = restored_frame.as_ref().map(|f| f.pointer_pos);
     if let Some(f) = restored_frame {
         state.timeline.set_frame_size(f.width, f.height);
         state.latest_frame = Some(f);
     }
-    state.pointer_pos = pointer_pos;
-    state.pointer_shown = pointer_shown;
     state.held_keys = machine.state.keys_down.clone();
     state.recording_len = machine
         .recording
         .as_ref()
         .map_or(0, crate::route::Route::len);
     state.timeline.clear();
-    state.timeline.set_pointer(pointer_pos.0, pointer_pos.1);
     state.timeline.set_pointer_shown(pointer_shown);
+    if state.timeline.mouse_mode().is_relative() {
+        state.timeline.set_pointer(hw_pointer.0, hw_pointer.1);
+        if let Some((vx, vy)) = restored_visual {
+            state.timeline.set_visual_cursor(vx, vy);
+        }
+    } else {
+        state.timeline.set_pointer(pointer_pos.0, pointer_pos.1);
+    }
     state.active_wait = None;
     state.step_budget = 0;
     state.close_pending = false;

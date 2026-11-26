@@ -418,47 +418,53 @@ fn adler32(bytes: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::encode;
-
-    /// Decode our PNG's IDAT stream and unfilter RGB24 scanlines back to BGRA32.
-    fn decode_png_to_rgb(png: &[u8]) -> (u32, u32, Vec<u8>) {
-        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-        assert_eq!(&png[12..16], b"IHDR");
-        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
-        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-        assert_eq!(&png[24..29], &[8, 2, 0, 0, 0]);
-        let idat_len = u32::from_be_bytes([png[33], png[34], png[35], png[36]]) as usize;
-        assert_eq!(&png[37..41], b"IDAT");
-        let zlib = &png[41..41 + idat_len];
-        assert_eq!(&zlib[..2], &[0x78, 0x01]);
-        let raw = crate::inflate::inflate(&zlib[2..zlib.len() - 4]).expect("it inflates");
-        assert_eq!(
-            zlib[zlib.len() - 4..],
-            super::adler32(&raw).to_be_bytes(),
-            "valid Adler-32 checksum"
-        );
-        let row_bytes = (w as usize) * 3;
-        assert_eq!(raw.len(), (row_bytes + 1) * (h as usize));
-        let mut rgb = Vec::with_capacity(row_bytes * (h as usize));
-        for y in 0..h as usize {
-            let line = &raw[y * (row_bytes + 1)..(y + 1) * (row_bytes + 1)];
-            let filter = line[0];
-            let data = &line[1..];
-            match filter {
-                0 => rgb.extend_from_slice(data),
-                1 => {
-                    let row_start = rgb.len();
-                    for i in 0..row_bytes {
-                        let left = if i >= 3 { rgb[row_start + i - 3] } else { 0 };
-                        rgb.push(data[i].wrapping_add(left));
-                    }
-                }
-                other => panic!("unexpected PNG filter {other}"),
-            }
+pub(crate) fn decode_png_to_rgb(png: &[u8]) -> (u32, u32, Vec<u8>) {
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(&png[12..16], b"IHDR");
+    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!(&png[24..29], &[8, 2, 0, 0, 0]);
+    let mut pos = 8usize;
+    let mut zlib = Vec::new();
+    while pos + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[pos..pos + 4].try_into().unwrap()) as usize;
+        if &png[pos + 4..pos + 8] == b"IDAT" {
+            zlib.extend_from_slice(&png[pos + 8..pos + 8 + len]);
         }
-        (w, h, rgb)
+        pos += 12 + len;
     }
+    assert_eq!(&zlib[..2], &[0x78, 0x01]);
+    let raw = crate::inflate::inflate(&zlib[2..zlib.len() - 4]).expect("it inflates");
+    assert_eq!(
+        zlib[zlib.len() - 4..],
+        adler32(&raw).to_be_bytes(),
+        "valid Adler-32 checksum"
+    );
+    let row_bytes = (w as usize) * 3;
+    assert_eq!(raw.len(), (row_bytes + 1) * (h as usize));
+    let mut rgb = Vec::with_capacity(row_bytes * (h as usize));
+    for y in 0..h as usize {
+        let line = &raw[y * (row_bytes + 1)..(y + 1) * (row_bytes + 1)];
+        let filter = line[0];
+        let data = &line[1..];
+        match filter {
+            0 => rgb.extend_from_slice(data),
+            1 => {
+                let row_start = rgb.len();
+                for i in 0..row_bytes {
+                    let left = if i >= 3 { rgb[row_start + i - 3] } else { 0 };
+                    rgb.push(data[i].wrapping_add(left));
+                }
+            }
+            other => panic!("unexpected PNG filter {other}"),
+        }
+    }
+    (w, h, rgb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_png_to_rgb, encode};
 
     fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);

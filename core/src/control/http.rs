@@ -687,8 +687,13 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             }
             let _ = write!(
                 out,
-                ",\"cursor\":{},\"declared_ms\":{},\"pointer\":[{},{}],\"held_keys\":[",
-                st.cursor, st.declared_ms, st.pointer_pos.0, st.pointer_pos.1
+                ",\"cursor\":{},\"declared_ms\":{},\"pointer\":[{},{}],\"hw_pointer_pos\":[{},{}],\"held_keys\":[",
+                st.cursor,
+                st.declared_ms,
+                st.pointer_pos.0,
+                st.pointer_pos.1,
+                st.hw_pointer_pos.0,
+                st.hw_pointer_pos.1
             );
             for (i, k) in st.held_keys.iter().enumerate() {
                 if i > 0 {
@@ -848,7 +853,7 @@ fn handle_frame_png(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         crop,
     };
     let st = ctx.bus.status();
-    match render_frame_png(&snap, opts, st.pointer_pos) {
+    match render_frame_png(&snap, opts, snap.pointer_pos) {
         Ok(png) => HttpResponse::raw(200, "image/png", png)
             .with_header("X-Flip", snap.flip.to_string())
             .with_header("X-Cursor", st.cursor.to_string())
@@ -874,8 +879,8 @@ fn handle_frame_json(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         &snap,
         cols,
         rows,
-        st.pointer_pos,
-        st.pointer_shown,
+        snap.pointer_pos,
+        snap.pointer_shown,
         st.paused,
         st.finished,
     );
@@ -1127,7 +1132,7 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 obs.push_str(",\"diff\":");
                 write_diff(&mut obs, &snap.diff);
                 if include_png {
-                    match render_frame_png(&snap, opts, resp.status.pointer_pos) {
+                    match render_frame_png(&snap, opts, snap.pointer_pos) {
                         Ok(png) => {
                             obs.push_str(",\"png_base64\":");
                             write_json_str(&mut obs, &base64_encode(&png));

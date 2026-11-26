@@ -12,7 +12,7 @@ use super::http::{ExtraRoutes, HttpContext, HttpRequest, HttpResponse, StreamIo}
 use super::json::{write_agent_state, write_json_str, write_status, write_window_metrics};
 use super::observe::stuck_loop_warning;
 use super::ws::{
-    encode_binary_frame, encode_xor_rle, is_websocket_upgrade, read_client_frame,
+    encode_binary_frame_with_pointer, encode_xor_rle, is_websocket_upgrade, read_client_frame,
     write_handshake_response, write_ws_frame, WsClientFrame, FRAME_FLAG_PNG_KEYFRAME,
     FRAME_FLAG_XOR_RLE_DELTA, OPCODE_BINARY, OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG,
 };
@@ -162,11 +162,13 @@ pub fn encode_stream_frame(
             if let Ok(rle) = encode_xor_rle(&p.bgra[..expected], curr_slice) {
                 if rle.len() <= MAX_DELTA_BYTES {
                     return (
-                        encode_binary_frame(
+                        encode_binary_frame_with_pointer(
                             FRAME_FLAG_XOR_RLE_DELTA,
                             curr.flip,
                             curr.width,
                             curr.height,
+                            curr.pointer_pos,
+                            curr.pointer_shown,
                             &rle,
                         ),
                         false,
@@ -178,11 +180,13 @@ pub fn encode_stream_frame(
 
     let png = crate::png::encode(curr.width, curr.height, curr_slice);
     (
-        encode_binary_frame(
+        encode_binary_frame_with_pointer(
             FRAME_FLAG_PNG_KEYFRAME,
             curr.flip,
             curr.width,
             curr.height,
+            curr.pointer_pos,
+            curr.pointer_shown,
             &png,
         ),
         true,
@@ -196,7 +200,9 @@ fn is_new_snapshot(prev: Option<&FrameSnapshot>, curr: &FrameSnapshot) -> bool {
             !Arc::ptr_eq(&p.bgra, &curr.bgra)
                 && (p.width != curr.width
                     || p.height != curr.height
-                    || p.frame_hash != curr.frame_hash)
+                    || p.frame_hash != curr.frame_hash
+                    || p.pointer_pos != curr.pointer_pos
+                    || p.pointer_shown != curr.pointer_shown)
         }
     }
 }
@@ -865,6 +871,7 @@ mod tests {
     #[test]
     fn encode_stream_frame_selects_keyframe_on_first_resize_cut_and_interval() {
         use crate::control::bus::FrameDiff;
+        use crate::control::ws::{decode_binary_frame, FRAME_FLAG_HAS_POINTER};
         let mk_snap = |flip: u64, w: u32, h: u32, fill: u8, diff_pct: f64| FrameSnapshot {
             flip,
             width: w,
@@ -879,34 +886,51 @@ mod tests {
                 unchanged_streak: 0,
             },
             uniform: true,
+            pointer_pos: (10 + flip as i32, 20 + flip as i32),
+            pointer_shown: flip.is_multiple_of(2),
         };
 
         let f0 = mk_snap(0, 16, 12, 0x10, 100.0);
         let (bytes0, kf0) = encode_stream_frame(None, &f0, 0);
         assert!(kf0);
-        assert_eq!(bytes0[0], FRAME_FLAG_PNG_KEYFRAME);
+        let h0 = decode_binary_frame(&bytes0).expect("v2 keyframe header");
+        assert_eq!(h0.flags, FRAME_FLAG_PNG_KEYFRAME | FRAME_FLAG_HAS_POINTER);
+        assert_eq!(h0.kind, FRAME_FLAG_PNG_KEYFRAME);
+        assert_eq!(h0.pointer, Some(((10, 20), true)));
 
         let f1 = mk_snap(1, 16, 12, 0x12, 5.0);
         let (bytes1, kf1) = encode_stream_frame(Some(&f0), &f1, 0);
         assert!(!kf1);
-        assert_eq!(bytes1[0], FRAME_FLAG_XOR_RLE_DELTA);
+        let h1 = decode_binary_frame(&bytes1).expect("v2 delta header");
+        assert_eq!(h1.flags, FRAME_FLAG_XOR_RLE_DELTA | FRAME_FLAG_HAS_POINTER);
+        assert_eq!(h1.kind, FRAME_FLAG_XOR_RLE_DELTA);
+        assert_eq!(h1.pointer, Some(((11, 21), false)));
 
         // Resize forces keyframe.
         let f_resize = mk_snap(2, 32, 24, 0x12, 5.0);
         let (bytes_r, kf_r) = encode_stream_frame(Some(&f1), &f_resize, 1);
         assert!(kf_r);
-        assert_eq!(bytes_r[0], FRAME_FLAG_PNG_KEYFRAME);
+        assert_eq!(
+            decode_binary_frame(&bytes_r).unwrap().kind,
+            FRAME_FLAG_PNG_KEYFRAME
+        );
 
         // Scene cut (> KEYFRAME_DIFF_PCT) forces keyframe.
         let f_cut = mk_snap(3, 16, 12, 0x80, 60.0);
         let (bytes_c, kf_c) = encode_stream_frame(Some(&f1), &f_cut, 1);
         assert!(kf_c);
-        assert_eq!(bytes_c[0], FRAME_FLAG_PNG_KEYFRAME);
+        assert_eq!(
+            decode_binary_frame(&bytes_c).unwrap().kind,
+            FRAME_FLAG_PNG_KEYFRAME
+        );
 
         // Periodic interval forces keyframe.
         let (bytes_i, kf_i) = encode_stream_frame(Some(&f0), &f1, KEYFRAME_INTERVAL);
         assert!(kf_i);
-        assert_eq!(bytes_i[0], FRAME_FLAG_PNG_KEYFRAME);
+        assert_eq!(
+            decode_binary_frame(&bytes_i).unwrap().kind,
+            FRAME_FLAG_PNG_KEYFRAME
+        );
     }
 
     #[test]
@@ -977,6 +1001,8 @@ mod tests {
                     unchanged_streak: streak,
                 },
                 uniform: false,
+                pointer_pos: (320, 240),
+                pointer_shown: true,
             });
         };
 
@@ -1014,5 +1040,241 @@ mod tests {
         let warnings = parsed.as_object().unwrap()["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].as_str().unwrap().starts_with("stuck_loop:"));
+    }
+
+    #[test]
+    fn ws_stream_frame_locked_pointer_matches_rendered_centroid_for_relative_modes() {
+        use crate::control::host::{
+            find_green_cursor_centroid, png_crosshair_red_center, render_3x3_cursor_bgra,
+        };
+        use crate::control::observe::{render_frame_png, ObserveOptions};
+        use crate::control::timeline::Action;
+        use crate::control::ws::decode_binary_frame;
+        use crate::host::{FlipMeta, Frame, Host, Input};
+        use crate::title::{MouseMode, TitleGuide};
+
+        const W: u32 = 320;
+        const H: u32 = 240;
+
+        fn wire_png_to_bgra(png: &[u8]) -> Vec<u8> {
+            let (pw, ph, rgb) = crate::png::decode_png_to_rgb(png);
+            assert_eq!((pw, ph), (W, H));
+            let mut bgra = Vec::with_capacity((W * H * 4) as usize);
+            for px in rgb.as_chunks::<3>().0 {
+                bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            }
+            bgra
+        }
+
+        const SOFT_REL: TitleGuide = TitleGuide {
+            display_name: "WS SoftwareRelative",
+            resolution: (W, H),
+            mouse_mode: MouseMode::SoftwareRelative {
+                virtual_span: (W, H),
+                start_pos: (160, 120),
+            },
+            ..TitleGuide::EMPTY
+        };
+        const REL_STEER: TitleGuide = TitleGuide {
+            display_name: "WS RelativeSteered",
+            resolution: (W, H),
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (640, 640),
+                recenter: (160, 120),
+                start_corner: (0, 240),
+            },
+            ..TitleGuide::EMPTY
+        };
+
+        for (guide, recenter_every_flip, scale) in [
+            (&SOFT_REL, false, (1.0f64, 1.0f64)),
+            (&REL_STEER, true, (2.0f64, 640.0 / 240.0)),
+        ] {
+            let mut host = ControlHost::new(
+                Headless::new(),
+                ControlConfig {
+                    title: Title::STUB.key,
+                    mode: ExecMode::Live,
+                    owner: InputOwner::Agent,
+                    guide,
+                    ..ControlConfig::default()
+                },
+            );
+            let bus = host.bus();
+            let ctx = Arc::new(HttpContext::new(bus.clone(), &Title::STUB, None));
+            let mut server = HttpServer::start("127.0.0.1:0", ctx).expect("http start");
+            let addr = server.addr();
+
+            let mut hw = (160i32, 120i32);
+            let mut cur = match guide.mouse_mode {
+                MouseMode::RelativeSteered { start_corner, .. } => (
+                    f64::from(start_corner.0),
+                    f64::from((start_corner.1).min(H as i32 - 1)),
+                ),
+                MouseMode::SoftwareRelative { start_pos, .. } => {
+                    (f64::from(start_pos.0), f64::from(start_pos.1))
+                }
+                _ => (160.0, 120.0),
+            };
+            let present =
+                |host: &mut ControlHost<Headless>, flip: u64, cur: (f64, f64), hw: (i32, i32)| {
+                    let bgra =
+                        render_3x3_cursor_bgra(W, H, cur.0.round() as i32, cur.1.round() as i32);
+                    host.present(&Frame {
+                        width: W,
+                        height: H,
+                        pitch: W * 4,
+                        pixels: &bgra,
+                    });
+                    host.observe_flip(&FlipMeta {
+                        flip,
+                        clock_nanos: flip * 16_000_000,
+                        cursor: flip * 100,
+                        instructions_passed: 0,
+                        pointer_shown: false,
+                        pointer_pos: hw,
+                        route_active: false,
+                        route_remaining: 0,
+                    });
+                };
+
+            // Flip 0: initial keyframe.
+            present(&mut host, 0, cur, hw);
+
+            // Connect live WS client to /api/stream?fps=60.
+            let mut ws_sock = TcpStream::connect(addr).unwrap();
+            ws_sock
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let key = "dGhlIHNhbXBsZSBub25jZQ==";
+            write!(
+                ws_sock,
+                "GET /api/stream?fps=60 HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Key: {key}\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .unwrap();
+            let mut ws_reader = BufReader::new(ws_sock);
+            loop {
+                let mut line = String::new();
+                ws_reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+
+            let (op0, raw0) = read_server_ws_frame(&mut ws_reader);
+            assert_eq!(op0, OPCODE_BINARY);
+            let h0 = decode_binary_frame(&raw0).expect("v2 keyframe");
+            assert_eq!(h0.kind, FRAME_FLAG_PNG_KEYFRAME);
+            let (ws_ptr0, ws_shown0) = h0.pointer.expect("pointer extension");
+            assert!(!ws_shown0);
+            let snap0 = bus.latest_frame().unwrap();
+            assert_eq!(u64::from(h0.flip), snap0.flip);
+            assert_eq!(ws_ptr0, snap0.pointer_pos);
+            let mut prev_bgra = wire_png_to_bgra(h0.payload);
+            let c0 = find_green_cursor_centroid(&prev_bgra, W, H);
+            assert!(
+                (c0.0 - ws_ptr0.0).abs() <= 1 && (c0.1 - ws_ptr0.1).abs() <= 1,
+                "centroid {c0:?} vs ws_ptr0 {ws_ptr0:?}"
+            );
+
+            // Drive target move (240, 60) + transition SetCursorPos(160, 120) + move (70, 190).
+            let mut saw_delta = false;
+            let mut flip = 1u64;
+            for target in [(240, 60), (70, 190)] {
+                assert!(
+                    bus.dispatch(Command::Act {
+                        action: Action::Move {
+                            x: target.0,
+                            y: target.1,
+                            glide_flips: 1,
+                        },
+                        auto_step: false,
+                    })
+                    .ok
+                );
+                for _ in 0..4 {
+                    if recenter_every_flip {
+                        hw = (160, 120);
+                        host.put_pointer(160, 120);
+                    }
+                    for ev in host.poll_input(flip - 1) {
+                        if let Input::Move { x, y } = ev {
+                            let dx = x - hw.0;
+                            let dy = y - hw.1;
+                            hw = (x, y);
+                            cur.0 = (cur.0 + f64::from(dx) / scale.0).clamp(0.0, f64::from(W - 1));
+                            cur.1 = (cur.1 + f64::from(dy) / scale.1).clamp(0.0, f64::from(H - 1));
+                        }
+                    }
+                    if !recenter_every_flip && target == (240, 60) {
+                        // Simulate post-race SetCursorPos(160, 120) transition!
+                        hw = (160, 120);
+                        host.put_pointer(160, 120);
+                    }
+                    present(&mut host, flip, cur, hw);
+                    flip += 1;
+                    if bus.latest_frame().unwrap().bgra.as_slice() != prev_bgra.as_slice() {
+                        let (op, frame) = read_server_ws_frame(&mut ws_reader);
+                        assert_eq!(op, OPCODE_BINARY);
+                        let hdr = decode_binary_frame(&frame).expect("v2 delta");
+                        let (ws_ptr, ws_shown) = hdr.pointer.expect("pointer ext");
+                        assert!(!ws_shown);
+                        let reconstructed = if hdr.kind == FRAME_FLAG_XOR_RLE_DELTA {
+                            saw_delta = true;
+                            decode_xor_rle(&prev_bgra, hdr.payload).expect("decode xor")
+                        } else {
+                            wire_png_to_bgra(hdr.payload)
+                        };
+                        let centroid = find_green_cursor_centroid(&reconstructed, W, H);
+                        let snap = bus.latest_frame().unwrap();
+                        assert_eq!(u64::from(hdr.flip), snap.flip);
+                        let png = render_frame_png(
+                            &snap,
+                            ObserveOptions {
+                                cursor: true,
+                                ..ObserveOptions::default()
+                            },
+                            snap.pointer_pos,
+                        )
+                        .unwrap();
+                        let cross = png_crosshair_red_center(&png);
+                        assert!(
+                            (centroid.0 - ws_ptr.0).abs() <= 1
+                                && (centroid.1 - ws_ptr.1).abs() <= 1
+                        );
+                        assert_eq!(ws_ptr, snap.pointer_pos);
+                        assert_eq!(ws_ptr, bus.status().pointer_pos);
+                        assert_eq!(cross, ws_ptr);
+                        prev_bgra = reconstructed;
+                    }
+                    if bus.status().pending_actions == 0 {
+                        break;
+                    }
+                }
+                assert!(
+                    (bus.status().pointer_pos.0 - target.0).abs() <= 1
+                        && (bus.status().pointer_pos.1 - target.1).abs() <= 1,
+                    "guide={} target={target:?} got={:?}",
+                    guide.display_name,
+                    bus.status().pointer_pos
+                );
+            }
+            assert!(
+                saw_delta,
+                "expected at least one XOR+RLE delta frame for {}",
+                guide.display_name
+            );
+
+            let ws_inner = ws_reader.get_mut();
+            let _ = ws_inner.write_all(&[0x80 | OPCODE_CLOSE, 0x80, 1, 2, 3, 4]);
+            let _ = ws_inner.flush();
+            drop(ws_reader);
+            server.stop();
+        }
     }
 }

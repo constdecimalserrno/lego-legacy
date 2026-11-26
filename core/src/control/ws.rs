@@ -2,9 +2,10 @@
 //! video codec for `/api/stream` (#310).
 //!
 //! Strictly pure-`std` and integer-only (ADR-0001): implements RFC 3174 SHA-1
-//! (for `Sec-WebSocket-Accept`), RFC 6455 server/client framing, a 9-byte
-//! binary frame envelope (`[1B flags][4B LE flip][2B LE w][2B LE h][payload]`),
-//! and single-pass PackBits-RLE compression over BGRA XOR deltas.
+//! (for `Sec-WebSocket-Accept`), RFC 6455 server/client framing, a 9-byte v1
+//! / 14-byte v2 pointer-locked binary frame envelope (`[1B flags][4B LE flip]
+//! [2B LE w][2B LE h][optional 2B i16 ptr_x + 2B i16 ptr_y + 1B ptr_shown]
+//! [payload]`), and single-pass PackBits-RLE compression over BGRA XOR deltas.
 
 use super::http::HttpRequest;
 use super::json::base64_encode;
@@ -20,12 +21,31 @@ pub const OPCODE_CLOSE: u8 = 0x8;
 pub const OPCODE_PING: u8 = 0x9;
 pub const OPCODE_PONG: u8 = 0xA;
 
-/// Binary video frame header size: `1B flags + 4B LE flip + 2B LE width + 2B LE height`.
+/// Binary video frame v1 header size: `1B flags + 4B LE flip + 2B LE width + 2B LE height`.
 pub const FRAME_HEADER_LEN: usize = 9;
+/// Binary video frame v2 header size (when `FRAME_FLAG_HAS_POINTER` is set):
+/// v1 header (9B) + `2B LE i16 ptr_x + 2B LE i16 ptr_y + 1B ptr_shown`.
+pub const FRAME_HEADER_V2_LEN: usize = 14;
 /// Binary frame flag: payload is a complete PNG image keyframe.
 pub const FRAME_FLAG_PNG_KEYFRAME: u8 = 0;
 /// Binary frame flag: payload is a PackBits-RLE encoded BGRA XOR delta.
 pub const FRAME_FLAG_XOR_RLE_DELTA: u8 = 1;
+/// Low-nibble mask extracting the base payload kind (`PNG_KEYFRAME` or `XOR_RLE_DELTA`).
+pub const FRAME_FLAG_KIND_MASK: u8 = 0x0f;
+/// High-bit flag indicating the 5-byte frame-locked pointer extension follows the 9B header (#327).
+pub const FRAME_FLAG_HAS_POINTER: u8 = 0x80;
+
+/// Decoded spectator binary video frame header (v1 or v2 with frame-locked pointer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BinaryFrameHeader<'a> {
+    pub flags: u8,
+    pub kind: u8,
+    pub flip: u32,
+    pub width: u16,
+    pub height: u16,
+    pub pointer: Option<((i32, i32), bool)>,
+    pub payload: &'a [u8],
+}
 
 /// Maximum client-to-server WebSocket frame payload accepted (64 KiB).
 const MAX_CLIENT_FRAME_BYTES: usize = 64 * 1024;
@@ -325,7 +345,7 @@ pub fn read_client_frame(stream: &mut dyn Read) -> io::Result<Option<WsClientFra
     Ok(Some(frame))
 }
 
-/// Pack a spectator binary video frame:
+/// Pack a spectator binary video frame (v1 header, 9 bytes):
 /// `[1B flags][4B LE flip][2B LE width][2B LE height][payload]`.
 #[must_use]
 pub fn encode_binary_frame(
@@ -344,17 +364,78 @@ pub fn encode_binary_frame(
     out
 }
 
-/// Unpack a spectator binary video frame header and payload slice.
+/// Pack a spectator binary video frame (v2 header, 14 bytes) with frame-locked
+/// visual cursor coordinates:
+/// `[1B flags|0x80][4B LE flip][2B LE width][2B LE height][2B LE i16 ptr_x][2B LE i16 ptr_y][1B ptr_shown][payload]` (#327).
 #[must_use]
-pub fn decode_binary_frame_header(data: &[u8]) -> Option<(u8, u32, u16, u16, &[u8])> {
+pub fn encode_binary_frame_with_pointer(
+    kind: u8,
+    flip: u64,
+    width: u32,
+    height: u32,
+    pointer_pos: (i32, i32),
+    pointer_shown: bool,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEADER_V2_LEN + payload.len());
+    out.push((kind & FRAME_FLAG_KIND_MASK) | FRAME_FLAG_HAS_POINTER);
+    out.extend_from_slice(&(flip as u32).to_le_bytes());
+    out.extend_from_slice(&(width as u16).to_le_bytes());
+    out.extend_from_slice(&(height as u16).to_le_bytes());
+    let px = pointer_pos
+        .0
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let py = pointer_pos
+        .1
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    out.extend_from_slice(&px.to_le_bytes());
+    out.extend_from_slice(&py.to_le_bytes());
+    out.push(u8::from(pointer_shown));
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Unpack a spectator binary video frame (v1 9-byte or v2 14-byte with
+/// frame-locked pointer metadata) (#327).
+#[must_use]
+pub fn decode_binary_frame(data: &[u8]) -> Option<BinaryFrameHeader<'_>> {
     if data.len() < FRAME_HEADER_LEN {
         return None;
     }
     let flags = data[0];
+    let kind = flags & FRAME_FLAG_KIND_MASK;
     let flip = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
     let width = u16::from_le_bytes([data[5], data[6]]);
     let height = u16::from_le_bytes([data[7], data[8]]);
-    Some((flags, flip, width, height, &data[FRAME_HEADER_LEN..]))
+    let (pointer, payload) = if (flags & FRAME_FLAG_HAS_POINTER) != 0 {
+        if data.len() < FRAME_HEADER_V2_LEN {
+            return None;
+        }
+        let px = i32::from(i16::from_le_bytes([data[9], data[10]]));
+        let py = i32::from(i16::from_le_bytes([data[11], data[12]]));
+        (
+            Some(((px, py), data[13] != 0)),
+            &data[FRAME_HEADER_V2_LEN..],
+        )
+    } else {
+        (None, &data[FRAME_HEADER_LEN..])
+    };
+    Some(BinaryFrameHeader {
+        flags,
+        kind,
+        flip,
+        width,
+        height,
+        pointer,
+        payload,
+    })
+}
+
+/// Unpack a spectator binary video frame header (v1 or v2) into `(kind, flip, width, height, payload)`.
+#[must_use]
+pub fn decode_binary_frame_header(data: &[u8]) -> Option<(u8, u32, u16, u16, &[u8])> {
+    let hdr = decode_binary_frame(data)?;
+    Some((hdr.kind, hdr.flip, hdr.width, hdr.height, hdr.payload))
 }
 
 /// Standard PackBits-RLE encoder operating on an arbitrary byte accessor
@@ -633,7 +714,7 @@ mod tests {
 
     #[test]
     fn binary_frame_header_and_xor_packbits_rle_are_bit_exact() {
-        // 1. Header round-trip.
+        // 1. Header round-trip (v1 and v2 pointer-locked).
         let env = encode_binary_frame(FRAME_FLAG_XOR_RLE_DELTA, 42_001, 640, 480, b"xyz");
         assert_eq!(env.len(), FRAME_HEADER_LEN + 3);
         let (flags, flip, w, h, payload) = decode_binary_frame_header(&env).unwrap();
@@ -641,6 +722,30 @@ mod tests {
             (flags, flip, w, h, payload),
             (1, 42_001, 640, 480, &b"xyz"[..])
         );
+        assert_eq!(decode_binary_frame(&env).unwrap().pointer, None);
+
+        let env_v2 = encode_binary_frame_with_pointer(
+            FRAME_FLAG_PNG_KEYFRAME,
+            99,
+            640,
+            480,
+            (585, 430),
+            false,
+            b"png!",
+        );
+        assert_eq!(env_v2.len(), FRAME_HEADER_V2_LEN + 4);
+        let h2 = decode_binary_frame(&env_v2).unwrap();
+        assert_eq!(h2.flags, FRAME_FLAG_PNG_KEYFRAME | FRAME_FLAG_HAS_POINTER);
+        assert_eq!(h2.kind, FRAME_FLAG_PNG_KEYFRAME);
+        assert_eq!((h2.flip, h2.width, h2.height), (99, 640, 480));
+        assert_eq!(h2.pointer, Some(((585, 430), false)));
+        assert_eq!(h2.payload, b"png!");
+        assert_eq!(
+            decode_binary_frame_header(&env_v2),
+            Some((FRAME_FLAG_PNG_KEYFRAME, 99, 640, 480, &b"png!"[..]))
+        );
+        // Truncated v2 header is rejected cleanly.
+        assert!(decode_binary_frame(&env_v2[..FRAME_HEADER_V2_LEN - 1]).is_none());
 
         // 2. Identical 640x480 BGRA frame compresses dramatically (>60x smaller).
         let mut prev = vec![0u8; 640 * 480 * 4];
