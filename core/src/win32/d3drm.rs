@@ -4274,6 +4274,7 @@ mod tests {
                         height: h,
                         pitch,
                         pixels: surface_addr,
+                        owned_pixels: false,
                         format: PixelFormat::RGB565,
                         primary: false,
                         caps: 0,

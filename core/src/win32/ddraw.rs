@@ -585,12 +585,15 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     let (object, pixels) = make_surface_as(ctx, width, height, format, given)?;
     let pitch = pitch_for(width, depth);
     if back_count > 0 {
-        let back_pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
+        let back_pixels = ctx
+            .state
+            .alloc_surface_pixels(pitch * height.max(1) + SURFACE_SLACK);
         let back = State::make_com(
             ctx,
             &DIRECT_DRAW_SURFACE,
             ComState::Surface {
                 pixels: back_pixels,
+                owned_pixels: back_pixels != 0,
                 width,
                 height,
                 pitch,
@@ -604,6 +607,12 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
             },
         )
         .map_err(Stop::Fault)?;
+        // An implicitly created backbuffer starts with zero external references
+        // and stays alive via its parent primary surface until `GetAttachedSurface`
+        // hands a reference out, as Windows DirectDraw does.
+        if let Some(obj) = ctx.state.com_mut(back) {
+            obj.refs = 0;
+        }
         if let Some(object) = ctx.state.com_mut(object) {
             if let ComState::Surface { back: slot, .. } = &mut object.state {
                 *slot = back;
@@ -660,12 +669,15 @@ fn make_surface_as(
     caps: u32,
 ) -> Result<(u32, u32), Stop> {
     let pitch = pitch_for(width, format.bits);
-    let pixels = ctx.state.heap.alloc(pitch * height.max(1) + SURFACE_SLACK);
+    let pixels = ctx
+        .state
+        .alloc_surface_pixels(pitch * height.max(1) + SURFACE_SLACK);
     let object = State::make_com(
         ctx,
         &DIRECT_DRAW_SURFACE,
         ComState::Surface {
             pixels,
+            owned_pixels: pixels != 0,
             width,
             height,
             pitch,
@@ -929,6 +941,7 @@ fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     if back == 0 {
         return Ok(DDERR_NOTFOUND);
     }
+    ctx.state.com_ref(back, 1);
     Ok(S_OK)
 }
 
@@ -1339,6 +1352,7 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     }
     let Some(ComState::Surface {
         pixels,
+        owned_pixels,
         width: w,
         pitch: p,
         ..
@@ -1347,8 +1361,12 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         return Ok(DDERR_INVALIDPARAMS);
     };
     let before = std::mem::replace(pixels, memory);
+    let free_before = memory != before && std::mem::replace(owned_pixels, false);
     if sized != 0 {
         (*w, *p) = (width, pitch);
+    }
+    if free_before && before != 0 {
+        ctx.state.free_surface_pixels(before);
     }
     // Its key and its clipper are its own, kept by where its pixels are, and
     // go with them; a key or a clipper kept where they now are was a
@@ -2386,6 +2404,7 @@ mod tests {
                 &DIRECT_DRAW_SURFACE,
                 ComState::Surface {
                     pixels: 0x4000,
+                    owned_pixels: false,
                     width,
                     height,
                     pitch,
@@ -2402,6 +2421,7 @@ mod tests {
                 &DIRECT_DRAW_SURFACE,
                 ComState::Surface {
                     pixels: 0x2000,
+                    owned_pixels: false,
                     width,
                     height,
                     pitch,
@@ -2442,6 +2462,422 @@ mod tests {
                 flip(ctx, front, &[0, 0]),
                 Err(Stop::NotWritten { .. })
             ));
+        });
+    }
+
+    fn write_surface_desc_in(ctx: &mut crate::win32::Ctx<'_>, at: u32, w: u32, h: u32, caps: u32) {
+        ctx.mem.write(at, &[0u8; 108]).unwrap();
+        ctx.mem.write_u32(at, 108).unwrap();
+        // DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH
+        ctx.mem.write_u32(at + 4, 0x07).unwrap();
+        ctx.mem.write_u32(at + 8, h).unwrap();
+        ctx.mem.write_u32(at + 12, w).unwrap();
+        ctx.mem.write_u32(at + 0x68, caps).unwrap();
+    }
+
+    #[test]
+    fn releasing_transient_surfaces_reclaims_heap_and_com_entries_without_leaking() {
+        use super::{
+            create_surface, ddscaps, lock, set_color_key, set_surface_desc, surface_of, unlock,
+            DIRECT_DRAW, DIRECT_DRAW_SURFACE4,
+        };
+        use crate::com::{RELEASE, S_OK};
+        use crate::win32::d3d::TEXTURE2;
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::{ComState, State};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x20_0000, |ctx| {
+            let dd = State::make_com(ctx, &DIRECT_DRAW, ComState::None).unwrap();
+            let desc_at = 0x1000u32;
+            let lock_desc_at = 0x1100u32;
+            let out_at = 0x1200u32;
+            let ck_at = 0x1300u32;
+            let handle_at = 0x1320u32;
+            let client_buf = ctx.state.heap.alloc(8192);
+            let get_handle = TEXTURE2
+                .methods
+                .iter()
+                .find(|m| m.name == "GetHandle")
+                .unwrap()
+                .run;
+
+            // Warm up once (one 64x64x16 + one 128x128x16 with multi-face QI) so vtables
+            // and steady-state pool entries exist, then measure baseline.
+            for (w, h) in [(64, 64), (128, 128)] {
+                write_surface_desc_in(ctx, desc_at, w, h, ddscaps::OFFSCREENPLAIN);
+                assert_eq!(
+                    create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                    S_OK
+                );
+                let s1 = ctx.mem.read_u32(out_at).unwrap();
+                let s4 = State::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
+                let tex = State::face(ctx, s4, &TEXTURE2).unwrap();
+                assert_eq!((RELEASE.run)(ctx, s1, &[]).unwrap(), 0);
+                assert_eq!((RELEASE.run)(ctx, s4, &[]).unwrap(), 0);
+                assert_eq!((RELEASE.run)(ctx, tex, &[]).unwrap(), 0);
+            }
+            let base_live = ctx.state.heap.live_bytes();
+            let base_extent = ctx.state.heap.extent();
+            let base_com = ctx.state.com_objects().count();
+            let mut long_lived_small = Vec::new();
+
+            // 100,000 64x64x16 (8 KiB) + periodic 128x128x16 (32 KiB) surfaces, interleaved
+            // with SetSurfaceDesc + QI + GetHandle + SetColorKey and small guest allocations
+            // to prove zero monotonic leak and zero 32 KiB block hijacking by small allocs.
+            for i in 0..100_000u32 {
+                let (w, h) = if i % 3 == 2 { (128, 128) } else { (64, 64) };
+                let caps = if i % 97 == 0 {
+                    ddscaps::SYSTEMMEMORY | ddscaps::OFFSCREENPLAIN
+                } else {
+                    ddscaps::OFFSCREENPLAIN
+                };
+                write_surface_desc_in(ctx, desc_at, w, h, caps);
+                assert_eq!(
+                    create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                    S_OK
+                );
+                let surf = ctx.mem.read_u32(out_at).unwrap();
+                let info = surface_of(ctx, surf).expect("surface live");
+                assert_ne!(
+                    info.pixels, 0,
+                    "iteration {i}: heap exhausted (NULL pixels)"
+                );
+
+                if i % 97 == 0 {
+                    // Exercise SetSurfaceDesc -> QI(Texture2) -> GetHandle -> Release.
+                    ctx.mem.write(desc_at, &[0u8; 108]).unwrap();
+                    ctx.mem.write_u32(desc_at, 108).unwrap();
+                    ctx.mem.write_u32(desc_at + 4, 0x800).unwrap();
+                    ctx.mem.write_u32(desc_at + 0x24, client_buf).unwrap();
+                    assert_eq!(set_surface_desc(ctx, surf, &[desc_at, 0]).unwrap(), S_OK);
+                    let tex = State::face(ctx, surf, &TEXTURE2).unwrap();
+                    assert_eq!(get_handle(ctx, tex, &[0, handle_at]).unwrap(), S_OK);
+                    ctx.mem.write_u32(ck_at, 0xf81f).unwrap();
+                    ctx.mem.write_u32(ck_at + 4, 0xf81f).unwrap();
+                    assert_eq!(set_color_key(ctx, surf, &[0x8, ck_at]).unwrap(), S_OK);
+                    assert_eq!((RELEASE.run)(ctx, tex, &[]).unwrap(), 0);
+                } else {
+                    assert_eq!(lock(ctx, surf, &[0, lock_desc_at, 0, 0]).unwrap(), S_OK);
+                    let lp = ctx.mem.read_u32(lock_desc_at + 0x24).unwrap();
+                    assert_eq!(lp, info.pixels);
+                    ctx.mem.write_u32(lp, i).unwrap();
+                    assert_eq!(unlock(ctx, surf, &[lp]).unwrap(), S_OK);
+                }
+
+                // Interleave small guest allocations (both transient and long-lived) while
+                // surface buffers are pooled to confirm small allocs never hijack 8/32 KiB blocks.
+                if i % 500 == 0 {
+                    long_lived_small.push(ctx.state.heap.alloc(16));
+                }
+                if i % 50 == 0 {
+                    let tmp = ctx.state.heap.alloc(16);
+                    assert!(ctx.state.heap.free(tmp));
+                }
+
+                assert_eq!((RELEASE.run)(ctx, surf, &[]).unwrap(), 0);
+                assert!(
+                    surface_of(ctx, surf).is_none(),
+                    "iteration {i}: surface must be reclaimed on final Release"
+                );
+            }
+
+            let small_bytes = long_lived_small.len() as u32 * 16;
+            assert_eq!(
+                ctx.state.heap.live_bytes(),
+                base_live + small_bytes,
+                "live heap bytes must grow only by explicit long-lived small allocs ({small_bytes} B)"
+            );
+            assert!(
+                ctx.state.heap.extent() <= base_extent + small_bytes + 64 * 1024,
+                "heap extent grew from {base_extent:#x} to {:#x}",
+                ctx.state.heap.extent()
+            );
+            assert_eq!(
+                ctx.state.com_objects().count(),
+                base_com,
+                "COM object table must stay bounded"
+            );
+            assert!(ctx.state.heap.free(client_buf));
+        });
+    }
+
+    #[test]
+    fn surface_release_respects_faces_set_surface_desc_backbuffer_holders_and_snap() {
+        use super::{
+            attached_surface, create_surface, ddscaps, flip, set_color_key, set_surface_desc,
+            surface_of, DIRECT_DRAW, DIRECT_DRAW_SURFACE4,
+        };
+        use crate::com::{ADD_REF, RELEASE, S_OK};
+        use crate::snap::{Reader, Snap, Visitor, Writer};
+        use crate::win32::amstream::DIRECT_DRAW_STREAM_SAMPLE;
+        use crate::win32::d3d::{DEVICE2, DEVICE3, DEVICE7, TEXTURE2};
+        use crate::win32::d3drm::DEVICE3 as RM_DEVICE3;
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::{ComState, State};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let dd = State::make_com(ctx, &DIRECT_DRAW, ComState::None).unwrap();
+            let desc_at = 0x1000u32;
+            let out_at = 0x1200u32;
+            let ck_at = 0x1300u32;
+            let handle_at = 0x1320u32;
+            let get_handle = TEXTURE2
+                .methods
+                .iter()
+                .find(|m| m.name == "GetHandle")
+                .unwrap()
+                .run;
+            let set_tex = DEVICE3
+                .methods
+                .iter()
+                .find(|m| m.name == "SetTexture")
+                .unwrap()
+                .run;
+            let set_rt = DEVICE3
+                .methods
+                .iter()
+                .find(|m| m.name == "SetRenderTarget")
+                .unwrap()
+                .run;
+            let get_rt = DEVICE3
+                .methods
+                .iter()
+                .find(|m| m.name == "GetRenderTarget")
+                .unwrap()
+                .run;
+
+            // 1. Multi-face lifetime + handle & color-key cleanup + address reuse without handle collision.
+            write_surface_desc_in(ctx, desc_at, 64, 64, ddscaps::OFFSCREENPLAIN);
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let s1 = ctx.mem.read_u32(out_at).unwrap();
+            let pixels = surface_of(ctx, s1).unwrap().pixels;
+            ctx.mem.write_u32(ck_at, 0xf81f).unwrap();
+            ctx.mem.write_u32(ck_at + 4, 0xf81f).unwrap();
+            assert_eq!(set_color_key(ctx, s1, &[0x8, ck_at]).unwrap(), S_OK);
+            assert!(ctx.state.color_keys.contains_key(&pixels));
+
+            let s4 = State::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
+            let tex = State::face(ctx, s4, &TEXTURE2).unwrap();
+            assert_eq!(get_handle(ctx, tex, &[0, handle_at]).unwrap(), S_OK);
+            let h1 = ctx.mem.read_u32(handle_at).unwrap();
+            assert_ne!(h1, 0);
+
+            assert_eq!((RELEASE.run)(ctx, s1, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, s4).is_some());
+            assert_eq!((ADD_REF.run)(ctx, s4, &[]).unwrap(), 2);
+            assert_eq!((RELEASE.run)(ctx, s4, &[]).unwrap(), 1);
+            assert_eq!((RELEASE.run)(ctx, s4, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, tex).is_some());
+
+            assert_eq!((RELEASE.run)(ctx, tex, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, s1).is_none());
+            assert!(!ctx.state.color_keys.contains_key(&pixels));
+
+            // Re-creating a 64x64 surface reuses the pooled pixels and COM slot, and gets a fresh handle.
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let s1_reused = ctx.mem.read_u32(out_at).unwrap();
+            assert!(
+                [s1, s4, tex].contains(&s1_reused),
+                "reclaimed COM slot must be reused"
+            );
+            assert_eq!(
+                surface_of(ctx, s1_reused).unwrap().pixels,
+                pixels,
+                "reclaimed pixel buffer must be reused"
+            );
+            let tex2 = State::face(ctx, s1_reused, &TEXTURE2).unwrap();
+            assert_eq!(get_handle(ctx, tex2, &[0, handle_at]).unwrap(), S_OK);
+            let h2 = ctx.mem.read_u32(handle_at).unwrap();
+            assert_ne!(
+                h2, h1,
+                "old D3D handle must be removed so reused COM address gets a fresh handle"
+            );
+            assert_eq!((RELEASE.run)(ctx, tex2, &[]).unwrap(), 0);
+            assert_eq!((RELEASE.run)(ctx, s1_reused, &[]).unwrap(), 0);
+
+            // 2. SetSurfaceDesc client-memory ownership: pools old DirectDraw buffer immediately
+            //    and never pools or frees guest-owned client memory on Release.
+            write_surface_desc_in(
+                ctx,
+                desc_at,
+                64,
+                64,
+                ddscaps::SYSTEMMEMORY | ddscaps::OFFSCREENPLAIN,
+            );
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let sys = ctx.mem.read_u32(out_at).unwrap();
+            let orig_pixels = surface_of(ctx, sys).unwrap().pixels;
+
+            let client_buf = ctx.state.heap.alloc(8192);
+            ctx.mem.write(desc_at, &[0u8; 108]).unwrap();
+            ctx.mem.write_u32(desc_at, 108).unwrap();
+            ctx.mem.write_u32(desc_at + 4, 0x800).unwrap();
+            ctx.mem.write_u32(desc_at + 0x24, client_buf).unwrap();
+            assert_eq!(set_surface_desc(ctx, sys, &[desc_at, 0]).unwrap(), S_OK);
+
+            // Snapshot round-trip with live client-memory surface (owned_pixels=false) + pooled buffer.
+            let mut w = Writer::new();
+            ctx.state.snap(&mut w);
+            let mut restored = State::new();
+            let mut r = Reader::new(&w.out);
+            restored.snap(&mut r);
+            assert!(!r.failed());
+            assert_eq!(
+                restored.com(sys).map(|o| &o.state),
+                ctx.state.com(sys).map(|o| &o.state)
+            );
+
+            assert_eq!((RELEASE.run)(ctx, sys, &[]).unwrap(), 0);
+            // Next 64x64 surface must reuse orig_pixels, never client_buf.
+            write_surface_desc_in(ctx, desc_at, 64, 64, ddscaps::OFFSCREENPLAIN);
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let next64 = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(surface_of(ctx, next64).unwrap().pixels, orig_pixels);
+            assert_ne!(surface_of(ctx, next64).unwrap().pixels, client_buf);
+            assert!(ctx.state.heap.free(client_buf));
+            assert_eq!((RELEASE.run)(ctx, next64, &[]).unwrap(), 0);
+
+            // 3. Attached backbuffer (both release orders).
+            ctx.mem.write(desc_at, &[0u8; 108]).unwrap();
+            ctx.mem.write_u32(desc_at, 108).unwrap();
+            ctx.mem.write_u32(desc_at + 4, 0x21).unwrap();
+            ctx.mem.write_u32(desc_at + 0x14, 1).unwrap();
+            ctx.mem
+                .write_u32(desc_at + 0x68, ddscaps::PRIMARYSURFACE)
+                .unwrap();
+            ctx.state.display_mode = (32, 32, 16);
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let primary = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(attached_surface(ctx, primary, &[0, out_at]).unwrap(), S_OK);
+            let back = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!((RELEASE.run)(ctx, back, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, back).is_some());
+            assert_eq!(flip(ctx, primary, &[0, 0]).unwrap(), S_OK);
+            assert_eq!((RELEASE.run)(ctx, primary, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, primary).is_none());
+            assert!(surface_of(ctx, back).is_none());
+
+            // Reverse order: primary released while guest still holds back.
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let primary2 = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(attached_surface(ctx, primary2, &[0, out_at]).unwrap(), S_OK);
+            let back2 = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!((RELEASE.run)(ctx, primary2, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, primary2).is_none());
+            assert!(surface_of(ctx, back2).is_some());
+            assert_eq!((RELEASE.run)(ctx, back2, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, back2).is_none());
+
+            // 4. Lazy Device3D (DX7 never registered in immediate.devices), GetRenderTarget AddRef,
+            //    SetRenderTarget reclaim, and Device3D::Release draining SetTexture + target.
+            write_surface_desc_in(ctx, desc_at, 32, 32, ddscaps::OFFSCREENPLAIN);
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let rt1 = ctx.mem.read_u32(out_at).unwrap();
+            let dev7 = State::make_com(ctx, &DEVICE7, ComState::Device3D { surface: rt1 }).unwrap();
+            // GetRenderTarget must AddRef rt1 so releasing the fetched ref leaves creation ref intact.
+            assert_eq!(get_rt(ctx, dev7, &[out_at]).unwrap(), S_OK);
+            assert_eq!(ctx.mem.read_u32(out_at).unwrap(), rt1);
+            assert_eq!((RELEASE.run)(ctx, rt1, &[]).unwrap(), 1);
+            // Dropping creation ref keeps rt1 alive while dev7 still holds it (even before first draw).
+            assert_eq!((RELEASE.run)(ctx, rt1, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, rt1).is_some());
+            // Swapping render target reclaims unreferenced rt1 immediately.
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let rt2 = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(set_rt(ctx, dev7, &[rt2, 0]).unwrap(), S_OK);
+            assert!(surface_of(ctx, rt1).is_none());
+            // Bind a texture and drop guest refs to both rt2 and texture; releasing dev7 reclaims both.
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let bound = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!(set_tex(ctx, dev7, &[0, bound]).unwrap(), S_OK);
+            assert_eq!((RELEASE.run)(ctx, bound, &[]).unwrap(), 1);
+            assert_eq!((RELEASE.run)(ctx, rt2, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, bound).is_some());
+            assert!(surface_of(ctx, rt2).is_some());
+            assert_eq!((RELEASE.run)(ctx, dev7, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, bound).is_none());
+            assert!(surface_of(ctx, rt2).is_none());
+
+            // 5. Offscreen RetainedDevice (caps=0) and StreamSample (with players empty) guard & reclaim.
+            write_surface_desc_in(ctx, desc_at, 16, 16, 0);
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let rm_surf = ctx.mem.read_u32(out_at).unwrap();
+            let rm_dev = State::make_com(
+                ctx,
+                &RM_DEVICE3,
+                ComState::RetainedDevice {
+                    surface: rm_surf,
+                    buffers: 1,
+                    immediate: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!((RELEASE.run)(ctx, rm_surf, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, rm_surf).is_some());
+            assert_eq!((RELEASE.run)(ctx, rm_dev, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, rm_surf).is_none());
+
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let ss_surf = ctx.mem.read_u32(out_at).unwrap();
+            let sample = State::make_com(
+                ctx,
+                &DIRECT_DRAW_STREAM_SAMPLE,
+                ComState::StreamSample {
+                    owner: 0,
+                    surface: ss_surf,
+                },
+            )
+            .unwrap();
+            assert!(ctx.state.players.is_empty());
+            assert_eq!((RELEASE.run)(ctx, ss_surf, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, ss_surf).is_some());
+            assert_eq!((RELEASE.run)(ctx, sample, &[]).unwrap(), 0);
+            assert!(surface_of(ctx, ss_surf).is_none());
+
+            // Also verify Device2::SetTexture unbind reclaims without releasing the device.
+            assert_eq!(
+                create_surface(ctx, dd, &[desc_at, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let bound2 = ctx.mem.read_u32(out_at).unwrap();
+            let dev2 = State::make_com(ctx, &DEVICE2, ComState::Device3D { surface: 0 }).unwrap();
+            assert_eq!(set_tex(ctx, dev2, &[0, bound2]).unwrap(), S_OK);
+            assert_eq!((RELEASE.run)(ctx, bound2, &[]).unwrap(), 1);
+            assert_eq!(set_tex(ctx, dev2, &[0, 0]).unwrap(), S_OK);
+            assert!(surface_of(ctx, bound2).is_none());
         });
     }
 }

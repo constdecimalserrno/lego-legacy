@@ -488,7 +488,14 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
         };
         let (width, height) = movie.avi.streams[movie.video].picture_size();
         let depth = ctx.state.display_mode.2;
-        super::ddraw::make_surface(ctx, width, height, depth)?.0
+        let surface = super::ddraw::make_surface(ctx, width, height, depth)?.0;
+        // The stream sample owns this implicitly created surface; `GetSurface`
+        // adds an external reference, and releasing the sample reclaims it once
+        // external references are gone (#338).
+        if let Some(obj) = ctx.state.com_mut(surface) {
+            obj.refs = 0;
+        }
+        surface
     } else {
         args[0]
     };

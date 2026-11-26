@@ -1345,6 +1345,7 @@ fn surface(m: &mut Machine, pixels: u32, width: u32, height: u32) -> u32 {
             &win32::ddraw::DIRECT_DRAW_SURFACE,
             win32::ComState::Surface {
                 pixels,
+                owned_pixels: false,
                 width,
                 height,
                 pitch: width * 2,
@@ -3336,6 +3337,7 @@ fn a_surface_hands_out_one_dc_at_a_time() {
             &win32::ddraw::DIRECT_DRAW_SURFACE,
             win32::ComState::Surface {
                 pixels: PIXELS,
+                owned_pixels: false,
                 width: 4,
                 height: 4,
                 pitch: 8,

@@ -713,7 +713,10 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
 /// flip at the same cursor, and the same mix handed over at the same flips,
 /// as main made them running every pass (5d8104c, and e9bed42 after #215),
 /// but for #171's 23,170 instructions at boot, which move the digest and every
-/// flip's cursor and leave the mix where it was.
+/// flip's cursor and leave the mix where it was, and #338's DirectDraw surface
+/// reclamation, which pools freed surface buffers (moving only the memory
+/// digest while keeping every flip cursor, audio mix, and handoff flip
+/// bit-exact).
 #[test]
 fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() {
     let Some(ran) = intro(&INTRO, true) else {
@@ -747,7 +750,7 @@ fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() 
             hash::sha256_hex(&handed).as_str(),
         ),
         (
-            "c917cd49f4f73ff09c22b4b4ff7ccad6681632b24f82c45b6fd689830c5dd4bc",
+            "51288544274d4d88213497d8e8ac330cdb7320e11cede822d20dc90ca8514a9d",
             "eacf667e3096f6953aae3553d0260df1ffb463e83eb89de9b05c5a0d0d63d953",
             "70e84ca87ff3133b07ccc0debb9dd4e8b4a06f368854e780d6ae05a8e8e54ef7",
             "77712d0720f53b658e72e2d3f300da30a2e50d3298feacb51c536e2fba2a7a42",
@@ -1007,9 +1010,12 @@ fn the_route_makes_a_named_player_and_opens_the_quick_game_screen() {
         .assert_logged("GM16.DLS from ");
     assert_eq!(ran.log.matches("midi stream open answered").count(), 1);
     assert_eq!(ran.flip_before("midi stream open answered 0"), 304);
-    ran.assert_logged("flip 392 cursor 3116458135 640x480x16")
-        .assert_logged("flip 432 cursor 3201821254 640x480x16")
-        .assert_logged("end exited 0 cursor 3246057181 flips 471 declared-ms 24867")
+    // #338: DirectDraw surface pooling reduces heap bump growth, shifting the
+    // MIDI player thread's heap address and its guest instruction count by +2
+    // while keeping every presented frame and audio mix bit-exact.
+    ran.assert_logged("flip 392 cursor 3116458137 640x480x16")
+        .assert_logged("flip 432 cursor 3201821256 640x480x16")
+        .assert_logged("end exited 0 cursor 3246057183 flips 471 declared-ms 24867")
         .assert_flips(471);
     the_room_is_made_and_presented(ran);
     // In the throne room its tune starts on the room's first flip, plays under
@@ -1287,12 +1293,12 @@ fn two_players_play_scholars_mate_with_capture_cartoon_to_checkmate() {
         .assert_logged("GM16.DLS from ")
         .assert_logged("movie Advisors\\sherriff.avi opened through AVIFile: 1 streams")
         .assert_logged("movie Advisors\\baddude.avi opened through AVIFile: 1 streams")
-        .assert_logged("flip 555 cursor 3628985280 640x480x16")
-        .assert_logged("flip 2180 cursor 9651005871 640x480x16")
-        .assert_logged("flip 3500 cursor 10594060919 640x480x16")
-        .assert_logged("flip 4250 cursor 11473961220 640x480x16")
-        .assert_logged("flip 4295 cursor 11651873111 640x480x16")
-        .assert_logged("end exited 0 cursor 11685933862 flips 4311 declared-ms 109017");
+        .assert_logged("flip 555 cursor 3628985282 640x480x16")
+        .assert_logged("flip 2180 cursor 9651005873 640x480x16")
+        .assert_logged("flip 3500 cursor 10594060921 640x480x16")
+        .assert_logged("flip 4250 cursor 11473961222 640x480x16")
+        .assert_logged("flip 4295 cursor 11651873105 640x480x16")
+        .assert_logged("end exited 0 cursor 11685933856 flips 4311 declared-ms 109017");
     // Three MIDI opens, none refused: boot init (tune.mid), Western match
     // (wtune.mid), and throne room return (tune.mid).
     assert_eq!(ran.log.matches("midi stream open answered").count(), 3);
@@ -1635,7 +1641,7 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
     let ran = &runs.save_run;
     ran.assert_exited(0)
         .assert_flips(1081)
-        .assert_logged("end exited 0 cursor 6114083756 flips 1081 declared-ms 47500")
+        .assert_logged("end exited 0 cursor 6114083750 flips 1081 declared-ms 47500")
         .assert_logged(
             "file written C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof1.lcp, 4544 bytes",
         )
@@ -1716,9 +1722,12 @@ fn a_route_registers_a_player_saves_a_game_and_quits_cleanly() {
         );
     }
     assert!(saves[8 * SLOT_LEN..].iter().all(|&b| b == 0));
+    // #338: byte +0x0031 (uninitialized top byte of ply 0's 8-byte record)
+    // moved from 0x22 to 0x21 because DirectDraw surface pooling keeps the
+    // guest heap below 0x2200_0000; all other 190,919 bytes are identical.
     assert_eq!(
         hash::sha256_hex(saves),
-        "10f16ddfe254aa5b2608bbd1d1360ba262c40368e727b60220c7aee5c0149b0c"
+        "7b5f0eb4ebca93ee07f6978a62a7fdadc421c4aed05b06d5a9b16b8901463aae"
     );
 
     assert_pinned_frames(
@@ -1755,7 +1764,7 @@ fn a_second_run_over_the_same_data_root_finds_the_player_and_loads_the_game() {
     let ran = &runs.load_run;
     ran.assert_exited(0)
         .assert_flips(826)
-        .assert_logged("end exited 0 cursor 5168222319 flips 826 declared-ms 37717")
+        .assert_logged("end exited 0 cursor 5168222305 flips 826 declared-ms 37717")
         // Positive proof that 0x0041DE60 opened prof1.lcp and continued to prof2.lcp.
         .assert_logged(
             "file missing C:\\Program Files\\LEGO Media\\Games\\LEGO Chess\\profiles\\prof2.lcp, asked from 0x0045656a",

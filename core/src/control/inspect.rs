@@ -702,6 +702,7 @@ fn inspect_win32(machine: &Machine) -> String {
         match &obj.state {
             ComState::Surface {
                 pixels,
+                owned_pixels: _,
                 width,
                 height,
                 pitch,

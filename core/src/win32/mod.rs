@@ -433,6 +433,12 @@ pub struct State {
     com: BTreeMap<u32, ComObject>,
     /// Every face of every object, by the object and the interface.
     faces: BTreeMap<(u32, &'static str), u32>,
+    /// Freed DirectDraw surface pixel buffers kept by rounded allocation size,
+    /// segregated from `State::heap` so small guest `malloc`/COM allocations
+    /// never hijack large surface buffers (#338).
+    surface_pool: BTreeMap<u32, VecDeque<u32>>,
+    /// Freed 8-byte surface COM face slots reused by `make_com` (#338).
+    free_com: VecDeque<u32>,
     /// Which vtable an interface's methods live behind, once one is made.
     vtables: BTreeMap<&'static str, u32>,
     /// The registry, as a flat map from a key's whole path to its values.
@@ -552,6 +558,8 @@ impl State {
             render: None,
             com: BTreeMap::new(),
             faces: BTreeMap::new(),
+            surface_pool: BTreeMap::new(),
+            free_com: VecDeque::new(),
             vtables: BTreeMap::new(),
             registry: BTreeMap::new(),
         }
@@ -787,10 +795,39 @@ impl State {
                 at
             }
         };
-        let object = ctx.state.heap.alloc(8);
+        let object = ctx
+            .state
+            .free_com
+            .pop_front()
+            .unwrap_or_else(|| ctx.state.heap.alloc(8));
         ctx.mem.write_u32(object, vtable)?;
         ctx.state.add_com(object, interface.name, state);
         Ok(object)
+    }
+
+    /// Allocate a DirectDraw surface pixel buffer, reusing a same-sized freed
+    /// surface buffer from `surface_pool` before bumping `self.heap` (#338).
+    pub(crate) fn alloc_surface_pixels(&mut self, size: u32) -> u32 {
+        let Some(rounded) = size.max(1).checked_next_multiple_of(8) else {
+            return 0;
+        };
+        if let Some(bucket) = self.surface_pool.get_mut(&rounded) {
+            if let Some(addr) = bucket.pop_front() {
+                if bucket.is_empty() {
+                    self.surface_pool.remove(&rounded);
+                }
+                return addr;
+            }
+        }
+        self.heap.alloc(size)
+    }
+
+    /// Return a DirectDraw-owned pixel buffer to `surface_pool` for reuse by
+    /// future surfaces of the same size (#338).
+    pub(crate) fn free_surface_pixels(&mut self, addr: u32) {
+        if let Some(size) = self.heap.size_of(addr) {
+            self.surface_pool.entry(size).or_default().push_back(addr);
+        }
     }
 
     /// Remember a COM object the machine handed out.
@@ -878,13 +915,124 @@ impl State {
     }
 
     /// Count a reference in or out, and answer with what is left.
+    ///
+    /// When the last reference on all faces of a DirectDraw surface drops to
+    /// zero, its pixel buffer, COM faces, and surface side-table entries are
+    /// reclaimed (#338). Releasing a `Device3D`, `RetainedDevice`, or
+    /// `StreamSample` also drains bound textures / retries reclamation of its
+    /// guarded surface.
     pub fn com_ref(&mut self, at: u32, by: i32) -> u32 {
-        match self.com.get_mut(&at) {
-            Some(object) => {
-                object.refs = (object.refs + by).max(0);
-                u32::try_from(object.refs).unwrap_or(0)
+        let Some(object) = self.com.get_mut(&at) else {
+            return 0;
+        };
+        object.refs = object.refs.saturating_add(by).max(0);
+        let left = u32::try_from(object.refs).unwrap_or(0);
+        if by < 0 && left == 0 {
+            let identity = object.identity;
+            match self.com.get(&identity).map(|o| &o.state) {
+                Some(ComState::Surface { .. }) => self.reclaim_surface_if_unreferenced(identity),
+                Some(&ComState::Device3D { surface }) if !self.has_live_refs(identity) => {
+                    for tex in self.immediate.take_device_textures(identity) {
+                        self.com_ref(tex, -1);
+                    }
+                    if surface != 0 {
+                        let target = self.identity(surface);
+                        self.reclaim_surface_if_unreferenced(target);
+                    }
+                }
+                Some(&ComState::RetainedDevice { surface, .. })
+                | Some(&ComState::StreamSample { surface, .. })
+                    if !self.has_live_refs(identity) && surface != 0 =>
+                {
+                    let target = self.identity(surface);
+                    self.reclaim_surface_if_unreferenced(target);
+                }
+                _ => {}
             }
-            None => 0,
+        }
+        left
+    }
+
+    /// Iterate all `(key, face_addr)` entries in `self.faces` belonging to `identity`.
+    fn face_entries(&self, identity: u32) -> impl Iterator<Item = ((u32, &'static str), u32)> + '_ {
+        use std::ops::Bound;
+        let end = match identity.checked_add(1) {
+            Some(next) => Bound::Excluded((next, "")),
+            None => Bound::Unbounded,
+        };
+        self.faces
+            .range((Bound::Included((identity, "")), end))
+            .map(|(&k, &v)| (k, v))
+    }
+
+    /// Whether any face sharing `identity` still holds a live reference.
+    fn has_live_refs(&self, identity: u32) -> bool {
+        self.face_entries(identity)
+            .any(|(_, addr)| self.com.get(&addr).is_some_and(|o| o.refs > 0))
+    }
+
+    /// Reclaim a DirectDraw surface's pixel buffer, COM faces, and side-table
+    /// entries once every face of `identity` has refcount 0 and no live parent
+    /// flipping chain, 3D device, or stream sample still holds it (#338).
+    pub(crate) fn reclaim_surface_if_unreferenced(&mut self, identity: u32) {
+        let Some(&ComState::Surface {
+            pixels,
+            owned_pixels,
+            back,
+            ..
+        }) = self.com.get(&identity).map(|o| &o.state)
+        else {
+            return;
+        };
+
+        if self.has_live_refs(identity) {
+            return;
+        }
+
+        // Guard live internal holders (flipping-chain parent, Device3D,
+        // RetainedDevice, StreamSample) that store a surface pointer without
+        // bumping its COM refcount.
+        if self.com.iter().any(|(&addr, o)| match o.state {
+            ComState::Surface { back: b, .. } => b == identity,
+            ComState::Device3D { surface }
+            | ComState::RetainedDevice { surface, .. }
+            | ComState::StreamSample { surface, .. } => {
+                surface != 0 && self.identity(surface) == identity && self.has_live_refs(addr)
+            }
+            _ => false,
+        }) {
+            return;
+        }
+
+        loop {
+            let Some((key, face_addr)) = self.face_entries(identity).next() else {
+                break;
+            };
+            self.faces.remove(&key);
+            self.com.remove(&face_addr);
+            self.free_com.push_back(face_addr);
+        }
+
+        self.surface_dcs.retain(|_, &mut s| s != identity);
+        self.immediate.remove_handle_for(identity);
+
+        if pixels != 0
+            && (self.color_keys.contains_key(&pixels) || self.clipped.contains(&pixels))
+            && !self
+                .com
+                .values()
+                .any(|o| matches!(o.state, ComState::Surface { pixels: p, .. } if p == pixels))
+        {
+            self.color_keys.remove(&pixels);
+            self.clipped.remove(&pixels);
+        }
+
+        if owned_pixels && pixels != 0 {
+            self.free_surface_pixels(pixels);
+        }
+
+        if back != 0 {
+            self.reclaim_surface_if_unreferenced(back);
         }
     }
 
@@ -1026,6 +1174,9 @@ pub enum ComState {
     /// A drawing surface: guest memory, and how to read it.
     Surface {
         pixels: u32,
+        /// Whether DirectDraw allocated `pixels` from the guest heap (false
+        /// once `SetSurfaceDesc` installs client-owned memory).
+        owned_pixels: bool,
         width: u32,
         height: u32,
         pitch: u32,
@@ -1929,9 +2080,11 @@ impl crate::snap::Snap for ComState {
                 2 => *self = Self::Sound,
                 3 => {
                     let (mut pixels, mut width, mut height, mut pitch) = (0u32, 0u32, 0u32, 0u32);
+                    let mut owned_pixels = false;
                     let mut format = crate::raster::PixelFormat::RGB565;
                     let (mut primary, mut caps, mut back, mut palette) = (false, 0u32, 0u32, 0u32);
                     v.u32(&mut pixels);
+                    v.bool(&mut owned_pixels);
                     v.u32(&mut width);
                     v.u32(&mut height);
                     v.u32(&mut pitch);
@@ -1942,6 +2095,7 @@ impl crate::snap::Snap for ComState {
                     v.u32(&mut palette);
                     *self = Self::Surface {
                         pixels,
+                        owned_pixels,
                         width,
                         height,
                         pitch,
@@ -2059,6 +2213,7 @@ impl crate::snap::Snap for ComState {
                 Self::Device { keyboard } => v.bool(keyboard),
                 Self::Surface {
                     pixels,
+                    owned_pixels,
                     width,
                     height,
                     pitch,
@@ -2069,6 +2224,7 @@ impl crate::snap::Snap for ComState {
                     palette,
                 } => {
                     v.u32(pixels);
+                    v.bool(owned_pixels);
                     v.u32(width);
                     v.u32(height);
                     v.u32(pitch);
@@ -2245,6 +2401,8 @@ impl crate::snap::Snap for State {
             render,
             com,
             faces,
+            surface_pool,
+            free_com,
             vtables,
             registry,
         } = self;
@@ -2499,6 +2657,13 @@ impl crate::snap::Snap for State {
             },
             |val, v| v.u32(val),
         );
+        crate::snap::snap_btree_map(
+            v,
+            surface_pool,
+            |k, v| v.u32(k),
+            |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
+        );
+        crate::snap::snap_vec_deque(v, free_com, |addr, v| v.u32(addr));
         crate::snap::snap_btree_map_with(
             v,
             vtables,
