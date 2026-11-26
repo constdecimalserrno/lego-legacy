@@ -319,6 +319,16 @@ const FACES: &[(&str, [u8; 16], &str)] = &[
     ),
 ];
 
+/// DirectShow `CLSID_FilterGraph` faces: every interface in this group is
+/// symmetrically queryable from every other via its IID in [`OWN`] (#372).
+const FILTER_GRAPH_FACES: &[&str] = &[
+    "IGraphBuilder",
+    "IMediaControl",
+    "IMediaEvent",
+    "IMediaPosition",
+    "IVideoWindow",
+];
+
 /// Every interface this machine hands out, and the identifier it is asked for
 /// by, from each interface's own header.
 const OWN: &[(&str, [u8; 16])] = &[
@@ -510,6 +520,26 @@ const OWN: &[(&str, [u8; 16])] = &[
         "IMediaStream",
         parse_iid("b502d1bd-9a57-11d0-8fde-00c04fd9189d"),
     ),
+    (
+        "IGraphBuilder",
+        parse_iid("56a868a9-0ad4-11ce-b03a-0020af0ba770"),
+    ),
+    (
+        "IMediaControl",
+        parse_iid("56a868b1-0ad4-11ce-b03a-0020af0ba770"),
+    ),
+    (
+        "IMediaPosition",
+        parse_iid("56a868b2-0ad4-11ce-b03a-0020af0ba770"),
+    ),
+    (
+        "IVideoWindow",
+        parse_iid("56a868b4-0ad4-11ce-b03a-0020af0ba770"),
+    ),
+    (
+        "IMediaEvent",
+        parse_iid("56a868b6-0ad4-11ce-b03a-0020af0ba770"),
+    ),
 ];
 
 /// What every object is: `IUnknown`.
@@ -591,10 +621,18 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
             return Ok(S_OK);
         }
 
-        if let Some((_, _, give)) = FACES
+        let target = FACES
             .iter()
             .find(|(from, iid, _)| *from == have && *iid == asked)
-        {
+            .map(|(_, _, give)| *give)
+            .or_else(|| {
+                FILTER_GRAPH_FACES.contains(&have).then(|| {
+                    OWN.iter()
+                        .find(|(name, iid)| *iid == asked && FILTER_GRAPH_FACES.contains(name))
+                        .map(|(name, _)| *name)
+                })?
+            });
+        if let Some(give) = target {
             if let Some(interface) = crate::win32::interface_named(give) {
                 let object =
                     crate::win32::State::face(ctx, this, interface).map_err(Stop::Fault)?;
@@ -743,6 +781,68 @@ mod tests {
                 query_interface(ctx, dd, &[0xffff_fff0, out_at]).unwrap(),
                 E_NOINTERFACE
             );
+        });
+    }
+
+    #[test]
+    fn directshow_filter_graph_queries_all_five_interfaces_symmetrically() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let iid_at = 0x1000u32;
+            let out_at = 0x1040u32;
+            let graph = crate::win32::dshow::create(ctx, &crate::win32::dshow::GRAPH_BUILDER)
+                .expect("create FilterGraph");
+            let all = [
+                (
+                    "IGraphBuilder",
+                    parse_iid("56a868a9-0ad4-11ce-b03a-0020af0ba770"),
+                ),
+                (
+                    "IMediaControl",
+                    parse_iid("56a868b1-0ad4-11ce-b03a-0020af0ba770"),
+                ),
+                (
+                    "IMediaPosition",
+                    parse_iid("56a868b2-0ad4-11ce-b03a-0020af0ba770"),
+                ),
+                (
+                    "IVideoWindow",
+                    parse_iid("56a868b4-0ad4-11ce-b03a-0020af0ba770"),
+                ),
+                (
+                    "IMediaEvent",
+                    parse_iid("56a868b6-0ad4-11ce-b03a-0020af0ba770"),
+                ),
+            ];
+            let mut ptrs = Vec::new();
+            for &(name, iid) in &all {
+                ctx.mem.write(iid_at, &iid).unwrap();
+                assert_eq!(
+                    query_interface(ctx, graph, &[iid_at, out_at]).unwrap(),
+                    S_OK
+                );
+                let face = ctx.mem.read_u32(out_at).unwrap();
+                assert_eq!(ctx.state.interface_of(face), Some(name));
+                assert_eq!(ctx.state.identity(face), graph);
+                ptrs.push((name, face));
+            }
+            // Symmetric QI from every face to every other face and IUnknown.
+            for &(_, from_face) in &ptrs {
+                ctx.mem.write(iid_at, &IUNKNOWN).unwrap();
+                assert_eq!(
+                    query_interface(ctx, from_face, &[iid_at, out_at]).unwrap(),
+                    S_OK
+                );
+                assert_eq!(ctx.mem.read_u32(out_at).unwrap(), graph);
+                for &(to_name, to_iid) in &all {
+                    ctx.mem.write(iid_at, &to_iid).unwrap();
+                    assert_eq!(
+                        query_interface(ctx, from_face, &[iid_at, out_at]).unwrap(),
+                        S_OK
+                    );
+                    let got = ctx.mem.read_u32(out_at).unwrap();
+                    assert_eq!(ctx.state.interface_of(got), Some(to_name));
+                }
+            }
         });
     }
 }

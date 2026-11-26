@@ -1097,6 +1097,7 @@ const POLLS: &[&str] = &[
     "PeekMessageA",
     "GetMessageA",
     "WaitMessage",
+    "MsgWaitForMultipleObjects",
     "GetCursorPos",
     "GetAsyncKeyState",
     // `IDirectInputDeviceA`'s, the keyboard's and the mouse's.
@@ -2168,26 +2169,30 @@ impl Machine {
             }
         }
 
-        // Rehydrate AVIFile `Rc<[u8]>` handles from `state.movie_bytes` or `tree`.
-        let avi_keys: Vec<(u32, String)> = self
-            .state
-            .avi_files
-            .iter()
-            .filter(|(_, f)| f.needs_bytes())
-            .map(|(&obj, f)| (obj, f.key.clone()))
-            .collect();
-        for (obj, key) in avi_keys {
-            let bytes = if let Some(cached) = self.state.movie_bytes.get(&key) {
-                cached.clone()
-            } else if let Some(loaded) = self.tree.read(&key) {
+        // Rehydrate AVIFile and DirectShow `Rc<[u8]>` movie buffers from
+        // `state.movie_bytes` or `tree` without duplicating bytes.
+        let mut load_movie =
+            |key: &str, err: &'static str| -> Result<std::rc::Rc<[u8]>, SnapError> {
+                if let Some(cached) = self.state.movie_bytes.get(key) {
+                    return Ok(cached.clone());
+                }
+                let Some(loaded) = self.tree.read(key) else {
+                    return Err(SnapError::Corrupt(err));
+                };
                 let rc: std::rc::Rc<[u8]> = loaded.into();
-                self.state.movie_bytes.insert(key, rc.clone());
-                rc
-            } else {
-                return Err(SnapError::Corrupt("avi movie missing from tree").into());
+                self.state.movie_bytes.insert(key.to_owned(), rc.clone());
+                Ok(rc)
             };
-            if let Some(file) = self.state.avi_files.get_mut(&obj) {
+        for file in self.state.avi_files.values_mut() {
+            if file.needs_bytes() {
+                let bytes = load_movie(&file.key, "avi movie missing from tree")?;
                 file.set_bytes(bytes);
+            }
+        }
+        for graph in self.state.filter_graphs.values_mut() {
+            if let Some(key) = graph.movie_key_needing_bytes() {
+                let bytes = load_movie(key, "dshow movie missing from tree")?;
+                graph.set_bytes(bytes);
             }
         }
 

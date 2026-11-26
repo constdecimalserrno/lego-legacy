@@ -192,6 +192,30 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
         return Ok(S_OK);
     }
+    // CLSID_FilterGraph: DirectShow filter graph (#372).
+    if class == "e436ebb3-524f-11ce-9f53-0020af0ba770" && args[1] == 0 {
+        let iface = match interface.as_str() {
+            "56a868a9-0ad4-11ce-b03a-0020af0ba770" | "00000000-0000-0000-c000-000000000046" => {
+                &super::dshow::GRAPH_BUILDER
+            }
+            "56a868b1-0ad4-11ce-b03a-0020af0ba770" => &super::dshow::MEDIA_CONTROL,
+            "56a868b2-0ad4-11ce-b03a-0020af0ba770" => &super::dshow::MEDIA_POSITION,
+            "56a868b4-0ad4-11ce-b03a-0020af0ba770" => &super::dshow::VIDEO_WINDOW,
+            "56a868b6-0ad4-11ce-b03a-0020af0ba770" => &super::dshow::MEDIA_EVENT,
+            _ => {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "ole32.dll!CoCreateInstance: FilterGraph as {interface} is not a face \
+                         this machine has"
+                    ),
+                    caller: 0,
+                })
+            }
+        };
+        let object = super::dshow::create(ctx, iface)?;
+        ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
+        return Ok(S_OK);
+    }
     // DirectSound, asked for by class rather than through its own creator:
     // Alpha Team's sound server goes through COM for it (#60). What it asks
     // for is the maker rather than the thing.

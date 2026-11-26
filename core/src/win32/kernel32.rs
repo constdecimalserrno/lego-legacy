@@ -1695,7 +1695,7 @@ fn wake_waiters(state: &mut super::State, handle: u32) {
 ///
 /// An event or a thread is there while it is signalled, a semaphore while it
 /// has any of its count, and a mutex while nobody else holds it.
-fn ready(ctx: &Ctx<'_>, handle: u32) -> bool {
+pub(super) fn ready(ctx: &Ctx<'_>, handle: u32) -> bool {
     match ctx.state.object(handle) {
         Some(Object::Semaphore { count, .. }) => *count > 0,
         Some(Object::Named {
@@ -1713,7 +1713,7 @@ fn ready(ctx: &Ctx<'_>, handle: u32) -> bool {
 /// An automatic event goes back down as its waiter takes it; a manual one
 /// stays up. A mutex is taken by the thread that waited, and a thread that
 /// already holds one takes it again. A semaphore gives one of its count.
-fn claim(ctx: &mut Ctx<'_>, handle: u32) -> bool {
+pub(super) fn claim(ctx: &mut Ctx<'_>, handle: u32) -> bool {
     if !ready(ctx, handle) {
         return false;
     }
@@ -1845,7 +1845,7 @@ fn wait_for(ctx: &mut Ctx<'_>, handles: &[u32], all: bool, timeout: u32) -> Resu
 }
 
 /// Handle a wait whose objects are not yet available.
-fn wait_blocked(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
+pub(super) fn wait_blocked(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32, Stop> {
     // Not available. Whether this thread can be woken at all decides what a
     // wait means: with nobody else to run, waiting is only spending time.
     if ctx.state.threads.len() < 2 {
@@ -1896,7 +1896,7 @@ fn wait_blocked(ctx: &mut Ctx<'_>, handles: &[u32], timeout: u32) -> Result<u32,
 /// Clear any parked wait state on the running thread without touching
 /// `threads` when single-threaded or already unparked.
 #[inline(always)]
-fn unpark(ctx: &mut Ctx<'_>) {
+pub(super) fn unpark(ctx: &mut Ctx<'_>) {
     if ctx.state.threads.len() < 2 {
         return;
     }

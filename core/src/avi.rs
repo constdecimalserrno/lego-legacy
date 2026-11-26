@@ -104,6 +104,39 @@ impl Stream {
             self.sample_size
         }
     }
+
+    /// How long one unit is, in declared milliseconds, as a `(num, den)` ratio.
+    #[must_use]
+    pub fn frame_millis(&self) -> (u64, u64) {
+        (u64::from(self.scale) * 1000, u64::from(self.rate.max(1)))
+    }
+
+    /// When unit `n` is due, in declared milliseconds from the start.
+    #[must_use]
+    pub fn due_millis(&self, n: usize) -> u64 {
+        let (num, den) = self.frame_millis();
+        n as u64 * num / den
+    }
+}
+
+impl Avi {
+    /// Decode the first audio stream's concatenated chunks into mixer PCM, if
+    /// the movie carries an audio stream.
+    ///
+    /// # Errors
+    /// When the audio stream's format or payload cannot be decoded.
+    pub fn decode_audio(&self, bytes: &[u8]) -> Result<Option<Vec<i16>>, crate::sound::Error> {
+        let Some(stream) = self.streams.iter().find(|s| s.is_audio()) else {
+            return Ok(None);
+        };
+        let format = crate::sound::Format::parse(&stream.format)?;
+        let data: Vec<u8> = stream
+            .chunks
+            .iter()
+            .flat_map(|&(at, len)| bytes[at..at + len].iter().copied())
+            .collect();
+        format.decode(&data).map(Some)
+    }
 }
 
 /// What a movie's main header, its `avih`, says about the whole of it: the

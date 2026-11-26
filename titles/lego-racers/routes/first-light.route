@@ -1,19 +1,24 @@
 #lego-legacy-route 1
-# LEGO Racers: cold boot to rendered Main Menu under `--guest-args -novideo` (#370).
-#
-# Run with `--guest-args -novideo` until #372 lands DirectShow `CLSID_FilterGraph`
-# playback for the three intro AVIs (`lmicmp.avi`, `HVSCmp.avi`, `introcmp.avi`).
+# LEGO Racers: unflagged cold boot through all 3 DirectShow intro movies to
+# rendered Main Menu and clean exit (#370, #372).
 #
 # Sequence:
-# - Loads `GolDP.dll` (DirectDraw 4 + Direct3D 3 IM), initializes DirectInput
-#   keyboard/mouse (`IDirectInputDevice2A::Poll` + buffered `GetDeviceData`) and
-#   DirectSound (22050 Hz 16-bit stereo), and opens `LEGO.JAM`.
-# - Flips 0..298: LEGO Media splash screen fades in, holds, and fades out while
-#   Main Menu assets and 3D minifigure models load.
-# - Flip 299 -> 300: registers the 100 ms multimedia timer (`WINMM!timeSetEvent`,
-#   periodic `.tun` callback dispatch follows in #371) and presents the animated
-#   3D Captain Redbeard Main Menu (640x480x16) with software cursor `ARROW.BMP`
-#   initially at (0, 0).
-# - Flip 330: closes the window cleanly (`WM_SYSCOMMAND SC_CLOSE` ->
-#   `timeKillEvent` -> `DestroyWindow` -> `PostQuitMessage(0)` -> exit 0).
-flip 330 close
+# - Flips 0..236: `lmicmp.avi` (640x480 IV50 + 22050 Hz PCM, 237 frames,
+#   unskippable) plays to completion (`EC_COMPLETE`).
+# - Flips 237..241: `hvscmp.avi` (640x480 IV50 + 22050 Hz PCM, 337 frames,
+#   skippable) starts and is skipped on flip 240..241 via Space (`WM_KEYUP`).
+# - Flips 242..247: `introcmp.avi` (640x480 scalable IV50 + 22050 Hz PCM,
+#   1080 frames, skippable) starts and is skipped on flip 246..247 via left
+#   mouse click (`click_in_a_movie` -> Space `WM_KEYUP`).
+# - Flips 247..546: LEGO Media splash screen fades in, holds, and fades out
+#   while Main Menu assets and 3D minifigure models load.
+# - Flips 547..580: animated 3D Captain Redbeard Main Menu (640x480x16) with
+#   software cursor `ARROW.BMP` initially at (0, 0).
+# - Flip 580: closes cleanly (`WM_SYSCOMMAND SC_CLOSE` -> `timeKillEvent` ->
+#   `DestroyWindow` -> `PostQuitMessage(0)` -> exit 0).
+flip 240 key Space down
+flip 241 key Space up
+flip 245 move 320 240
+flip 246 down left
+flip 247 up left
+flip 580 close
