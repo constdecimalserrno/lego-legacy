@@ -26,7 +26,7 @@ Observation:
 
 Actions & piping:
   act <raw-json | subcommand ...>                  execute raw JSON or friendly action
-  click <x> <y> [--right] [--poll] [--hold-flips N] [--hold-ms N]
+  click <x> <y> [--right] [--poll] [--hold-flips N] [--hold-ms N] [--settle-flips N]
   move <x> <y> [--glide-flips N]
   delta <dx> <dy> [--flips N]
   drag <x1> <y1> <x2> <y2> [--right] [--step-px N]
@@ -548,6 +548,7 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
             let mut poll = false;
             let mut hold_flips: Option<u64> = None;
             let mut hold_ms: Option<u64> = None;
+            let mut settle_flips: Option<u64> = None;
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -561,9 +562,16 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
                         i += 1;
                         hold_ms = Some(parse_u64_flag(args, i, "--hold-ms")?);
                     }
+                    "--settle-flips" => {
+                        i += 1;
+                        settle_flips = Some(parse_u64_flag(args, i, "--settle-flips")?);
+                    }
                     other => return Err(format!("unknown `click` flag `{other}`")),
                 }
                 i += 1;
+            }
+            if poll && settle_flips.is_some() {
+                return Err("`--settle-flips` cannot be combined with `--poll`".to_owned());
             }
             let action = if poll { "click_poll" } else { "click" };
             let button = if right { "right" } else { "left" };
@@ -574,6 +582,9 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
             }
             if let Some(hm) = hold_ms {
                 let _ = write!(out, ",\"hold_ms\":{hm}");
+            }
+            if let Some(sf) = settle_flips {
+                let _ = write!(out, ",\"settle_flips\":{sf}");
             }
             out.push('}');
             Ok(CliCommand::ActRaw { json: out })

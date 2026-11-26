@@ -5,6 +5,10 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Control timeline click settle gap (#344) strictly outside guest state (`core/src/control/{timeline,json}.rs`):
+
+- **Default 1-flip settle between `Move` and `Down` on `Action::Click`:** Adds `settle_flips` (default `1`; `0` to opt out) so coordinate clicks emit `Move` (or complete relative move/delta chunking) on flip `M`, `Down` on flip `M + settle_flips`, and `Up` on `M + settle_flips + hold_flips` (preventing same-flip hover/button-down races in menu hit-testing), while omitting the settle gap for in-place clicks without coordinates, arming `hold_ms` release windows at `down_flip` (preserving `#327`'s `min_flip` guard) so `Up` never fires before `Down`, rejecting non-integer `settle_flips` or `settle_flips` on `click_poll`, and keeping `click_poll` semantics unchanged.
+
 Control timeline `type_text` first-character hold fix (#345) strictly outside guest state (`core/src/control/{timeline,host,bus,snapshot}.rs`):
 
 - **Preserve non-zero first-character hold when `type_text` schedules mid-frame:** `Timeline` tracks the highest polled flip internally (updated in `Timeline::drain_due` and `ControlHost::poll_input`, cleared on rewind/live restore, and preserved across `Timeline::clear`). When `Action::TypeText` is scheduled after `start_flip` has already been polled (e.g. `Live` mode between `deliver_input(N)` and `observe_flip(N+1)`), it advances the first character's start flip to `polled + 1` so `key down` and `key up` never collapse onto the same flip (`up_flip > down_flip` for every character while preserving exact `flip_gap` spacing).

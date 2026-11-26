@@ -29,14 +29,17 @@ pub enum Action {
         scale_x: Option<f64>,
         scale_y: Option<f64>,
     },
-    /// Press and release a mouse button, optionally moving first and releasing
-    /// after `hold_flips` or `hold_ms` declared milliseconds.
+    /// Press and release a mouse button, optionally moving first, settling for
+    /// `settle_flips` (only when coordinates are given so hover state latches
+    /// before button-down), and releasing after `hold_flips` or `hold_ms`
+    /// declared milliseconds.
     Click {
         x: Option<i32>,
         y: Option<i32>,
         button: Button,
         hold_flips: u64,
         hold_ms: Option<u64>,
+        settle_flips: u64,
     },
     /// Press and release a mouse button using dual elapsed-flip + declared-ms
     /// release tracking so releases fire even inside static non-flipping poll
@@ -292,6 +295,14 @@ enum Due {
         flip: u64,
         declared_ms: u64,
     },
+    /// Arms into `FlipOrMs` once `flip >= arm_flip`, measuring `hold_ms` from
+    /// the `declared_ms` observed when `arm_flip` arrives so a settle gap or
+    /// multi-flip relative move before `Down` never fires `Up` early.
+    AfterFlipOrMs {
+        arm_flip: u64,
+        flip: u64,
+        hold_ms: u64,
+    },
     Ms {
         min_flip: u64,
         declared_ms: u64,
@@ -310,6 +321,7 @@ impl Due {
                 flip >= f
                     || ((flip > min_flip || (flip == min_flip && poll > 0)) && declared_ms >= ms)
             }
+            Self::AfterFlipOrMs { .. } => false,
             Self::Ms {
                 min_flip,
                 declared_ms: ms,
@@ -319,7 +331,9 @@ impl Due {
 
     fn sort_flip(self) -> u64 {
         match self {
-            Self::Point { flip, .. } | Self::FlipOrMs { flip, .. } => flip,
+            Self::Point { flip, .. }
+            | Self::FlipOrMs { flip, .. }
+            | Self::AfterFlipOrMs { flip, .. } => flip,
             Self::Ms { min_flip, .. } => min_flip,
         }
     }
@@ -833,16 +847,22 @@ impl Timeline {
                 button,
                 hold_flips,
                 hold_ms,
+                settle_flips,
             } => {
-                let click_flip = self.schedule_optional_move(*x, *y, start_flip);
-                self.push_input(click_flip, 0, Input::Down(*button));
+                let move_flip = self.schedule_optional_move(*x, *y, start_flip);
+                let down_flip = if x.is_some() && y.is_some() {
+                    move_flip.saturating_add(*settle_flips)
+                } else {
+                    move_flip
+                };
+                self.push_input(down_flip, 0, Input::Down(*button));
                 let hold = (*hold_flips).max(1);
-                let rel_flip = click_flip.saturating_add(hold);
+                let rel_flip = down_flip.saturating_add(hold);
                 let due = match hold_ms {
-                    Some(ms) => Due::FlipOrMs {
-                        min_flip: click_flip,
+                    Some(ms) => Due::AfterFlipOrMs {
+                        arm_flip: down_flip,
                         flip: rel_flip,
-                        declared_ms: start_ms.saturating_add(*ms),
+                        hold_ms: *ms,
                     },
                     None => Due::Point {
                         flip: rel_flip,
@@ -1102,7 +1122,21 @@ impl Timeline {
         }
         let mut due_items = Vec::new();
         let mut remaining = Vec::with_capacity(self.pending.len());
-        for item in self.pending.drain(..) {
+        for mut item in self.pending.drain(..) {
+            if let Due::AfterFlipOrMs {
+                arm_flip,
+                flip: rel_flip,
+                hold_ms,
+            } = item.due
+            {
+                if flip >= arm_flip {
+                    item.due = Due::FlipOrMs {
+                        min_flip: flip,
+                        flip: rel_flip,
+                        declared_ms: declared_ms.saturating_add(hold_ms),
+                    };
+                }
+            }
             if item.due.is_due(flip, poll, declared_ms) {
                 due_items.push(item);
             } else {
@@ -1200,6 +1234,136 @@ mod tests {
             [Input::Move { x: 115, y: 105 }],
             "explicit override scales delta"
         );
+    }
+
+    #[test]
+    fn click_inserts_default_settle_gap_and_respects_opt_out_and_in_place() {
+        use crate::control::json::{parse_action_obj, parse_json};
+
+        let parse_click = |raw: &str| {
+            let v = parse_json(raw).expect("valid json");
+            parse_action_obj("click", v.as_object().expect("object")).expect("valid click")
+        };
+
+        // 1. Default click with coordinates settles 1 flip between Move and Down.
+        let mut tl = Timeline::new((1.0, 1.0));
+        let act = parse_click(r#"{"x":320,"y":222,"hold_flips":1}"#);
+        let report = tl.schedule(&act, 10, 1000).unwrap();
+        assert_eq!(report.events_scheduled, 3);
+        assert_eq!(report.end_flip, 12);
+        assert_eq!(report.required_flips, 3);
+        assert_eq!(
+            tl.drain_due(10, 0, 1000),
+            [Input::Move { x: 320, y: 222 }],
+            "move fires alone on start flip"
+        );
+        assert_eq!(
+            tl.drain_due(11, 0, 1016),
+            [Input::Down(Button::Left)],
+            "down fires after 1-flip settle gap"
+        );
+        assert_eq!(tl.drain_due(12, 0, 1032), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // 2. Explicit settle_flips: 0 opts out and keeps same-flip Move + Down.
+        let act = parse_click(r#"{"x":320,"y":222,"hold_flips":1,"settle_flips":0}"#);
+        let report = tl.schedule(&act, 20, 2000).unwrap();
+        assert_eq!(report.events_scheduled, 3);
+        assert_eq!(report.end_flip, 21);
+        assert_eq!(report.required_flips, 2);
+        assert_eq!(
+            tl.drain_due(20, 0, 2000),
+            [Input::Move { x: 320, y: 222 }, Input::Down(Button::Left)]
+        );
+        assert_eq!(tl.drain_due(21, 0, 2016), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // 3. Explicit settle_flips: 2 leaves an idle flip between Move and Down.
+        let act = parse_click(r#"{"x":320,"y":222,"hold_flips":2,"settle_flips":2}"#);
+        let report = tl.schedule(&act, 30, 3000).unwrap();
+        assert_eq!(report.end_flip, 34);
+        assert_eq!(report.required_flips, 5);
+        assert_eq!(tl.drain_due(30, 0, 3000), [Input::Move { x: 320, y: 222 }]);
+        assert_eq!(tl.drain_due(31, 0, 3016), []);
+        assert_eq!(tl.drain_due(32, 0, 3032), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(33, 0, 3048), []);
+        assert_eq!(tl.drain_due(34, 0, 3064), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // 4. In-place click (no coordinates) omits settle gap because no Move is emitted.
+        let act = parse_click(r#"{"hold_flips":1}"#);
+        let report = tl.schedule(&act, 40, 4000).unwrap();
+        assert_eq!(report.events_scheduled, 2);
+        assert_eq!(report.end_flip, 41);
+        assert_eq!(report.required_flips, 2);
+        assert_eq!(tl.drain_due(40, 0, 4000), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(41, 0, 4016), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // 5. Partial coordinates (only x, no y) emits no Move and omits settle gap.
+        let act = parse_click(r#"{"x":100,"hold_flips":1}"#);
+        let report = tl.schedule(&act, 50, 5000).unwrap();
+        assert_eq!(report.events_scheduled, 2);
+        assert_eq!(report.end_flip, 51);
+        assert_eq!(tl.drain_due(50, 0, 5000), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(51, 0, 5016), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+    }
+
+    #[test]
+    fn click_with_settle_and_hold_ms_never_releases_before_down() {
+        use crate::control::json::{parse_action_obj, parse_json};
+
+        let v = parse_json(r#"{"x":100,"y":200,"hold_flips":3,"hold_ms":16,"settle_flips":2}"#)
+            .unwrap();
+        let act = parse_action_obj("click", v.as_object().unwrap()).unwrap();
+
+        let mut tl = Timeline::new((1.0, 1.0));
+        let report = tl.schedule(&act, 10, 1000).unwrap();
+        assert_eq!(report.events_scheduled, 3);
+        assert_eq!(report.end_flip, 15);
+        assert_eq!(report.required_flips, 6);
+
+        assert_eq!(tl.drain_due(10, 0, 1000), [Input::Move { x: 100, y: 200 }]);
+        // Flip 11 is at 1020 ms (> 1000 + 16), but Down hasn't fired yet -> must NOT emit Up.
+        assert_eq!(tl.drain_due(11, 0, 1020), []);
+        // Flip 12 fires Down and arms the 16 ms release window from 1040 ms -> 1056 ms.
+        assert_eq!(tl.drain_due(12, 0, 1040), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(12, 1, 1050), []);
+        assert_eq!(tl.drain_due(12, 2, 1056), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // Flip-triggered release when flip reaches rel_flip before hold_ms elapses.
+        let v =
+            parse_json(r#"{"x":10,"y":20,"hold_flips":1,"hold_ms":500,"settle_flips":1}"#).unwrap();
+        let act = parse_action_obj("click", v.as_object().unwrap()).unwrap();
+        tl.schedule(&act, 20, 2000).unwrap();
+        assert_eq!(tl.drain_due(20, 0, 2000), [Input::Move { x: 10, y: 20 }]);
+        assert_eq!(tl.drain_due(21, 0, 2016), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(22, 0, 2032), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // Zero hold_ms with settle_flips > 0 still delivers Down alone on poll 0
+        // (min_flip guard) and releases strictly after on poll 1.
+        let v =
+            parse_json(r#"{"x":10,"y":20,"hold_flips":1,"hold_ms":0,"settle_flips":1}"#).unwrap();
+        let act = parse_action_obj("click", v.as_object().unwrap()).unwrap();
+        tl.schedule(&act, 30, 3000).unwrap();
+        assert_eq!(tl.drain_due(30, 0, 3000), [Input::Move { x: 10, y: 20 }]);
+        assert_eq!(tl.drain_due(31, 0, 3016), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(31, 1, 3016), [Input::Up(Button::Left)]);
+        assert!(tl.is_empty());
+
+        // Invalid settle_flips values and settle_flips on click_poll are rejected.
+        for bad in [
+            r#"{"x":1,"y":2,"settle_flips":-1}"#,
+            r#"{"x":1,"y":2,"settle_flips":"0"}"#,
+        ] {
+            let v = parse_json(bad).unwrap();
+            assert!(parse_action_obj("click", v.as_object().unwrap()).is_err());
+        }
+        let v = parse_json(r#"{"x":1,"y":2,"settle_flips":1}"#).unwrap();
+        assert!(parse_action_obj("click_poll", v.as_object().unwrap()).is_err());
     }
 
     #[test]
@@ -1716,5 +1880,140 @@ mod tests {
         res.observe_emitted_move(500, 400);
         res.set_frame_size(320, 200);
         assert_eq!(res.last_pointer(), (160, 100));
+    }
+
+    #[test]
+    fn click_settle_applies_after_relative_move_chunking_and_software_relative() {
+        // 1. RelativeSteered: multi-flip delta chunking lands at move_flip, then
+        //    settle_flips waits before Down, and hold_ms arms at down_flip.
+        let mut rel = Timeline::new((2.0, 1280.0 / 480.0));
+        rel.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            (640, 480),
+        );
+        let r = rel
+            .schedule(
+                &Action::Click {
+                    x: Some(480),
+                    y: Some(120),
+                    button: Button::Left,
+                    hold_flips: 2,
+                    hold_ms: Some(25),
+                    settle_flips: 1,
+                },
+                0,
+                0,
+            )
+            .unwrap();
+        let mut move_flips = Vec::new();
+        let mut down_flip = None;
+        let mut up_flip = None;
+        for f in 0..=r.end_flip {
+            rel.set_pointer(320, 240);
+            for ev in rel.drain_due(f, 0, f * 33) {
+                match ev {
+                    Input::Move { .. } => move_flips.push(f),
+                    Input::Down(Button::Left) => {
+                        assert!(up_flip.is_none(), "Up must never fire before Down");
+                        down_flip = Some(f);
+                    }
+                    Input::Up(Button::Left) => {
+                        assert!(down_flip.is_some(), "Up must follow Down");
+                        up_flip = Some(f);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let last_move = *move_flips.last().expect("at least one move chunk");
+        assert!(move_flips.len() >= 2, "expected multi-flip relative chunks");
+        assert_eq!(down_flip, Some(last_move + 1));
+        assert_eq!(up_flip, Some(last_move + 2));
+        assert_eq!(rel.visual_cursor_pos(), (480, 120));
+        assert!(rel.is_empty());
+
+        // 2. RelativeSteered with settle_flips: 0 fires Down on last move chunk flip.
+        let r0 = rel
+            .schedule(
+                &Action::Click {
+                    x: Some(120),
+                    y: Some(360),
+                    button: Button::Left,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 0,
+                },
+                20,
+                1000,
+            )
+            .unwrap();
+        let mut last_move0 = None;
+        let mut down0 = None;
+        for f in 20..=r0.end_flip {
+            rel.set_pointer(320, 240);
+            for ev in rel.drain_due(f, 0, 1000 + (f - 20) * 16) {
+                match ev {
+                    Input::Move { .. } => last_move0 = Some(f),
+                    Input::Down(Button::Left) => down0 = Some(f),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(down0, last_move0);
+        assert_eq!(rel.visual_cursor_pos(), (120, 360));
+        assert!(rel.is_empty());
+
+        // 3. SoftwareRelative: single-flip unclamped move + 1-flip settle + Down + Up,
+        //    and in-place click omits settle gap.
+        let mut sr = Timeline::new((1.0, 1.0));
+        sr.configure_mode(
+            MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (320, 240),
+            },
+            (640, 480),
+        );
+        let r = sr
+            .schedule(
+                &Action::Click {
+                    x: Some(100),
+                    y: Some(50),
+                    button: Button::Left,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                10,
+                0,
+            )
+            .unwrap();
+        assert_eq!(r.end_flip, 12);
+        assert_eq!(sr.drain_due(10, 0, 0), [Input::Move { x: 100, y: 50 }]);
+        assert_eq!(sr.drain_due(11, 0, 16), [Input::Down(Button::Left)]);
+        assert_eq!(sr.drain_due(12, 0, 32), [Input::Up(Button::Left)]);
+        assert_eq!(sr.visual_cursor_pos(), (100, 50));
+
+        let r_in_place = sr
+            .schedule(
+                &Action::Click {
+                    x: None,
+                    y: None,
+                    button: Button::Right,
+                    hold_flips: 1,
+                    hold_ms: None,
+                    settle_flips: 1,
+                },
+                20,
+                0,
+            )
+            .unwrap();
+        assert_eq!(r_in_place.end_flip, 21);
+        assert_eq!(sr.drain_due(20, 0, 0), [Input::Down(Button::Right)]);
+        assert_eq!(sr.drain_due(21, 0, 16), [Input::Up(Button::Right)]);
+        assert!(sr.is_empty());
     }
 }

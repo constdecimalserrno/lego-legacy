@@ -534,20 +534,31 @@ pub fn parse_action_obj(kind: &str, obj: &BTreeMap<String, JsonValue>) -> Result
                 .and_then(JsonValue::as_u64)
                 .unwrap_or(1),
             hold_ms: obj.get("hold_ms").and_then(JsonValue::as_u64),
+            settle_flips: match obj.get("settle_flips") {
+                None | Some(JsonValue::Null) => 1,
+                Some(v) => v
+                    .as_u64()
+                    .ok_or_else(|| "`settle_flips` must be a non-negative integer".to_owned())?,
+            },
         }),
-        "click_poll" => Ok(Action::ClickPoll {
-            x: opt_i32(obj, "x")?,
-            y: opt_i32(obj, "y")?,
-            button: parse_button(obj)?,
-            hold_flips: obj
-                .get("hold_flips")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(2),
-            hold_ms: obj
-                .get("hold_ms")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(150),
-        }),
+        "click_poll" => {
+            if matches!(obj.get("settle_flips"), Some(v) if !matches!(v, JsonValue::Null)) {
+                return Err("`settle_flips` is not supported on `click_poll`".to_owned());
+            }
+            Ok(Action::ClickPoll {
+                x: opt_i32(obj, "x")?,
+                y: opt_i32(obj, "y")?,
+                button: parse_button(obj)?,
+                hold_flips: obj
+                    .get("hold_flips")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or(2),
+                hold_ms: obj
+                    .get("hold_ms")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or(150),
+            })
+        }
         "drag" => Ok(Action::Drag {
             from_x: req_i32(obj, "from_x")?,
             from_y: req_i32(obj, "from_y")?,
