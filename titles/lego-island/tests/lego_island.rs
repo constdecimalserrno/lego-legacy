@@ -632,6 +632,7 @@ const KEY_O: u32 = 0x18;
 const KEY_S: u32 = 0x1f;
 const KEY_G: u32 = 0x22;
 const KEY_L: u32 = 0x26;
+const KEY_SPACE: u32 = 0x39;
 const KEY_UP: u32 = 0xc8;
 const KEY_LEFT: u32 = 0xcb;
 const KEY_RIGHT: u32 = 0xcd;
@@ -670,6 +671,18 @@ impl Hand {
         hand.done.push((hand.flip, Input::Down(Button::Left)));
         hand.done.push((hand.flip + 2, Input::Up(Button::Left)));
         hand.flip += 3;
+        hand
+    }
+
+    /// The left button pressed over `from`, glided smoothly to `to`, and let
+    /// go there.
+    fn drag(self, from: (i32, i32), to: (i32, i32)) -> Self {
+        let mut hand = self.glide(from);
+        hand.done.push((hand.flip, Input::Down(Button::Left)));
+        hand.flip += 1;
+        let mut hand = hand.glide(to);
+        hand.done.push((hand.flip, Input::Up(Button::Left)));
+        hand.flip += 1;
         hand
     }
 
@@ -1830,5 +1843,88 @@ fn a_button_held_still_for_a_declared_second_starts_a_walk() {
     assert!(
         testkit::differing(frame(still), frame(LET_GO), (0, 0, 640, 480)) > 100_000,
         "the walk"
+    );
+}
+
+/// 3D Vehicle Build Workshop drag-and-drop tracks and snaps (#347).
+///
+/// Scrolls `DBFRXLY0` (part 1, front axle) onto the upper-right shelf via
+/// `ShelfUp_Ctl` (`(95, 165)`), drags it smoothly onto its flashing red
+/// wireframe slot at `D4/D5`, and checks that it leaves the shelf, stays
+/// placed on the build table, and reveals `part[1]`'s ghost on `E4/F4`.
+#[test]
+fn a_hand_drags_and_snaps_a_dune_buggy_part_in_the_workshop() {
+    static WORKSHOP: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    const FRONT_AXLE_UPPER_RIGHT: (i32, i32) = (390, 140);
+    const FRONT_AXLE_SLOT: (i32, i32) = (265, 315);
+    const BEFORE: u64 = 15150;
+    const AFTER: u64 = 15230;
+    // Flip 15230 is presented at 6.524 billion.
+    const BUDGET: u64 = 6_550_000_000;
+
+    let Some(ran) = by_hand(
+        &WORKSHOP,
+        || {
+            out_of_the_door()
+                .wait(13000)
+                .hold(KEY_UP, 150)
+                .wait(13200)
+                .click((370, 295)) // Octan Garage
+                .wait(13900)
+                .click((555, 215)) // Dune Buggy workshop door
+                .wait(14900)
+                .hold(KEY_SPACE, 2)
+                .wait(15020)
+                .click((95, 165)) // ShelfUp_Ctl (red Octan gas pump)
+                .wait(BEFORE)
+                .drag(FRONT_AXLE_UPPER_RIGHT, FRONT_AXLE_SLOT)
+        },
+        &[BEFORE, AFTER],
+        BUDGET,
+    ) else {
+        return;
+    };
+    assert_eq!(
+        ran.finish.outcome,
+        lego_legacy_core::machine::Outcome::BudgetExhausted,
+        "nothing the workshop drag does stops the run"
+    );
+    let before = ran.host.frame(BEFORE).expect("before frame");
+    let after = ran.host.frame(AFTER).expect("after frame");
+
+    let (sx, sy) = (
+        FRONT_AXLE_UPPER_RIGHT.0 as usize,
+        FRONT_AXLE_UPPER_RIGHT.1 as usize,
+    );
+    let (tx, ty) = (FRONT_AXLE_SLOT.0 as usize, FRONT_AXLE_SLOT.1 as usize);
+
+    assert!(
+        pixel(before, sx, sy).into_iter().all(|c| c > 180),
+        "front axle hubcap on upper-right shelf before drag: {:?}",
+        pixel(before, sx, sy)
+    );
+    assert!(
+        pixel(after, sx, sy).into_iter().all(|c| c < 80),
+        "upper-right shelf empty after snap: {:?}",
+        pixel(after, sx, sy)
+    );
+    assert!(
+        !pixel(before, tx - 30, ty).into_iter().all(|c| c < 70),
+        "D4/D5 slot not already a dark tire before drag: {:?}",
+        pixel(before, tx - 30, ty)
+    );
+    assert!(
+        pixel(after, tx, ty).into_iter().all(|c| c > 180),
+        "placed front axle white hubcap at D4/D5: {:?}",
+        pixel(after, tx, ty)
+    );
+    assert!(
+        pixel(after, tx - 30, ty).into_iter().all(|c| c < 70),
+        "placed front axle black tire at D4/D5: {:?}",
+        pixel(after, tx - 30, ty)
+    );
+    assert!(
+        testkit::differing(before, after, (375, 255, 470, 365)) > 2_000,
+        "rear-axle target ghost appeared on E4/F4 after front axle snapped"
     );
 }

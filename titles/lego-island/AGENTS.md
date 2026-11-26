@@ -37,7 +37,7 @@ Keep normal clicks brief (`--hold-flips 2`, well under `1000 ms`) so they regist
 
 - **3D World Picking (quick left click):** Enter visible buildings from up close or down the road (Pizzeria, Hospital, Gas Station, Police Station, Information Center tower), mount vehicles (red bicycle, skateboard), talk to NPCs, accept quests (click Papa Brickolini's pizza), and trigger world props.
 - **Skip Intro / Welcome:** Quick click anywhere on the floor (e.g. `(600, 450)`) or press `Space`.
-- **Vehicle Build Workshops (`drag`):** Left-drag pieces from the shelf onto highlighted build slots (`--step-px 16`). Click colour bricks (`Red`, `Blue`, `Yellow`, `Green`, `Black`, `Gray`) and decal/mood buttons to customise; click the Exit button to leave.
+- **Vehicle Build Workshops (`drag`):** Left-drag the piece matching the currently flashing red wireframe ghost from the shelf (or `E2` preview) onto the ghost slot (`--step-px 16`). Click the Shelf Elevator (`ShelfUp_Ctl` — red Octan gas pump `B3 (95, 165)` in the Dune Buggy workshop) to cycle hidden shelves, the yellow lever (`Platform_Ctl`, `H3 (598, 225)`) to rotate the build table, colour bricks (`Red`, `Blue`, `Yellow`, `Green`, `Black`, `Gray`) and decal/mood buttons to customise, and Exit to leave.
 - **Info Center Controls:** Click the blue book (Registration Book), character portraits (select active citizen), left/right room arrows, Elevator top button (Observation Deck — changes sky colour & launches paper planes), Score Room History Book, radio/map props, and Quit Door.
 
 ### Keyboard Shortcuts (`ISLE.EXE` / `LEGO1.DLL`)
@@ -66,6 +66,10 @@ Keep normal clicks brief (`--hold-flips 2`, well under `1000 ms`) so they regist
 | Elevator Room | Left arrow -> Revolving Door | `A2` | `(35, 140)` |
 | Revolving Door | Exit to LEGO Island | `E3` | `(330, 220)` |
 | Outside Info Center | Red bicycle (after stepping out & turning left) | `A4` | `(70, 271)` |
+| Octan Garage (Inside) | Dune Buggy build bench door | `G3` | `(555, 215)` |
+| Dune Buggy Workshop | Shelf Elevator (`ShelfUp_Ctl`, red Octan gas pump) | `B3` | `(95, 165)` |
+| Dune Buggy Workshop | Platform Rotator (`Platform_Ctl`, yellow lever) | `H3` | `(598, 225)` |
+| Dune Buggy Workshop | Part 1 front axle target (`DBFRXLWA` red ghost) | `D4/D5` | `(265, 315)` |
 
 ## Object of the Game & Progression Ladder
 
@@ -94,7 +98,7 @@ Explore LEGO Island as any of the five playable citizens (**Pepper**, **Mama**, 
 - **Walk-drag hijack (`>= 1000 ms` click):** Keep interaction clicks at `--hold-flips 2`. If a long hold triggers walk-drag, release and click cleanly once.
 - **Save persistence & clean data roots:** Signing writes only `Players.gsi` (and shifts old `G0.GS` -> `G1.GS`). Progress (`G0.GS`, `History.gsi`) saves only on `F12`, Quit Door -> Green Yes, switching players, or clean `Close` (`lego-ctrl mode close`). Launch with a fresh `--data-root` for reproducible runs so saved rows don't offset Registration Book ticks.
 - **Pepper's Pizza Delivery roadblock:** Pepper's pizza destination is the Jail; town roadworks block the direct road (forcing a long detour around the Police Station — and triggering Act 2 once the Helicopter is built). Pick **Nick** for the shortest clean delivery test (straight east + north to the Gas Station).
-- **Vehicle Build drag precision:** Observe with `screenshot --grid --cursor` before each drag, use smooth drags (`--step-px 16`) from part center to highlighted slot, and re-verify placement on the next frame before moving to the next part.
+- **Vehicle Build strict order & hidden shelves:** `LEGO1.DLL` (`LegoCarBuildAnimPresenter::IsNextPartToPlace`) enforces strict sequential part placement — only the part matching the currently flashing red wireframe ghost snaps on mouse-up, while any out-of-order part moves mid-drag and then returns to the rotating `E2` preview on release. Half the parts sit on off-screen shelves (and which row starts visible varies by run); in the Dune Buggy workshop, click the red Octan gas pump (`B3 (95, 165)`) to cycle hidden shelves until the active part (starting with `DBFRXLY0`, front axle with headlights — distinct from the wide-tire rear axle `DBBKXLY0`) is visible before dragging (`--step-px 16`). If a low-shelf part's projected drag offset misses slightly, click it once to lift it into the `E2` preview `(320, 140)` and drag from there.
 - **Cutscene & loading pacing:** Transitions and spoken lines take 100–600+ flips while the cursor shows an hourglass. Wait for frames to settle (`wait-settled`) or press `Space` / quick floor click rather than queuing blind clicks during transitions.
 
 ## Quick `lego-ctrl` Recipe (Sign In & Steer)
