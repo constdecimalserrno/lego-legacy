@@ -1036,7 +1036,21 @@ fn handle_set_agent_state(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse 
         Err(e) => return HttpResponse::error_json(400, &e),
     };
     let resp = ctx.bus.dispatch(Command::SetAgentState(patch));
-    control_resp_to_http(&resp, None)
+    let st = &resp.status;
+    let mut out = String::with_capacity(96);
+    out.push_str("{\"ok\":true,\"flip\":");
+    match st.flip {
+        Some(f) => {
+            let _ = write!(out, "{f}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"mode\":");
+    write_json_str(&mut out, st.mode.as_str());
+    out.push_str(",\"owner\":");
+    write_json_str(&mut out, st.owner.as_str());
+    let _ = write!(out, ",\"paused\":{}}}", st.paused);
+    HttpResponse::json(200, out)
 }
 
 fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
@@ -2730,5 +2744,287 @@ mod tests {
             rj.as_object().unwrap()["scheduled"].as_object().unwrap()["end_flip"].as_u64(),
             Some(30688)
         );
+    }
+
+    #[test]
+    fn post_agent_state_returns_compact_ack_while_get_returns_full_feed() {
+        let bus = ControlBus::new(ControlConfig {
+            title: Title::STUB.key,
+            mode: ExecMode::Live,
+            owner: InputOwner::Shared,
+            ..ControlConfig::default()
+        });
+        for i in 0..60 {
+            let _ = bus.dispatch(Command::SetPace(if i % 2 == 0 { 1.0 } else { 2.0 }));
+        }
+        assert!(bus.agent_state().action_feed.len() >= 60);
+
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+
+        let post_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/agent-state".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"goal":"compact ack","thought":"updating narration"}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(post_resp.status, 200);
+        let post_text = std::str::from_utf8(&post_resp.body).unwrap();
+        assert!(
+            !post_text.contains("action_feed"),
+            "POST /api/agent-state must not return action_feed bloat: {post_text}"
+        );
+        assert!(
+            !post_text.contains("agent_state"),
+            "POST /api/agent-state must return compact ack without agent_state: {post_text}"
+        );
+        assert!(
+            post_text.len() < 256,
+            "POST /api/agent-state ack should be compact (<256 bytes), got {} bytes: {post_text}",
+            post_text.len()
+        );
+        let pj = parse_json(post_text).unwrap();
+        let pobj = pj.as_object().unwrap();
+        assert_eq!(pobj["ok"].as_bool(), Some(true));
+        assert_eq!(pobj["flip"], JsonValue::Null);
+        assert_eq!(pobj["mode"].as_str(), Some("live"));
+        assert_eq!(pobj["owner"].as_str(), Some("shared"));
+        assert_eq!(pobj["paused"].as_bool(), Some(false));
+
+        // After observe_flip, compact ack reports integer flip (Some(42)).
+        let mut control = ControlHost::with_bus(Headless::new(), bus.clone());
+        control.observe_flip(&FlipMeta {
+            flip: 42,
+            cursor: 42,
+            clock_nanos: 42 * 16_000_000,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (320, 240),
+            route_active: false,
+            route_remaining: 0,
+        });
+        let post_after_flip = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/agent-state".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"notepad":"flip 42"}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(post_after_flip.status, 200);
+        let p2 = parse_json(std::str::from_utf8(&post_after_flip.body).unwrap()).unwrap();
+        assert_eq!(p2.as_object().unwrap()["flip"].as_u64(), Some(42));
+
+        // Invalid patch payload returns 400.
+        let bad_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/agent-state".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"subgoals":"not-an-array"}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(bad_resp.status, 400);
+
+        // GET /api/agent-state stays unchanged: full agent_state + action_feed.
+        let get_resp = dispatch_http(
+            &HttpRequest {
+                method: "GET".to_owned(),
+                path: "/api/agent-state".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(get_resp.status, 200);
+        let gj = parse_json(std::str::from_utf8(&get_resp.body).unwrap()).unwrap();
+        let gobj = gj.as_object().unwrap();
+        assert_eq!(gobj["ok"].as_bool(), Some(true));
+        let ag = gobj["agent_state"].as_object().unwrap();
+        assert_eq!(ag["goal"].as_str(), Some("compact ack"));
+        assert_eq!(ag["thought"].as_str(), Some("updating narration"));
+        assert!(ag["action_feed"].as_array().unwrap().len() >= 60);
+    }
+
+    #[test]
+    fn http_act_supports_raw_mouse_down_and_mouse_up_with_held_button_tracking() {
+        let mut control = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                title: Title::STUB.key,
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = control.bus();
+        control.observe_flip(&FlipMeta {
+            flip: 10,
+            cursor: 10,
+            clock_nanos: 160_000_000,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (100, 100),
+            route_active: false,
+            route_remaining: 0,
+        });
+
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+
+        // 1. Raw mouse_down with coordinates and default left button.
+        let down_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"mouse_down","x":240,"y":180,"wait":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(
+            down_resp.status,
+            200,
+            "{}",
+            std::str::from_utf8(&down_resp.body).unwrap()
+        );
+        assert_eq!(
+            control.poll_input(10),
+            [
+                Input::Move { x: 240, y: 180 },
+                Input::Down(crate::host::Button::Left),
+            ]
+        );
+        // Button remains held across intermediate flips with no auto-release.
+        assert_eq!(control.poll_input(11), []);
+
+        // Clearing queue while holding raw mouse_down with NO queued mouse_up preserves deliberate hold (#346).
+        let clear_hold = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(clear_hold.status, 200);
+        assert_eq!(control.poll_input(12), []);
+
+        // 2. Queued mouse_up dropped via clear-queue triggers clean release of held button (#346).
+        let queued_up = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"mouse_up","button":"left","wait":false,"queue":true}"#
+                    .to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(queued_up.status, 200);
+        let clear_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(clear_resp.status, 200);
+        assert_eq!(
+            control.poll_input(13),
+            [Input::Up(crate::host::Button::Left)]
+        );
+
+        // Clearing an unfired queued mouse_down drops it without emitting a spurious Up.
+        let unfired_down = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"mouse_down","button":"right","wait":false,"queue":true}"#
+                    .to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(unfired_down.status, 200);
+        let clear_unfired = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(clear_unfired.status, 200);
+        assert_eq!(control.poll_input(14), []);
+
+        // 3. Explicit right button down/up in-place.
+        let rdown = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"mouse_down","button":"right","wait":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(rdown.status, 200);
+        assert_eq!(
+            control.poll_input(15),
+            [Input::Down(crate::host::Button::Right)]
+        );
+        let rup = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/act".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: br#"{"action":"mouse_up","button":"right","wait":false}"#.to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(rup.status, 200);
+        assert_eq!(
+            control.poll_input(16),
+            [Input::Up(crate::host::Button::Right)]
+        );
+
+        // 4. Invalid button, non-string button, and partial coords return 400.
+        for bad_payload in [
+            &b"{\"action\":\"mouse_down\",\"button\":\"middle\",\"wait\":false}"[..],
+            &b"{\"action\":\"mouse_down\",\"button\":123,\"wait\":false}"[..],
+            &b"{\"action\":\"mouse_down\",\"x\":100,\"wait\":false}"[..],
+            &b"{\"action\":\"mouse_up\",\"y\":200,\"wait\":false}"[..],
+        ] {
+            let bad = dispatch_http(
+                &HttpRequest {
+                    method: "POST".to_owned(),
+                    path: "/api/act".to_owned(),
+                    query: BTreeMap::new(),
+                    headers: BTreeMap::new(),
+                    body: bad_payload.to_vec(),
+                },
+                &ctx,
+            );
+            assert_eq!(bad.status, 400);
+        }
     }
 }

@@ -27,6 +27,8 @@ Observation:
 Actions & piping:
   act <raw-json | subcommand ...>                  execute raw JSON or friendly action
   click <x> <y> [--right] [--poll] [--hold-flips N] [--hold-ms N] [--settle-flips N]
+  mouse-down [<x> <y>] [--right] [--button left|right]
+  mouse-up [<x> <y>] [--right] [--button left|right]
   move <x> <y> [--glide-flips N]
   delta <dx> <dy> [--flips N]
   drag <x1> <y1> <x2> <y2> [--right] [--step-px N]
@@ -55,6 +57,8 @@ Checkpoints & agent state:
   snapshot <path> | restore <path>                 save or restore snapshot file
   export-route [-o path]                           export recorded #lego-legacy-route 1
   goal <text> | thought <text> | hint <text>       update live /watch agent state
+  resume                                           resume live playback (POST /api/mode)
+  pace <mult>                                      set live pace multiplier (0.25..=4.0)
   mode <step|live|pause|resume|agent|human|shared|close|pace> [pace] [--force]";
 
 pub const PIPE_USAGE: &str = "\
@@ -308,8 +312,10 @@ where
         "screenshot" => parse_screenshot(rest)?,
         "frame-json" => parse_frame_json(rest)?,
         "act" => parse_act(rest)?,
-        "click" | "move" | "delta" | "drag" | "key" | "chord" | "type" | "step" | "wait"
-        | "wait-change" | "wait-settled" | "settle" => parse_friendly_action(cmd, rest)?,
+        "click" | "mouse-down" | "mouse-up" | "move" | "delta" | "drag" | "key" | "chord"
+        | "type" | "step" | "wait" | "wait-change" | "wait-settled" | "settle" => {
+            parse_friendly_action(cmd, rest)?
+        }
         "pipe" => parse_pipe(rest)?,
         "clear" => parse_clear(rest)?,
         "mem" => parse_mem(rest)?,
@@ -354,6 +360,7 @@ where
             field: "user_hint",
             value: join_text("hint", rest)?,
         },
+        "resume" | "pace" => parse_mode(&raw[i..])?,
         "mode" => parse_mode(rest)?,
         other => {
             return Err(format!(
@@ -640,6 +647,8 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
             out.push('}');
             Ok(CliCommand::ActRaw { json: out })
         }
+        "mouse-down" => parse_mouse_button_action("mouse_down", args),
+        "mouse-up" => parse_mouse_button_action("mouse_up", args),
         "move" => {
             let x = parse_i32_arg(args, 0, "x")?;
             let y = parse_i32_arg(args, 1, "y")?;
@@ -940,6 +949,62 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
     }
 }
 
+fn parse_mouse_button_action(action: &str, args: &[String]) -> Result<CliCommand, String> {
+    let mut coords: Vec<i32> = Vec::new();
+    let mut button = "left";
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--right" => button = "right",
+            "--button" => {
+                i += 1;
+                let b = args
+                    .get(i)
+                    .ok_or_else(|| "`--button` requires `left` or `right`".to_owned())?;
+                button = match b.as_str() {
+                    "left" => "left",
+                    "right" => "right",
+                    other => {
+                        return Err(format!(
+                            "unknown `--button` `{other}` (expected left|right)"
+                        ));
+                    }
+                };
+            }
+            other
+                if other.starts_with('-')
+                    && (other.len() == 1 || !other[1..].bytes().all(|b| b.is_ascii_digit())) =>
+            {
+                return Err(format!("unknown `{action}` flag `{other}`"));
+            }
+            tok => {
+                if coords.len() >= 2 {
+                    return Err(format!("unexpected extra `{action}` argument `{tok}`"));
+                }
+                let n = tok
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid integer `{tok}` for `{action}`"))?;
+                coords.push(n);
+            }
+        }
+        i += 1;
+    }
+    let mut out = format!("{{\"action\":\"{action}\",\"button\":\"{button}\"");
+    match coords.as_slice() {
+        [] => {}
+        [x, y] => {
+            let _ = write!(out, ",\"x\":{x},\"y\":{y}");
+        }
+        _ => {
+            return Err(format!(
+                "`{action}` coordinates require both `<x>` and `<y>`"
+            ));
+        }
+    }
+    out.push('}');
+    Ok(CliCommand::ActRaw { json: out })
+}
+
 fn parse_pipe(args: &[String]) -> Result<CliCommand, String> {
     if args.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
         return Ok(CliCommand::Help(PIPE_USAGE));
@@ -1201,6 +1266,21 @@ fn parse_export_route(args: &[String]) -> Result<CliCommand, String> {
     Ok(CliCommand::ExportRoute { out })
 }
 
+fn parse_pace_value(cmd: &str, args: &[String]) -> Result<f64, String> {
+    let [pace_str] = args else {
+        return Err(format!("`{cmd}` requires a single multiplier (e.g. 1.0)"));
+    };
+    let p: f64 = pace_str
+        .parse()
+        .map_err(|_| format!("invalid pace `{pace_str}`"))?;
+    if !p.is_finite() || p <= 0.0 || p > 1000.0 {
+        return Err(format!(
+            "invalid pace `{pace_str}` (expected positive finite multiplier, e.g. 0.25..=4.0)"
+        ));
+    }
+    Ok(p)
+}
+
 fn parse_mode(args: &[String]) -> Result<CliCommand, String> {
     let Some(first) = args.first().map(String::as_str) else {
         return Err(
@@ -1212,14 +1292,9 @@ fn parse_mode(args: &[String]) -> Result<CliCommand, String> {
     match first {
         "step" | "live" => {
             map.insert("mode".to_owned(), JsonValue::Str(first.to_owned()));
-            if let Some(pace_str) = args.get(1) {
-                let p: f64 = pace_str
-                    .parse()
-                    .map_err(|_| format!("invalid pace `{pace_str}`"))?;
+            if !args[1..].is_empty() {
+                let p = parse_pace_value(&format!("mode {first}"), &args[1..])?;
                 map.insert("pace".to_owned(), JsonValue::Float(p));
-            }
-            if args.len() > 2 {
-                return Err(format!("unexpected extra argument `{}`", args[2]));
             }
         }
         "pause" => {
@@ -1248,12 +1323,7 @@ fn parse_mode(args: &[String]) -> Result<CliCommand, String> {
             }
         }
         "pace" => {
-            let pace_str = args
-                .get(1)
-                .ok_or_else(|| "`mode pace` requires a multiplier (e.g. 1.0)".to_owned())?;
-            let p: f64 = pace_str
-                .parse()
-                .map_err(|_| format!("invalid pace `{pace_str}`"))?;
+            let p = parse_pace_value("mode pace", &args[1..])?;
             map.insert("pace".to_owned(), JsonValue::Float(p));
         }
         other => {

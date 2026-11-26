@@ -18,3 +18,4 @@ Initial zero-crate `lego-ctrl` CLI and shared HTTP/1.1 + UDS client library (#31
   explicit `flip +N` relative offsets with absolute bare `flip N` default), queue clearing
   (`clear` -> `POST /api/clear-queue`), read-only memory/CPU/Win32/file inspection,
   bookmarks/rewind/snapshot/restore/route export, agent state, and execution mode control (#346).
+- Top-level `resume`, `pace <mult>` (dispatching to `POST /api/mode`), and raw `mouse-down` / `mouse-up` (`[<x> <y>] [--right] [--button left|right]`) subcommands (#352).

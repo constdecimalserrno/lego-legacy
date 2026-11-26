@@ -473,10 +473,14 @@ pub fn write_json_f64_or_null(out: &mut String, v: f64) {
 /// # Errors
 /// Returns an error if `"button"` is present and not `"left"` or `"right"`.
 pub fn parse_button(obj: &BTreeMap<String, JsonValue>) -> Result<Button, String> {
-    match obj.get("button").and_then(JsonValue::as_str) {
-        None | Some("left") => Ok(Button::Left),
-        Some("right") => Ok(Button::Right),
-        Some(other) => Err(format!("unknown button `{other}` (expected left|right)")),
+    match obj.get("button") {
+        None | Some(JsonValue::Null) => Ok(Button::Left),
+        Some(JsonValue::Str(s)) if s == "left" => Ok(Button::Left),
+        Some(JsonValue::Str(s)) if s == "right" => Ok(Button::Right),
+        Some(JsonValue::Str(other)) => {
+            Err(format!("unknown button `{other}` (expected left|right)"))
+        }
+        Some(_) => Err("`button` must be a string (expected left|right)".to_owned()),
     }
 }
 
@@ -538,6 +542,21 @@ pub fn parse_action_obj(kind: &str, obj: &BTreeMap<String, JsonValue>) -> Result
             scale_x: obj.get("scale_x").and_then(JsonValue::as_f64),
             scale_y: obj.get("scale_y").and_then(JsonValue::as_f64),
         }),
+        "mouse_down" | "mouse_up" => {
+            let x = opt_i32(obj, "x")?;
+            let y = opt_i32(obj, "y")?;
+            if x.is_some() != y.is_some() {
+                return Err(format!(
+                    "`{kind}` requires both `x` and `y` when specifying coordinates"
+                ));
+            }
+            let button = parse_button(obj)?;
+            Ok(if kind == "mouse_down" {
+                Action::MouseDown { x, y, button }
+            } else {
+                Action::MouseUp { x, y, button }
+            })
+        }
         "click" => Ok(Action::Click {
             x: opt_i32(obj, "x")?,
             y: opt_i32(obj, "y")?,

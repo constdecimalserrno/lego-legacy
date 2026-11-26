@@ -85,8 +85,8 @@ pub fn parse_command_line(line: &str) -> Result<ParsedLine, String> {
             let action = parse_action_obj(action_name, obj)?;
             vec![Command::Act { action, auto_step }]
         }
-        "move" | "mouse_delta" | "click" | "click_poll" | "drag" | "key_hold" | "chord"
-        | "type_text" => {
+        "move" | "mouse_delta" | "mouse_down" | "mouse_up" | "click" | "click_poll" | "drag"
+        | "key_hold" | "chord" | "type_text" => {
             let action = parse_action_obj(cmd_name, obj)?;
             vec![Command::Act { action, auto_step }]
         }
@@ -437,6 +437,44 @@ mod tests {
         assert!(
             cleared_json.contains("\"cleared\":0"),
             "ClearQueue JSON must include cleared count: {cleared_json}"
+        );
+
+        let md = parse_command_line(r#"{"cmd":"mouse_down","x":50,"y":60,"button":"right"}"#)
+            .expect("parse mouse_down");
+        assert!(matches!(
+            md.commands.as_slice(),
+            [Command::Act {
+                action: Action::MouseDown {
+                    x: Some(50),
+                    y: Some(60),
+                    button: Button::Right,
+                },
+                auto_step: true
+            }]
+        ));
+        let mu = parse_command_line(r#"{"cmd":"mouse_up"}"#).expect("parse mouse_up");
+        assert!(matches!(
+            mu.commands.as_slice(),
+            [Command::Act {
+                action: Action::MouseUp {
+                    x: None,
+                    y: None,
+                    button: Button::Left,
+                },
+                auto_step: true
+            }]
+        ));
+
+        let set_resp = cleared_bus.dispatch(Command::SetAgentState(
+            crate::control::bus::AgentStatePatch {
+                thought: Some("compact".to_owned()),
+                ..crate::control::bus::AgentStatePatch::default()
+            },
+        ));
+        let set_json = format_response_json(Some(&JsonValue::Int(10)), &set_resp);
+        assert!(
+            !set_json.contains("action_feed"),
+            "SetAgentState response must not dump action_feed: {set_json}"
         );
 
         assert!(parse_command_line(r#"{"cmd":"bogus"}"#).is_err());

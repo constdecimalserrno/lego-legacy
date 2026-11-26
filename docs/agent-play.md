@@ -32,6 +32,8 @@ lego-ctrl screenshot --crop 160,120,320,240 -o zoom.png
 # Drive inputs & pipe routes / JSONL
 lego-ctrl click 320 240                      # 1-flip settle between move and down (--settle-flips 0 to opt out)
 lego-ctrl click 320 240 --poll --hold-flips 2
+lego-ctrl mouse-down 320 240                 # press and hold mouse button across turns (--right or --button right)
+lego-ctrl mouse-up                           # release held mouse button (optional x y + --right/--button)
 lego-ctrl move 120 80
 lego-ctrl delta -12 8
 lego-ctrl drag 100 100 300 240
@@ -67,6 +69,8 @@ lego-ctrl export-route -o recorded.route
 lego-ctrl goal "Complete Mission 1"
 lego-ctrl thought "Navigating menu cursor to Start"
 lego-ctrl hint "Try the left button"
+lego-ctrl resume                             # switch step -> live / unpause (POST /api/mode)
+lego-ctrl pace 2.0                           # set live pace multiplier 0.25..=4.0 (POST /api/mode)
 lego-ctrl mode live 1.0
 lego-ctrl mode pause
 lego-ctrl mode shared
@@ -83,13 +87,15 @@ lego-ctrl mode close
 | `game_launch` | Launch a title with `--control` and wait for readiness |
 | `game_meta` | Fetch `/api/meta`, `/api/controls`, `/api/goals` |
 | `game_observe` | Fetch `/api/status` + `/api/frame.json` + native PNG `ImageContent` (`grid`/`cursor`/`crop`) |
-| `game_act` | Execute actions, batches, `step`/`wait`, `pipe` routes (`flip +N` relative, bare `flip N` absolute), or `clear_queue` + optional PNG `ImageContent` |
+| `game_act` | Execute actions (including raw `mouse_down`/`mouse_up`), batches, `step`/`wait`, `pipe` routes (`flip +N` relative, bare `flip N` absolute), or `clear_queue` + optional PNG `ImageContent` |
 | `game_inspect` | Read-only `mem`, `mem_map`, `mem_search`, `cpu`, `win32`, `files`, `file_read`, `fps` |
 | `game_goal` | Update `goal`, `subgoals`, `thought`, `commentary`, `notepad`, `user_hint` on `/watch` |
 | `game_checkpoint` | `bookmark`, `list_bookmarks`, `rewind`, `snapshot`, `restore`, `export_route` |
 | `game_mode` | `step`/`live`, `pause`/`resume`, `pace`, `owner` (`agent`/`human`/`shared`), `close` |
 
 ### Antigravity Setup (`~/.gemini/antigravity/mcp_config.json`)
+
+Build and link `lego-mcp` first (`lego-ship` + `ln -sf` above), then add `"lego-legacy"` to `~/.gemini/antigravity/mcp_config.json` and restart/reload Antigravity so the 9 `game_*` tools register:
 
 ```json
 {
@@ -119,6 +125,44 @@ Or add to `~/.claude.json` under `"mcpServers"`:
     }
   }
 }
+```
+
+### Generic Stdio MCP Client & Optional Overrides
+
+Any MCP client supporting stdio JSON-RPC 2.0 can launch `lego-mcp` directly. By default `lego-mcp` auto-discovers the latest live session in `~/.local/state/lego-legacy/sessions/`. Either filter auto-discovery by title via CLI `args` (`--title`):
+
+```json
+{
+  "mcpServers": {
+    "lego-legacy": {
+      "command": "/path/to/lego-mcp",
+      "args": ["--title", "lego-chess"]
+    }
+  }
+}
+```
+
+Or pin an explicit endpoint (which takes precedence over `--title` discovery) and optional Bearer token via `env` (`LEGO_CTRL_URL`, `LEGO_LEGACY_TOKEN`) or `--url` / `--token`:
+
+```json
+{
+  "mcpServers": {
+    "lego-legacy": {
+      "command": "/path/to/lego-mcp",
+      "args": [],
+      "env": {
+        "LEGO_CTRL_URL": "http://127.0.0.1:7777",
+        "LEGO_LEGACY_TOKEN": "<optional-bearer-token>"
+      }
+    }
+  }
+}
+```
+
+Quick stdio smoke test (confirms `lego-mcp` lists all 9 tools cleanly):
+
+```sh
+printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | lego-mcp
 ```
 
 ## Mac mini ↔ `mbp` Tailscale Watching & Control

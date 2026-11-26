@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Control API ergonomics (#352) strictly outside guest state (`core/src/control/{bus,http,json,stdio,timeline}.rs`):
+
+- **Compact `POST /api/agent-state` ack:** `Command::SetAgentState` now returns `ResponseData::None` (avoiding cloning the 200-entry `action_feed` on every patch), and `POST /api/agent-state` returns a compact JSON ack (`{"ok":true,"flip":...,"mode":...,"owner":...,"paused":...}`) without `action_feed` bloat while `GET /api/agent-state` stays unchanged.
+- **Raw `mouse_down` & `mouse_up` actions:** Adds `Action::MouseDown` and `Action::MouseUp` (with optional `x`/`y` move-before-event respecting `#327` relative/absolute `MouseMode` and `button`: `"left"` | `"right"`, default `"left"`) across `Timeline`, `POST /api/act`, and `stdio` JSONL, integrating cleanly with `#346` `held_buttons` and `clear-queue` cleanup.
+
 Control timeline chord prefix lead stagger (#348) strictly outside guest state (`core/src/control/{timeline,json}.rs`):
 
 - **Default 1-flip prefix lead/trail on multi-key `Action::Chord`:** Adds `lead_flips` (default `1` via JSON/CLI/MCP; `0` to opt out) so earlier prefix keys assert at `start_flip`, the final key asserts at `start_flip + lead_flips` and releases at `+ hold_flips`, and prefix keys release in reverse order `lead_flips` later (omitted for single-key or deduplicated-to-1 chords), advances `start_flip` past `last_polled_flip` so mid-frame `Live`-mode chords never collapse onto one flip (while preserving static poll-loop delivery for `lead_flips: 0` with `hold_ms`), arms `hold_ms` release windows at the final key's press flip (`Due::AfterFlipOrMs` with `min_poll` guard), and rejects negative/non-integer `lead_flips`.

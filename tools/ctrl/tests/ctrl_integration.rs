@@ -707,3 +707,123 @@ fn pipe_flags_help_and_clear_subcommand_work() {
     assert_eq!(targets[2], "/api/pipe?relative=0&wait=0");
     assert_eq!(targets[3], "/api/clear-queue");
 }
+
+#[test]
+fn resume_pace_and_mouse_down_up_subcommands_parse_and_dispatch() {
+    // 1. Help text documents resume, pace, mouse-down, and mouse-up.
+    let help = parse_args(["--help"]).unwrap();
+    let mut help_buf = Vec::new();
+    execute_cli(&help, &mut Cursor::new(&[][..]), &mut help_buf).unwrap();
+    let help_text = String::from_utf8(help_buf).unwrap();
+    for needle in ["resume", "pace <mult>", "mouse-down", "mouse-up"] {
+        assert!(
+            help_text.contains(needle),
+            "USAGE must mention `{needle}`:\n{help_text}"
+        );
+    }
+
+    // 2. Parsing & validation.
+    assert!(parse_args(["resume", "extra"]).is_err());
+    assert!(parse_args(["pace"]).is_err());
+    assert!(parse_args(["pace", "0"]).is_err());
+    assert!(parse_args(["pace", "-1.5"]).is_err());
+    assert!(parse_args(["pace", "NaN"]).is_err());
+    assert!(parse_args(["pace", "1e20"]).is_err());
+    assert!(parse_args(["pace", "2.0", "extra"]).is_err());
+    assert!(parse_args(["mode", "pace", "0"]).is_err());
+    assert!(parse_args(["mode", "pace", "2.0", "extra"]).is_err());
+    assert!(parse_args(["mode", "live", "-1"]).is_err());
+    assert!(parse_args(["mouse-down", "100"]).is_err());
+    assert!(parse_args(["mouse-down", "--button", "middle"]).is_err());
+    assert!(parse_args(["mouse-up", "100"]).is_err());
+    let overflow_err = parse_args(["mouse-down", "-999999999999", "20"]).unwrap_err();
+    assert!(
+        overflow_err.contains("invalid integer"),
+        "expected invalid integer error, got: {overflow_err}"
+    );
+
+    // Top-level and `act` prefix work; negative coords and flag-before-coords work.
+    for argv in [vec!["mouse-down"], vec!["act", "mouse-down"]] {
+        let p = parse_args(argv).unwrap();
+        let CliCommand::ActRaw { json } = p.command else {
+            panic!("expected ActRaw");
+        };
+        let obj = parse_json(&json).unwrap();
+        let map = obj.as_object().unwrap();
+        assert_eq!(map["action"].as_str(), Some("mouse_down"));
+        assert_eq!(map["button"].as_str(), Some("left"));
+        assert!(!map.contains_key("x"));
+    }
+
+    let p = parse_args(["mouse-down", "--right", "-10", "20"]).unwrap();
+    let CliCommand::ActRaw { json } = p.command else {
+        panic!("expected ActRaw");
+    };
+    let map = parse_json(&json).unwrap();
+    let map = map.as_object().unwrap();
+    assert_eq!(map["action"].as_str(), Some("mouse_down"));
+    assert_eq!(map["x"].as_i64(), Some(-10));
+    assert_eq!(map["y"].as_i64(), Some(20));
+    assert_eq!(map["button"].as_str(), Some("right"));
+
+    let p = parse_args(["mouse-up", "--button", "right"]).unwrap();
+    let CliCommand::ActRaw { json } = p.command else {
+        panic!("expected ActRaw");
+    };
+    let map = parse_json(&json).unwrap();
+    let map = map.as_object().unwrap();
+    assert_eq!(map["action"].as_str(), Some("mouse_up"));
+    assert_eq!(map["button"].as_str(), Some("right"));
+
+    // 3. Wire integration against MockServer.
+    let srv = MockServer::start(Some("sec-352"));
+    let url = srv.url();
+
+    let run = |extra: &[&str]| -> String {
+        let mut args = vec!["--url", &url, "--token", "sec-352"];
+        args.extend_from_slice(extra);
+        let parsed = parse_args(args).expect("parse");
+        let mut buf = Vec::new();
+        execute_cli(&parsed, &mut Cursor::new(&[][..]), &mut buf)
+            .unwrap_or_else(|e| panic!("cmd {extra:?} failed: {e}"));
+        String::from_utf8(buf).unwrap()
+    };
+
+    run(&["resume"]);
+    run(&["pace", "2.5"]);
+    run(&["mouse-down", "100", "200", "--right"]);
+    run(&["mouse-up", "--right"]);
+
+    let reqs = srv.requests();
+    assert_eq!(reqs.len(), 4);
+    assert_eq!(reqs[0].target, "/api/mode");
+    assert_eq!(
+        parse_json(std::str::from_utf8(&reqs[0].body).unwrap())
+            .unwrap()
+            .as_object()
+            .unwrap()["resume"]
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(reqs[1].target, "/api/mode");
+    assert_eq!(
+        parse_json(std::str::from_utf8(&reqs[1].body).unwrap())
+            .unwrap()
+            .as_object()
+            .unwrap()["pace"]
+            .as_f64(),
+        Some(2.5)
+    );
+    assert_eq!(reqs[2].target, "/api/act");
+    let md_body = parse_json(std::str::from_utf8(&reqs[2].body).unwrap()).unwrap();
+    assert_eq!(
+        md_body.as_object().unwrap()["action"].as_str(),
+        Some("mouse_down")
+    );
+    assert_eq!(reqs[3].target, "/api/act");
+    let mu_body = parse_json(std::str::from_utf8(&reqs[3].body).unwrap()).unwrap();
+    assert_eq!(
+        mu_body.as_object().unwrap()["action"].as_str(),
+        Some("mouse_up")
+    );
+}
