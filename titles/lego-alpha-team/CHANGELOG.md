@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Verifies `#327`'s `RelativeSteered` cursor tracking against the real retail disc (headless `ControlHost`, `--cursor` crosshair overlay, and live loopback `/api/stream` WebSocket v2 binary frames + `/watch` Take Over clicks across Main Menu, large single-call `mouse_delta` owed-delta chunking, edge-clamp recovery, Single Missions, and `M0010` Training Area), updates stale `#332` `GUIDE`/`AGENTS.md` cursor hazards, and adds disc-gated `tests/cursor_alignment.rs` (#332). Strictly outside guest state; no route moved.
+
 Documents explicit `flip +N` relative pipe syntax, absolute bare `flip N` default, `--relative`, and `lego-ctrl clear` (`POST /api/clear-queue`) in `AGENTS.md` (#346). Strictly outside guest state; no route moved.
 
 Fixes live-verified playbook and `GUIDE` inaccuracies (#351): `R` rotates 90° counter-clockwise (CCW) and needs `~0.5s` settle after opening the Unit Menu; `Z` zooms out cleanly (`PageDown` does not zoom out), `Q`/`W` orbit, arrows pan, and camera keys recenter the cursor; `Escape` opens the Mission Menu in normal missions (`M1010`/`M1020`) but is disabled during `M0010` Training Area (click Menu `(61, 430)`); documents piped relative-drag math (`0.5 px/raw_x`, `0.375 px/raw_y`; carry Action Bricks at `<= 8 screen px/flip` = `16 raw px/flip`). Strictly outside guest state; no route moved.

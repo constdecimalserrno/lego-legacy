@@ -166,14 +166,14 @@ pub const GUIDE: TitleGuide = TitleGuide {
     },
     controls: &[
         ControlHint {
-            input: "mouse_delta",
+            input: "mouse_delta / move",
             action: "Steer software cursor",
-            notes: "Required because `DDMouse` re-centers to `(320, 240)` every flip on a `1280x1280` virtual span (`2.0x` X, `8/3x` Y); cursor starts at `(0, 480)` bottom-left. Spread large moves across multiple flips (<= 140 px X, <= 80 px Y per flip) to avoid clamping, and confirm cursor position visually before clicking.",
+            notes: "`DDMouse` re-centers Win32 cursor to `(320, 240)` every flip on a `1280x1280` virtual span (`2.0x` X, `8/3x` Y); cursor starts at `(0, 480)` bottom-left (`(0, 479)` in `status.pointer_pos`). `ControlHost` tracks `visual_cursor_pos` independently of per-flip `SetCursorPos(320, 240)`, auto-chunks large `mouse_delta` moves across recenter flips, and translates `move`/`click`/`drag` targets into scaled relative deltas.",
         },
         ControlHint {
-            input: "Left click (in-place)",
+            input: "Left click",
             action: "Click UI / open Unit Menu",
-            notes: "Omit `x`/`y` (or pass `320, 240`) so no absolute jump occurs. Clicks menu/HUD buttons; clicking and releasing a movable Action Brick opens its Unit Menu (`RotateCW`, `RotateCCW`, `Info`, `Hint`, plus Belt/Cord/Rope attach or Mirror toggle — wait ~0.5s / ~15 flips to settle before pressing `R` for 90 deg CCW). Clicks during the intro translate to `Escape` (`click_in_a_movie`).",
+            notes: "Pass target `x`/`y` (auto-translated to multi-flip relative deltas) or omit `x`/`y` to click in place. Clicks menu/HUD buttons; clicking and releasing a movable Action Brick opens its Unit Menu (`RotateCW`, `RotateCCW`, `Info`, `Hint`, plus Belt/Cord/Rope attach or Mirror toggle — wait ~0.5s / ~15 flips to settle before pressing `R` for 90 deg CCW). Clicks during the intro translate to `Escape` (`click_in_a_movie`).",
         },
         ControlHint {
             input: "Left hold + relative drag",
@@ -222,10 +222,9 @@ pub const GUIDE: TitleGuide = TitleGuide {
         },
     ],
     hazards: &[
-        "Absolute `move`/`drag` or `click` with non-`(320, 240)` coordinates knocks the software cursor off target because `DDMouse` re-centers to `(320, 240)` every flip; always steer with `mouse_delta` and click in place.",
-        "Cursor clamping & drift (#332): a single flip clamps at `0..639 x 0..479` (max `+-159.5` visual px X, `+-89.6` Y per flip). Spread moves across `flips >= 4` and verify the drawn software cursor in a screenshot before every click.",
+        "Raw piped `#lego-legacy-route 1` `move` events are interpreted as relative deltas from `(320, 240)` because `DDMouse` re-centers every flip (`0.5 px/raw_x`, `0.375 px/raw_y`); via the control API (`move`/`click`/`drag`/`mouse_delta`), `ControlHost` tracks `visual_cursor_pos` from `(0, 479)` and chunks large deltas automatically (#327, #332).",
         "Leaving the software cursor within `16 px` of left/right or `12 px` of top/bottom edges continuously scrolls the mission camera.",
-        "Camera keys (`Z` zoom out, `Q`/`W` orbit, arrow keys pan) recenter the cursor; `PageDown` does not zoom out (use `Z`). Re-verify cursor position before clicking after using keyboard camera controls.",
+        "Camera keys (`Z` zoom out, `Q`/`W` orbit, arrow keys pan) internally warp `DDMouse` to `(320, 192)` in-mission without calling Win32 `SetCursorPos`; `PageDown` does not zoom out (use `Z`). Re-verify cursor position visually before clicking after using keyboard camera controls.",
         "Intended presentation rate is 30 Hz (33.3 ms per flip), not 60 Hz; size waits in 30-flip (1 s) multiples. No built-in fast-forward key exists; use control-host pace instead.",
         "Intro movie (`LMIINTRO.AVI`) refuses all keys and clicks before ~flip 440; `Space` is ignored for the entire intro (use `Escape` or click from ~flip 440).",
         "In Training Area (`M0010`), `Escape` is disabled (click Menu button `(61, 430)` instead; `Escape` works in normal missions `M1010`/`M1020`), and Tee Vee (`T0001`) locks picking to only the flashing step target after each spoken line finishes whole (Direction Tile `U0179` unlocks at step `220a`).",

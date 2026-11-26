@@ -24,13 +24,13 @@ Isometric 3D puzzle-action game (`LEGOATeam.exe`, NetImmerse / Direct3D 7). Plac
 
 `DDMouse` hides the OS cursor, draws a software cursor (`Cursor_Arrow.tga`), and calls `SetCursorPos(320, 240)` **every flip**. Each raw delivered pixel away from `(320, 240)` moves the drawn cursor by `1/1280` of the screen on both axes (`0.5 px` X, `0.375 px` Y on `640×480`).
 
-- **Steer with `mouse_delta`:** `ControlHost` auto-scales `(dx, dy)` by `(2.0, 2.6667)` so `dx`/`dy` are in visual `640×480` pixels. The cursor starts at **`(0, 480)` (bottom-left)** on the front end.
-- **Spread large moves across flips (avoid `#332` clamping):** One flip can only carry `±319` raw X (`±159.5` visual px) and `±239` raw Y (`±89.6` visual px) before clamping to `0..639 × 0..479`. Keep each flip under `±140 px` X and `±80 px` Y (e.g. `flips: 4..6` for cross-screen moves).
+- **Steer with `move`, `click`, or `mouse_delta`:** `ControlHost` tracks `visual_cursor_pos` from **`(0, 479)`** (matching Alpha Team's bottom-left `(0, 480)` start corner) independently of per-flip `SetCursorPos(320, 240)`, auto-scales `(dx, dy)` by `(2.0, 2.6667)`, auto-chunks large single-call `mouse_delta` moves across recenter flips, and translates `move`/`click`/`drag` targets into scaled relative deltas (`#327`, `#332`).
   ```sh
-  lego-ctrl delta 320 -240 --flips 5
+  lego-ctrl move 320 240
+  lego-ctrl delta 300 -200 --flips 1
   ```
-- **Confirm cursor visually before every click:** Take a screenshot (`lego-ctrl screenshot --grid` or `game_observe`) after steering and verify the drawn software cursor sits on the button or brick before clicking.
-- **Click in place (omit `x`/`y`):** Pass `{"action":"click","hold_flips":2}` (or `lego-ctrl click 320 240 --hold-flips 2`, which has zero offset from recenter). Passing non-center `x`/`y` to `click` or using `move`/`drag` injects an absolute `Input::Move` that `DDMouse` reads as a sudden relative jump off target.
+- **Confirm cursor visually after keyboard camera keys:** In-mission camera keys (`Z`, `Q`/`W`, arrows) internally warp `DDMouse` to `(320, 192)` without calling Win32 `SetCursorPos`; take a screenshot (`lego-ctrl screenshot --grid` or `game_observe`) after using keyboard camera controls before clicking.
+- **Click at coordinates or in place:** Pass target `x`/`y` (auto-translated to scaled relative deltas with button-down on arrival) or omit `x`/`y` (`{"action":"click","hold_flips":2}`) to click in place. Raw `#lego-legacy-route 1` `move` lines remain offsets from `(320, 240)`.
 - **Drag movable Action Bricks via piped route:** Steer onto the brick, verify visually, then pipe a `#lego-legacy-route 1` sequence holding Left button while emitting small offsets from `(320, 240)` and releasing `up` on the target pad (pattern in [`routes/first-mission.route`](routes/first-mission.route#L145-L162)). Use explicit `flip +N` offsets (e.g. `flip +0 down`, `flip +4 move 304 219`, `flip +12 up`) for relative scheduling from the current flip, or bare `flip N` for absolute flip numbers (matching committed `.route` files; pass `--relative` only if piping bare `flip 0`..`flip N` offsets). Run `lego-ctrl clear` (`POST /api/clear-queue`) if you ever need to cancel queued pipe events cleanly. Verified piped relative-drag scaling is `0.5 px/raw_x` and `0.375 px/raw_y`; carry Action Bricks at `<= 8 screen px/flip` (`= 16 raw px/flip` in X) so the brick stays attached to the pointer.
 - **Right-drag orbits the 3D camera:** Holding Right button (`down right` .. relative moves .. `up right`) orbits the mission camera around the puzzle room.
 
@@ -86,10 +86,10 @@ Isometric 3D puzzle-action game (`LEGOATeam.exe`, NetImmerse / Direct3D 7). Plac
 
 ## Hazards
 
-- **Cursor clamping & drift (`#332`):** Single-flip `mouse_delta` beyond `±159.5` X / `±89.6` Y visual px clips silently; absolute `move`/`drag` or `click` with non-`(320, 240)` coordinates jumps the pointer off target. Always use multi-flip `mouse_delta`, verify the drawn cursor in a screenshot, and click in place.
+- **Raw route offsets vs. control API (`#327`, `#332`):** Control API `move`/`click`/`drag`/`mouse_delta` track `visual_cursor_pos` from `(0, 479)` and chunk large deltas across recenter flips automatically; raw `#lego-legacy-route 1` `move` events are still relative offsets from `(320, 240)`.
 - **Accidental edge-scrolling:** Parking the cursor in the outer `16 px` left/right or `12 px` top/bottom margin continuously pans the camera. Move back toward center after edge-panning.
 - **30 Hz timing:** Every second of declared time is 30 flips (`33.3 ms/flip`), not 60.
-- **Camera keys recenter the cursor:** Pressing `Z` (zoom out; `PageDown` does not zoom out), `Q`/`W` (orbit), or arrow keys (pan) recenters the cursor — re-verify cursor position visually before clicking.
+- **Camera keys recenter the cursor:** Pressing `Z` (zoom out; `PageDown` does not zoom out), `Q`/`W` (orbit), or arrow keys (pan) internally warps `DDMouse` to `(320, 192)` in-mission without calling Win32 `SetCursorPos` (`Tab` does not warp) — re-verify cursor position visually before clicking.
 - **Training Area script & `Escape` locks:** In `M0010`, `Escape` is disabled (click the Menu button at `(61, 430)` instead; `Escape` works in normal missions `M1010`/`M1020`). Tee Vee (`T0001`) speaks each step and flashes the single permitted target; nothing else can be picked until step `220a` unlocks Direction Tile `U0179`, and each step only advances after the voice line finishes whole (`#85`, `#92`).
 - **Intro lock-out:** Clicks and keys before ~flip `440` are ignored by the game (`#66`).
 - **Display options:** Keep `640×480` 16-bit in Options (higher resolutions or 32-bit BPP break display output; `Game.txt` stores the override).
@@ -106,4 +106,4 @@ Isometric 3D puzzle-action game (`LEGOATeam.exe`, NetImmerse / Direct3D 7). Plac
 
 - Title declaration & `GUIDE`: [`src/lib.rs`](src/lib.rs)
 - Verified headless routes: [`routes/menu.route`](routes/menu.route), [`routes/first-mission.route`](routes/first-mission.route), [`routes/select-adventure.route`](routes/select-adventure.route)
-- Integration tests & frame constants: [`tests/alpha_team.rs`](tests/alpha_team.rs)
+- Integration tests & frame constants: [`tests/alpha_team.rs`](tests/alpha_team.rs), [`tests/cursor_alignment.rs`](tests/cursor_alignment.rs)
