@@ -18,7 +18,7 @@ Playable RTS guide for driving `lego-rock-raiders` via `lego-ctrl` or `lego-mcp`
 1. Launch in `step` mode (`lego-ctrl launch lego-rock-raiders --mode step` or `game_launch`), then read `game_meta` for live `controls` and `goals`.
 2. Skip the two intro movies (`lmi640.avi`, `intro.avi`) with `Space`, `Escape`, or a left-click, then `wait-change` through the loading screen until the Main Menu renders (flip `4603` if unskipped).
 3. Click `Start Game` at `(320, 222)`, then step ~80 flips through the 3D rockfall until the Level Select cavern map settles (ready by flip `4700`).
-4. Click Mission 1 (**Driller Night!**) at `(155, 160)`, wait through the loading screen until the Mission Brief overlays the 3D cavern, then press `Space` to advance and dismiss each briefing page.
+4. On Level Select, un-scrolled `(155, 160)` is **`1. Moving Rock Raiders`** (Training Mission 1). To launch Campaign Mission 1 (**Driller Night!**), scroll the Level Select map down (`move 320 478`), return the pointer to the interior, and click the center cavern at `(315, 180)`; wait through the loading screen until the Mission Brief overlays the 3D cavern, then press `Space` to advance and dismiss each briefing page.
 5. Loop in mission: **observe** (`screenshot --grid --cursor`) → **issue orders** (clicks or `chord F2,<Key>`) → **park pointer in safe interior `(320, 240)`** → **step 30–90 flips** → repeat until the mission reward screen appears.
 
 Done when the current rung on the Progression Ladder holds (confirmed by screenshot, crystal bar, or reward screen).
@@ -89,7 +89,8 @@ Select a Raider or Vehicle, switch view with `chord F2,1` (Eye View) or `chord F
 | Element | Screen Rect / Center (`x, y`) |
 | --- | --- |
 | Main Menu: `Start Game` | `(320, 222)` (`Load` ~`y=260`, `Training` ~`y=300`, `Credits` ~`y=340`, `Quit` ~`y=380`) |
-| Level Select: Mission 1 (**Driller Night!**) | `(155, 160)` (top-left open cavern); Back button `(6..46, 436..476)` |
+| Level Select: Training Mission 1 (**1. Moving Rock Raiders**) | `(155, 160)` (un-scrolled top-left cavern) |
+| Level Select: Mission 1 (**Driller Night!**) | Scroll down (`move 320 478`), then center cavern `(315, 180)`; Back button `(6..46, 436..476)` |
 | Radar Viewport | `(16..167, 13..164)` (`151×151`); Toggle `(187, 49)` |
 | Radar Buttons | Map View `(32, 183)` · Tagged View `(68, 183)` · Zoom In `(108, 183)` · Zoom Out `(144, 183)` |
 | Top Panel (`330, 0`) | Action Stations `(421, 12)` · Options `(458, 12)` · Priorities `(495, 12)` |
@@ -126,7 +127,7 @@ Select a Raider or Vehicle, switch view with `chord F2,1` (Eye View) or `chord F
 | Goal ID | Milestone | Completion Criterion |
 | --- | --- | --- |
 | `boot-to-level-select` | `first_light` | Skip intros, click `Start Game` `(320, 222)`, wait past 3D rockfall to the Level Select cavern map |
-| `launch-mission-1` | `first_light` | Click Mission 1 `(155, 160)`, dismiss Mission Brief with `Space`, confirm active 3D cavern play with Raiders moving |
+| `launch-mission-1` | `first_light` | Scroll Level Select down (`move 320 478`), click Campaign Mission 1 (**Driller Night!**) at center cavern `(315, 180)` (un-scrolled `(155, 160)` is Training Mission 1 *1. Moving Rock Raiders*), dismiss Mission Brief with `Space`, confirm active 3D cavern play with Raiders moving |
 | `mission-1-driller-night` | `playable` | Drill cavern walls (`F2+W`), locate the Tool Store, clear rubble, and collect all 5 Energy Crystals in **Driller Night!** |
 | `advance-to-mission-2` | `playable` | Clear Mission 1's reward screen, save slot, and launch the next unlocked mission: **The Path To Power** (`Level05`, build Power Station via upgraded Tool Store, Power Paths & Teleport Pad) or **Rubble Trouble!** (`Level03`, reinforce walls, clear rubble, collect 5 crystals) |
 | `campaign-complete` | `complete` | Complete all 25 campaign missions (`Level01` **Driller Night!** through `Level25` **Rocky Horror**) with profile saves in `C:\LEGORR\DATA\SAVES\` |

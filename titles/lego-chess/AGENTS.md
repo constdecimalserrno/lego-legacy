@@ -14,8 +14,8 @@ LEGO Chess uses two distinct mouse-handling loops. Pick the matching primitive e
 
 | Target | Required primitive | CLI example | Why |
 | --- | --- | --- | --- |
-| UI buttons, green ticks, menus, dialogs, top HUD icons | `click_poll` (`hold_ms: 150`) | `lego-ctrl click 590 410 --poll --hold-ms 150` | Release loops spin waiting for button-up without flipping frames; standard `click` hangs. |
-| 3D chessboard squares, expanded Rotate arrows, Throne Room world objects | standard `click` (`hold_flips: 3..6`) | `lego-ctrl click 356 308 --hold-flips 4` | Board hit-testing runs on presented flips; `click_poll` misfires or drops clicks on 3D squares. |
+| UI buttons, green ticks, menus, dialogs, top HUD icons, Throne Room Chess Table | `click_poll` (`hold_ms: 150`) | `lego-ctrl click 590 410 --poll --hold-ms 150` | Release loops spin waiting for button-up without flipping frames; standard `click` hangs (Throne Room Chess Table spins `+155s` `declared_ms`). |
+| 3D chessboard squares, expanded Rotate arrows | standard `click` (`hold_flips: 3..6`) | `lego-ctrl click 356 308 --hold-flips 4` | Board hit-testing runs on presented flips; `click_poll` misfires or drops clicks on 3D squares. |
 
 ## 3D Camera & Board View Controls
 
@@ -55,7 +55,7 @@ The room camera pans toward the pointer, shifting what sits under it. Always `mo
 
 | Object | Location | Destination |
 | --- | --- | --- |
-| Chess Table | `(385, 285)` after camera settles (`click --hold-flips 2`) | **Quick Game** setup |
+| Chess Table | `(385, 285)` after camera settles (`click_poll` `--poll --hold-ms 150`; standard `click` hangs in poll-release loop and spins `+155s` `declared_ms`) | **Quick Game** setup |
 | Red Curtains | Back wall behind King | **Story Game** (Wild West & Pirates campaigns) |
 | Open Book on Pedestal | Mid-right behind table | **How to Play** (King's Study: Basic, Advanced, Tactics) |
 | Green Crystal Ball | Far right on stand | **Settings** (Graphics, Sound, Gameplay) |
@@ -110,14 +110,14 @@ Switch to 2D whenever exact square targeting matters, then return to 3D via `cli
 ## Hazards & Recovery
 
 - **Clean shutdown only outside a match:** `Lego Chess.exe` ignores `WM_QUIT` mid-match and hits the 5 s close grace. Resign (`Escape` poll-release → `click_poll 360 232`) or finish via Checkmate green tick (`click_poll 320 232`) before sending `close`.
-- **Click-mode mismatch:** Using standard `click` on UI buttons hangs; using `click_poll` on 3D board squares misfires.
+- **Click-mode mismatch:** Using standard `click` on UI buttons or the Throne Room Chess Table `(385, 285)` hangs in the poll-release loop (`+155s` `declared_ms`); using `click_poll` on 3D board squares misfires.
 - **Capture cartoons missing:** Verify `Show cartoons` is enabled (`F1` → Graphics) and both sides use the same Western or Pirates piece set (mismatched sets and Classic Staunton skip cartoons).
 - **AI turn wait:** After a legal White move, wait for piece walk animation + AI think time + Black piece animation (`wait-settled` or `wait 60..150`; up to ~300 flips at difficulty `100` out of book) before clicking the next square.
 
 ## Concrete Agent Goals
 
 1. **Create Profile & Enter Throne Room (`playable`):** Skip Krisalis' logo and intro with `Space` (`--hold-ms 150`), type a player name (`--flip-gap 4`), confirm `(576, 420)` twice, and reach the Throne Room with the King visible.
-2. **Play 3D Chess vs AI & Trigger Capture Cartoons (`playable`):** Open Quick Game `(385, 285)` → green tick `(590, 410)`, play legal moves (`click --hold-flips 4`), execute a capture in matched Western or Pirates sets, and observe the 3D capture cartoon (or skip with `Space` poll-release).
+2. **Play 3D Chess vs AI & Trigger Capture Cartoons (`playable`):** Open Quick Game via Throne Room Chess Table `(385, 285)` (`click_poll --hold-ms 150`) → green tick `(590, 410)`, play legal moves (`click --hold-flips 4`), execute a capture in matched Western or Pirates sets, and observe the 3D capture cartoon (or skip with `Space` poll-release).
 3. **Inspect 3D Camera & Toggle 2D/3D View (`playable`):** Expand Rotate/Tilt `(320, 60)`, orbit with `(282, 60)` / `LeftShift+Left`, tilt with `(320, 24)`, snap back via `(320, 60)`, toggle 2D via `(440, 60)`, and return to 3D via `(585, 200)`.
 4. **Checkmate AI in Western & Pirates Themes (`complete`):** Defeat the Computer AI by checkmate in default Western and in Pirates (1 click on Theme `(320, 70)`), reaching `"Checkmate! Congratulations, you win!"` and returning to the Throne Room via `(320, 232)`.
 5. **Save & Reload Match Across Runs (`complete`):** Open `!` Options `(200, 60)` → Save Game `(282, 258)`, clear `....` (4× `Backspace`), type a label (`--flip-gap 4`), confirm `(392, 194)`, resign cleanly (`Escape` → `(360, 232)`), relaunch with the same `--data-root`, reload via Options → Load Game `(360, 258)` → `(392, 194)`, and play another legal move on the restored board.

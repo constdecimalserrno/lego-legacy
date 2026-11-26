@@ -96,7 +96,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Left click / Left drag",
             action: "Select / interact / box-select",
-            notes: "Select raiders, vehicles, buildings, walls, floor tiles, or HUD icons; drag to box-select Raiders; clicks skip intro movies directly (`Start Game` at `(320, 222)`, Mission 1 at `(155, 160)`).",
+            notes: "Select raiders, vehicles, buildings, walls, floor tiles, or HUD icons; drag to box-select Raiders; clicks skip intro movies directly (`Start Game` at `(320, 222)`; un-scrolled Level Select `(155, 160)` is Training Mission 1 `1. Moving Rock Raiders`, while Campaign Mission 1 `Driller Night!` requires scrolling down via `(320, 478)` to center cavern `(315, 180)`).",
         },
         ControlHint {
             input: "Right click",
@@ -136,7 +136,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Border move (x<=3 || x>=636 || y<=3 || y>=476)",
             action: "Edge-scroll map",
-            notes: "Pans the cavern camera (and scrolls the Level Select map vertically, e.g. `(320, 478)`); return pointer to `(320, 240)` to stop scrolling.",
+            notes: "Pans the cavern camera (and scrolls the Level Select map vertically, e.g. `(320, 478)` to reach Campaign Mission 1 `Driller Night!` at `(315, 180)`); return pointer to `(320, 240)` to stop scrolling.",
         },
         ControlHint {
             input: "F2+W / F2+Q / F2+R / F2+E",
@@ -198,7 +198,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
             id: "launch-mission-1",
             name: "Launch Mission 1: Driller Night",
             milestone: Milestone::FirstLight,
-            description: "Click Mission 1 at (155, 160), dismiss the Mission Brief pages with Space, and reach active 3D cavern gameplay.",
+            description: "Scroll the Level Select map down via (320, 478), return pointer to interior, click Campaign Mission 1 (Driller Night!) at center cavern (315, 180) (un-scrolled (155, 160) is Training Mission 1: 1. Moving Rock Raiders), dismiss the Mission Brief pages with Space, and reach active 3D cavern gameplay.",
         },
         Goal {
             id: "mission-1-driller-night",
@@ -248,6 +248,28 @@ mod tests {
             assert!(goal_ids.insert(goal.id), "duplicate goal id {}", goal.id);
         }
         assert!(goal_ids.contains("mission-1-driller-night"));
+        let launch_m1 = GUIDE
+            .goals
+            .iter()
+            .find(|g| g.id == "launch-mission-1")
+            .expect("launch-mission-1 goal");
+        assert!(
+            launch_m1.description.contains("(320, 478)")
+                && launch_m1.description.contains("(315, 180)")
+                && launch_m1.description.contains("Moving Rock Raiders"),
+            "launch-mission-1 must document scroll to (315, 180) and distinguish Training Mission 1 at (155, 160)"
+        );
+        let click_hint = GUIDE
+            .controls
+            .iter()
+            .find(|c| c.input.contains("Left click"))
+            .expect("Left click control hint");
+        assert!(
+            click_hint.notes.contains("(320, 478)")
+                && click_hint.notes.contains("(315, 180)")
+                && click_hint.notes.contains("Moving Rock Raiders"),
+            "Left click hint must distinguish Training Mission 1 at (155, 160) from Campaign Mission 1 at (315, 180) (#351)"
+        );
 
         for hint in GUIDE.controls {
             assert!(!hint.input.is_empty());

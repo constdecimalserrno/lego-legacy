@@ -146,12 +146,12 @@ pub const GUIDE: TitleGuide = TitleGuide {
     controls: &[
         ControlHint {
             input: "click_poll (--poll --hold-ms 150)",
-            action: "Click UI buttons, green ticks, menus, HUD icons & dialogs",
-            notes: "Required on UI controls because button release loops spin without presenting frames. Do NOT use on 3D chessboard squares.",
+            action: "Click UI buttons, green ticks, menus, HUD icons, dialogs & Throne Room Chess Table",
+            notes: "Required on UI controls and the Throne Room Chess Table (385,285) because button release loops spin without presenting frames (standard click hangs in the poll-release loop and spins +155s declared_ms). Do NOT use on 3D chessboard squares.",
         },
         ControlHint {
             input: "click --hold-flips 3..6",
-            action: "Select & move pieces on 3D chessboard squares (and Throne Room objects)",
+            action: "Select & move pieces on 3D chessboard squares",
             notes: "Standard flip-held click (NOT click_poll). On default 3D camera, rank centers compress upward: Rank 1 y=349, Rank 2 y=308, Rank 3 y=272, Rank 4 y=241, Rank 5 y=214, Rank 7 y=180.",
         },
         ControlHint {
@@ -192,11 +192,11 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Throne Room & Match HUD hotspots",
             action: "Navigate hub, Quick Game setup, Advisor Help & ! Options",
-            notes: "Throne Room (move + wait 25 flips for camera pan): Chess Table (385,285)=Quick Game, Curtains=Story, Book=Tutorial, Crystal Ball=Settings, Trapdoor=Quit, Scrapbook/Scissors=Scrapbook, Chest=Load, Quill/Inkpot=Switch Player. Quick Game: Theme (320,70) cycles Western->Pirates->Classic, Black AI/Human (520,180), Start (590,410). Match 3D HUD: White Advisor Help (60,75) [Pointer/Moves/Hint/Undo], ! Options (200,60) [Save (282,258), Load (360,258), confirm (392,194)].",
+            notes: "Throne Room (move + wait 25 flips for camera pan): Chess Table (385,285, click_poll --hold-ms 150)=Quick Game, Curtains=Story, Book=Tutorial, Crystal Ball=Settings, Trapdoor=Quit, Scrapbook/Scissors=Scrapbook, Chest=Load, Quill/Inkpot=Switch Player. Quick Game: Theme (320,70) cycles Western->Pirates->Classic, Black AI/Human (520,180), Start (590,410). Match 3D HUD: White Advisor Help (60,75) [Pointer/Moves/Hint/Undo], ! Options (200,60) [Save (282,258), Load (360,258), confirm (392,194)].",
         },
     ],
     hazards: &[
-        "UI buttons, menus, dialogs, and Space skips require poll-release (`click_poll` / `--hold-ms 150`) because release loops spin without flipping; 3D chessboard squares require standard `click --hold-flips 3..6` (NOT `click_poll`).",
+        "UI buttons, menus, dialogs, the Throne Room Chess Table (385,285), and Space skips require poll-release (`click_poll` / `--hold-ms 150`) because release loops spin without flipping (standard click on the Chess Table hangs and spins +155s declared_ms); 3D chessboard squares require standard `click --hold-flips 3..6` (NOT `click_poll`).",
         "Never send `close` mid-match (the game ignores `WM_QUIT` and hits the 5 s close grace); resign via Escape -> green tick (360,232) or finish via checkmate green tick (320,232) to return to Quick Game / Throne Room first.",
         "Default 3D camera foreshortens ranks sharply (Rank 1 y=349, Rank 2 y=308, Rank 3 y=272, Rank 4 y=241, Rank 5 y=214, Rank 7 y=180); toggle 2D view at (440,60) for uniform 44x40 px squares (return to 3D at (585,200)).",
         "Throne Room camera tracks the mouse pointer — move to an object, wait ~25 flips for the pan to settle, observe, then click.",
@@ -214,7 +214,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
             id: "quick-game-checkmate",
             name: "Play 3D Quick Game vs AI with capture cartoons to checkmate",
             milestone: Milestone::Playable,
-            description: "Click the Throne Room Chess Table (385,285) -> Start (590,410), play legal 3D chess moves (`click --hold-flips 4`), trigger a 3D capture cartoon, and win by checkmate.",
+            description: "Click the Throne Room Chess Table (385,285) with click_poll (--hold-ms 150) -> Start (590,410), play legal 3D chess moves (`click --hold-flips 4`), trigger a 3D capture cartoon, and win by checkmate.",
         },
         Goal {
             id: "camera-and-view-inspection",
@@ -254,15 +254,22 @@ mod tests {
                 requires_poll_release: true
             }
         );
-        // Critical click distinction: UI uses click_poll, 3D squares use standard flip-held click.
-        assert!(GUIDE
-            .controls
-            .iter()
-            .any(|c| c.input.contains("click_poll") && c.notes.contains("Do NOT use on 3D")));
-        assert!(GUIDE
-            .controls
-            .iter()
-            .any(|c| c.input.contains("hold-flips 3..6") && c.action.contains("3D chessboard")));
+        assert!(
+            GUIDE.controls.iter().any(|c| {
+                c.input.contains("click_poll")
+                    && c.notes.contains("Do NOT use on 3D")
+                    && c.notes.contains("385,285")
+            }),
+            "click_poll hint must cover UI and Throne Room Chess Table (385,285) and exclude 3D squares (#351)"
+        );
+        assert!(
+            GUIDE.controls.iter().any(|c| {
+                c.input.contains("hold-flips 3..6")
+                    && c.action.contains("3D chessboard")
+                    && !c.action.contains("Throne Room")
+            }),
+            "standard flip-held click hint must cover 3D chessboard squares without Throne Room (#351)"
+        );
         assert!(GUIDE
             .controls
             .iter()
