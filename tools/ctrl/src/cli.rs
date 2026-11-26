@@ -37,7 +37,9 @@ Actions & piping:
   wait <flips> [--ms N]
   wait-change [max_flips] [--min-diff PCT]
   wait-settled [max_flips] [--stable-flips N] [--max-diff PCT]
-  pipe <file | -> [--absolute] [--no-wait]         pipe route or JSONL into /api/pipe
+  pipe <file | -> [--relative|--absolute] [--no-wait]
+                                                   pipe route or JSONL into /api/pipe (`lego-ctrl pipe --help`)
+  clear                                            drop pending queued actions (/api/clear-queue)
 
 Read-only introspection:
   mem <addr> <len> [--fmt hex|raw|u8|u16|u32|i32|f32|cstr] [-o path]
@@ -54,6 +56,49 @@ Checkpoints & agent state:
   export-route [-o path]                           export recorded #lego-legacy-route 1
   goal <text> | thought <text> | hint <text>       update live /watch agent state
   mode <step|live|pause|resume|agent|human|shared|close|pace> [pace] [--force]";
+
+pub const PIPE_USAGE: &str = "\
+usage: lego-ctrl pipe <file | -> [--relative|--absolute] [--no-wait]
+
+Pipe a `#lego-legacy-route 1` file/snippet or a JSONL command stream into POST /api/pipe.
+
+Flip addressing for route payloads:
+  flip N ...       Absolute flip number by default (matches committed `.route` files
+                   and `export-route`). Events with `N <= current_flip` fire immediately
+                   on the next poll.
+  flip +N ...      Always relative to the emulator's current flip (`current_flip + N`),
+                   even without `--relative`.
+
+Flags:
+  --relative       Treat bare `flip N` numbers as relative offsets (`?relative=1`).
+  --absolute       Explicitly treat bare `flip N` numbers as absolute (`?relative=0`, default).
+  --no-wait        Return immediately after scheduling without waiting for completion (`wait=0`).
+  -h, --help       Show this help text.";
+
+pub const CLEAR_USAGE: &str = "\
+usage: lego-ctrl clear
+
+Drop all pending scheduled actions via POST /api/clear-queue (returns `cleared` count),
+cancel any runaway step budget or active wait, and release already-held keys/buttons
+whose queued release was dropped without perturbing running emulation.";
+
+/// Choose `Content-Type` for a `/api/pipe` payload (`text/plain` for routes,
+/// `application/x-ndjson` for JSONL).
+#[must_use]
+pub fn pipe_content_type(payload: &str) -> &'static str {
+    let trimmed = payload.trim();
+    let is_route = trimmed.starts_with("#lego-legacy-route")
+        || trimmed
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .is_some_and(|l| l.split_whitespace().next() == Some("flip"));
+    if is_route {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/x-ndjson; charset=utf-8"
+    }
+}
 
 /// Global target flags accepted before the subcommand.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,7 +117,7 @@ pub struct ParsedCli {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CliCommand {
-    Help,
+    Help(&'static str),
     Version,
     Sessions,
     Launch(LaunchOptions),
@@ -104,9 +149,10 @@ pub enum CliCommand {
     },
     Pipe {
         source: String,
-        absolute: bool,
+        relative: Option<bool>,
         no_wait: bool,
     },
+    Clear,
     Mem {
         addr: String,
         len: usize,
@@ -205,7 +251,7 @@ where
                 "-h" | "--help" => {
                     return Ok(ParsedCli {
                         global,
-                        command: CliCommand::Help,
+                        command: CliCommand::Help(USAGE),
                     });
                 }
                 "-V" | "--version" => {
@@ -222,13 +268,17 @@ where
     let Some(cmd) = raw.get(i).map(String::as_str) else {
         return Ok(ParsedCli {
             global,
-            command: CliCommand::Help,
+            command: CliCommand::Help(USAGE),
         });
     };
     let rest = &raw[i + 1..];
 
     let command = match cmd {
-        "help" => CliCommand::Help,
+        "help" => CliCommand::Help(match rest.first().map(String::as_str) {
+            Some("pipe") => PIPE_USAGE,
+            Some("clear") => CLEAR_USAGE,
+            _ => USAGE,
+        }),
         "sessions" => {
             expect_no_extra("sessions", rest)?;
             CliCommand::Sessions
@@ -261,6 +311,7 @@ where
         "click" | "move" | "delta" | "drag" | "key" | "chord" | "type" | "step" | "wait"
         | "wait-change" | "wait-settled" | "settle" => parse_friendly_action(cmd, rest)?,
         "pipe" => parse_pipe(rest)?,
+        "clear" => parse_clear(rest)?,
         "mem" => parse_mem(rest)?,
         "mem-map" => {
             expect_no_extra("mem-map", rest)?;
@@ -890,23 +941,54 @@ fn parse_friendly_action(kind: &str, args: &[String]) -> Result<CliCommand, Stri
 }
 
 fn parse_pipe(args: &[String]) -> Result<CliCommand, String> {
-    let Some(source) = args.first() else {
-        return Err("`pipe` requires `<file | ->`".to_owned());
-    };
-    let mut absolute = false;
+    if args.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
+        return Ok(CliCommand::Help(PIPE_USAGE));
+    }
+    let mut source: Option<String> = None;
+    let mut relative: Option<bool> = None;
     let mut no_wait = false;
-    for flag in &args[1..] {
-        match flag.as_str() {
-            "--absolute" => absolute = true,
+    for arg in args {
+        match arg.as_str() {
+            "--relative" => {
+                if relative == Some(false) {
+                    return Err("`pipe` cannot combine `--relative` and `--absolute`".to_owned());
+                }
+                relative = Some(true);
+            }
+            "--absolute" => {
+                if relative == Some(true) {
+                    return Err("`pipe` cannot combine `--relative` and `--absolute`".to_owned());
+                }
+                relative = Some(false);
+            }
             "--no-wait" => no_wait = true,
-            other => return Err(format!("unknown `pipe` flag `{other}`")),
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown `pipe` flag `{other}`"));
+            }
+            path => {
+                if source.is_some() {
+                    return Err(format!("unexpected extra `pipe` argument `{path}`"));
+                }
+                source = Some(path.to_owned());
+            }
         }
     }
+    let Some(source) = source else {
+        return Err("`pipe` requires `<file | ->` (run `lego-ctrl pipe --help`)".to_owned());
+    };
     Ok(CliCommand::Pipe {
-        source: source.clone(),
-        absolute,
+        source,
+        relative,
         no_wait,
     })
+}
+
+fn parse_clear(args: &[String]) -> Result<CliCommand, String> {
+    if args.iter().any(|a| matches!(a.as_str(), "-h" | "--help")) {
+        return Ok(CliCommand::Help(CLEAR_USAGE));
+    }
+    expect_no_extra("clear", args)?;
+    Ok(CliCommand::Clear)
 }
 
 fn parse_mem(args: &[String]) -> Result<CliCommand, String> {
@@ -1195,8 +1277,8 @@ pub fn execute_cli<R: Read, W: Write>(
     stdout: &mut W,
 ) -> Result<(), String> {
     match &parsed.command {
-        CliCommand::Help => {
-            writeln!(stdout, "{USAGE}").map_err(|e| e.to_string())?;
+        CliCommand::Help(text) => {
+            writeln!(stdout, "{text}").map_err(|e| e.to_string())?;
             return Ok(());
         }
         CliCommand::Version => {
@@ -1294,7 +1376,7 @@ pub fn execute_cli<R: Read, W: Write>(
         }
         CliCommand::Pipe {
             source,
-            absolute,
+            relative,
             no_wait,
         } => {
             let payload = if source == "-" {
@@ -1307,16 +1389,10 @@ pub fn execute_cli<R: Read, W: Write>(
                 std::fs::read_to_string(source)
                     .map_err(|e| format!("failed to read `{source}`: {e}"))?
             };
-            let trimmed = payload.trim();
-            let content_type =
-                if trimmed.starts_with("#lego-legacy-route") || trimmed.starts_with("flip ") {
-                    "text/plain; charset=utf-8"
-                } else {
-                    "application/x-ndjson; charset=utf-8"
-                };
+            let content_type = pipe_content_type(&payload);
             let mut qs = Vec::new();
-            if *absolute {
-                qs.push("relative=0");
+            if let Some(rel) = *relative {
+                qs.push(if rel { "relative=1" } else { "relative=0" });
             }
             if *no_wait {
                 qs.push("wait=0");
@@ -1331,6 +1407,7 @@ pub fn execute_cli<R: Read, W: Write>(
                 stdout,
             )
         }
+        CliCommand::Clear => write_text_resp(client.post_json("/api/clear-queue", "{}")?, stdout),
         CliCommand::Mem {
             addr,
             len,
@@ -1420,7 +1497,10 @@ pub fn execute_cli<R: Read, W: Write>(
             write_text_resp(client.post_json("/api/agent-state", &body)?, stdout)
         }
         CliCommand::Mode { json } => write_text_resp(client.post_json("/api/mode", json)?, stdout),
-        CliCommand::Help | CliCommand::Version | CliCommand::Sessions | CliCommand::Launch(_) => {
+        CliCommand::Help(_)
+        | CliCommand::Version
+        | CliCommand::Sessions
+        | CliCommand::Launch(_) => {
             unreachable!()
         }
     }

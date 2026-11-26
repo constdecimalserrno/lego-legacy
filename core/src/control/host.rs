@@ -327,6 +327,9 @@ impl<H: Host> Host for ControlHost<H> {
         let owner = state.owner;
 
         let mut out = Vec::new();
+        if !state.pending_releases.is_empty() {
+            out.append(&mut state.pending_releases);
+        }
         if matches!(owner, InputOwner::Human | InputOwner::Shared) {
             for ev in &human {
                 if let Input::Move { x, y } = *ev {

@@ -14,3 +14,7 @@ Initial zero-crate `lego-ctrl` CLI and shared HTTP/1.1 + UDS client library (#31
 - Full CLI surface for status, metadata, controls, goals, fps, watch URL, PNG screenshots,
   action primitives (including `click --settle-flips N`, #344, and `chord --lead-flips N`, #348), route/JSONL piping, read-only memory/CPU/Win32/file inspection,
   bookmarks/rewind/snapshot/restore/route export, agent state, and execution mode control.
+  action primitives (including `click --settle-flips N`, #344), route/JSONL piping (`pipe --relative|--absolute|--no-wait`, `pipe --help`,
+  explicit `flip +N` relative offsets with absolute bare `flip N` default), queue clearing
+  (`clear` -> `POST /api/clear-queue`), read-only memory/CPU/Win32/file inspection,
+  bookmarks/rewind/snapshot/restore/route export, agent state, and execution mode control (#346).

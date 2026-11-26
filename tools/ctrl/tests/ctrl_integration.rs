@@ -223,6 +223,7 @@ fn write_mock_resp<W: Write>(stream: &mut W, req: &RecordedReq, expected_token: 
         }
         ("POST", "/api/act")
         | ("POST", "/api/pipe")
+        | ("POST", "/api/clear-queue")
         | ("POST", "/api/step")
         | ("POST", "/api/wait")
         | ("POST", "/api/mode")
@@ -632,4 +633,77 @@ fn lego_ctrl_end_to_end_covers_all_endpoints_auth_and_binary_outputs() {
     assert!(pipe_req.body.starts_with(b"#lego-legacy-route 1"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pipe_flags_help_and_clear_subcommand_work() {
+    // 1. `lego-ctrl pipe --help`, `help pipe`, and `clear --help` print addressing/clear docs cleanly.
+    for argv in [vec!["pipe", "--help"], vec!["help", "pipe"]] {
+        let help = parse_args(argv).expect("pipe help parses");
+        let mut help_out = Vec::new();
+        execute_cli(&help, &mut Cursor::new(&[][..]), &mut help_out).expect("pipe help executes");
+        let help_text = String::from_utf8(help_out).unwrap();
+        assert!(
+            help_text.contains("+N")
+                && help_text.contains("--relative")
+                && help_text.contains("--absolute"),
+            "pipe help must explain +N, --relative, and --absolute: {help_text}"
+        );
+    }
+    let clear_help = parse_args(["clear", "--help"]).expect("clear --help parses");
+    let mut clear_help_out = Vec::new();
+    execute_cli(&clear_help, &mut Cursor::new(&[][..]), &mut clear_help_out)
+        .expect("clear --help executes");
+    assert!(String::from_utf8(clear_help_out)
+        .unwrap()
+        .contains("/api/clear-queue"));
+
+    // Route content-type helper handles leading comments and tab-separated `flip\t+0`.
+    assert!(
+        lego_ctrl::cli::pipe_content_type("# comment\nflip\t+0 down\n").starts_with("text/plain")
+    );
+    assert!(
+        lego_ctrl::cli::pipe_content_type("# comment\n{\"cmd\":\"status\"}\n")
+            .starts_with("application/x-ndjson")
+    );
+
+    // 2. `--relative` and `--absolute` cannot be combined; flags accepted before or after `-`.
+    assert!(parse_args(["pipe", "-", "--relative", "--absolute"]).is_err());
+    assert!(parse_args(["pipe", "--relative", "-"]).is_ok());
+    assert!(parse_args(["pipe", "--absolute", "-"]).is_ok());
+    assert!(parse_args(["clear"]).is_ok());
+    assert!(parse_args(["clear", "extra"]).is_err());
+
+    // 3. Wire check against mock server: default pipe, --relative, --absolute, and clear.
+    let srv = MockServer::start(Some("sec-346"));
+    let url = srv.url();
+
+    let run = |extra: &[&str], stdin_data: &[u8]| -> String {
+        let mut args = vec!["--url", &url, "--token", "sec-346"];
+        args.extend_from_slice(extra);
+        let parsed = parse_args(args).expect("parse");
+        let mut buf = Vec::new();
+        execute_cli(&parsed, &mut Cursor::new(stdin_data), &mut buf)
+            .unwrap_or_else(|e| panic!("cmd {extra:?} failed: {e}"));
+        String::from_utf8(buf).unwrap()
+    };
+
+    run(&["pipe", "-"], b"#lego-legacy-route 1\nflip 100 down\n");
+    run(
+        &["pipe", "--relative", "-"],
+        b"#lego-legacy-route 1\nflip 0 down\n",
+    );
+    run(
+        &["pipe", "-", "--absolute", "--no-wait"],
+        b"#lego-legacy-route 1\nflip 100 down\n",
+    );
+    let clear_out = run(&["clear"], &[]);
+    assert!(clear_out.contains("\"ok\":true"), "{clear_out}");
+
+    let reqs = srv.requests();
+    let targets: Vec<&str> = reqs.iter().map(|r| r.target.as_str()).collect();
+    assert_eq!(targets[0], "/api/pipe");
+    assert_eq!(targets[1], "/api/pipe?relative=1");
+    assert_eq!(targets[2], "/api/pipe?relative=0&wait=0");
+    assert_eq!(targets[3], "/api/clear-queue");
 }

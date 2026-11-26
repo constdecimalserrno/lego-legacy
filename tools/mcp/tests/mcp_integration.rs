@@ -162,13 +162,17 @@ fn handle_one<S: Read + Write>(stream: &mut S) {
         ("GET", "/api/route") => send(stream, "200 OK", "text/plain", b"#lego-legacy-route 1\n"),
         ("POST", "/api/act")
         | ("POST", "/api/pipe")
+        | ("POST", "/api/clear-queue")
         | ("POST", "/api/agent-state")
         | ("POST", "/api/bookmark")
         | ("POST", "/api/mode") => send(
             stream,
             "200 OK",
             "application/json",
-            br#"{"ok":true,"status":{"flip":8}}"#,
+            format!(
+                "{{\"ok\":true,\"target\":\"{target}\",\"cleared\":2,\"status\":{{\"flip\":8}}}}"
+            )
+            .as_bytes(),
         ),
         _ => send(
             stream,
@@ -375,13 +379,34 @@ fn lego_mcp_binary_handles_jsonrpc_over_piped_stdio() {
             11,
             r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"game_meta","arguments":{}}}"#,
         ),
+        (
+            13,
+            r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"game_act","arguments":{"action":"clear_queue"}}}"#,
+        ),
+        (
+            14,
+            r##"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"game_act","arguments":{"pipe":"#lego-legacy-route 1\nflip 100 down\n"}}}"##,
+        ),
     ] {
         let r = send_recv(&mut stdin, &mut reader, payload);
         assert_eq!(r["id"].as_i64(), Some(id));
-        assert_eq!(
-            r["result"].as_object().unwrap()["isError"].as_bool(),
-            Some(false)
-        );
+        let res = r["result"].as_object().unwrap();
+        assert_eq!(res["isError"].as_bool(), Some(false), "id {id}: {r:?}");
+        let body_text = res["content"].as_array().unwrap()[0].as_object().unwrap()["text"]
+            .as_str()
+            .unwrap();
+        if id == 13 {
+            assert!(
+                body_text.contains("/api/clear-queue"),
+                "game_act clear_queue must hit /api/clear-queue: {body_text}"
+            );
+        }
+        if id == 14 {
+            assert!(
+                body_text.contains("relative=0"),
+                "game_act pipe must default to relative=0 (absolute): {body_text}"
+            );
+        }
     }
 
     // 9. Unknown tool returns JSON-RPC error -32602.

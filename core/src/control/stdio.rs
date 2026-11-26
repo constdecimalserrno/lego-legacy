@@ -118,7 +118,7 @@ pub fn parse_command_line(line: &str) -> Result<ParsedLine, String> {
             let relative = obj
                 .get("relative")
                 .and_then(JsonValue::as_bool)
-                .unwrap_or(true);
+                .unwrap_or(false);
             vec![Command::PipeRoute {
                 route_text,
                 relative,
@@ -251,6 +251,9 @@ pub fn format_response_json(id: Option<&JsonValue>, resp: &Response) -> String {
                 out,
                 ",\"scheduled\":{{\"events_scheduled\":{events_scheduled},\"end_flip\":{end_flip},\"required_flips\":{required_flips}}}"
             );
+        }
+        ResponseData::Cleared { cleared } => {
+            let _ = write!(out, ",\"cleared\":{cleared}");
         }
         ResponseData::WaitResult(w) => {
             out.push_str(",\"wait\":");
@@ -411,6 +414,30 @@ mod tests {
                 ..
             }]
         ));
+
+        // Omitting `relative` defaults to `false` (absolute bare flip numbers, #346).
+        let p = parse_command_line(
+            r##"{"cmd":"pipe_route","route":"#lego-legacy-route 1\nflip 100 key Space down\n"}"##,
+        )
+        .unwrap();
+        assert!(matches!(
+            p.commands.as_slice(),
+            [Command::PipeRoute {
+                relative: false,
+                auto_step: true,
+                ..
+            }]
+        ));
+
+        let cleared_bus = ControlBus::new(ControlConfig::default());
+        let cleared_json = format_response_json(
+            Some(&JsonValue::Int(9)),
+            &cleared_bus.dispatch(Command::ClearQueue),
+        );
+        assert!(
+            cleared_json.contains("\"cleared\":0"),
+            "ClearQueue JSON must include cleared count: {cleared_json}"
+        );
 
         assert!(parse_command_line(r#"{"cmd":"bogus"}"#).is_err());
         assert!(parse_command_line("not json").is_err());

@@ -5,7 +5,7 @@
 //! guest memory/CPU/Win32/files introspection (`/api/mem`, `/api/mem/map`,
 //! `/api/mem/search`, `/api/cpu`, `/api/win32`, `/api/files`, `/api/files/read`,
 //! `/api/route`, `/api/fps`), unified control & task piping (`/api/act`,
-//! `/api/pipe`, `/api/step`, `/api/wait`, `/api/mode`, `/api/agent-state`),
+//! `/api/pipe`, `/api/clear-queue`, `/api/step`, `/api/wait`, `/api/mode`, `/api/agent-state`),
 //! Tier-1 route checkpoints (`/api/bookmark`, `/api/rewind`), baseline title
 //! metadata stubs (`/api/meta`, `/api/controls`, `/api/goals` ready for #311),
 //! and a streaming [`ExtraRoutes`] hook ready for #310 (`/watch`, `/api/stream`,
@@ -650,6 +650,7 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             req.path.as_str(),
             "/api/act"
                 | "/api/pipe"
+                | "/api/clear-queue"
                 | "/api/step"
                 | "/api/wait"
                 | "/api/mode"
@@ -764,6 +765,9 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         // --- Control, Piping & Tier-1 Checkpoints ---
         ("POST", "/api/act") => handle_act(req, ctx),
         ("POST", "/api/pipe") => handle_pipe(req, ctx),
+        ("POST", "/api/clear-queue") => {
+            control_resp_to_http(&ctx.bus.dispatch(Command::ClearQueue), None)
+        }
         ("POST", "/api/step") => handle_step(req, ctx),
         ("POST", "/api/wait") => handle_wait(req, ctx),
         ("POST", "/api/mode") => handle_mode(req, ctx),
@@ -1176,6 +1180,15 @@ fn handle_act(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
     control_resp_to_http(&resp, obs_json.as_deref())
 }
 
+fn looks_like_route(trimmed: &str) -> bool {
+    trimmed.starts_with("#lego-legacy-route")
+        || trimmed
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .is_some_and(|l| l.split_whitespace().next() == Some("flip"))
+}
+
 fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
     let text = match std::str::from_utf8(&req.body) {
         Ok(s) => s,
@@ -1186,10 +1199,10 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         return HttpResponse::error_json(400, "empty pipe payload");
     }
 
-    let relative = req
-        .query
-        .get("relative")
-        .is_none_or(|v| !matches!(v.as_str(), "0" | "false"));
+    // Bare `flip N` defaults to absolute (matching `#lego-legacy-route 1` files);
+    // explicit `flip +N` lines are always relative, and `?relative=1` opts bare
+    // `flip N` lines into relative offsets (#346).
+    let relative = parse_bool_param(req.query.get("relative"));
     let sync = req
         .query
         .get("wait")
@@ -1206,10 +1219,7 @@ fn handle_pipe(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         .get("content-type")
         .map(String::as_str)
         .unwrap_or("");
-    if content_type.starts_with("text/plain")
-        || trimmed.starts_with("#lego-legacy-route")
-        || trimmed.starts_with("flip ")
-    {
+    if content_type.starts_with("text/plain") || looks_like_route(trimmed) {
         let cmd = Command::PipeRoute {
             route_text: trimmed.to_owned(),
             relative,
@@ -1588,6 +1598,9 @@ fn control_resp_to_http(resp: &Response, observe_after_json: Option<&str>) -> Ht
                 ",\"scheduled\":{{\"events_scheduled\":{events_scheduled},\"end_flip\":{end_flip},\"required_flips\":{required_flips}}}"
             );
         }
+        ResponseData::Cleared { cleared } => {
+            let _ = write!(out, ",\"cleared\":{cleared}");
+        }
         ResponseData::WaitResult(w) => {
             out.push_str(",\"wait\":");
             write_wait_result(&mut out, w);
@@ -1609,6 +1622,7 @@ mod tests {
     use crate::control::host::{service_flip_boundary, ControlHost};
     use crate::guest::GuestMem;
     use crate::host::headless::Headless;
+    use crate::host::{FlipMeta, Host, Input};
     use crate::machine::Machine;
     use crate::route::Route;
     use crate::runlog::RunLog;
@@ -1903,7 +1917,7 @@ mod tests {
                 .to_owned();
             assert_eq!(bm_flip, 3);
 
-            // 8. POST /api/pipe (raw route) + POST /api/step + POST /api/wait -> advance to flip 6
+            // 8. POST /api/pipe (raw route with explicit `+N` offsets) + POST /api/wait -> advance to flip 6
             let (code, _, _) = tcp_call(
                 addr,
                 "POST",
@@ -1912,7 +1926,7 @@ mod tests {
                     ("Authorization", "Bearer test-secret-309"),
                     ("Content-Type", "text/plain"),
                 ],
-                b"#lego-legacy-route 1\nflip 0 key Space down\nflip 1 key Space up\n",
+                b"#lego-legacy-route 1\nflip +0 key Space down\nflip +1 key Space up\n",
             );
             assert_eq!(code, 200);
 
@@ -2550,5 +2564,170 @@ mod tests {
             .unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].as_str().unwrap().starts_with("stuck_loop:"));
+    }
+
+    #[test]
+    fn http_pipe_defaults_to_absolute_supports_plus_and_relative_and_clear_queue_cleans_holds() {
+        let mut control = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                title: Title::STUB.key,
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = control.bus();
+        // Advance ControlHost metadata to flip 30678 (exact #346 scenario).
+        control.observe_flip(&FlipMeta {
+            flip: 30678,
+            cursor: 30678,
+            clock_nanos: 30678 * 33_333_333,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (320, 240),
+            route_active: false,
+            route_remaining: 0,
+        });
+
+        let ctx = HttpContext::new(bus.clone(), &Title::STUB, Some("tok-346".to_owned()));
+        let auth = BTreeMap::from([("authorization".to_owned(), "Bearer tok-346".to_owned())]);
+
+        // 1. Default POST /api/pipe treats bare `flip N` as absolute (30690, NOT 61368).
+        let abs_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/pipe".to_owned(),
+                query: BTreeMap::from([("wait".to_owned(), "0".to_owned())]),
+                headers: auth.clone(),
+                body: b"#lego-legacy-route 1\nflip 30690 down\nflip 30705 up\n".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(abs_resp.status, 200);
+        let abs_j = parse_json(std::str::from_utf8(&abs_resp.body).unwrap()).unwrap();
+        assert_eq!(
+            abs_j.as_object().unwrap()["scheduled"].as_object().unwrap()["end_flip"].as_u64(),
+            Some(30705),
+            "bare flip N must be absolute by default"
+        );
+        assert_eq!(bus.status().pending_actions, 2);
+
+        // 2. POST /api/clear-queue requires Bearer auth when configured.
+        let unauth_clear = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(unauth_clear.status, 401);
+
+        // 3. Authenticated POST /api/clear-queue drops all 2 pending actions and returns count.
+        let clear_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: auth.clone(),
+                body: Vec::new(),
+            },
+            &ctx,
+        );
+        assert_eq!(clear_resp.status, 200);
+        let cj = parse_json(std::str::from_utf8(&clear_resp.body).unwrap()).unwrap();
+        assert_eq!(cj.as_object().unwrap()["cleared"].as_u64(), Some(2));
+        let st = bus.status();
+        assert_eq!(st.pending_actions, 0);
+        assert_eq!(st.mode, ExecMode::Live);
+        assert!(!st.paused, "clear-queue must not pause running Live mode");
+        // No spurious button release emitted because `down` at 30690 never fired.
+        assert_eq!(control.poll_input(30679), []);
+
+        // 4. Explicit `flip +N` schedules relative to current_flip (30678) without `?relative=1`.
+        let plus_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/pipe".to_owned(),
+                query: BTreeMap::from([("wait".to_owned(), "0".to_owned())]),
+                headers: auth.clone(),
+                body: b"#lego-legacy-route 1\nflip +0 key Space down\nflip +1000 key Space up\nflip +0 down\nflip +1000 up\n".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(plus_resp.status, 200);
+        let pj = parse_json(std::str::from_utf8(&plus_resp.body).unwrap()).unwrap();
+        assert_eq!(
+            pj.as_object().unwrap()["scheduled"].as_object().unwrap()["end_flip"].as_u64(),
+            Some(31678)
+        );
+
+        // Emit flip 30678 so Space and Left button are now HELD DOWN while their releases wait at 31678.
+        let emitted = control.poll_input(30678);
+        assert_eq!(
+            emitted,
+            [
+                Input::Key {
+                    code: 0x39,
+                    down: true
+                },
+                Input::Down(crate::host::Button::Left),
+            ]
+        );
+        assert_eq!(bus.status().held_keys, [0x39]);
+        assert_eq!(bus.status().pending_actions, 2);
+
+        // Clearing queue drops the 2 future releases AND schedules clean releases so nothing stays stuck!
+        let clear2 = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/clear-queue".to_owned(),
+                query: BTreeMap::new(),
+                headers: auth.clone(),
+                body: b"{}".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(clear2.status, 200);
+        let c2j = parse_json(std::str::from_utf8(&clear2.body).unwrap()).unwrap();
+        assert_eq!(c2j.as_object().unwrap()["cleared"].as_u64(), Some(2));
+        assert_eq!(bus.status().pending_actions, 0);
+
+        let cleanup = control.poll_input(30679);
+        assert_eq!(
+            cleanup,
+            [
+                Input::Key {
+                    code: 0x39,
+                    down: false
+                },
+                Input::Up(crate::host::Button::Left),
+            ]
+        );
+        assert!(bus.status().held_keys.is_empty());
+
+        // 5. `?relative=1` treats bare `flip N` as relative to current_flip.
+        let rel_resp = dispatch_http(
+            &HttpRequest {
+                method: "POST".to_owned(),
+                path: "/api/pipe".to_owned(),
+                query: BTreeMap::from([
+                    ("relative".to_owned(), "1".to_owned()),
+                    ("wait".to_owned(), "0".to_owned()),
+                ]),
+                headers: auth,
+                body: b"#lego-legacy-route 1\nflip 0 down\nflip 10 up\n".to_vec(),
+            },
+            &ctx,
+        );
+        assert_eq!(rel_resp.status, 200);
+        let rj = parse_json(std::str::from_utf8(&rel_resp.body).unwrap()).unwrap();
+        assert_eq!(
+            rj.as_object().unwrap()["scheduled"].as_object().unwrap()["end_flip"].as_u64(),
+            Some(30688)
+        );
     }
 }
