@@ -1152,6 +1152,7 @@ impl ControlBus {
         state.latest_frame = None;
         state.held_keys.clear();
         state.timeline.clear();
+        state.timeline.reset_polled();
         let mode = state.guide.mouse_mode;
         let res = state.guide.resolution;
         state.timeline.configure_mode(mode, res);
