@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-10-21
 
+Re-pins LEGO Chess route expectations for core #338's DirectDraw surface reclamation (`titles/lego-chess/tests/lego_chess.rs`): every presented frame hash, audio mix hash, flip count, declared duration, and `prof1.lcp` byte stays bit-exact, while lower guest-heap addresses shift `intro`'s memory digest, MIDI-enabled route cursors by `+2`/`-6`/`-14` instructions (bankless `throne-room` unchanged), and one uninitialized top byte at `+0x0031` of `1save.lcs` (`0x22` → `0x21`, all other 190,919 bytes identical).
+
 Fixes Throne Room Chess Table `(385, 285)` click semantics in `AGENTS.md` and `GUIDE` (#351): requires `click_poll` (`--poll --hold-ms 150`) rather than standard `click` (which hangs in the poll-release loop and spins `+155s` `declared_ms`). Strictly outside guest state; no route moved.
 
 Adds the title-level agent playbook (`titles/lego-chess/AGENTS.md`) and enriches static `GUIDE: TitleGuide` metadata (#335): separates `click_poll` (UI buttons, green ticks, HUD icons, menus) from standard flip-held `click --hold-flips 3..6` (3D chessboard squares and Throne Room objects), documents live-verified 3D camera Rotate/Tilt controls (`(320,60)` expanded HUD arrows and `LeftShift+Arrow`), 2D/3D view toggling (`(440,60)` -> `(585,200)` with 2D HUD relocation and uniform `44×40` px grid), `F1` in-game Settings, Throne Room / Quick Game / Match HUD coordinates, 3D perspective rank heights, hazards, and five concrete agent goals. Strictly outside guest state; no route moved.

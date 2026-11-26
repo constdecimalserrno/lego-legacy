@@ -90,6 +90,30 @@ impl Immediate {
     pub fn viewports_count(&self) -> usize {
         self.viewports.len()
     }
+
+    pub(crate) fn remove_handle_for(&mut self, identity: u32) {
+        self.handles.retain(|_, id| *id != identity);
+    }
+
+    /// Drain all texture pointers bound to `identity` when the device drops to
+    /// zero references so their COM refcounts are released cleanly (#338).
+    pub(crate) fn take_device_textures(&mut self, identity: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        if let Some((_, dev)) = self.devices.iter_mut().find(|(id, _)| *id == identity) {
+            for slot in &mut dev.textures {
+                let tex = std::mem::take(slot);
+                if tex != 0 {
+                    out.push(tex);
+                }
+            }
+            for (_, tex) in std::mem::take(&mut dev.textures_extra) {
+                if tex != 0 {
+                    out.push(tex);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Reusable per-draw buffers kept across immediate-mode and retained-mode
@@ -1305,8 +1329,16 @@ fn get_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
 
 fn set_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The surface the device draws into, changed after it was made.
-    if let Some(ComState::Device3D { surface }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
-        *surface = args[0];
+    let old = if let Some(ComState::Device3D { surface }) =
+        ctx.state.com_mut(this).map(|o| &mut o.state)
+    {
+        std::mem::replace(surface, args[0])
+    } else {
+        0
+    };
+    if old != 0 && old != args[0] {
+        let old_id = ctx.state.identity(old);
+        ctx.state.reclaim_surface_if_unreferenced(old_id);
     }
     ctx.log
         .line(&format!("d3d render target {:#010x}", args[0]));
@@ -1318,6 +1350,9 @@ fn get_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
         Some(ComState::Device3D { surface }) => *surface,
         _ => 0,
     };
+    if surface != 0 {
+        ctx.state.com_ref(surface, 1);
+    }
     ctx.mem.write_u32(args[0], surface).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
