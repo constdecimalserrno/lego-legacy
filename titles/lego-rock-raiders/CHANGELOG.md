@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Reclassifies `GUIDE.mouse_mode` from `AbsoluteKept` to `SoftwareAbsolute { requires_poll_release: false }` (matching `LegoRR.exe`'s `ShowCursor(FALSE)` + DirectDraw software cursor) and adds a disc-gated headless + loopback `/api/stream` WebSocket v2 cursor alignment test (#331). Strictly outside guest state; no route moved.
+
 Documents `LegoRR.exe` (`0x0041C370`) sidebar slide-in settlement (~15 flips before `0x004DF1F8` bit `0x80` accepts `F2+<Key>` chords) and tile-context selection for `F2+W`/`F2+Q` in `AGENTS.md` and `GUIDE` (#348). Strictly outside guest state; no route moved.
 
 Fixes Level Select Mission 1 coordinates in `AGENTS.md` and `GUIDE` (#351): un-scrolled `(155, 160)` is `1. Moving Rock Raiders` (Training Mission 1), while Campaign Mission 1 `Driller Night!` requires scrolling down (`move 320 478`) to the center cavern at `(315, 180)`. Strictly outside guest state; no route moved.
