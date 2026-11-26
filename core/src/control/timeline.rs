@@ -190,6 +190,67 @@ pub struct ScheduleReport {
     pub required_flips: u64,
 }
 
+/// Parse `#lego-legacy-route 1` text for piping into a [`Route`] with resolved
+/// absolute flip numbers (#346).
+///
+/// Addressing rules:
+/// - Explicit `flip +N ...` ALWAYS resolves relative to `current_flip` (`current_flip + N`).
+/// - Bare `flip N ...` resolves relative to `current_flip` when `relative == true`,
+///   or at literal absolute flip `N` when `relative == false`.
+pub(crate) fn parse_pipe_route(
+    route_text: &str,
+    current_flip: u64,
+    relative: bool,
+) -> Result<Route, ParseError> {
+    let mut normalized = String::with_capacity(route_text.len());
+    for (idx, raw) in route_text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            normalized.push('\n');
+            continue;
+        }
+        let fail = |why: &'static str| ParseError {
+            line: idx + 1,
+            text: line.to_owned(),
+            why,
+        };
+        let mut words = line.split_whitespace();
+        if words.next() != Some("flip") {
+            return Err(fail("an event starts with `flip`"));
+        }
+        let flip_tok = words.next().ok_or_else(|| fail("`flip` needs a number"))?;
+        let (is_rel, digits) = match flip_tok.strip_prefix('+') {
+            Some(d) => (true, d),
+            None => (relative, flip_tok),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(fail("a flip is a whole number"));
+        }
+        let raw_flip = digits
+            .parse::<u64>()
+            .map_err(|_| fail("a flip is a whole number"))?;
+        let target_flip = if is_rel {
+            current_flip.saturating_add(raw_flip)
+        } else {
+            raw_flip
+        };
+
+        use std::fmt::Write as _;
+        let _ = write!(normalized, "flip {target_flip}");
+        for word in words {
+            normalized.push(' ');
+            normalized.push_str(word);
+        }
+        normalized.push('\n');
+    }
+    Route::parse(&normalized).map_err(|mut err| {
+        if let Some(orig) = route_text.lines().nth(err.line.saturating_sub(1)) {
+            err.text = orig.trim().to_owned();
+        }
+        err
+    })
+}
+
 /// Resolve a DirectInput key name (matching `route::KEYS` case-insensitively),
 /// decimal scancode, or `0x`-prefixed hex scancode.
 #[must_use]
@@ -601,6 +662,41 @@ impl Timeline {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.owed_delta = (0.0, 0.0);
+    }
+
+    /// Drop all pending scheduled actions and owed relative delta, returning the
+    /// exact count cleared plus any unpaired key/button release payloads (whose
+    /// earliest pending event in chronological order is an `Up`/`down: false`,
+    /// meaning their `Down` already fired) so already-held inputs can be released
+    /// without disturbing unrelated human or earlier holds (#346).
+    pub fn clear_queue(&mut self) -> (usize, Vec<Input>) {
+        let cleared = self.pending_len();
+        let mut dropped = std::mem::take(&mut self.pending);
+        dropped.sort_by_key(|item| (item.due.sort_flip(), item.seq));
+
+        let mut seen_keys = Vec::new();
+        let mut seen_buttons = Vec::new();
+        let mut unpaired_releases = Vec::new();
+        for item in dropped {
+            match item.payload {
+                Payload::Input(Input::Key { code, down }) if !seen_keys.contains(&code) => {
+                    seen_keys.push(code);
+                    if !down {
+                        unpaired_releases.push(Input::Key { code, down: false });
+                    }
+                }
+                Payload::Input(Input::Down(btn)) if !seen_buttons.contains(&btn) => {
+                    seen_buttons.push(btn);
+                }
+                Payload::Input(Input::Up(btn)) if !seen_buttons.contains(&btn) => {
+                    seen_buttons.push(btn);
+                    unpaired_releases.push(Input::Up(btn));
+                }
+                _ => {}
+            }
+        }
+        self.owed_delta = (0.0, 0.0);
+        (cleared, unpaired_releases)
     }
 
     fn clamps_hw_pointer(&self) -> bool {
@@ -1143,8 +1239,9 @@ impl Timeline {
     }
 
     /// Parse `#lego-legacy-route 1` text and schedule its events onto this
-    /// timeline (relative to `current_flip` when `relative == true`, or at
-    /// their literal flip numbers otherwise).
+    /// timeline: explicit `flip +N` lines always offset from `current_flip`,
+    /// while bare `flip N` lines offset from `current_flip` when `relative == true`
+    /// or schedule at literal absolute flip `N` otherwise (#346).
     ///
     /// # Errors
     /// Returns [`ActionError::RouteParse`] if `route_text` is not a valid route.
@@ -1154,7 +1251,8 @@ impl Timeline {
         current_flip: u64,
         relative: bool,
     ) -> Result<ScheduleReport, ActionError> {
-        let route = Route::parse(route_text).map_err(ActionError::RouteParse)?;
+        let route = parse_pipe_route(route_text, current_flip, relative)
+            .map_err(ActionError::RouteParse)?;
         let entries = route.due(0, (u64::MAX, u64::MAX));
         if entries.is_empty() {
             return Ok(ScheduleReport {
@@ -1164,12 +1262,7 @@ impl Timeline {
             });
         }
         let mut end_flip = current_flip;
-        for &((flip, poll), input) in entries {
-            let target_flip = if relative {
-                current_flip.saturating_add(flip)
-            } else {
-                flip
-            };
+        for &((target_flip, poll), input) in entries {
             end_flip = end_flip.max(target_flip);
             self.push_input(target_flip, poll, input);
         }
@@ -1779,6 +1872,147 @@ mod tests {
         assert_eq!(abs.end_flip, 150);
         assert_eq!(tl.drain_due(149, 0, 0), []);
         assert_eq!(tl.drain_due(150, 0, 16), [Input::Down(Button::Right)]);
+    }
+
+    #[test]
+    fn pipe_route_explicit_plus_offset_is_relative_even_in_absolute_mode() {
+        let mut tl = Timeline::new((1.0, 1.0));
+        // Exact #346 repro: bare `flip 30690` in absolute mode schedules at 30690, not 61368.
+        let abs_report = tl
+            .pipe_route(
+                "#lego-legacy-route 1\nflip 30690 down\nflip 30705 up\n",
+                30678,
+                false,
+            )
+            .unwrap();
+        assert_eq!(abs_report.events_scheduled, 2);
+        assert_eq!(abs_report.end_flip, 30705);
+        assert_eq!(abs_report.required_flips, 30705 - 30678 + 1);
+        assert_eq!(tl.drain_due(30689, 0, 0), []);
+        assert_eq!(tl.drain_due(30690, 0, 0), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(30705, 0, 0), [Input::Up(Button::Left)]);
+
+        // Explicit `+N` syntax is ALWAYS relative to `current_flip`, even when `relative == false`.
+        let rel_plus = tl
+            .pipe_route(
+                "#lego-legacy-route 1\n\
+                 flip +0 down\n\
+                 flip +2 poll 1 move 304 219\n\
+                 flip +4 up\n",
+                30678,
+                false,
+            )
+            .unwrap();
+        assert_eq!(rel_plus.events_scheduled, 3);
+        assert_eq!(rel_plus.end_flip, 30682);
+        assert_eq!(rel_plus.required_flips, 5);
+        assert_eq!(tl.drain_due(30678, 0, 0), [Input::Down(Button::Left)]);
+        assert_eq!(tl.drain_due(30680, 0, 0), []);
+        assert_eq!(tl.drain_due(30680, 1, 0), [Input::Move { x: 304, y: 219 }]);
+        assert_eq!(tl.drain_due(30682, 0, 0), [Input::Up(Button::Left)]);
+
+        // Mixed absolute + explicit `+N` lines work together cleanly.
+        let mixed = tl
+            .pipe_route("flip 200 down\nflip +5 up\n", 190, false)
+            .unwrap();
+        assert_eq!(mixed.end_flip, 200);
+        assert_eq!(tl.drain_due(195, 0, 0), [Input::Up(Button::Left)]);
+        assert_eq!(tl.drain_due(200, 0, 0), [Input::Down(Button::Left)]);
+
+        // Malformed `+` offsets report exact 1-based line numbers.
+        for bad in ["flip + down\n", "flip ++5 down\n", "flip +-1 down\n"] {
+            let err = tl
+                .pipe_route(&format!("# header\n{bad}"), 10, false)
+                .unwrap_err();
+            match err {
+                ActionError::RouteParse(pe) => assert_eq!(pe.line, 2, "for `{bad}`: {pe}"),
+                other => panic!("expected RouteParse for `{bad}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn clear_queue_returns_count_including_owed_delta_and_dedupes_releases() {
+        let mut tl = Timeline::new((2.0, 2.0));
+        tl.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (1280, 960),
+                recenter: (320, 240),
+                start_corner: (320, 240),
+            },
+            (640, 480),
+        );
+        // Generate carried-over owed delta (+600 raw px > 319 cap).
+        tl.schedule(
+            &Action::MouseDelta {
+                dx: 300.0,
+                dy: 0.0,
+                flips: 1,
+                scale_x: None,
+                scale_y: None,
+            },
+            0,
+            0,
+        )
+        .unwrap();
+        let _ = tl.drain_due(0, 0, 0);
+        assert!(tl.has_owed_delta());
+
+        // Queue duplicate unpaired releases alongside a paired future down+up (which must NOT
+        // be flagged as an unpaired release) and a move.
+        tl.push_input(
+            5,
+            0,
+            Input::Key {
+                code: 0x39,
+                down: false,
+            },
+        );
+        tl.push_input(
+            6,
+            0,
+            Input::Key {
+                code: 0x39,
+                down: false,
+            },
+        );
+        tl.push_input(7, 0, Input::Up(Button::Left));
+        tl.push_input(8, 0, Input::Up(Button::Left));
+        tl.push_input(
+            9,
+            0,
+            Input::Key {
+                code: 0x1e,
+                down: true,
+            },
+        );
+        tl.push_input(
+            10,
+            0,
+            Input::Key {
+                code: 0x1e,
+                down: false,
+            },
+        );
+        tl.push_input(11, 0, Input::Down(Button::Right));
+        tl.push_input(12, 0, Input::Up(Button::Right));
+        tl.push_input(13, 0, Input::Move { x: 10, y: 20 });
+        assert_eq!(tl.pending_len(), 10);
+
+        let (cleared, releases) = tl.clear_queue();
+        assert_eq!(cleared, 10);
+        assert_eq!(
+            releases,
+            [
+                Input::Key {
+                    code: 0x39,
+                    down: false
+                },
+                Input::Up(Button::Left),
+            ]
+        );
+        assert!(tl.is_empty());
+        assert_eq!(tl.pending_len(), 0);
     }
 
     #[test]

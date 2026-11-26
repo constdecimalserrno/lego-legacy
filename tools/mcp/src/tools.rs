@@ -158,11 +158,11 @@ pub const fn tools_list_json() -> &'static str {
         "url": { "type": "string" },
         "title": { "type": "string" },
         "token": { "type": "string" },
-        "action": { "type": "string", "description": "Action kind: move|mouse_delta|click|click_poll|drag|key_hold|chord|type_text|step|wait|wait_until_change|wait_until_settled|pipe." },
+        "action": { "type": "string", "description": "Action kind: move|mouse_delta|click|click_poll|drag|key_hold|chord|type_text|step|wait|wait_until_change|wait_until_settled|pipe|clear_queue." },
         "actions": { "type": "array", "description": "Batch of action objects to dispatch to /api/act." },
         "pipe": { "type": "string", "description": "#lego-legacy-route 1 text or JSONL commands to post to /api/pipe." },
         "route": { "type": "string", "description": "Alias for pipe route text." },
-        "relative": { "type": "boolean", "description": "For pipe routes, interpret flips relative to current flip (default true)." },
+        "relative": { "type": "boolean", "description": "For pipe routes, interpret bare flip N numbers relative to current flip (default false: bare flip N is absolute matching #lego-legacy-route 1; explicit flip +N is always relative)." },
         "x": { "type": "integer" },
         "y": { "type": "integer" },
         "dx": { "type": "number" },
@@ -499,7 +499,7 @@ fn tool_act(
         let relative = args
             .get("relative")
             .and_then(JsonValue::as_bool)
-            .unwrap_or(true);
+            .unwrap_or(false);
         let wait = args
             .get("wait")
             .and_then(JsonValue::as_bool)
@@ -508,12 +508,7 @@ fn tool_act(
             .get("auto_step")
             .and_then(JsonValue::as_bool)
             .unwrap_or(true);
-        let trimmed = text.trim();
-        let ct = if trimmed.starts_with("#lego-legacy-route") || trimmed.starts_with("flip ") {
-            "text/plain; charset=utf-8"
-        } else {
-            "application/x-ndjson; charset=utf-8"
-        };
+        let ct = lego_ctrl::cli::pipe_content_type(text);
         let target = format!(
             "/api/pipe?relative={}&wait={}&auto_step={}",
             u8::from(relative),
@@ -521,6 +516,8 @@ fn tool_act(
             u8::from(auto_step)
         );
         check_ok(client.post_raw(&target, ct, text.as_bytes())?)?
+    } else if action_kind == Some("clear_queue") {
+        check_ok(client.post_json("/api/clear-queue", "{}")?)?
     } else if action_kind == Some("step") {
         let mut body = BTreeMap::new();
         if let Some(v) = args.get("flips") {

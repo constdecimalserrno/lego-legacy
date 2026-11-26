@@ -460,6 +460,14 @@ fn sync_after_live_restore(
         state.latest_frame = Some(f);
     }
     state.held_keys = machine.state.keys_down.clone();
+    state.held_buttons.clear();
+    if machine.state.mouse_down {
+        state.held_buttons.push(crate::host::Button::Left);
+    }
+    if machine.state.right_down {
+        state.held_buttons.push(crate::host::Button::Right);
+    }
+    state.pending_releases.clear();
     state.recording_len = machine
         .recording
         .as_ref()

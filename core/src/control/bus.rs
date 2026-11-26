@@ -11,12 +11,11 @@ use super::observe::STUCK_LOOP_THRESHOLD;
 use super::snapshot::{
     execute_snapshot_op, SnapshotOp, SnapshotReply, SnapshotSlot, SnapshotSummary,
 };
-use super::timeline::{resolve_key, Action, Timeline};
+use super::timeline::{parse_pipe_route, resolve_key, Action, Timeline};
 use crate::clock::FlipCost;
 use crate::host::telemetry::{FpsReport, Telemetry};
-use crate::host::{FlipMeta, Host, Input};
+use crate::host::{Button, FlipMeta, Host, Input};
 use crate::machine::{Finish, Machine};
-use crate::route::Route;
 use crate::title::TitleGuide;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -356,6 +355,9 @@ pub enum ResponseData {
         end_flip: u64,
         required_flips: u64,
     },
+    Cleared {
+        cleared: usize,
+    },
     WaitResult(WaitResult),
 }
 
@@ -414,6 +416,8 @@ pub(crate) struct BusState {
     pub last_meta: Option<FlipMeta>,
     pub recording_len: usize,
     pub held_keys: Vec<u32>,
+    pub held_buttons: Vec<Button>,
+    pub pending_releases: Vec<Input>,
     pub latest_frame: Option<FrameSnapshot>,
     pub telemetry: Telemetry,
     pub audio_underruns: Option<u64>,
@@ -472,6 +476,8 @@ impl BusState {
             last_meta: None,
             recording_len: 0,
             held_keys: Vec::new(),
+            held_buttons: Vec::new(),
+            pending_releases: Vec::new(),
             latest_frame: None,
             telemetry: Telemetry::new(config.flip_cost),
             audio_underruns: None,
@@ -556,11 +562,22 @@ impl BusState {
 
     pub(crate) fn record_emitted_inputs(&mut self, inputs: &[Input]) {
         for input in inputs {
-            if let Input::Key { code, down } = *input {
-                self.held_keys.retain(|k| *k != code);
-                if down {
-                    self.held_keys.push(code);
+            match *input {
+                Input::Key { code, down } => {
+                    self.held_keys.retain(|k| *k != code);
+                    if down {
+                        self.held_keys.push(code);
+                    }
                 }
+                Input::Down(btn) => {
+                    if !self.held_buttons.contains(&btn) {
+                        self.held_buttons.push(btn);
+                    }
+                }
+                Input::Up(btn) => {
+                    self.held_buttons.retain(|b| *b != btn);
+                }
+                Input::Move { .. } | Input::Close => {}
             }
         }
     }
@@ -1194,6 +1211,8 @@ impl ControlBus {
         state.last_meta = None;
         state.latest_frame = None;
         state.held_keys.clear();
+        state.held_buttons.clear();
+        state.pending_releases.clear();
         state.timeline.clear();
         state.timeline.reset_polled();
         state.last_agent_action_flip = None;
@@ -1338,10 +1357,17 @@ impl ControlBus {
         source: Option<&'static str>,
     ) -> Response {
         let mut state = self.lock();
+        let prev_wait_epoch = state.wait_epoch;
+        let prev_step_epoch = state.step_epoch;
         let (resp, wake) = apply_command(&mut state, cmd, force, source);
+        let notify_client =
+            state.wait_epoch != prev_wait_epoch || state.step_epoch != prev_step_epoch;
         drop(state);
         if wake {
             self.notify_host();
+        }
+        if notify_client {
+            self.notify_client();
         }
         resp
     }
@@ -1410,6 +1436,9 @@ impl ControlBus {
         if !resp.ok {
             drop(state);
             return resp;
+        }
+        if state.wait_epoch != start_wait_epoch || state.step_epoch != start_step_epoch {
+            self.inner.wake_client.notify_all();
         }
         if wake {
             self.inner.wake_host.notify_all();
@@ -1512,7 +1541,7 @@ fn action_presses_escape(action: &Action) -> bool {
 }
 
 fn route_presses_escape(route_text: &str) -> bool {
-    let Ok(route) = Route::parse(route_text) else {
+    let Ok(route) = parse_pipe_route(route_text, 0, false) else {
         return false;
     };
     route.due(0, (u64::MAX, u64::MAX)).iter().any(|(_, input)| {
@@ -1891,12 +1920,39 @@ fn apply_command(
             (ok_response(state, ResponseData::None), false)
         }
         Command::ClearQueue => {
-            state.timeline.clear();
-            state.active_wait = None;
+            let (cleared, unpaired_releases) = state.timeline.clear_queue();
+            for ev in unpaired_releases {
+                let is_held = match ev {
+                    Input::Key { code, down: false } => state.held_keys.contains(&code),
+                    Input::Up(btn) => state.held_buttons.contains(&btn),
+                    _ => false,
+                };
+                if is_held && !state.pending_releases.contains(&ev) {
+                    state.pending_releases.push(ev);
+                }
+            }
+            let prev_budget = state.step_budget;
+            state.step_budget = 0;
+            if prev_budget > 0 && state.is_paused {
+                state.step_epoch += 1;
+            }
+            if let Some(cond) = state.active_wait.take() {
+                let start_flip = match cond {
+                    WaitCondition::Fixed { start_flip, .. }
+                    | WaitCondition::UntilChange { start_flip, .. }
+                    | WaitCondition::UntilSettled { start_flip, .. } => start_flip,
+                };
+                state.last_wait_result = Some(WaitResult {
+                    satisfied: false,
+                    flips_elapsed: state.current_flip().saturating_sub(start_flip),
+                    diff_pct: 0.0,
+                });
+                state.wait_epoch += 1;
+            }
             state.last_agent_action_flip = None;
             state.agent_timeline_end_flip = None;
-            state.push_feed("control", "clear_queue".to_owned());
-            (ok_response(state, ResponseData::None), false)
+            state.push_feed("control", format!("clear_queue ({cleared} cleared)"));
+            (ok_response(state, ResponseData::Cleared { cleared }), false)
         }
         Command::Close { force } => {
             state.close_pending = true;
@@ -2179,15 +2235,19 @@ mod tests {
         assert!(!resp.ok);
         assert_eq!(resp.status.pending_actions, 0);
 
-        // PipeRoute containing Escape is blocked without force.
-        let resp = bus.dispatch(Command::PipeRoute {
-            route_text: "#lego-legacy-route 1\nflip 0 key Escape down\nflip 1 key Escape up\n"
-                .to_owned(),
-            relative: true,
-            auto_step: false,
-        });
-        assert!(!resp.ok);
-        assert_eq!(resp.status.pending_actions, 0);
+        // PipeRoute containing Escape (both bare and `+N`) is blocked without force.
+        for route in [
+            "#lego-legacy-route 1\nflip 0 key Escape down\nflip 1 key Escape up\n",
+            "#lego-legacy-route 1\nflip +0 key Escape down\nflip +1 key Escape up\n",
+        ] {
+            let resp = bus.dispatch(Command::PipeRoute {
+                route_text: route.to_owned(),
+                relative: false,
+                auto_step: false,
+            });
+            assert!(!resp.ok, "expected Escape in `{route}` to be blocked");
+            assert_eq!(resp.status.pending_actions, 0);
+        }
 
         // Non-Escape keys (including "1" = DIK_1 = 0x02 and "Space") are allowed.
         for key in ["Space", "1"] {
@@ -2340,5 +2400,87 @@ mod tests {
         assert_eq!(bus.status().pending_actions, 0);
         assert_eq!(bus.agent_state().action_feed.len(), feed_before);
         assert!(!bus.lock().is_agent_driving());
+    }
+
+    #[test]
+    fn clear_queue_cancels_step_budget_and_wakes_blocked_wait() {
+        let bus = ControlBus::new(ControlConfig {
+            mode: ExecMode::Step,
+            ..ControlConfig::default()
+        });
+        // Schedule a huge future pipe with auto_step=true, setting a large step_budget.
+        let sched = bus.dispatch(Command::PipeRoute {
+            route_text: "flip 5000 down\nflip 5010 up\n".to_owned(),
+            relative: false,
+            auto_step: true,
+        });
+        assert!(sched.ok);
+        assert_eq!(bus.lock().step_budget, 5011);
+
+        // Start a blocking Wait on another thread, then cancel via ClearQueue.
+        let waiter_bus = bus.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_bus.dispatch_sync(
+                Command::Wait {
+                    flips: Some(500),
+                    ms: None,
+                },
+                Some(Duration::from_secs(5)),
+            )
+        });
+        // Wait briefly until the waiter has registered `active_wait`.
+        for _ in 0..200 {
+            if bus.lock().active_wait.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(bus.lock().active_wait.is_some());
+
+        let clear = bus.dispatch(Command::ClearQueue);
+        assert!(clear.ok);
+        assert!(matches!(clear.data, ResponseData::Cleared { cleared: 2 }));
+        assert_eq!(clear.status.pending_actions, 0);
+        assert_eq!(bus.lock().step_budget, 0);
+
+        let wait_resp = waiter.join().unwrap();
+        assert!(wait_resp.ok);
+        assert!(matches!(
+            wait_resp.data,
+            ResponseData::WaitResult(WaitResult {
+                satisfied: false,
+                ..
+            })
+        ));
+
+        // Clearing while paused in Step mode must also wake a blocked `SyncKind::Step`
+        // caller (e.g. `PipeRoute { auto_step: true }`) immediately instead of hanging.
+        bus.lock().is_paused = true;
+        let step_bus = bus.clone();
+        let stepper = std::thread::spawn(move || {
+            step_bus.dispatch_sync(
+                Command::PipeRoute {
+                    route_text: "flip 9000 down\nflip 9005 up\n".to_owned(),
+                    relative: false,
+                    auto_step: true,
+                },
+                Some(Duration::from_secs(5)),
+            )
+        });
+        for _ in 0..200 {
+            if bus.lock().step_budget > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(bus.lock().step_budget > 0);
+        let clear_step = bus.dispatch(Command::ClearQueue);
+        assert!(matches!(
+            clear_step.data,
+            ResponseData::Cleared { cleared: 2 }
+        ));
+        let step_resp = stepper.join().unwrap();
+        assert!(step_resp.ok);
+        assert_eq!(step_resp.status.pending_actions, 0);
     }
 }

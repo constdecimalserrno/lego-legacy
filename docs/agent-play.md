@@ -42,8 +42,12 @@ lego-ctrl wait 30
 lego-ctrl wait-change 60
 lego-ctrl wait-settled 120
 lego-ctrl act '{"action":"click","x":320,"y":240,"hold_flips":1}'
-lego-ctrl pipe titles/lego-island/routes/boot.route
+lego-ctrl pipe titles/lego-island/routes/boot.route     # bare `flip N` is absolute by default
+printf 'flip +0 down\nflip +4 up\n' | lego-ctrl pipe - # `flip +N` is always relative to current flip
+lego-ctrl pipe snippet.route --relative                # opt bare `flip N` into relative offsets
+lego-ctrl pipe --help                                  # full flip-addressing help
 cat tasks.jsonl | lego-ctrl pipe -
+lego-ctrl clear                                        # drop pending queued actions (POST /api/clear-queue)
 
 # Read-only introspection (zero guest mutation)
 lego-ctrl mem 0x00400000 64 --fmt hex
@@ -79,7 +83,7 @@ lego-ctrl mode close
 | `game_launch` | Launch a title with `--control` and wait for readiness |
 | `game_meta` | Fetch `/api/meta`, `/api/controls`, `/api/goals` |
 | `game_observe` | Fetch `/api/status` + `/api/frame.json` + native PNG `ImageContent` (`grid`/`cursor`/`crop`) |
-| `game_act` | Execute actions, batches, `step`/`wait`, or `pipe` routes + optional PNG `ImageContent` |
+| `game_act` | Execute actions, batches, `step`/`wait`, `pipe` routes (`flip +N` relative, bare `flip N` absolute), or `clear_queue` + optional PNG `ImageContent` |
 | `game_inspect` | Read-only `mem`, `mem_map`, `mem_search`, `cpu`, `win32`, `files`, `file_read`, `fps` |
 | `game_goal` | Update `goal`, `subgoals`, `thought`, `commentary`, `notepad`, `user_hint` on `/watch` |
 | `game_checkpoint` | `bookmark`, `list_bookmarks`, `rewind`, `snapshot`, `restore`, `export_route` |
