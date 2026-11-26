@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Telemetry accuracy fixes (#349) strictly outside guest state (`core/src/host/{mod,pace,telemetry,mac,linux,windows}.rs`, `core/src/control/{host,snapshot}.rs`, `core/src/run.rs`):
+
+- **Exclude intentional `Pace` sleep from `over_budget_flips` / `over_budget_pct`:** `Pace` tracks cumulative wall nanoseconds spent in intentional pacing sleeps (`Pace::slept_total_nanos`, exposed via `Host::pace_sleep_nanos()` across `MacWindow`, `LinuxWindow`, `WinWindow`, `TelemetryHost`, and `ControlHost`), and `Telemetry::metrics` compares per-flip compute time (`wall_delta_nanos.saturating_sub(pace_sleep_delta_nanos)`) against the declared frame budget so steady paced `Live` runs no longer report `44–49%` false over-budget flips from sleep timer jitter while true compute overruns remain counted.
+- **Re-baseline `Telemetry` across snapshot restore and rewind:** Adds `Telemetry::rebaseline` (re-anchoring `last_wall_nanos`, `last_clock_nanos`, `last_executed`, and `last_pace_sleep_nanos`) and invokes it in `sync_after_live_restore` alongside `pace_epoch` and in `ControlHost::reset_for_rewind` (after `setup()` on Tier-1 rewind) so restoring a cold `LLSNAP v2` snapshot or rewinding never injects phantom `declared_nanos` or `executed_insns` deltas into cumulative `pace`, `guest_fps`, or `throughput_mips`.
+
 Control & spectator polish (#325) strictly outside guest state (`core/src/host/{mod,mac,linux,windows,telemetry}.rs`, `core/src/control/{bus,host,snapshot,observe,http,spectator}.rs`):
 
 - **Headless `Live` wall-clock pacing:** Adds `Host::is_paced()` (returning `true` on `MacWindow`/`LinuxWindow`/`WinWindow` and `false` on `Headless`) and embeds `host::pace::Pace` inside `ControlHost` so unpaced headless `Live` runs (`!paused && !route_active && pace > 0.0`) pace against `declared_nanos / pace` (`0.5× / 1× / 2× / 4×`) with clean wall-anchor resets across pause/resume, rewind/live restore, mode change, and pace change (zero catch-up bursts), while keeping windowed hosts double-sleep-free and `Step` (`step_uncapped: true`) plus `--route` replays 100% uncapped.

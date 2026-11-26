@@ -469,6 +469,12 @@ fn sync_after_live_restore(
     state.step_budget = 0;
     state.close_pending = false;
     state.pace_epoch = state.pace_epoch.wrapping_add(1);
+    state.telemetry.rebaseline(
+        meta.clock_nanos,
+        meta.cursor,
+        meta.instructions_passed,
+        host.pace_sleep_nanos(),
+    );
     state.force_closes = 0;
 }
 
@@ -661,5 +667,160 @@ fn reply_to_http(reply: SnapshotReply) -> HttpResponse {
             HttpResponse::json(200, out)
         }
         SnapshotReply::Error { status, message } => HttpResponse::error_json(status, &message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Trace;
+    use crate::clock::FlipCost;
+    use crate::control::bus::{ControlConfig, ExecMode};
+    use crate::control::host::ControlHost;
+    use crate::guest::GuestMem;
+    use crate::host::headless::Headless;
+    use crate::runlog::RunLog;
+    use crate::stub;
+    use crate::Title;
+
+    const TIMED_STUB: Title = Title {
+        flip_cost: FlipCost::Refresh(60),
+        ..Title::STUB
+    };
+
+    /// Minimal stub program that presents `count` flips and exits with `eax = count`.
+    fn flip_loop_stub(count: u32) -> Vec<u8> {
+        let mut code = Vec::new();
+        // mov ecx, count
+        code.push(0xb9);
+        code.extend_from_slice(&count.to_le_bytes());
+        // loop: int 0x20 ; dec ecx ; jnz loop ; int 0x21
+        code.extend_from_slice(&[0xcd, stub::INT_PRESENT]);
+        code.push(0x49);
+        code.extend_from_slice(&[0x75, (-5i8) as u8]);
+        code.extend_from_slice(&[0xcd, stub::INT_EXIT]);
+        code
+    }
+
+    fn tick_flips(machine: &mut Machine, host: &mut dyn Host, log: &mut RunLog, target: u64) {
+        while machine.flips() < target {
+            if machine.tick(host, log).is_some() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn cold_snapshot_restore_and_rewind_do_not_inject_phantom_declared_nanos() {
+        const MS: u64 = 1_000_000;
+
+        // 1. Run a producer machine to flip 60 (~1.0 s declared) and save a
+        //    cold LLSNAP v2 snapshot to disk.
+        let mut prod_host = Headless::new();
+        let mut prod = Machine::new(&TIMED_STUB, &mut prod_host).expect("producer machine");
+        prod.load_stub().expect("stub");
+        prod.arena
+            .write(stub::ENTRY, &flip_loop_stub(120))
+            .expect("write stub");
+        let mut prod_log = RunLog::create("snap-tel-prod", Trace::Off).expect("prod log");
+        tick_flips(&mut prod, &mut prod_host, &mut prod_log, 60);
+        let snap_clock = prod.clock.nanos();
+        assert!(
+            snap_clock >= 900 * MS,
+            "snapshot clock should be ~1s, got {snap_clock}"
+        );
+        let snap_bytes = prod.snapshot_v2().expect("snapshot_v2");
+        let snap_path = prod_log.dir().join("cold-60.llsnap");
+        std::fs::write(&snap_path, &snap_bytes).expect("write cold snapshot");
+
+        // 2. Start a fresh machine under ControlHost (Live 1.0x mode), run
+        //    2 flips (~33 ms declared), then restore the cold 60-flip (~1.0 s)
+        //    snapshot from disk.
+        let mut control = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                pace: 1.0,
+                flip_cost: FlipCost::Refresh(60),
+                ..ControlConfig::default()
+            },
+        )
+        .with_deferred_pause(true);
+        let bus = control.bus();
+
+        let mut machine = Machine::new(&TIMED_STUB, &mut control).expect("machine");
+        machine.load_stub().expect("stub");
+        machine
+            .arena
+            .write(stub::ENTRY, &flip_loop_stub(120))
+            .expect("write stub");
+        let mut log = RunLog::create("snap-tel-live", Trace::Off).expect("live log");
+
+        tick_flips(&mut machine, &mut control, &mut log, 2);
+        let before_restore = bus.telemetry_report(None).full;
+        assert_eq!(before_restore.flips, 2);
+
+        // Save an early in-memory slot at flip 2 for a backward rewind check too.
+        let saved = execute_snapshot_op(
+            &bus,
+            &mut machine,
+            &mut control,
+            SnapshotOp::Save {
+                name: Some("early".into()),
+                path: None,
+            },
+        );
+        assert!(matches!(saved, SnapshotReply::Saved { .. }));
+
+        // Cold restore forward from ~33 ms -> ~1000 ms.
+        let restored = execute_snapshot_op(
+            &bus,
+            &mut machine,
+            &mut control,
+            SnapshotOp::RestorePath {
+                path: snap_path.clone(),
+            },
+        );
+        assert!(matches!(restored, SnapshotReply::Restored { .. }));
+        assert_eq!(machine.flips(), 60);
+
+        // Run 3 flips post-restore (flips 60, 61, 62 -> ~50 ms declared).
+        tick_flips(&mut machine, &mut control, &mut log, 63);
+        let after_cold = bus.telemetry_report(None).full;
+        assert_eq!(after_cold.flips, 5);
+        // 5 flips @ 60 Hz = ~83.3 ms declared (NOT ~1050 ms with a +967 ms phantom jump!).
+        assert!(
+            after_cold.declared_nanos < 120 * MS,
+            "cold restore injected phantom declared_nanos: {} ms (expected ~83 ms)",
+            after_cold.declared_nanos / MS
+        );
+        assert!(
+            (after_cold.guest_fps - 60.0).abs() < 5.0,
+            "cold restore skewed guest_fps: {:.2} (expected ~60.0)",
+            after_cold.guest_fps
+        );
+
+        // 3. Rewind backward to the early slot (flip 2, ~33 ms) and run 1 flip:
+        //    the first post-rewind flip must still record ~16.67 ms declared (not 0).
+        let rewound = execute_snapshot_op(
+            &bus,
+            &mut machine,
+            &mut control,
+            SnapshotOp::RestoreSlot {
+                name: "early".into(),
+            },
+        );
+        assert!(matches!(rewound, SnapshotReply::Restored { .. }));
+        assert_eq!(machine.flips(), 2);
+
+        let before_rewind_flip = bus.telemetry_report(None).full.declared_nanos;
+        tick_flips(&mut machine, &mut control, &mut log, 3);
+        let after_rewind_flip = bus.telemetry_report(None).full.declared_nanos;
+        let delta = after_rewind_flip.saturating_sub(before_rewind_flip);
+        assert!(
+            (15 * MS..=20 * MS).contains(&delta),
+            "backward rewind flip declared delta was {} ms (expected ~16.7 ms)",
+            delta / MS
+        );
     }
 }

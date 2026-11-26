@@ -29,6 +29,9 @@ pub struct FlipSample {
     pub wall_nanos: u64,
     /// Unpaused host wall nanoseconds elapsed for this flip.
     pub wall_delta_nanos: u64,
+    /// Intentional host pacing sleep nanoseconds during this flip, excluded
+    /// from frame compute budget checks (#349).
+    pub pace_sleep_delta_nanos: u64,
     /// Declared clock nanoseconds elapsed for this flip.
     pub declared_delta_nanos: u64,
     /// Guest instructions actually executed (excluding passed clock spins) for
@@ -61,9 +64,11 @@ pub struct WindowMetrics {
     pub p95_ms: f64,
     pub p99_ms: f64,
     pub max_ms: f64,
-    /// Flips whose unpaused wall time exceeded their declared frame budget.
+    /// Flips whose compute wall time (excluding intentional pacing sleep)
+    /// exceeded their declared frame budget.
     pub over_budget_flips: u64,
-    /// Percentage of flips exceeding their declared frame budget.
+    /// Percentage of flips whose compute wall time exceeded their declared
+    /// frame budget.
     pub over_budget_pct: f64,
     /// Flips whose unpaused wall time reached or exceeded
     /// [`STALL_THRESHOLD_NANOS`].
@@ -200,6 +205,7 @@ pub struct Telemetry {
     last_wall_nanos: u64,
     last_clock_nanos: u64,
     last_executed: u64,
+    last_pace_sleep_nanos: u64,
     samples: Vec<FlipSample>,
 }
 
@@ -219,6 +225,7 @@ impl Telemetry {
             last_wall_nanos: 0,
             last_clock_nanos: 0,
             last_executed: 0,
+            last_pace_sleep_nanos: 0,
             samples: Vec::new(),
         }
     }
@@ -273,19 +280,29 @@ impl Telemetry {
         u64::try_from(unpaused).unwrap_or(u64::MAX)
     }
 
-    /// Record one flip at the current unpaused wall timestamp.
-    pub fn record_flip(&mut self, meta: &FlipMeta, uniform: bool) {
+    /// Record one flip at the current unpaused wall timestamp, given cumulative
+    /// host pacing sleep nanoseconds from [`Host::pace_sleep_nanos`] (#349).
+    pub fn record_flip(&mut self, meta: &FlipMeta, uniform: bool, pace_sleep_nanos: u64) {
         let now = self.unpaused_wall_nanos();
-        self.record_flip_at(meta, now, uniform);
+        self.record_flip_at(meta, now, pace_sleep_nanos, uniform);
     }
 
-    /// Record one flip at an explicit unpaused wall timestamp (in nanoseconds).
-    pub fn record_flip_at(&mut self, meta: &FlipMeta, wall_nanos: u64, uniform: bool) {
+    /// Record one flip at an explicit unpaused wall timestamp and cumulative
+    /// pacing sleep total (both in nanoseconds).
+    pub fn record_flip_at(
+        &mut self,
+        meta: &FlipMeta,
+        wall_nanos: u64,
+        pace_sleep_nanos: u64,
+        uniform: bool,
+    ) {
         let executed = meta.cursor.saturating_sub(meta.instructions_passed);
         let wall_delta_nanos = wall_nanos.saturating_sub(self.last_wall_nanos);
+        let pace_sleep_delta_nanos = pace_sleep_nanos.saturating_sub(self.last_pace_sleep_nanos);
         let declared_delta_nanos = meta.clock_nanos.saturating_sub(self.last_clock_nanos);
         let executed_delta = executed.saturating_sub(self.last_executed);
         self.last_wall_nanos = wall_nanos;
+        self.last_pace_sleep_nanos = pace_sleep_nanos;
         self.last_clock_nanos = meta.clock_nanos;
         self.last_executed = executed;
         self.samples.push(FlipSample {
@@ -295,10 +312,27 @@ impl Telemetry {
             instructions_passed: meta.instructions_passed,
             wall_nanos,
             wall_delta_nanos,
+            pace_sleep_delta_nanos,
             declared_delta_nanos,
             executed_delta,
             uniform,
         });
+    }
+
+    /// Re-baseline cumulative delta anchors at the current unpaused wall time
+    /// after a snapshot restore or rewind so the next flip does not inject a
+    /// phantom `declared_nanos`, `executed_insns`, or pacing-sleep jump (#349).
+    pub fn rebaseline(
+        &mut self,
+        clock_nanos: u64,
+        cursor: u64,
+        instructions_passed: u64,
+        pace_sleep_nanos: u64,
+    ) {
+        self.last_wall_nanos = self.unpaused_wall_nanos();
+        self.last_clock_nanos = clock_nanos;
+        self.last_executed = cursor.saturating_sub(instructions_passed);
+        self.last_pace_sleep_nanos = pace_sleep_nanos;
     }
 
     /// All recorded flip samples in presentation order.
@@ -342,12 +376,13 @@ impl Telemetry {
             wall_sum += u128::from(s.wall_delta_nanos);
             declared_sum += u128::from(s.declared_delta_nanos);
             executed_sum = executed_sum.saturating_add(s.executed_delta);
+            let compute_nanos = s.wall_delta_nanos.saturating_sub(s.pace_sleep_delta_nanos);
             let budget = if s.declared_delta_nanos > 0 {
                 s.declared_delta_nanos
             } else {
                 intended_budget_nanos
             };
-            if budget > 0 && s.wall_delta_nanos > budget {
+            if budget > 0 && compute_nanos > budget {
                 over_budget += 1;
             }
             if s.wall_delta_nanos >= STALL_THRESHOLD_NANOS {
@@ -527,6 +562,10 @@ impl<H: Host> Host for TelemetryHost<H> {
         self.inner.is_paced()
     }
 
+    fn pace_sleep_nanos(&self) -> u64 {
+        self.inner.pace_sleep_nanos()
+    }
+
     fn pump(&mut self) {
         self.inner.pump();
     }
@@ -537,7 +576,9 @@ impl<H: Host> Host for TelemetryHost<H> {
     }
 
     fn observe_flip(&mut self, meta: &FlipMeta) {
-        self.telemetry.record_flip(meta, self.last_uniform);
+        let pace_sleep = self.inner.pace_sleep_nanos();
+        self.telemetry
+            .record_flip(meta, self.last_uniform, pace_sleep);
         self.inner.observe_flip(meta);
     }
 }
@@ -605,7 +646,7 @@ mod tests {
             clock += dc;
             cursor += dcur;
             passed += dpass;
-            tel.record_flip_at(&meta(f, clock, cursor, passed), wall, uniform);
+            tel.record_flip_at(&meta(f, clock, cursor, passed), wall, 0, uniform);
         }
 
         let report = tel.report(Some((4, 10)), Some(2));
@@ -761,5 +802,157 @@ mod tests {
         assert!(with.finish.flips > 0, "stub presented at least one flip");
         with.assert_logged("fps-report [full]");
         with.assert_logged("fps-report [0..1]");
+    }
+
+    #[test]
+    fn pace_sleep_is_excluded_from_over_budget_while_compute_overruns_still_count() {
+        struct PacedHost {
+            inner: Headless,
+            pace: crate::host::pace::Pace,
+        }
+        impl Host for PacedHost {
+            fn present(&mut self, frame: &Frame<'_>) {
+                self.inner.present(frame);
+            }
+            fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+                self.inner.poll_input(flip)
+            }
+            fn audio(&mut self, samples: &[i16]) {
+                self.inner.audio(samples);
+            }
+            fn map(&mut self, len: usize) -> Result<Mapping, HostError> {
+                self.inner.map(len)
+            }
+            fn pace(&mut self, declared_nanos: u64) -> f64 {
+                self.pace.hold(declared_nanos)
+            }
+            fn is_paced(&self) -> bool {
+                true
+            }
+            fn pace_sleep_nanos(&self) -> u64 {
+                self.pace.slept_total_nanos()
+            }
+        }
+
+        let mut inner = PacedHost {
+            inner: Headless::new(),
+            pace: crate::host::pace::Pace::new(),
+        };
+        inner.pace.simulated = Some(0);
+        let mut host = TelemetryHost::new(inner, FlipCost::Refresh(60));
+        host.telemetry.simulated_wall = Some(0);
+
+        let budget = 16_666_666u64;
+        let mut clock = 0u64;
+        // 10 flips at steady ~1.0x pace: 2 ms compute, paced via Pace::hold
+        // plus +0.5 ms simulated timer overshoot so wall_delta > budget.
+        for f in 0..10u64 {
+            clock += budget;
+            *host.inner_mut().pace.simulated.as_mut().unwrap() += 2 * MS;
+            host.pace(clock);
+            let wall = host.inner().pace.wall_nanos() + 500_000;
+            *host.inner_mut().pace.simulated.as_mut().unwrap() = wall;
+            *host.telemetry.simulated_wall.as_mut().unwrap() = wall;
+            host.observe_flip(&meta(f, clock, (f + 1) * 1000, 0));
+        }
+
+        // Flip 10: genuine compute overrun (20 ms compute, 0 ms sleep).
+        clock += budget;
+        *host.inner_mut().pace.simulated.as_mut().unwrap() += 20 * MS;
+        host.pace(clock);
+        let wall = host.inner().pace.wall_nanos();
+        *host.telemetry.simulated_wall.as_mut().unwrap() = wall;
+        host.observe_flip(&meta(10, clock, 11 * 1000, 0));
+
+        let m = host.report(None).full;
+        assert_eq!(m.flips, 11);
+        assert!(host.pace_sleep_nanos() > 100 * MS, "Pace::hold slept");
+        assert_eq!(
+            m.over_budget_flips, 1,
+            "only the 20 ms compute flip is over budget"
+        );
+        assert!((m.over_budget_pct - (100.0 / 11.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rebaseline_prevents_phantom_declared_and_executed_jump_on_restore() {
+        const SEC: u64 = 1_000_000_000;
+        let mut tel = Telemetry::new(FlipCost::Refresh(50));
+        tel.simulated_wall = Some(0);
+
+        // 2 pre-restore flips: 20 ms declared, 10 ms wall, 2M executed each.
+        *tel.simulated_wall.as_mut().unwrap() = 10 * MS;
+        tel.record_flip(&meta(0, 20 * MS, 2_000_000, 0), false, 0);
+        *tel.simulated_wall.as_mut().unwrap() = 20 * MS;
+        tel.record_flip(&meta(1, 40 * MS, 4_000_000, 0), false, 0);
+
+        // Cold snapshot restore jumps declared clock forward by +174.2 s (and
+        // cursor by +18B instructions), taking 50 ms of restore wall time, with
+        // 15 ms of prior host pacing sleep already accumulated.
+        let restored_clock = 174_240 * MS;
+        let restored_cursor = 20_000_000_000;
+        let restored_passed = 2_000_000_000;
+        *tel.simulated_wall.as_mut().unwrap() = 70 * MS;
+        tel.rebaseline(restored_clock, restored_cursor, restored_passed, 15 * MS);
+
+        // 2 post-restore flips: +20 ms declared, +10 ms wall, +2M executed each.
+        *tel.simulated_wall.as_mut().unwrap() = 80 * MS;
+        tel.record_flip(
+            &meta(
+                5000,
+                restored_clock + 20 * MS,
+                restored_cursor + 2_000_000,
+                restored_passed,
+            ),
+            false,
+            15 * MS,
+        );
+        *tel.simulated_wall.as_mut().unwrap() = 90 * MS;
+        tel.record_flip(
+            &meta(
+                5001,
+                restored_clock + 40 * MS,
+                restored_cursor + 4_000_000,
+                restored_passed,
+            ),
+            false,
+            15 * MS,
+        );
+
+        let m = tel.metrics(None, None);
+        assert_eq!(m.flips, 4);
+        assert_eq!(
+            m.wall_nanos,
+            40 * MS,
+            "50 ms restore I/O excluded from flip wall time"
+        );
+        assert_eq!(m.declared_nanos, 80 * MS, "no +174.2 s phantom jump");
+        assert_eq!(
+            m.executed_insns, 8_000_000,
+            "no +18B phantom instruction jump"
+        );
+        assert!((m.pace - 2.0).abs() < 1e-6);
+        assert!((m.guest_fps - 50.0).abs() < 1e-6);
+        assert!((m.throughput_mips - 200.0).abs() < 1e-6);
+
+        // Backward rewind to 10.0 s also yields exact single-flip deltas and
+        // preserves compute-budget checks against synced pace_sleep_nanos.
+        *tel.simulated_wall.as_mut().unwrap() = 100 * MS;
+        tel.rebaseline(10 * SEC, 1_000_000_000, 0, 30 * MS);
+        *tel.simulated_wall.as_mut().unwrap() = 125 * MS;
+        tel.record_flip(
+            &meta(300, 10 * SEC + 20 * MS, 1_002_000_000, 0),
+            false,
+            30 * MS,
+        );
+        let m2 = tel.metrics(None, None);
+        assert_eq!(m2.flips, 5);
+        assert_eq!(m2.declared_nanos, 100 * MS);
+        assert_eq!(m2.executed_insns, 10_000_000);
+        assert_eq!(
+            m2.over_budget_flips, 1,
+            "25 ms compute flip after rewind must not be masked by pre-rewind sleep"
+        );
+        assert!((m2.guest_fps - 50.0).abs() < 1e-6);
     }
 }
