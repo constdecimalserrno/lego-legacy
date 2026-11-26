@@ -167,7 +167,12 @@ pub const GUIDE: TitleGuide = TitleGuide {
         ControlHint {
             input: "Left drag (step_px=16)",
             action: "Assemble vehicles in workshops",
-            notes: "Drag parts from the shelf onto highlighted slots in the Race Car, Dune Buggy, Jetski, and Helicopter workshops; click colour/decal/mood bricks to customise.",
+            notes: "Drag the part matching the currently flashing red wireframe ghost from the shelf (or E2 preview) onto the ghost slot; LEGO1 enforces strict sequential order and returns out-of-order parts to the E2 preview on release.",
+        },
+        ControlHint {
+            input: "Shelf Elevator B3 (95, 165) & Platform Lever H3 (598, 225)",
+            action: "Scroll workshop shelves & rotate build platform (Dune Buggy)",
+            notes: "Click the red Octan gas pump at (95, 165) to cycle hidden parts shelves until the part matching the flashing red ghost is visible; click the yellow lever at (598, 225) to rotate the build table.",
         },
         ControlHint {
             input: "Space",
@@ -211,7 +216,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
         "Holding Left mouse button still for >= 1000 ms fires `WM_TIMER` and enters continuous walk-drag; keep normal pick clicks brief (`hold_flips=2`).",
         "Signing writes only `Players.gsi` (shifting old `G0.GS` to `G1.GS`); progress (`G0.GS`, `History.gsi`) is only persisted on `F12`, Quit Door -> Yes, switching players, or clean `Close` — never force-kill before saving.",
         "Each character delivers pizza to a different target: Pepper's Jail route is blocked by town roadworks (and triggers Act 2 once the Helicopter is built); pick Nick `(372, 105)` for the shortest direct delivery east+north to the Gas Station.",
-        "Vehicle Build drag-and-drop requires accurate shelf-to-slot coordinates and smooth motion (`step_px=16`); observe with `--grid --cursor` and verify each part snapped before dragging the next.",
+        "Vehicle Build workshops enforce strict sequential part order (`IsNextPartToPlace`): only the part matching the currently flashing red wireframe ghost snaps on release (any other part returns to the E2 preview). Some required parts start off-shelf — click the Shelf Elevator (`ShelfUp_Ctl`, red Octan gas pump `(95, 165)` in Dune Buggy) to scroll shelves before dragging.",
         "Cutscenes, spoken lines, and room transitions span 100-600+ flips while the hourglass cursor shows; wait for frames to settle or use `Space` / quick floor clicks instead of queueing blind clicks.",
     ],
     goals: &[
@@ -282,6 +287,11 @@ mod tests {
             .any(|c| c.input.contains("chord Up,Left")));
         assert!(GUIDE.controls.iter().any(|c| c.input == "F12"));
         assert!(GUIDE.controls.iter().any(|c| c.input.contains("(38, 148)")));
+        assert!(GUIDE.controls.iter().any(|c| c.input.contains("(95, 165)")));
+        assert!(GUIDE
+            .hazards
+            .iter()
+            .any(|h| h.contains("flashing red") && h.contains("(95, 165)")));
         assert_eq!(GUIDE.goals.len(), 6);
         assert!(GUIDE
             .goals
