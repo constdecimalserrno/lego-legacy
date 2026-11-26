@@ -20,9 +20,11 @@ use lego_racers::LEGO_RACERS as RACERS;
 use std::path::PathBuf;
 
 const ROOT: &str = RACERS.install_dir;
-const BOOT_BUDGET: u64 = 60_000;
+const BOOT_BUDGET: u64 = 200_000;
 const FIRST_LIGHT_BUDGET: u64 = 200_000_000;
 const FULL_INTRO_BUDGET: u64 = 250_000_000;
+const BUILD_RACER_BUDGET: u64 = 1_000_000_000;
+const FIRST_RACE_BUDGET: u64 = 6_000_000_000;
 
 fn route_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,7 +32,7 @@ fn route_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The default unflagged boot path, run once for 60k instructions to verify
+/// The default unflagged boot path, run once for 200k instructions to verify
 /// cabinet loading, DirectInput setup, and the start of `lmicmp.avi` playback.
 fn boot() -> Option<&'static testkit::Ran> {
     static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
@@ -503,67 +505,283 @@ fn all_three_intro_movies_play_to_completion_and_land_on_main_menu() {
     );
 }
 
+fn assert_snapshot_round_trip(
+    baseline: &testkit::Ran,
+    route_name: &str,
+    budget: u64,
+    label: &str,
+    snap_flip: u64,
+) {
+    let route = Route::load(&route_path(route_name)).expect("load route");
+    let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("racers-snap-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_root);
+
+    let mut host_a = Headless::new();
+    let mut machine_a = Machine::new(&RACERS, &mut host_a).expect("machine");
+    machine_a.load_title(&RACERS).expect("load title");
+    machine_a.route = Some(route.clone());
+    machine_a.tree.set_profile(data_root.join("a"));
+    let mut log_a =
+        RunLog::create(&format!("lego-racers-snap-{label}-a"), Trace::Off).expect("log");
+    let dir_a = log_a.dir().to_path_buf();
+    while machine_a.flips() < snap_flip {
+        assert!(
+            machine_a
+                .step(&mut host_a, &mut log_a, budget, true)
+                .is_none(),
+            "should reach {label} flip {snap_flip} without ending"
+        );
+    }
+    let snap = machine_a.snapshot_v2().expect("capture LLSNAP v2");
+
+    let mut host_b = Headless::new();
+    let mut machine_b = Machine::new(&RACERS, &mut host_b).expect("machine");
+    machine_b.load_title(&RACERS).expect("load title");
+    machine_b.route = Some(route);
+    machine_b.tree.set_profile(data_root.join("b"));
+    machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
+    let mut log_b =
+        RunLog::create(&format!("lego-racers-snap-{label}-b"), Trace::Off).expect("log");
+    let dir_b = log_b.dir().to_path_buf();
+    let finish_b = machine_b.run(&mut host_b, &mut log_b, budget);
+
+    assert_eq!(finish_b.outcome, baseline.finish.outcome, "{label} outcome");
+    assert_eq!(finish_b.cursor, baseline.finish.cursor, "{label} cursor");
+    assert_eq!(finish_b.flips, baseline.finish.flips, "{label} flips");
+    assert_eq!(
+        finish_b.declared_millis, baseline.finish.declared_millis,
+        "{label} declared_millis"
+    );
+    assert_eq!(machine_b.state_digest(), baseline.digest, "{label} digest");
+    host_a.audio_blocks.extend(host_b.audio_blocks);
+    assert_eq!(
+        host_a.audio_blocks, baseline.host.audio_blocks,
+        "{label} mixed PCM audio before + after LLSNAP v2 restore is bit-exact"
+    );
+
+    drop(log_a);
+    drop(log_b);
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
+    let _ = std::fs::remove_dir_all(&data_root);
+}
+
 #[test]
 fn first_light_mid_movie_and_main_menu_snapshots_round_trip_bit_exact() {
     let Some(baseline) = first_light() else {
         return;
     };
-    let route = Route::load(&route_path("first-light.route")).expect("load first-light.route");
+    for (label, snap_flip) in [("mid-movie", 100u64), ("main-menu", 555u64)] {
+        assert_snapshot_round_trip(
+            baseline,
+            "first-light.route",
+            FIRST_LIGHT_BUDGET,
+            label,
+            snap_flip,
+        );
+    }
+}
+
+/// The committed `first-race.route`: unflagged cold boot -> SINGLE RACE ->
+/// Imperial Grand Prix -> 3-2-1-GO -> Turbo Start -> full 3D Lap 1 with
+/// power-ups and Power Slides -> LAP 2 -> Pause -> EXIT -> Main Menu -> close (#373).
+fn first_race() -> Option<&'static testkit::Ran> {
+    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        route: Some(route_path("first-race.route")),
+        ..Cli::default()
+    };
+    testkit::replay(
+        &RAN,
+        scratch,
+        &RACERS,
+        &cli,
+        &[1572, 2182, 2619, 4851, 6067, 6368],
+        FIRST_RACE_BUDGET,
+    )
+}
+
+#[test]
+fn build_racer_writes_save_and_reloads_cleanly_on_second_boot() {
+    if !scratch() {
+        return;
+    }
+    const SAVE_REL: &str = "profile/C/PROGRAM FILES/LEGO MEDIA/GAMES/LEGO RACERS/SAVE/0/LEGORAC1";
+    const MISSING_LINE: &str =
+        "file missing C:\\Program Files\\LEGO Media\\Games\\LEGO Racers\\Save\\0\\LEGORac1";
+
     let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("racers-snap-{}", std::process::id()));
+        .join(format!("racers-save-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_root);
 
-    for (label, snap_flip) in [("mid-movie", 100u64), ("main-menu", 555u64)] {
-        let profile_a = data_root.join(format!("{label}-a"));
-        let profile_b = data_root.join(format!("{label}-b"));
+    let save_cli = Cli {
+        route: Some(route_path("build-racer.route")),
+        data_root: Some(data_root.clone()),
+        ..Cli::default()
+    };
+    let build_run = testkit::run_on(
+        Headless::new().keeping(&[1012, 1285, 1485]),
+        &RACERS,
+        &save_cli,
+        BUILD_RACER_BUDGET,
+    );
+    build_run
+        .assert_exited(0)
+        .assert_flips(1501)
+        .assert_logged("Save\\0\\LEGORac1, 1792 bytes");
 
-        let mut host_a = Headless::new();
-        let mut machine_a = Machine::new(&RACERS, &mut host_a).expect("machine");
-        machine_a.load_title(&RACERS).expect("load title");
-        machine_a.route = Some(route.clone());
-        machine_a.tree.set_profile(profile_a);
-        let mut log_a =
-            RunLog::create(&format!("lego-racers-snap-{label}-a"), Trace::Off).expect("log");
-        let dir_a = log_a.dir().to_path_buf();
-        while machine_a.flips() < snap_flip {
-            assert!(
-                machine_a
-                    .step(&mut host_a, &mut log_a, FIRST_LIGHT_BUDGET, true)
-                    .is_none(),
-                "should reach {label} flip {snap_flip} without ending"
-            );
-        }
-        let snap = machine_a.snapshot_v2().expect("capture LLSNAP v2");
-
-        let mut host_b = Headless::new();
-        let mut machine_b = Machine::new(&RACERS, &mut host_b).expect("machine");
-        machine_b.load_title(&RACERS).expect("load title");
-        machine_b.route = Some(route.clone());
-        machine_b.tree.set_profile(profile_b);
-        machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
-        let mut log_b =
-            RunLog::create(&format!("lego-racers-snap-{label}-b"), Trace::Off).expect("log");
-        let dir_b = log_b.dir().to_path_buf();
-        let finish_b = machine_b.run(&mut host_b, &mut log_b, FIRST_LIGHT_BUDGET);
-
-        assert_eq!(finish_b.outcome, baseline.finish.outcome, "{label} outcome");
-        assert_eq!(finish_b.cursor, baseline.finish.cursor, "{label} cursor");
-        assert_eq!(finish_b.flips, baseline.finish.flips, "{label} flips");
-        assert_eq!(
-            finish_b.declared_millis, baseline.finish.declared_millis,
-            "{label} declared_millis"
-        );
-        assert_eq!(machine_b.state_digest(), baseline.digest, "{label} digest");
-        host_a.audio_blocks.extend(host_b.audio_blocks);
-        assert_eq!(
-            host_a.audio_blocks, baseline.host.audio_blocks,
-            "{label} mixed PCM audio before + after LLSNAP v2 restore is bit-exact"
-        );
-
-        drop(log_a);
-        drop(log_b);
-        let _ = std::fs::remove_dir_all(dir_a);
-        let _ = std::fs::remove_dir_all(dir_b);
+    for flip in [1012u64, 1285, 1485] {
+        assert!(!build_run.host.frame(flip).expect("frame kept").is_uniform());
     }
-    let _ = std::fs::remove_dir_all(data_root);
+
+    let save_path = data_root.join(SAVE_REL);
+    let save_bytes = std::fs::read(&save_path)
+        .unwrap_or_else(|e| panic!("expected Save\\0\\LEGORac1 at {}: {e}", save_path.display()));
+    assert_eq!(
+        save_bytes.len(),
+        1_792,
+        "header (1152 B) + 1 driver (640 B)"
+    );
+    assert_eq!(&save_bytes[..5], b"LR\x01\x80\x04");
+    assert_eq!(&save_bytes[1152..1160], b"A\x00D\x00A\x00\x00\x00");
+
+    let data_root_b = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("racers-save-b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_root_b);
+    let build_run_b = testkit::run_headless(
+        &RACERS,
+        &Cli {
+            route: Some(route_path("build-racer.route")),
+            data_root: Some(data_root_b.clone()),
+            ..Cli::default()
+        },
+        BUILD_RACER_BUDGET,
+    );
+    build_run.assert_same_machine(&build_run_b);
+    let save_bytes_b =
+        std::fs::read(data_root_b.join(SAVE_REL)).expect("second run wrote Save\\0\\LEGORac1");
+    assert_eq!(
+        save_bytes, save_bytes_b,
+        "Save\\0\\LEGORac1 bytes are bit-exact across independent runs"
+    );
+
+    let reload_route_path = data_root.join("reload.route");
+    std::fs::write(
+        &reload_route_path,
+        "#lego-legacy-route 1\n\
+         flip 240 key Space down\n\
+         flip 241 key Space up\n\
+         flip 245 move 320 240\n\
+         flip 246 down left\n\
+         flip 247 up left\n\
+         flip 560 key Return down\n\
+         flip 561 key Return up\n\
+         flip 660 close\n",
+    )
+    .expect("write reload route");
+
+    let reload_run = testkit::run_on(
+        Headless::new().keeping(&[650]),
+        &RACERS,
+        &Cli {
+            route: Some(reload_route_path.clone()),
+            data_root: Some(data_root.clone()),
+            ..Cli::default()
+        },
+        FIRST_LIGHT_BUDGET,
+    );
+    reload_run.assert_exited(0).assert_flips(661);
+    assert!(
+        !reload_run.log.contains(MISSING_LINE),
+        "cold second boot should load Save\\0\\LEGORac1 from Tree::profile"
+    );
+
+    let empty_run = testkit::run_on(
+        Headless::new().keeping(&[650]),
+        &RACERS,
+        &Cli {
+            route: Some(reload_route_path),
+            ..Cli::default()
+        },
+        FIRST_LIGHT_BUDGET,
+    );
+    empty_run.assert_exited(0).assert_logged(MISSING_LINE);
+
+    let reloaded_frame = reload_run.host.frame(650).expect("reloaded build menu");
+    let empty_frame = empty_run.host.frame(650).expect("empty build menu");
+    assert!(!reloaded_frame.is_uniform());
+    assert_ne!(
+        reloaded_frame.pixels, empty_frame.pixels,
+        "reloaded Build Menu with saved driver ADA differs visually from empty profile"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_root);
+    let _ = std::fs::remove_dir_all(&data_root_b);
+}
+
+#[test]
+fn first_race_drives_imperial_grand_prix_with_3d_rendering_and_audio() {
+    let Some(ran) = first_race() else {
+        return;
+    };
+    ran.assert_exited(0).assert_flips(6371);
+
+    let frames = [1572, 2182, 2619, 4851, 6067, 6368]
+        .map(|f| ran.host.frame(f).unwrap_or_else(|| panic!("flip {f} kept")));
+    for frame in &frames {
+        assert_eq!((frame.width, frame.height), (640, 480));
+        assert!(!frame.is_uniform());
+    }
+    for pair in frames.windows(2) {
+        assert_ne!(pair[0].pixels, pair[1].pixels);
+    }
+
+    let race_samples = pcm_from(ran, 1745);
+    assert!(
+        race_samples.len() >= 100_000,
+        "expected >= 100,000 stereo PCM samples during race, got {}",
+        race_samples.len()
+    );
+    let rms = (race_samples
+        .iter()
+        .map(|&s| f64::from(s).powi(2))
+        .sum::<f64>()
+        / race_samples.len() as f64)
+        .sqrt();
+    assert!(
+        rms > 500.0,
+        "expected non-silent race audio (RMS > 500), got {rms:.1}"
+    );
+}
+
+#[test]
+fn first_race_replays_to_the_same_machine_every_time() {
+    let Some(first) = first_race() else {
+        return;
+    };
+    let cli = Cli {
+        route: Some(route_path("first-race.route")),
+        ..Cli::default()
+    };
+    let second = testkit::run_headless(&RACERS, &cli, FIRST_RACE_BUDGET);
+    first.assert_same_machine(&second);
+    assert_eq!(
+        first.host.audio_blocks, second.host.audio_blocks,
+        "mixed race PCM audio is bit-exact across independent runs"
+    );
+}
+
+#[test]
+fn first_race_mid_race_llsnap_v2_round_trips_bit_exact() {
+    let Some(baseline) = first_race() else {
+        return;
+    };
+    assert_snapshot_round_trip(
+        baseline,
+        "first-race.route",
+        FIRST_RACE_BUDGET,
+        "mid-race",
+        2620,
+    );
 }

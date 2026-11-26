@@ -1,0 +1,113 @@
+#lego-legacy-route 1
+# LEGO Racers: unflagged cold boot -> SINGLE RACE -> Imperial Grand Prix ->
+# Starting Grid -> 3-2-1-GO -> Turbo Start -> full 3D Lap 1 completion (harbor
+# dock, Red Cannonball fire, Blue Shield activation, Power Slides, mine cave,
+# waterfall bridge, pirate cannon tower) -> cross Finish Line into LAP 2 ->
+# GAME PAUSED -> EXIT -> YES -> Main Menu -> clean exit (#373).
+#
+# Sequence:
+# - Flips 0..247: plays unskippable lmicmp.avi, skips hvscmp.avi (Space) and
+#   introcmp.avi (mouse click).
+# - Flips 806..1111: Main Menu -> SINGLE RACE -> Imperial Grand Prix -> Joan of Kart.
+# - Flips 1392..1745: Starting Grid + 3-2-1-GO countdown (60-flip 1.00 s cadence).
+# - Flip 1745: Turbo Start on GO! (`Up down`).
+# - Flips 1850..5926: full Lap 1 drive including Power Slides (`Space`), Red
+#   Cannonball pickup & fire (`Return`, flip 2161), Blue Shield pickup &
+#   activation (`Return`, flip 2608), White Power-Plus upgrade, and crossing
+#   the Finish Line into LAP 2 (`BEST 1:10:41`, flip ~5997).
+# - Flips 6072..6227: `Escape` -> `GAME PAUSED` -> `EXIT` -> `YES` -> Main Menu.
+# - Flip 6370: closes cleanly (exit 0).
+flip 240 key Space down
+flip 241 key Space up
+flip 245 move 320 240
+flip 246 down left
+flip 247 up left
+flip 806 key Down down
+flip 807 key Down up
+flip 816 key Down down
+flip 817 key Down up
+flip 826 key Return down
+flip 827 key Return up
+flip 968 key Return down
+flip 969 key Return up
+flip 1110 key Return down
+flip 1111 key Return up
+flip 1745 key Up down
+flip 1850 key Right down
+flip 1890 key Right up
+flip 2101 key Left down
+flip 2106 key Space down
+flip 2136 key Space up
+flip 2156 key Left up
+flip 2161 key Return down
+flip 2166 key Return up
+flip 2282 key Right down
+flip 2320 key Right up
+flip 2387 key Right down
+flip 2412 key Right up
+flip 2538 key Right down
+flip 2538 key Space down
+flip 2583 key Space up
+flip 2603 key Right up
+flip 2608 key Return down
+flip 2613 key Return up
+flip 2779 key Left down
+flip 2814 key Left up
+flip 2879 key Right down
+flip 2924 key Right up
+flip 3090 key Right down
+flip 3090 key Space down
+flip 3125 key Space up
+flip 3145 key Right up
+flip 3210 key Left down
+flip 3255 key Left up
+flip 3521 key Left down
+flip 3526 key Space down
+flip 3566 key Space up
+flip 3586 key Left up
+flip 3762 key Left down
+flip 3787 key Left up
+flip 3827 key Right down
+flip 3832 key Space down
+flip 3877 key Space up
+flip 3897 key Right up
+flip 4063 key Right down
+flip 4063 key Space down
+flip 4108 key Space up
+flip 4133 key Right up
+flip 4349 key Right down
+flip 4369 key Right up
+flip 4404 key Left down
+flip 4429 key Left up
+flip 4484 key Right down
+flip 4524 key Right up
+flip 4710 key Right down
+flip 4710 key Space down
+flip 4755 key Space up
+flip 4780 key Right up
+flip 4815 key Left down
+flip 4845 key Left up
+flip 5101 key Left down
+flip 5106 key Space down
+flip 5166 key Space up
+flip 5181 key Left up
+flip 5512 key Right down
+flip 5552 key Right up
+flip 5627 key Right down
+flip 5672 key Right up
+flip 5878 key Right down
+flip 5926 key Right up
+flip 6067 key Up up
+flip 6072 key Escape down
+flip 6073 key Escape up
+flip 6094 key Down down
+flip 6095 key Down up
+flip 6104 key Down down
+flip 6105 key Down up
+flip 6114 key Return down
+flip 6115 key Return up
+flip 6216 key Down down
+flip 6217 key Down up
+flip 6226 key Return down
+flip 6227 key Return up
+flip 6370 close
