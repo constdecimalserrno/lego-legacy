@@ -349,6 +349,7 @@ struct Scheduled {
 pub struct Timeline {
     next_seq: u64,
     pending: Vec<Scheduled>,
+    last_polled_flip: Option<u64>,
     hw_pointer: (i32, i32),
     visual_cursor: (f64, f64),
     pointer_shown: bool,
@@ -364,6 +365,7 @@ impl Timeline {
         Self {
             next_seq: 0,
             pending: Vec::new(),
+            last_polled_flip: None,
             hw_pointer: (320, 240),
             visual_cursor: (320.0, 240.0),
             pointer_shown: true,
@@ -715,6 +717,18 @@ impl Timeline {
         out.push(Input::Move { x: nx, y: ny });
     }
 
+    /// Record that `flip` has entered `Host::poll_input` so `Action::TypeText`
+    /// scheduled mid-frame (e.g. `Live` mode between `deliver_input(N)` and
+    /// `observe_flip(N+1)`) advances past the already-polled flip (#345).
+    pub(crate) fn note_polled(&mut self, flip: u64) {
+        self.last_polled_flip = self.last_polled_flip.max(Some(flip));
+    }
+
+    /// Clear tracked polled-flip watermark across rewind or live snapshot restore.
+    pub(crate) fn reset_polled(&mut self) {
+        self.last_polled_flip = None;
+    }
+
     fn push(&mut self, due: Due, payload: Payload) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -734,7 +748,7 @@ impl Timeline {
     pub fn schedule(
         &mut self,
         action: &Action,
-        start_flip: u64,
+        mut start_flip: u64,
         start_ms: u64,
     ) -> Result<ScheduleReport, ActionError> {
         let before = self.pending.len();
@@ -990,6 +1004,9 @@ impl Timeline {
                     });
                 }
                 let gap = (*flip_gap).max(1);
+                start_flip = self.last_polled_flip.map_or(start_flip, |polled| {
+                    start_flip.max(polled.saturating_add(1))
+                });
                 let mut cursor = start_flip;
                 let mut last_flip = start_flip;
                 for (shift, code) in mapped {
@@ -1079,6 +1096,7 @@ impl Timeline {
     /// against the live hardware pointer and paying back any owed delta chunks
     /// across recenter flips (#327).
     pub fn drain_due(&mut self, flip: u64, poll: u64, declared_ms: u64) -> Vec<Input> {
+        self.note_polled(flip);
         if self.pending.is_empty() && (poll > 0 || !self.has_owed_delta()) {
             return Vec::new();
         }
@@ -1378,6 +1396,115 @@ mod tests {
                 code: 0x30,
                 down: false
             }]
+        );
+    }
+
+    #[test]
+    fn type_text_after_polled_flip_preserves_nonzero_hold_and_gap() {
+        let drain_keys = |tl: &mut Timeline, flips: std::ops::RangeInclusive<u64>| {
+            let (mut downs, mut ups) = (Vec::new(), Vec::new());
+            for flip in flips {
+                for ev in tl.drain_due(flip, 0, flip * 16) {
+                    if let Input::Key { code, down } = ev {
+                        if code != DIK_LSHIFT {
+                            if down {
+                                downs.push((code, flip));
+                            } else {
+                                ups.push((code, flip));
+                            }
+                        }
+                    }
+                }
+            }
+            (downs, ups)
+        };
+
+        // Mid-frame `Live`-mode repro (#345): flip 554 already polled, then
+        // `type_text "AGY" --flip-gap 8` arrives while `current_flip` is 554.
+        let mut tl = Timeline::new((1.0, 1.0));
+        assert_eq!(tl.drain_due(554, 0, 554 * 16), []);
+        let report = tl
+            .schedule(
+                &Action::TypeText {
+                    text: "AGY".to_owned(),
+                    flip_gap: 8,
+                },
+                554,
+                554 * 16,
+            )
+            .unwrap();
+        assert_eq!(report.end_flip, 574);
+        assert_eq!(report.required_flips, 20);
+        let (downs, ups) = drain_keys(&mut tl, 555..=576);
+        assert_eq!(downs, [(0x1e, 555), (0x22, 564), (0x15, 573)]);
+        assert_eq!(ups, [(0x1e, 556), (0x22, 565), (0x15, 574)]);
+
+        // Single-char (unshifted & shifted), spaces, and mixed punctuation after
+        // an already-polled flip all enforce `up_flip > down_flip` and `flip_gap`.
+        for (text, gap) in [("x", 1u64), ("Z", 3), ("a B!", 4)] {
+            let mut tl = Timeline::new((1.0, 1.0));
+            assert_eq!(tl.drain_due(100, 0, 1600), []);
+            let rep = tl
+                .schedule(
+                    &Action::TypeText {
+                        text: text.to_owned(),
+                        flip_gap: gap,
+                    },
+                    100,
+                    1600,
+                )
+                .unwrap();
+            let (downs, ups) = drain_keys(&mut tl, 101..=rep.end_flip + 1);
+            assert_eq!(downs.len(), text.len(), "text={text:?}");
+            assert_eq!(ups.len(), text.len(), "text={text:?}");
+            let mut prev_up = None;
+            for i in 0..text.len() {
+                assert_eq!(downs[i].0, ups[i].0, "text={text:?} idx={i}");
+                assert!(
+                    ups[i].1 > downs[i].1,
+                    "text={text:?} idx={i}: up_flip={} must exceed down_flip={}",
+                    ups[i].1,
+                    downs[i].1
+                );
+                if let Some(pu) = prev_up {
+                    assert_eq!(downs[i].1 - pu, gap.max(1), "text={text:?} idx={i} gap");
+                }
+                prev_up = Some(ups[i].1);
+            }
+        }
+
+        // Clearing pending queue mid-frame preserves `last_polled_flip`;
+        // `reset_polled` clears it for rewind/restore to an earlier flip.
+        let mut tl = Timeline::new((1.0, 1.0));
+        assert_eq!(tl.drain_due(200, 0, 3200), []);
+        tl.clear();
+        tl.schedule(
+            &Action::TypeText {
+                text: "k".to_owned(),
+                flip_gap: 2,
+            },
+            200,
+            3200,
+        )
+        .unwrap();
+        assert_eq!(
+            drain_keys(&mut tl, 201..=202),
+            (vec![(0x25, 201)], vec![(0x25, 202)])
+        );
+
+        tl.reset_polled();
+        tl.schedule(
+            &Action::TypeText {
+                text: "k".to_owned(),
+                flip_gap: 2,
+            },
+            50,
+            800,
+        )
+        .unwrap();
+        assert_eq!(
+            drain_keys(&mut tl, 50..=51),
+            (vec![(0x25, 50)], vec![(0x25, 51)])
         );
     }
 

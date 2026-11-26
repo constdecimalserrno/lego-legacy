@@ -178,7 +178,9 @@ impl<H: Host> ControlHost<H> {
         self.staged_size = (0, 0);
         self.staged_valid = false;
         let pace_sleep = self.pace_sleep_nanos();
-        self.bus.lock().telemetry.rebaseline(0, 0, 0, pace_sleep);
+        let mut state = self.bus.lock();
+        state.timeline.reset_polled();
+        state.telemetry.rebaseline(0, 0, 0, pace_sleep);
     }
 
     fn set_host_paused(&mut self, paused: bool) {
@@ -319,6 +321,7 @@ impl<H: Host> Host for ControlHost<H> {
         if state.rewind_abort || state.rewind_target_flip.is_some() {
             return Vec::new();
         }
+        state.timeline.note_polled(flip);
         let owner = state.owner;
 
         let mut out = Vec::new();
@@ -2004,6 +2007,104 @@ mod tests {
                 && (rs_bus.status().pointer_pos.1 - 340).abs() <= 1,
             "drag landed at {:?}",
             rs_bus.status().pointer_pos
+        );
+    }
+
+    #[test]
+    fn type_text_in_live_mode_after_poll_input_holds_first_char_across_flips() {
+        use crate::control::timeline::DIK_LSHIFT;
+
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
+        let meta = |flip: u64| FlipMeta {
+            flip,
+            clock_nanos: flip * 16_000_000,
+            cursor: flip * 1000,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (0, 0),
+            route_active: false,
+            route_remaining: 0,
+        };
+        let key = |code: u32, down: bool| Input::Key { code, down };
+        let step = |host: &mut ControlHost<Headless>, flip: u64| {
+            host.observe_flip(&meta(flip));
+            host.poll_input(flip)
+        };
+
+        // Live mode: flip 554 already observed and polled; guest is mid-frame 555.
+        assert_eq!(step(&mut host, 554), []);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::TypeText {
+                    text: "AGY".to_owned(),
+                    flip_gap: 8,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+
+        let mut cursor = 555u64;
+        for (down_flip, code) in [(555, 0x1e), (564, 0x22), (573, 0x15)] {
+            while cursor < down_flip {
+                assert_eq!(step(&mut host, cursor), [], "gap flip {cursor}");
+                cursor += 1;
+            }
+            assert_eq!(
+                step(&mut host, down_flip),
+                [key(DIK_LSHIFT, true), key(code, true)]
+            );
+            assert_eq!(
+                step(&mut host, down_flip + 1),
+                [key(code, false), key(DIK_LSHIFT, false)]
+            );
+            cursor = down_flip + 2;
+        }
+
+        // Switching Human -> Agent mid-frame after poll_input(600) still holds across flips.
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Human)).ok);
+        assert_eq!(step(&mut host, 600), []);
+        assert!(bus.dispatch(Command::SetOwner(InputOwner::Agent)).ok);
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::TypeText {
+                    text: "a".to_owned(),
+                    flip_gap: 2,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        assert_eq!(step(&mut host, 601), [key(0x1e, true)]);
+        assert_eq!(step(&mut host, 602), [key(0x1e, false)]);
+
+        // Unpolled flip boundary (Step-mode pause at flip 700) delivers down on 700, up on 701.
+        host.observe_flip(&meta(700));
+        assert!(
+            bus.dispatch(Command::Act {
+                action: Action::TypeText {
+                    text: "Z".to_owned(),
+                    flip_gap: 2,
+                },
+                auto_step: false,
+            })
+            .ok
+        );
+        assert_eq!(
+            host.poll_input(700),
+            [key(DIK_LSHIFT, true), key(0x2c, true)]
+        );
+        assert_eq!(
+            step(&mut host, 701),
+            [key(0x2c, false), key(DIK_LSHIFT, false)]
         );
     }
 }

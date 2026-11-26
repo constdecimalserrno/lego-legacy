@@ -5,6 +5,10 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Control timeline `type_text` first-character hold fix (#345) strictly outside guest state (`core/src/control/{timeline,host,bus,snapshot}.rs`):
+
+- **Preserve non-zero first-character hold when `type_text` schedules mid-frame:** `Timeline` tracks the highest polled flip internally (updated in `Timeline::drain_due` and `ControlHost::poll_input`, cleared on rewind/live restore, and preserved across `Timeline::clear`). When `Action::TypeText` is scheduled after `start_flip` has already been polled (e.g. `Live` mode between `deliver_input(N)` and `observe_flip(N+1)`), it advances the first character's start flip to `polled + 1` so `key down` and `key up` never collapse onto the same flip (`up_flip > down_flip` for every character while preserving exact `flip_gap` spacing).
+
 Host/agent/WebSocket pointer-to-cursor alignment across all mouse regimes (#327) strictly outside guest state (`core/src/title.rs`, `core/src/control/{timeline,bus,host,meta,json,http,snapshot,ws,spectator,watch.html}`), leaving every run's cursor, flips, declared milliseconds, and `state_digest()` unchanged:
 
 - **`MouseMode::SoftwareRelative` & helpers:** Adds `MouseMode::SoftwareRelative { virtual_span, start_pos }` (keeping existing `AbsoluteKept`, `SoftwareAbsolute`, and `RelativeSteered` source-compatible), `MouseMode::is_relative()`, and `MouseMode::recenters_every_flip()`, extends `TitleGuide::relative_steered_scale()` to `SoftwareRelative`, and serializes `software_relative` / `recenter_every_flip` in `/api/meta` and `/api/controls` with zero title keys in `core/` (Golden Rule 4).
