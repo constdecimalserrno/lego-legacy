@@ -322,35 +322,29 @@ impl<H: Host> Host for ControlHost<H> {
         let owner = state.owner;
 
         let mut out = Vec::new();
-        match owner {
-            InputOwner::Agent => {
-                // Keep windowed host non-hijacking: ignore stray human
-                // mouse/key events while still honoring OS window Close.
-                for ev in human {
-                    if ev == Input::Close {
-                        out.push(ev);
-                    }
+        if matches!(owner, InputOwner::Human | InputOwner::Shared) {
+            for ev in &human {
+                if let Input::Move { x, y } = *ev {
+                    state.timeline.observe_emitted_move(x, y);
                 }
-                let scheduled = state.timeline.drain_due(flip, poll_index, declared_ms);
-                for ev in scheduled {
-                    if ev == Input::Close && out.contains(&Input::Close) {
-                        continue;
-                    }
+            }
+            out.extend(human);
+        } else {
+            // Keep windowed host non-hijacking: ignore stray human
+            // mouse/key events while still honoring OS window Close.
+            for ev in human {
+                if ev == Input::Close {
                     out.push(ev);
                 }
             }
-            InputOwner::Human => {
-                out.extend(human);
-            }
-            InputOwner::Shared => {
-                out.extend(human);
-                let scheduled = state.timeline.drain_due(flip, poll_index, declared_ms);
-                for ev in scheduled {
-                    if ev == Input::Close && out.contains(&Input::Close) {
-                        continue;
-                    }
-                    out.push(ev);
+        }
+        if matches!(owner, InputOwner::Agent | InputOwner::Shared) {
+            let scheduled = state.timeline.drain_due(flip, poll_index, declared_ms);
+            for ev in scheduled {
+                if ev == Input::Close && out.contains(&Input::Close) {
+                    continue;
                 }
+                out.push(ev);
             }
         }
 
@@ -375,9 +369,7 @@ impl<H: Host> Host for ControlHost<H> {
 
     fn show_pointer(&mut self, show: bool) {
         self.inner.show_pointer(show);
-        let mut state = self.bus.lock();
-        state.pointer_shown = show;
-        state.timeline.set_pointer_shown(show);
+        self.bus.lock().timeline.set_pointer_shown(show);
     }
 
     fn free_mouse(&mut self) {
@@ -387,7 +379,6 @@ impl<H: Host> Host for ControlHost<H> {
     fn put_pointer(&mut self, x: i32, y: i32) {
         self.inner.put_pointer(x, y);
         let mut state = self.bus.lock();
-        state.pointer_pos = (x, y);
         state.timeline.set_pointer(x, y);
     }
 
@@ -506,8 +497,16 @@ impl<H: Host> Host for ControlHost<H> {
         {
             let mut state = self.bus.lock();
             state.last_meta = Some(*meta);
-            state.pointer_shown = meta.pointer_shown;
             state.timeline.set_pointer_shown(meta.pointer_shown);
+            let mode = state.timeline.mouse_mode();
+            if !mode.is_relative()
+                && (meta.pointer_shown
+                    || matches!(mode, crate::title::MouseMode::SoftwareAbsolute { .. }))
+            {
+                state
+                    .timeline
+                    .set_pointer(meta.pointer_pos.0, meta.pointer_pos.1);
+            }
             state.audio_underruns = underruns;
 
             let uniform = if self.staged_valid {
@@ -532,6 +531,8 @@ impl<H: Host> Host for ControlHost<H> {
                     frame_hash,
                     diff,
                     uniform,
+                    pointer_pos: state.timeline.visual_cursor_pos(),
+                    pointer_shown: state.timeline.pointer_shown(),
                 };
                 state.latest_frame = Some(snapshot);
                 uniform
@@ -701,6 +702,53 @@ pub fn service_flip_boundary(
         bus.drain_inspects(machine);
         bus.drain_snapshots(machine, host);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn render_3x3_cursor_bgra(w: u32, h: u32, cx: i32, cy: i32) -> Vec<u8> {
+    let mut bgra = vec![0x10u8; (w * h * 4) as usize];
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let x = cx + dx;
+            let y = cy + dy;
+            if (0..w as i32).contains(&x) && (0..h as i32).contains(&y) {
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
+                bgra[i..i + 4].copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+    }
+    bgra
+}
+
+#[cfg(test)]
+pub(crate) fn find_green_cursor_centroid(bgra: &[u8], w: u32, h: u32) -> (i32, i32) {
+    let (mut sx, mut sy, mut n) = (0i64, 0i64, 0i64);
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            if bgra[i] == 0 && bgra[i + 1] == 255 && bgra[i + 2] == 0 {
+                sx += i64::from(x);
+                sy += i64::from(y);
+                n += 1;
+            }
+        }
+    }
+    assert!(n > 0, "cursor pixels missing");
+    ((sx / n) as i32, (sy / n) as i32)
+}
+
+#[cfg(test)]
+pub(crate) fn png_crosshair_red_center(png: &[u8]) -> (i32, i32) {
+    let (w, h, rgb) = crate::png::decode_png_to_rgb(png);
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 3) as usize;
+            if rgb[i] == 255 && rgb[i + 1] == 0 && rgb[i + 2] == 0 {
+                return (x as i32, y as i32);
+            }
+        }
+    }
+    panic!("crosshair center pixel not found");
 }
 
 #[cfg(test)]
@@ -1294,7 +1342,8 @@ mod tests {
         );
         let bus = host.bus();
         assert_eq!(host.guide().display_name, "Steered Test");
-        assert_eq!(bus.status().pointer_pos, (320, 240));
+        assert_eq!(bus.status().pointer_pos, (0, 479));
+        assert_eq!(bus.status().hw_pointer_pos, (320, 240));
         assert!(!bus.status().pointer_shown);
 
         // Even with default pointer_speed (1.0, 1.0) on ControlConfig, MouseMode::RelativeSteered
@@ -1552,5 +1601,409 @@ mod tests {
             m.over_budget_flips, m.flips, m.over_budget_pct
         );
         assert_eq!(m.over_budget_pct, 0.0);
+    }
+
+    #[test]
+    fn cursor_contracts_init_center_shared_sync_and_relative_steered_not_pinned() {
+        use crate::title::{MouseMode, TitleGuide};
+
+        // 1. AbsoluteKept initializes at (320, 240), syncs Shared human moves
+        //    into timeline, and reconciles observe_flip when pointer_shown == true.
+        let mut abs = ControlHost::new(
+            FakeWindowHost::new(vec![Input::Move { x: 150, y: 120 }]),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Shared,
+                ..ControlConfig::default()
+            },
+        );
+        let abs_bus = abs.bus();
+        assert_eq!(abs_bus.status().pointer_pos, (320, 240));
+        let _ = abs.poll_input(0);
+        assert_eq!(abs_bus.status().pointer_pos, (150, 120));
+        // A relative MouseDelta after a human move in Shared mode must start from (150, 120).
+        assert!(
+            abs_bus
+                .dispatch(Command::Act {
+                    action: Action::MouseDelta {
+                        dx: 10.0,
+                        dy: -5.0,
+                        flips: 1,
+                        scale_x: Some(1.0),
+                        scale_y: Some(1.0),
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        assert_eq!(abs.poll_input(1), [Input::Move { x: 160, y: 115 }]);
+        // observe_flip reconciles meta.pointer_pos when pointer_shown == true.
+        abs.observe_flip(&FlipMeta {
+            flip: 2,
+            clock_nanos: 32_000_000,
+            cursor: 200,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (400, 300),
+            route_active: false,
+            route_remaining: 0,
+        });
+        assert_eq!(abs_bus.status().pointer_pos, (400, 300));
+
+        // 2. RelativeSteered starts visual cursor at clamped start_corner (0, 479),
+        //    integrates emitted deltas / scale, and is NOT pinned by per-flip put_pointer(320, 240).
+        const STEERED: TitleGuide = TitleGuide {
+            display_name: "Steered Contract",
+            resolution: (640, 480),
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            ..TitleGuide::EMPTY
+        };
+        let mut rel = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                guide: &STEERED,
+                ..ControlConfig::default()
+            },
+        );
+        let rel_bus = rel.bus();
+        assert_eq!(rel_bus.status().pointer_pos, (0, 479));
+        assert!(
+            rel_bus
+                .dispatch(Command::Act {
+                    action: Action::MouseDelta {
+                        dx: 30.0,
+                        dy: -15.0,
+                        flips: 1,
+                        scale_x: None,
+                        scale_y: None,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        assert_eq!(rel.poll_input(0), [Input::Move { x: 380, y: 200 }]);
+        assert_eq!(rel_bus.status().pointer_pos, (30, 464));
+        // Per-flip SetCursorPos(320, 240) resets hw anchor ONLY, never visual cursor.
+        rel.put_pointer(320, 240);
+        assert_eq!(rel_bus.status().pointer_pos, (30, 464));
+        assert_eq!(rel_bus.status().hw_pointer_pos, (320, 240));
+    }
+
+    #[test]
+    fn synthetic_four_cursor_contracts_match_rendered_centroid_and_crosshair() {
+        use crate::control::observe::{render_frame_png, ObserveOptions};
+        use crate::title::{MouseMode, TitleGuide};
+
+        const W: u32 = 640;
+        const H: u32 = 480;
+
+        // --- Contract 1: SoftwareAbsolute (e.g. poll-release UI title) ---
+        const SOFT_ABS: TitleGuide = TitleGuide {
+            display_name: "SoftwareAbsolute Stub",
+            resolution: (W, H),
+            mouse_mode: MouseMode::SoftwareAbsolute {
+                requires_poll_release: true,
+            },
+            ..TitleGuide::EMPTY
+        };
+        let mut sa = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                guide: &SOFT_ABS,
+                ..ControlConfig::default()
+            },
+        );
+        assert_eq!(sa.bus().status().pointer_pos, (320, 240));
+        assert!(!sa.bus().status().pointer_shown);
+        assert!(
+            sa.bus()
+                .dispatch(Command::Act {
+                    action: Action::ClickPoll {
+                        x: Some(210),
+                        y: Some(140),
+                        button: Button::Left,
+                        hold_flips: 3,
+                        hold_ms: 150,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        assert_eq!(
+            sa.poll_input(0),
+            [Input::Move { x: 210, y: 140 }, Input::Down(Button::Left)]
+        );
+        sa.pace(200_000_000);
+        assert_eq!(sa.poll_input(0), [Input::Up(Button::Left)]);
+        assert_eq!(sa.bus().status().pointer_pos, (210, 140));
+        // SoftwareAbsolute reconciles meta.pointer_pos during route replays even while !pointer_shown.
+        sa.observe_flip(&FlipMeta {
+            flip: 1,
+            clock_nanos: 216_000_000,
+            cursor: 100,
+            instructions_passed: 0,
+            pointer_shown: false,
+            pointer_pos: (420, 310),
+            route_active: true,
+            route_remaining: 1,
+        });
+        assert_eq!(sa.bus().status().pointer_pos, (420, 310));
+
+        // --- Contract 2: SoftwareRelative (transition SetCursorPos(320,240) must NOT desync) ---
+        const SOFT_REL: TitleGuide = TitleGuide {
+            display_name: "SoftwareRelative Stub",
+            resolution: (W, H),
+            mouse_mode: MouseMode::SoftwareRelative {
+                virtual_span: (W, H),
+                start_pos: (320, 240),
+            },
+            ..TitleGuide::EMPTY
+        };
+        let mut sr = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                guide: &SOFT_REL,
+                ..ControlConfig::default()
+            },
+        );
+        let sr_bus = sr.bus();
+        let mut guest_hw = (320i32, 240i32);
+        let mut guest_cur = (320i32, 240i32);
+        let present_sr =
+            |host: &mut ControlHost<Headless>, flip: u64, cur: (i32, i32), hw: (i32, i32)| {
+                let pixels = render_3x3_cursor_bgra(W, H, cur.0, cur.1);
+                host.present(&Frame {
+                    width: W,
+                    height: H,
+                    pitch: W * 4,
+                    pixels: &pixels,
+                });
+                host.observe_flip(&FlipMeta {
+                    flip,
+                    clock_nanos: flip * 16_000_000,
+                    cursor: flip * 100,
+                    instructions_passed: 0,
+                    pointer_shown: false,
+                    pointer_pos: hw,
+                    route_active: false,
+                    route_remaining: 0,
+                });
+            };
+        let step_sr = |host: &mut ControlHost<Headless>,
+                       flip: u64,
+                       hw: &mut (i32, i32),
+                       cur: &mut (i32, i32)| {
+            for ev in host.poll_input(flip) {
+                if let Input::Move { x, y } = ev {
+                    let dx = x - hw.0;
+                    let dy = y - hw.1;
+                    *hw = (x, y);
+                    cur.0 = (cur.0 + dx).clamp(0, W as i32 - 1);
+                    cur.1 = (cur.1 + dy).clamp(0, H as i32 - 1);
+                }
+            }
+        };
+
+        // Move to (585, 430).
+        assert!(
+            sr_bus
+                .dispatch(Command::Act {
+                    action: Action::Move {
+                        x: 585,
+                        y: 430,
+                        glide_flips: 1,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        step_sr(&mut sr, 0, &mut guest_hw, &mut guest_cur);
+        assert_eq!(guest_cur, (585, 430));
+        // Mode transition calls SetCursorPos(320, 240) while rendered cursor stays at (585, 430)!
+        guest_hw = (320, 240);
+        sr.put_pointer(320, 240);
+        present_sr(&mut sr, 1, guest_cur, guest_hw);
+        assert_eq!(sr_bus.status().pointer_pos, (585, 430));
+        assert_eq!(sr_bus.status().hw_pointer_pos, (320, 240));
+
+        // Post-transition move to (270, 100) needs dy=-330 from hw.y=240 (unclamped ny=-90).
+        assert!(
+            sr_bus
+                .dispatch(Command::Act {
+                    action: Action::Move {
+                        x: 270,
+                        y: 100,
+                        glide_flips: 1,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        step_sr(&mut sr, 1, &mut guest_hw, &mut guest_cur);
+        present_sr(&mut sr, 2, guest_cur, guest_hw);
+        let snap = sr_bus.latest_frame().unwrap();
+        let centroid = find_green_cursor_centroid(&snap.bgra, W, H);
+        let png = render_frame_png(
+            &snap,
+            ObserveOptions {
+                cursor: true,
+                ..ObserveOptions::default()
+            },
+            snap.pointer_pos,
+        )
+        .unwrap();
+        let cross = png_crosshair_red_center(&png);
+        assert_eq!(centroid, (270, 100));
+        assert_eq!(sr_bus.status().pointer_pos, (270, 100));
+        assert_eq!(snap.pointer_pos, (270, 100));
+        assert_eq!(cross, (270, 100));
+
+        // --- Contract 3: RelativeSteered (per-flip recenter + owed-delta chunking + Move/Click/Drag) ---
+        const REL_STEER: TitleGuide = TitleGuide {
+            display_name: "RelativeSteered Stub",
+            resolution: (W, H),
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            ..TitleGuide::EMPTY
+        };
+        let mut rs = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                guide: &REL_STEER,
+                ..ControlConfig::default()
+            },
+        );
+        let rs_bus = rs.bus();
+        assert_eq!(rs_bus.status().pointer_pos, (0, 479));
+        let mut rs_hw = (320i32, 240i32);
+        let mut rs_cur = (0.0f64, 479.0f64);
+        let (sx, sy) = (2.0f64, 1280.0 / 480.0);
+        let mut rs_flip = 0u64;
+        let run_rs_flip = |host: &mut ControlHost<Headless>,
+                           flip: &mut u64,
+                           hw: &mut (i32, i32),
+                           cur: &mut (f64, f64)| {
+            // Guest calls SetCursorPos(320, 240) EVERY flip.
+            *hw = (320, 240);
+            host.put_pointer(320, 240);
+            let pixels = render_3x3_cursor_bgra(W, H, cur.0.round() as i32, cur.1.round() as i32);
+            host.present(&Frame {
+                width: W,
+                height: H,
+                pitch: W * 4,
+                pixels: &pixels,
+            });
+            host.observe_flip(&FlipMeta {
+                flip: *flip,
+                clock_nanos: *flip * 33_000_000,
+                cursor: *flip * 100,
+                instructions_passed: 0,
+                pointer_shown: false,
+                pointer_pos: *hw,
+                route_active: false,
+                route_remaining: 0,
+            });
+            for ev in host.poll_input(*flip) {
+                if let Input::Move { x, y } = ev {
+                    assert!((0..W as i32).contains(&x) && (0..H as i32).contains(&y));
+                    let dx = x - hw.0;
+                    let dy = y - hw.1;
+                    *hw = (x, y);
+                    cur.0 = (cur.0 + f64::from(dx) / sx).clamp(0.0, f64::from(W - 1));
+                    cur.1 = (cur.1 + f64::from(dy) / sy).clamp(0.0, f64::from(H - 1));
+                }
+            }
+            *flip += 1;
+        };
+
+        // Large single-flip MouseDelta(+300, 0) chunks across 2 recenter flips.
+        let r = rs_bus.dispatch(Command::Act {
+            action: Action::MouseDelta {
+                dx: 300.0,
+                dy: 0.0,
+                flips: 1,
+                scale_x: None,
+                scale_y: None,
+            },
+            auto_step: false,
+        });
+        assert!(r.ok);
+        for _ in 0..3 {
+            run_rs_flip(&mut rs, &mut rs_flip, &mut rs_hw, &mut rs_cur);
+        }
+        assert!((rs_cur.0 - 300.0).abs() <= 1.0);
+        assert_eq!(rs_bus.status().pointer_pos, (300, 479));
+
+        // Absolute Action::Move(480, 120) + Action::Drag(480, 120 -> 140, 340).
+        assert!(
+            rs_bus
+                .dispatch(Command::Act {
+                    action: Action::Move {
+                        x: 480,
+                        y: 120,
+                        glide_flips: 1,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        for _ in 0..6 {
+            run_rs_flip(&mut rs, &mut rs_flip, &mut rs_hw, &mut rs_cur);
+        }
+        let snap = rs_bus.latest_frame().unwrap();
+        let centroid = find_green_cursor_centroid(&snap.bgra, W, H);
+        let png = render_frame_png(
+            &snap,
+            ObserveOptions {
+                cursor: true,
+                ..ObserveOptions::default()
+            },
+            snap.pointer_pos,
+        )
+        .unwrap();
+        let cross = png_crosshair_red_center(&png);
+        assert!((centroid.0 - 480).abs() <= 1 && (centroid.1 - 120).abs() <= 1);
+        assert!((snap.pointer_pos.0 - centroid.0).abs() <= 1);
+        assert!((snap.pointer_pos.1 - centroid.1).abs() <= 1);
+        assert_eq!(cross, snap.pointer_pos);
+        assert_eq!(rs_bus.status().pointer_pos, snap.pointer_pos);
+
+        // Relative Drag translates both press position and drag leg cleanly.
+        assert!(
+            rs_bus
+                .dispatch(Command::Act {
+                    action: Action::Drag {
+                        from_x: 480,
+                        from_y: 120,
+                        to_x: 140,
+                        to_y: 340,
+                        button: Button::Left,
+                        step_px: 120,
+                    },
+                    auto_step: false,
+                })
+                .ok
+        );
+        for _ in 0..10 {
+            run_rs_flip(&mut rs, &mut rs_flip, &mut rs_hw, &mut rs_cur);
+        }
+        assert!(
+            (rs_bus.status().pointer_pos.0 - 140).abs() <= 1
+                && (rs_bus.status().pointer_pos.1 - 340).abs() <= 1,
+            "drag landed at {:?}",
+            rs_bus.status().pointer_pos
+        );
     }
 }

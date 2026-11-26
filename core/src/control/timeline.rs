@@ -8,6 +8,7 @@
 
 use crate::host::{Button, Input};
 use crate::route::{ParseError, Route};
+use crate::title::MouseMode;
 use std::fmt;
 
 /// DirectInput scancode for `LeftShift`.
@@ -282,9 +283,19 @@ pub fn ascii_to_key(ch: char) -> Option<(bool, u32)> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Due {
-    Point { flip: u64, poll: u64 },
-    FlipOrMs { flip: u64, declared_ms: u64 },
-    Ms { declared_ms: u64 },
+    Point {
+        flip: u64,
+        poll: u64,
+    },
+    FlipOrMs {
+        min_flip: u64,
+        flip: u64,
+        declared_ms: u64,
+    },
+    Ms {
+        min_flip: u64,
+        declared_ms: u64,
+    },
 }
 
 impl Due {
@@ -292,17 +303,24 @@ impl Due {
         match self {
             Self::Point { flip: f, poll: p } => (flip, poll) >= (f, p),
             Self::FlipOrMs {
+                min_flip,
                 flip: f,
                 declared_ms: ms,
-            } => flip >= f || declared_ms >= ms,
-            Self::Ms { declared_ms: ms } => declared_ms >= ms,
+            } => {
+                flip >= f
+                    || ((flip > min_flip || (flip == min_flip && poll > 0)) && declared_ms >= ms)
+            }
+            Self::Ms {
+                min_flip,
+                declared_ms: ms,
+            } => (flip > min_flip || (flip == min_flip && poll > 0)) && declared_ms >= ms,
         }
     }
 
     fn sort_flip(self) -> u64 {
         match self {
             Self::Point { flip, .. } | Self::FlipOrMs { flip, .. } => flip,
-            Self::Ms { .. } => 0,
+            Self::Ms { min_flip, .. } => min_flip,
         }
     }
 }
@@ -322,15 +340,22 @@ struct Scheduled {
 
 /// Deterministic timeline that expands high-level actions and piped routes into
 /// `Host::Input` events.
+///
+/// Tracks the Win32 hardware pointer anchor (`hw_pointer`, mirroring
+/// `win32::State::last_move`) separately from the rendered in-game software
+/// cursor (`visual_cursor`) so relative-mouse titles never lose alignment on
+/// `SetCursorPos` recenter calls (#327).
 #[derive(Clone, Debug)]
 pub struct Timeline {
     next_seq: u64,
     pending: Vec<Scheduled>,
-    last_pointer: (i32, i32),
+    hw_pointer: (i32, i32),
+    visual_cursor: (f64, f64),
     pointer_shown: bool,
     pointer_speed: (f64, f64),
+    mouse_mode: MouseMode,
     frame_size: (u32, u32),
-    delta_rem: (f64, f64),
+    owed_delta: (f64, f64),
 }
 
 impl Timeline {
@@ -339,20 +364,111 @@ impl Timeline {
         Self {
             next_seq: 0,
             pending: Vec::new(),
-            last_pointer: (0, 0),
+            hw_pointer: (320, 240),
+            visual_cursor: (320.0, 240.0),
             pointer_shown: true,
             pointer_speed,
+            mouse_mode: MouseMode::AbsoluteKept,
             frame_size: (0, 0),
-            delta_rem: (0.0, 0.0),
+            owed_delta: (0.0, 0.0),
         }
     }
 
-    /// Update the tracked guest pointer origin (e.g. from `Host::put_pointer`
-    /// or an observed move). Fractional sub-pixel remainder is preserved across
-    /// `put_pointer` recentering so `Mouse::Steered` titles do not drop
-    /// sub-pixel deltas.
+    fn clamp_visual(&self, x: f64, y: f64) -> (f64, f64) {
+        if self.frame_size.0 > 0 && self.frame_size.1 > 0 {
+            let max_x = f64::from(self.frame_size.0.saturating_sub(1));
+            let max_y = f64::from(self.frame_size.1.saturating_sub(1));
+            (x.clamp(0.0, max_x), y.clamp(0.0, max_y))
+        } else {
+            (x, y)
+        }
+    }
+
+    fn clamp_screen_i32(&self, x: i32, y: i32) -> (i32, i32) {
+        if self.frame_size.0 > 0 && self.frame_size.1 > 0 {
+            (
+                x.clamp(0, (self.frame_size.0 as i32).saturating_sub(1)),
+                y.clamp(0, (self.frame_size.1 as i32).saturating_sub(1)),
+            )
+        } else {
+            (x, y)
+        }
+    }
+
+    fn active_scale(&self) -> (f64, f64) {
+        let sane = |v: f64| if v.is_finite() && v > 0.0 { v } else { 1.0 };
+        (sane(self.pointer_speed.0), sane(self.pointer_speed.1))
+    }
+
+    /// Configure declared [`MouseMode`] and frame resolution, initializing
+    /// `hw_pointer` and `visual_cursor` to match Win32 / guest startup state (#327).
+    pub fn configure_mode(&mut self, mode: MouseMode, resolution: (u32, u32)) {
+        self.mouse_mode = mode;
+        if resolution.0 > 0 && resolution.1 > 0 {
+            self.frame_size = resolution;
+        }
+        let center = if self.frame_size.0 > 0 && self.frame_size.1 > 0 {
+            (self.frame_size.0 as i32 / 2, self.frame_size.1 as i32 / 2)
+        } else {
+            (320, 240)
+        };
+        let (hw, vis) = match mode {
+            MouseMode::AbsoluteKept | MouseMode::SoftwareAbsolute { .. } => {
+                (center, (f64::from(center.0), f64::from(center.1)))
+            }
+            MouseMode::SoftwareRelative { start_pos, .. } => (
+                center,
+                self.clamp_visual(f64::from(start_pos.0), f64::from(start_pos.1)),
+            ),
+            MouseMode::RelativeSteered {
+                recenter,
+                start_corner,
+                ..
+            } => (
+                recenter,
+                self.clamp_visual(f64::from(start_corner.0), f64::from(start_corner.1)),
+            ),
+        };
+        self.hw_pointer = hw;
+        self.visual_cursor = vis;
+        self.pointer_shown = matches!(mode, MouseMode::AbsoluteKept);
+        self.owed_delta = (0.0, 0.0);
+    }
+
+    /// Update the tracked Win32 hardware pointer anchor (from `Host::put_pointer`
+    /// or non-relative `observe_flip` reconciliation).
+    ///
+    /// On relative modes (`SoftwareRelative`, `RelativeSteered`), only the
+    /// hardware anchor changes — `visual_cursor` and `owed_delta` are preserved
+    /// so `SetCursorPos` transitions and per-flip recenters never pin or shift
+    /// the reported in-game cursor (#327).
     pub fn set_pointer(&mut self, x: i32, y: i32) {
-        self.last_pointer = (x, y);
+        self.hw_pointer = (x, y);
+        if !self.mouse_mode.is_relative() {
+            self.visual_cursor = (f64::from(x), f64::from(y));
+        }
+    }
+
+    /// Explicitly restore the tracked visual cursor position (e.g. after live
+    /// snapshot restore on relative-mouse titles).
+    pub fn set_visual_cursor(&mut self, x: i32, y: i32) {
+        self.visual_cursor = self.clamp_visual(f64::from(x), f64::from(y));
+    }
+
+    /// Record one emitted `Input::Move { x, y }` (whether from this timeline,
+    /// `PipeRoute`, or a human window in `Human`/`Shared` mode) (#327).
+    pub fn observe_emitted_move(&mut self, x: i32, y: i32) {
+        let prev = self.hw_pointer;
+        self.hw_pointer = (x, y);
+        if self.mouse_mode.is_relative() {
+            let (sx, sy) = self.active_scale();
+            let dx = f64::from(x.saturating_sub(prev.0)) / sx;
+            let dy = f64::from(y.saturating_sub(prev.1)) / sy;
+            self.visual_cursor =
+                self.clamp_visual(self.visual_cursor.0 + dx, self.visual_cursor.1 + dy);
+        } else {
+            self.visual_cursor = (f64::from(x), f64::from(y));
+        }
     }
 
     /// Update whether the host pointer is shown (`false` means `Mouse::Steered`).
@@ -361,13 +477,48 @@ impl Timeline {
     }
 
     /// Update the active guest frame dimensions used to clamp relative moves.
+    ///
+    /// When the guest switches display resolution mid-run, `ddraw::set_display_mode`
+    /// resets `state.last_move` to the new screen center; mirror that here so
+    /// subsequent relative deltas stay aligned.
     pub fn set_frame_size(&mut self, width: u32, height: u32) {
+        let changed = width > 0
+            && height > 0
+            && self.frame_size != (0, 0)
+            && self.frame_size != (width, height);
         self.frame_size = (width, height);
+        if changed {
+            self.hw_pointer = (width as i32 / 2, height as i32 / 2);
+            if !self.mouse_mode.is_relative() {
+                self.visual_cursor = (f64::from(self.hw_pointer.0), f64::from(self.hw_pointer.1));
+            }
+        }
+        if self.mouse_mode.is_relative() {
+            self.visual_cursor = self.clamp_visual(self.visual_cursor.0, self.visual_cursor.1);
+        }
     }
 
     #[must_use]
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.mouse_mode
+    }
+
+    /// Win32 hardware pointer anchor (`last_move`).
+    #[must_use]
     pub fn last_pointer(&self) -> (i32, i32) {
-        self.last_pointer
+        self.hw_pointer
+    }
+
+    /// Tracked rendered in-game cursor coordinates in guest pixel space (#327).
+    #[must_use]
+    pub fn visual_cursor_pos(&self) -> (i32, i32) {
+        let vx = self.visual_cursor.0.round() as i32;
+        let vy = self.visual_cursor.1.round() as i32;
+        if self.mouse_mode.is_relative() {
+            self.clamp_screen_i32(vx, vy)
+        } else {
+            (vx, vy)
+        }
     }
 
     #[must_use]
@@ -375,19 +526,193 @@ impl Timeline {
         self.pointer_shown
     }
 
+    /// Whether unemitted owed relative delta (> 0.5 px) remains for subsequent
+    /// recenter flips (strict `> 0.5` paired with `round_ties_even` prevents
+    /// half-integer `±0.5` oscillation).
+    #[must_use]
+    pub fn has_owed_delta(&self) -> bool {
+        self.owed_delta.0.abs() > 0.5 || self.owed_delta.1.abs() > 0.5
+    }
+
     #[must_use]
     pub fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + usize::from(self.has_owed_delta())
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && !self.has_owed_delta()
     }
 
     pub fn clear(&mut self) {
         self.pending.clear();
-        self.delta_rem = (0.0, 0.0);
+        self.owed_delta = (0.0, 0.0);
+    }
+
+    fn clamps_hw_pointer(&self) -> bool {
+        self.frame_size.0 > 0
+            && self.frame_size.1 > 0
+            && (self.mouse_mode.recenters_every_flip()
+                || (!self.mouse_mode.is_relative() && !self.pointer_shown))
+    }
+
+    fn min_flips_for_raw_delta(&self, raw_dx: f64, raw_dy: f64) -> u64 {
+        if !self.mouse_mode.recenters_every_flip()
+            || self.frame_size.0 == 0
+            || self.frame_size.1 == 0
+        {
+            return 1;
+        }
+        let max_x = (self.frame_size.0 as i32).saturating_sub(1);
+        let max_y = (self.frame_size.1 as i32).saturating_sub(1);
+        let anchor = match self.mouse_mode {
+            MouseMode::RelativeSteered { recenter, .. } => {
+                (recenter.0.clamp(0, max_x), recenter.1.clamp(0, max_y))
+            }
+            _ => (
+                self.hw_pointer.0.clamp(0, max_x),
+                self.hw_pointer.1.clamp(0, max_y),
+            ),
+        };
+        let axis = |delta: f64, pos: i32, max: i32| -> u64 {
+            if !delta.is_finite() || delta == 0.0 {
+                return 1;
+            }
+            let cap = if delta > 0.0 {
+                (max - pos).max(1)
+            } else {
+                pos.max(1)
+            };
+            (delta.abs() / f64::from(cap)).ceil().min(1024.0) as u64
+        };
+        axis(raw_dx, anchor.0, max_x)
+            .max(axis(raw_dy, anchor.1, max_y))
+            .max(1)
+    }
+
+    fn next_relative_flip(&self, start_flip: u64) -> u64 {
+        let mut base = start_flip;
+        for item in &self.pending {
+            if matches!(item.payload, Payload::MouseDeltaStep { .. }) {
+                base = base.max(item.due.sort_flip().saturating_add(1));
+            }
+        }
+        if base == start_flip && self.has_owed_delta() {
+            let payback = self.min_flips_for_raw_delta(self.owed_delta.0, self.owed_delta.1);
+            base = base.max(start_flip.saturating_add(payback));
+        }
+        base
+    }
+
+    fn planned_visual(&self) -> (f64, f64) {
+        let (mut raw_x, mut raw_y) = self.owed_delta;
+        for item in &self.pending {
+            if let Payload::MouseDeltaStep { dx, dy } = item.payload {
+                raw_x += dx;
+                raw_y += dy;
+            }
+        }
+        let (sx, sy) = self.active_scale();
+        self.clamp_visual(
+            self.visual_cursor.0 + raw_x / sx,
+            self.visual_cursor.1 + raw_y / sy,
+        )
+    }
+
+    fn schedule_relative_move_to(
+        &mut self,
+        target_x: i32,
+        target_y: i32,
+        start_flip: u64,
+        min_steps: u64,
+    ) -> u64 {
+        let effective_start = self.next_relative_flip(start_flip);
+        let (tx, ty) = self.clamp_screen_i32(target_x, target_y);
+        let (cur_x, cur_y) = self.planned_visual();
+        let (sx, sy) = self.active_scale();
+        let raw_dx = (f64::from(tx) - cur_x) * sx;
+        let raw_dy = (f64::from(ty) - cur_y) * sy;
+        let steps = min_steps
+            .max(self.min_flips_for_raw_delta(raw_dx, raw_dy))
+            .max(1);
+        let step_dx = raw_dx / steps as f64;
+        let step_dy = raw_dy / steps as f64;
+        for i in 0..steps {
+            self.push(
+                Due::Point {
+                    flip: effective_start.saturating_add(i),
+                    poll: 0,
+                },
+                Payload::MouseDeltaStep {
+                    dx: step_dx,
+                    dy: step_dy,
+                },
+            );
+        }
+        effective_start.saturating_add(steps - 1)
+    }
+
+    fn schedule_optional_move(&mut self, x: Option<i32>, y: Option<i32>, start_flip: u64) -> u64 {
+        match (x, y) {
+            (Some(x), Some(y)) if self.mouse_mode.is_relative() => {
+                self.schedule_relative_move_to(x, y, start_flip, 1)
+            }
+            (Some(x), Some(y)) => {
+                self.push_input(start_flip, 0, Input::Move { x, y });
+                start_flip
+            }
+            _ if self.mouse_mode.is_relative() => self.next_relative_flip(start_flip),
+            _ => start_flip,
+        }
+    }
+
+    fn flush_owed_delta(&mut self, force_emit: bool, out: &mut Vec<Input>) {
+        if !self.owed_delta.0.is_finite() {
+            self.owed_delta.0 = 0.0;
+        }
+        if !self.owed_delta.1.is_finite() {
+            self.owed_delta.1 = 0.0;
+        }
+        // `round_ties_even()` maps ±0.5 to 0, preventing ±1 px oscillation.
+        let want_x = self.owed_delta.0.round_ties_even() as i32;
+        let want_y = self.owed_delta.1.round_ties_even() as i32;
+        if !force_emit && want_x == 0 && want_y == 0 {
+            return;
+        }
+        let raw_nx = self.hw_pointer.0.saturating_add(want_x);
+        let raw_ny = self.hw_pointer.1.saturating_add(want_y);
+        let (nx, ny) = if self.clamps_hw_pointer() {
+            (
+                raw_nx.clamp(0, (self.frame_size.0 as i32).saturating_sub(1)),
+                raw_ny.clamp(0, (self.frame_size.1 as i32).saturating_sub(1)),
+            )
+        } else {
+            (raw_nx, raw_ny)
+        };
+        let emitted_x = nx.saturating_sub(self.hw_pointer.0);
+        let emitted_y = ny.saturating_sub(self.hw_pointer.1);
+        if self.mouse_mode.recenters_every_flip() {
+            // Per-flip recenter mode: carry clamped remainder into subsequent flips.
+            self.owed_delta.0 -= f64::from(emitted_x);
+            self.owed_delta.1 -= f64::from(emitted_y);
+        } else {
+            // Non-recentering mode: discard screen-edge overflow instead of wedging debt.
+            self.owed_delta.0 = if nx != raw_nx {
+                0.0
+            } else {
+                self.owed_delta.0 - f64::from(emitted_x)
+            };
+            self.owed_delta.1 = if ny != raw_ny {
+                0.0
+            } else {
+                self.owed_delta.1 - f64::from(emitted_y)
+            };
+        }
+        if !force_emit && emitted_x == 0 && emitted_y == 0 {
+            return;
+        }
+        self.observe_emitted_move(nx, ny);
+        out.push(Input::Move { x: nx, y: ny });
     }
 
     fn push(&mut self, due: Due, payload: Payload) {
@@ -416,11 +741,13 @@ impl Timeline {
         let end_flip = match action {
             Action::Move { x, y, glide_flips } => {
                 let steps = (*glide_flips).max(1);
-                if steps == 1 {
+                if self.mouse_mode.is_relative() {
+                    self.schedule_relative_move_to(*x, *y, start_flip, steps)
+                } else if steps == 1 {
                     self.push_input(start_flip, 0, Input::Move { x: *x, y: *y });
                     start_flip
                 } else {
-                    let (x0, y0) = self.last_pointer;
+                    let (x0, y0) = self.hw_pointer;
                     for i in 1..=steps {
                         let t = i as f64 / steps as f64;
                         let ix = if i == steps {
@@ -446,26 +773,32 @@ impl Timeline {
                 scale_y,
             } => {
                 let steps = (*flips).max(1);
-                let sx = scale_x.unwrap_or_else(|| {
-                    if self.pointer_shown {
-                        1.0
+                let (def_x, def_y) = if self.pointer_shown && !self.mouse_mode.is_relative() {
+                    (1.0, 1.0)
+                } else {
+                    self.active_scale()
+                };
+                let sane_scale = |v: Option<f64>, d: f64| match v {
+                    Some(s) if s.is_finite() && s > 0.0 => s,
+                    _ => d,
+                };
+                let sx = sane_scale(*scale_x, def_x);
+                let sy = sane_scale(*scale_y, def_y);
+                let sane_d = |v: f64| {
+                    if v.is_finite() {
+                        v.clamp(-1_000_000.0, 1_000_000.0)
                     } else {
-                        self.pointer_speed.0
+                        0.0
                     }
-                });
-                let sy = scale_y.unwrap_or_else(|| {
-                    if self.pointer_shown {
-                        1.0
-                    } else {
-                        self.pointer_speed.1
-                    }
-                });
-                let step_dx = (*dx * sx) / steps as f64;
-                let step_dy = (*dy * sy) / steps as f64;
+                };
+                let total_dx = (sane_d(*dx) * sx).clamp(-1_000_000.0, 1_000_000.0);
+                let total_dy = (sane_d(*dy) * sy).clamp(-1_000_000.0, 1_000_000.0);
+                let step_dx = total_dx / steps as f64;
+                let step_dy = total_dy / steps as f64;
                 for i in 0..steps {
                     self.push(
                         Due::Point {
-                            flip: start_flip + i,
+                            flip: start_flip.saturating_add(i),
                             poll: 0,
                         },
                         Payload::MouseDeltaStep {
@@ -474,7 +807,11 @@ impl Timeline {
                         },
                     );
                 }
-                start_flip + steps - 1
+                let needed = steps.max(self.min_flips_for_raw_delta(
+                    self.owed_delta.0 + total_dx,
+                    self.owed_delta.1 + total_dy,
+                ));
+                start_flip.saturating_add(needed.saturating_sub(1))
             }
             Action::Click {
                 x,
@@ -483,14 +820,13 @@ impl Timeline {
                 hold_flips,
                 hold_ms,
             } => {
-                if let (Some(x), Some(y)) = (*x, *y) {
-                    self.push_input(start_flip, 0, Input::Move { x, y });
-                }
-                self.push_input(start_flip, 0, Input::Down(*button));
+                let click_flip = self.schedule_optional_move(*x, *y, start_flip);
+                self.push_input(click_flip, 0, Input::Down(*button));
                 let hold = (*hold_flips).max(1);
-                let rel_flip = start_flip.saturating_add(hold);
+                let rel_flip = click_flip.saturating_add(hold);
                 let due = match hold_ms {
                     Some(ms) => Due::FlipOrMs {
+                        min_flip: click_flip,
                         flip: rel_flip,
                         declared_ms: start_ms.saturating_add(*ms),
                     },
@@ -509,22 +845,22 @@ impl Timeline {
                 hold_flips,
                 hold_ms,
             } => {
-                if let (Some(x), Some(y)) = (*x, *y) {
-                    self.push_input(start_flip, 0, Input::Move { x, y });
-                }
-                self.push_input(start_flip, 0, Input::Down(*button));
+                let click_flip = self.schedule_optional_move(*x, *y, start_flip);
+                self.push_input(click_flip, 0, Input::Down(*button));
                 let target_ms = start_ms.saturating_add(*hold_ms);
                 let (due, end_flip) = if *hold_flips == 0 {
                     (
                         Due::Ms {
+                            min_flip: click_flip,
                             declared_ms: target_ms,
                         },
-                        start_flip,
+                        click_flip,
                     )
                 } else {
-                    let rel_flip = start_flip.saturating_add(*hold_flips);
+                    let rel_flip = click_flip.saturating_add(*hold_flips);
                     (
                         Due::FlipOrMs {
+                            min_flip: click_flip,
                             flip: rel_flip,
                             declared_ms: target_ms,
                         },
@@ -542,35 +878,42 @@ impl Timeline {
                 button,
                 step_px,
             } => {
-                self.push_input(
-                    start_flip,
-                    0,
-                    Input::Move {
-                        x: *from_x,
-                        y: *from_y,
-                    },
-                );
-                self.push_input(start_flip, 0, Input::Down(*button));
-                let dx = (*to_x - *from_x).unsigned_abs();
-                let dy = (*to_y - *from_y).unsigned_abs();
-                let dist = dx.max(dy);
+                let dist = (*to_x - *from_x)
+                    .unsigned_abs()
+                    .max((*to_y - *from_y).unsigned_abs());
                 let step = (*step_px).max(1);
                 let steps = u64::from(dist.div_ceil(step).max(1));
-                for i in 1..=steps {
-                    let t = i as f64 / steps as f64;
-                    let ix = if i == steps {
-                        *to_x
-                    } else {
-                        (f64::from(*from_x) + f64::from(*to_x - *from_x) * t).round() as i32
-                    };
-                    let iy = if i == steps {
-                        *to_y
-                    } else {
-                        (f64::from(*from_y) + f64::from(*to_y - *from_y) * t).round() as i32
-                    };
-                    self.push_input(start_flip + i, 0, Input::Move { x: ix, y: iy });
-                }
-                let rel_flip = start_flip + steps + 1;
+                let drag_end = if self.mouse_mode.is_relative() {
+                    let down_flip = self.schedule_relative_move_to(*from_x, *from_y, start_flip, 1);
+                    self.push_input(down_flip, 0, Input::Down(*button));
+                    self.schedule_relative_move_to(*to_x, *to_y, down_flip.saturating_add(1), steps)
+                } else {
+                    self.push_input(
+                        start_flip,
+                        0,
+                        Input::Move {
+                            x: *from_x,
+                            y: *from_y,
+                        },
+                    );
+                    self.push_input(start_flip, 0, Input::Down(*button));
+                    for i in 1..=steps {
+                        let t = i as f64 / steps as f64;
+                        let ix = if i == steps {
+                            *to_x
+                        } else {
+                            (f64::from(*from_x) + f64::from(*to_x - *from_x) * t).round() as i32
+                        };
+                        let iy = if i == steps {
+                            *to_y
+                        } else {
+                            (f64::from(*from_y) + f64::from(*to_y - *from_y) * t).round() as i32
+                        };
+                        self.push_input(start_flip + i, 0, Input::Move { x: ix, y: iy });
+                    }
+                    start_flip + steps
+                };
+                let rel_flip = drag_end.saturating_add(1);
                 self.push_input(rel_flip, 0, Input::Up(*button));
                 rel_flip
             }
@@ -585,6 +928,7 @@ impl Timeline {
                 let rel_flip = start_flip.saturating_add(hold);
                 let due = match hold_ms {
                     Some(ms) => Due::FlipOrMs {
+                        min_flip: start_flip,
                         flip: rel_flip,
                         declared_ms: start_ms.saturating_add(*ms),
                     },
@@ -618,6 +962,7 @@ impl Timeline {
                 let rel_flip = start_flip.saturating_add(hold);
                 let due = match hold_ms {
                     Some(ms) => Due::FlipOrMs {
+                        min_flip: start_flip,
                         flip: rel_flip,
                         declared_ms: start_ms.saturating_add(*ms),
                     },
@@ -731,9 +1076,10 @@ impl Timeline {
 
     /// Drain every scheduled event due at `(flip, poll, declared_ms)` in
     /// deterministic order, translating relative [`Payload::MouseDeltaStep`]s
-    /// against the live tracked pointer.
+    /// against the live hardware pointer and paying back any owed delta chunks
+    /// across recenter flips (#327).
     pub fn drain_due(&mut self, flip: u64, poll: u64, declared_ms: u64) -> Vec<Input> {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && (poll > 0 || !self.has_owed_delta()) {
             return Vec::new();
         }
         let mut due_items = Vec::new();
@@ -748,33 +1094,31 @@ impl Timeline {
         self.pending = remaining;
         due_items.sort_by_key(|item| (item.due.sort_flip(), item.seq));
 
-        let mut out = Vec::with_capacity(due_items.len());
+        let mut out = Vec::with_capacity(due_items.len() + 1);
+        let mut emitted_delta = false;
         for item in due_items {
             match item.payload {
                 Payload::Input(input) => {
                     if let Input::Move { x, y } = input {
-                        self.last_pointer = (x, y);
-                        self.delta_rem = (0.0, 0.0);
+                        self.observe_emitted_move(x, y);
+                        self.owed_delta = (0.0, 0.0);
+                    } else if !emitted_delta && poll == 0 && self.has_owed_delta() {
+                        // Finish carry-over owed delta before emitting clicks/keys on this flip.
+                        self.flush_owed_delta(false, &mut out);
+                        emitted_delta = true;
                     }
                     out.push(input);
                 }
                 Payload::MouseDeltaStep { dx, dy } => {
-                    self.delta_rem.0 += dx;
-                    self.delta_rem.1 += dy;
-                    let step_x = self.delta_rem.0.round() as i32;
-                    let step_y = self.delta_rem.1.round() as i32;
-                    self.delta_rem.0 -= f64::from(step_x);
-                    self.delta_rem.1 -= f64::from(step_y);
-                    let mut nx = self.last_pointer.0.saturating_add(step_x);
-                    let mut ny = self.last_pointer.1.saturating_add(step_y);
-                    if self.frame_size.0 > 0 && self.frame_size.1 > 0 {
-                        nx = nx.clamp(0, (self.frame_size.0 as i32).saturating_sub(1));
-                        ny = ny.clamp(0, (self.frame_size.1 as i32).saturating_sub(1));
-                    }
-                    self.last_pointer = (nx, ny);
-                    out.push(Input::Move { x: nx, y: ny });
+                    self.owed_delta.0 += dx;
+                    self.owed_delta.1 += dy;
+                    self.flush_owed_delta(true, &mut out);
+                    emitted_delta = true;
                 }
             }
+        }
+        if !emitted_delta && poll == 0 && self.has_owed_delta() {
+            self.flush_owed_delta(false, &mut out);
         }
         out
     }
@@ -1071,5 +1415,179 @@ mod tests {
         assert_eq!(abs.end_flip, 150);
         assert_eq!(tl.drain_due(149, 0, 0), []);
         assert_eq!(tl.drain_due(150, 0, 16), [Input::Down(Button::Right)]);
+    }
+
+    #[test]
+    fn timeline_initializes_at_screen_center_and_chunks_owed_delta_across_recenter_flips() {
+        let mut tl = Timeline::new((2.0, 2.0));
+        assert_eq!(
+            tl.last_pointer(),
+            (320, 240),
+            "initial hw pointer matches win32::State::new center"
+        );
+        tl.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (1280, 960),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            (640, 480),
+        );
+
+        // +300 screen px * 2.0 scale = +600 raw px: exceeds 639 - 320 = 319 raw px
+        // in one flip, so the remaining 281 raw px must carry over to the next
+        // flip after recentering rather than being dropped.
+        let report = tl
+            .schedule(
+                &Action::MouseDelta {
+                    dx: 300.0,
+                    dy: 0.0,
+                    flips: 1,
+                    scale_x: None,
+                    scale_y: None,
+                },
+                10,
+                160,
+            )
+            .expect("schedules");
+        assert!(report.required_flips >= 2, "{report:?}");
+
+        let ev0 = tl.drain_due(10, 0, 160);
+        assert_eq!(ev0, [Input::Move { x: 639, y: 240 }]);
+
+        // Guest recenters to (320, 240) before flip 11; owed +281 raw px pays back.
+        tl.set_pointer(320, 240);
+        let ev1 = tl.drain_due(11, 0, 176);
+        assert_eq!(ev1, [Input::Move { x: 601, y: 240 }]);
+        assert_eq!(tl.drain_due(12, 0, 192), []);
+        assert!(tl.is_empty());
+    }
+
+    #[test]
+    fn half_integer_owed_delta_does_not_oscillate_and_software_absolute_does_not_wedge() {
+        // 1. Half-integer raw delta (±0.5) must never oscillate ±1 px across flips.
+        let mut tl = Timeline::new((1.0, 1.0));
+        tl.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (640, 480),
+                recenter: (320, 240),
+                start_corner: (320, 240),
+            },
+            (640, 480),
+        );
+        tl.schedule(
+            &Action::MouseDelta {
+                dx: 0.5,
+                dy: -1.5,
+                flips: 1,
+                scale_x: Some(1.0),
+                scale_y: Some(1.0),
+            },
+            0,
+            0,
+        )
+        .unwrap();
+        let _ = tl.drain_due(0, 0, 0);
+        tl.set_pointer(320, 240);
+        assert_eq!(tl.drain_due(1, 0, 16), [], "no ±1 oscillation on ±0.5 rem");
+        assert!(tl.is_empty());
+
+        // 2. Non-recentering SoftwareAbsolute discards wall overflow on MouseDelta
+        //    so is_empty() stays true and opposite moves reverse immediately.
+        let mut sa = Timeline::new((1.0, 1.0));
+        sa.configure_mode(
+            MouseMode::SoftwareAbsolute {
+                requires_poll_release: true,
+            },
+            (640, 480),
+        );
+        sa.schedule(
+            &Action::MouseDelta {
+                dx: 500.0,
+                dy: 0.0,
+                flips: 1,
+                scale_x: None,
+                scale_y: None,
+            },
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(sa.drain_due(0, 0, 0), [Input::Move { x: 639, y: 240 }]);
+        assert!(
+            sa.is_empty(),
+            "wall overflow must not wedge SoftwareAbsolute"
+        );
+        sa.schedule(
+            &Action::MouseDelta {
+                dx: -20.0,
+                dy: 0.0,
+                flips: 1,
+                scale_x: None,
+                scale_y: None,
+            },
+            1,
+            16,
+        )
+        .unwrap();
+        assert_eq!(sa.drain_due(1, 0, 16), [Input::Move { x: 619, y: 240 }]);
+
+        // 3. Multi-flip relative Click with hold_ms and ClickPoll never emit Up before Down.
+        let mut rel = Timeline::new((2.0, 1280.0 / 480.0));
+        rel.configure_mode(
+            MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
+            },
+            (640, 480),
+        );
+        let r = rel
+            .schedule(
+                &Action::ClickPoll {
+                    x: Some(480),
+                    y: Some(120),
+                    button: Button::Left,
+                    hold_flips: 2,
+                    hold_ms: 50,
+                },
+                0,
+                0,
+            )
+            .unwrap();
+        assert!(r.end_flip >= 4);
+        let mut saw_down = false;
+        let mut saw_up = false;
+        for f in 0..=r.end_flip {
+            rel.set_pointer(320, 240);
+            for ev in rel.drain_due(f, 0, f * 33) {
+                match ev {
+                    Input::Down(Button::Left) => {
+                        assert!(!saw_up, "Up must never fire before Down");
+                        saw_down = true;
+                    }
+                    Input::Up(Button::Left) => {
+                        assert!(saw_down, "Up must follow Down");
+                        saw_up = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_down && saw_up);
+        assert_eq!(rel.visual_cursor_pos(), (480, 120));
+
+        // 4. Mid-run display mode switch resets hw_pointer to new screen center.
+        let mut res = Timeline::new((1.0, 1.0));
+        res.configure_mode(
+            MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (320, 240),
+            },
+            (640, 480),
+        );
+        res.observe_emitted_move(500, 400);
+        res.set_frame_size(320, 200);
+        assert_eq!(res.last_pointer(), (160, 100));
     }
 }

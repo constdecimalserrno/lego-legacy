@@ -23,6 +23,16 @@ pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
                 "{{\"kind\":\"software_absolute\",\"requires_poll_release\":{requires_poll_release}}}"
             );
         }
+        MouseMode::SoftwareRelative {
+            virtual_span,
+            start_pos,
+        } => {
+            let _ = write!(
+                out,
+                "{{\"kind\":\"software_relative\",\"virtual_span\":[{},{}],\"start_pos\":[{},{}],\"recenter_every_flip\":false}}",
+                virtual_span.0, virtual_span.1, start_pos.0, start_pos.1
+            );
+        }
         MouseMode::RelativeSteered {
             virtual_span,
             recenter,
@@ -30,7 +40,7 @@ pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
         } => {
             let _ = write!(
                 out,
-                "{{\"kind\":\"relative_steered\",\"virtual_span\":[{},{}],\"recenter\":[{},{}],\"start_corner\":[{},{}]}}",
+                "{{\"kind\":\"relative_steered\",\"virtual_span\":[{},{}],\"recenter\":[{},{}],\"start_corner\":[{},{}],\"recenter_every_flip\":true}}",
                 virtual_span.0,
                 virtual_span.1,
                 recenter.0,
@@ -337,6 +347,7 @@ mod tests {
             mm["start_corner"].as_array().unwrap()[1].as_i64(),
             Some(480)
         );
+        assert_eq!(mm["recenter_every_flip"].as_bool(), Some(true));
         let scale = guide["relative_steered_scale"].as_array().unwrap();
         assert!((scale[0].as_f64().unwrap() - 2.0).abs() < 1e-9);
         assert!((scale[1].as_f64().unwrap() - (1280.0 / 480.0)).abs() < 1e-9);
@@ -388,6 +399,24 @@ mod tests {
             v.as_object().unwrap()["requires_poll_release"].as_bool(),
             Some(true)
         );
+
+        s.clear();
+        write_mouse_mode(
+            &mut s,
+            MouseMode::SoftwareRelative {
+                virtual_span: (640, 480),
+                start_pos: (320, 240),
+            },
+        );
+        let v = parse_json(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["kind"].as_str(), Some("software_relative"));
+        assert_eq!(
+            obj["virtual_span"].as_array().unwrap()[0].as_u64(),
+            Some(640)
+        );
+        assert_eq!(obj["start_pos"].as_array().unwrap()[0].as_i64(), Some(320));
+        assert_eq!(obj["recenter_every_flip"].as_bool(), Some(false));
 
         s.clear();
         write_cadence(&mut s, AgentCadence::BurstThenPause { burst_ms: 500 });

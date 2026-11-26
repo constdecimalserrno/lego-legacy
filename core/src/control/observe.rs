@@ -473,6 +473,8 @@ mod tests {
                 unchanged_streak: streak,
             },
             uniform,
+            pointer_pos: (320, 240),
+            pointer_shown: true,
         }
     }
 

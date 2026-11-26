@@ -66,7 +66,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--s
   padding:12px;position:relative;overflow:hidden;
 }
 .viewport{
-  position:relative;aspect-ratio:4 / 3;max-width:100%;max-height:100%;width:auto;height:100%;
+  box-sizing:content-box;position:relative;aspect-ratio:4 / 3;
+  max-width:calc(100% - 4px);max-height:calc(100% - 4px);
   background:#000;border:2px solid var(--border);border-radius:6px;overflow:hidden;
   box-shadow:0 12px 40px rgba(0,0,0,.65);
 }
@@ -227,7 +228,7 @@ details.inspect summary::-webkit-details-marker{display:none}
   </header>
 
   <main class="stage-col">
-    <div class="stage-wrap">
+    <div class="stage-wrap" id="stageWrap">
       <div class="viewport" id="viewport">
         <canvas id="stage" width="640" height="480" tabindex="0"></canvas>
         <canvas id="overlay" width="640" height="480"></canvas>
@@ -252,7 +253,7 @@ details.inspect summary::-webkit-details-marker{display:none}
       </div>
       <div class="sep"></div>
       <button class="btn amber" id="btnTakeover">Human Takeover</button>
-      <span class="coord-readout" id="coordReadout">640x480 · ptr (0, 0)</span>
+      <span class="coord-readout" id="coordReadout">640x480 · ptr (320, 240)</span>
     </div>
   </main>
 
@@ -359,6 +360,7 @@ details.inspect summary::-webkit-details-marker{display:none}
   for (let f = 1; f <= 12; f++) CODE_TO_ROUTE_KEY['F' + f] = 'F' + f;
 
   // DOM refs
+  const stageWrap = document.getElementById('stageWrap');
   const stage = document.getElementById('stage');
   const overlay = document.getElementById('overlay');
   const stageCtx = stage.getContext('2d', { willReadFrequently: true });
@@ -401,7 +403,10 @@ details.inspect summary::-webkit-details-marker{display:none}
   let fbImageData = null;
   let lastStatus = null;
   let lastFeedSeq = 0;
-  let pointerPos = [0, 0];
+  let pointerPos = [320, 240];
+  let wsPointerLocked = false;
+  let hoveringStage = false;
+  let mouseMode = { kind: 'absolute_kept' };
   let heldKeys = [];
   let localMouseBtn = null;
   let ripples = [];
@@ -450,6 +455,28 @@ details.inspect summary::-webkit-details-marker{display:none}
     return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + d;
   }
 
+  function fitViewport() {
+    if (!stageWrap || !viewport || frameW <= 0 || frameH <= 0) return;
+    const wcs = getComputedStyle(stageWrap);
+    const padX = (parseFloat(wcs.paddingLeft) || 0) + (parseFloat(wcs.paddingRight) || 0);
+    const padY = (parseFloat(wcs.paddingTop) || 0) + (parseFloat(wcs.paddingBottom) || 0);
+    const vcs = getComputedStyle(viewport);
+    const borderX = (parseFloat(vcs.borderLeftWidth) || 0) + (parseFloat(vcs.borderRightWidth) || 0);
+    const borderY = (parseFloat(vcs.borderTopWidth) || 0) + (parseFloat(vcs.borderBottomWidth) || 0);
+    const availW = Math.max(1, stageWrap.clientWidth - padX - borderX);
+    const availH = Math.max(1, stageWrap.clientHeight - padY - borderY);
+    const scale = Math.min(availW / frameW, availH / frameH);
+    const cw = Math.max(1, Math.floor(frameW * scale));
+    const ch = Math.max(1, Math.floor(frameH * scale));
+    viewport.style.aspectRatio = frameW + ' / ' + frameH;
+    viewport.style.width = cw + 'px';
+    viewport.style.height = ch + 'px';
+  }
+  if (typeof ResizeObserver === 'function' && stageWrap) {
+    new ResizeObserver(fitViewport).observe(stageWrap);
+  }
+  window.addEventListener('resize', fitViewport);
+
   function ensureFrameSize(w, h) {
     if (w <= 0 || h <= 0) return;
     if (stage.width !== w || stage.height !== h || !fbImageData) {
@@ -462,6 +489,7 @@ details.inspect summary::-webkit-details-marker{display:none}
       decodeCanvas.width = w;
       decodeCanvas.height = h;
       fbImageData = stageCtx.createImageData(w, h);
+      fitViewport();
     }
     stageEmpty.style.display = 'none';
   }
@@ -505,12 +533,23 @@ details.inspect summary::-webkit-details-marker{display:none}
   // Serialized async decode queue so deltas never race ahead of keyframes
   const frameQueue = [];
   let decodingFrame = false;
+  let videoGen = 0;
+
+  function applyWsPointer(framePtr) {
+    if (!framePtr) return;
+    pointerPos = framePtr;
+    wsPointerLocked = true;
+    if (!hoveringStage) {
+      coordReadout.textContent = frameW + 'x' + frameH + ' · ptr (' + pointerPos[0] + ', ' + pointerPos[1] + ')';
+    }
+  }
 
   function enqueueBinaryFrame(buf) {
     if (buf.byteLength < 9) return;
     const view = new DataView(buf);
     const flags = view.getUint8(0);
-    if (flags === 0) {
+    const kind = flags & 0x0f;
+    if (kind === 0) {
       // Keyframe supersedes any older queued frames
       frameQueue.length = 0;
     } else if (frameQueue.length > 4) {
@@ -524,25 +563,36 @@ details.inspect summary::-webkit-details-marker{display:none}
   async function drainFrameQueue() {
     decodingFrame = true;
     while (frameQueue.length > 0) {
+      const gen = videoGen;
       const buf = frameQueue.shift();
       const view = new DataView(buf);
       const flags = view.getUint8(0);
+      const kind = flags & 0x0f;
+      const hasPtr = (flags & 0x80) !== 0;
+      const hdrLen = hasPtr ? 14 : 9;
+      if (buf.byteLength < hdrLen) continue;
       const w = view.getUint16(5, true);
       const h = view.getUint16(7, true);
-      const payload = new Uint8Array(buf, 9);
+      const framePtr = hasPtr ? [view.getInt16(9, true), view.getInt16(11, true)] : null;
+      const payload = new Uint8Array(buf, hdrLen);
       if (w === 0 || h === 0) continue;
 
       try {
-        if (flags === 0) {
+        if (kind === 0) {
           const decoded = await decodePngBlob(payload);
+          if (gen !== videoGen) {
+            decoded.close();
+            continue;
+          }
           ensureFrameSize(w, h);
           decodeCtx.drawImage(decoded.bmp, 0, 0, w, h);
           decoded.close();
           fbImageData = decodeCtx.getImageData(0, 0, w, h);
           stageCtx.putImageData(fbImageData, 0, 0);
-        } else if (flags === 1 && fbImageData && w === frameW && h === frameH) {
+          applyWsPointer(framePtr);
+        } else if (kind === 1 && fbImageData && w === frameW && h === frameH) {
           const delta = decodePackBits(payload, w * h * 4);
-          if (delta) {
+          if (delta && gen === videoGen) {
             const dst = fbImageData.data;
             for (let i = 0; i < dst.length; i += 4) {
               dst[i]     ^= delta[i + 2];
@@ -551,6 +601,7 @@ details.inspect summary::-webkit-details-marker{display:none}
               dst[i + 3]  = 255;
             }
             stageCtx.putImageData(fbImageData, 0, 0);
+            applyWsPointer(framePtr);
           }
         }
       } catch (_) {
@@ -572,6 +623,9 @@ details.inspect summary::-webkit-details-marker{display:none}
   }
 
   function stopVideoTransports() {
+    videoGen++;
+    frameQueue.length = 0;
+    wsPointerLocked = false;
     clearTimeout(wsRetryTimer);
     clearInterval(pngPollTimer);
     pngPollTimer = null;
@@ -633,6 +687,7 @@ details.inspect summary::-webkit-details-marker{display:none}
     };
     ws.onclose = () => {
       ws = null;
+      wsPointerLocked = false;
       if (!useWs) return;
       if (lastStatus && lastStatus.finished) {
         setWsPill('warn', 'ENDED');
@@ -732,8 +787,8 @@ details.inspect summary::-webkit-details-marker{display:none}
       b.classList.toggle('active', Math.abs((st.pace || 1) - p) < 0.05);
     });
 
-    // Pointer & held keys
-    if (Array.isArray(st.pointer)) {
+    // Pointer & held keys (defer to frame-locked WS pointer when active)
+    if (!wsPointerLocked && Array.isArray(st.pointer)) {
       pointerPos = [st.pointer[0] || 0, st.pointer[1] || 0];
     }
     heldKeys = Array.isArray(st.held_keys) ? st.held_keys : [];
@@ -921,12 +976,32 @@ details.inspect summary::-webkit-details-marker{display:none}
     };
   });
 
+  function isRelativeMouse() {
+    return Boolean(mouseMode && (mouseMode.kind === 'relative_steered' || mouseMode.kind === 'software_relative'));
+  }
+
+  function requiresPollRelease() {
+    return Boolean(mouseMode && mouseMode.kind === 'software_absolute' && mouseMode.requires_poll_release);
+  }
+
+  async function loadMeta() {
+    try {
+      const res = await fetch('/api/meta', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.guide && data.guide.mouse_mode) {
+        mouseMode = data.guide.mouse_mode;
+      }
+    } catch (_) {}
+  }
+
   // Human Takeover toggle: switches to shared owner so browser POST /api/act reaches guest live
   async function setTakeover(enable) {
     takeoverActive = enable;
     viewport.classList.toggle('takeover', enable);
     btnTakeover.classList.toggle('takeover-on', enable);
     btnTakeover.textContent = enable ? 'Release Takeover' : 'Human Takeover';
+    relCursor = null;
     if (enable) {
       await apiPost('/api/mode', { owner: 'shared', mode: 'live', resume: true });
       stage.focus();
@@ -941,14 +1016,21 @@ details.inspect summary::-webkit-details-marker{display:none}
   // Stage pointer/keyboard capture during Human Takeover
   function stageCoords(ev) {
     const rect = stage.getBoundingClientRect();
-    const x = Math.max(0, Math.min(frameW - 1, Math.round((ev.clientX - rect.left) * frameW / rect.width)));
-    const y = Math.max(0, Math.min(frameH - 1, Math.round((ev.clientY - rect.top) * frameH / rect.height)));
+    if (!rect.width || !rect.height) return [0, 0];
+    const x = Math.max(0, Math.min(frameW - 1, Math.floor((ev.clientX - rect.left) * frameW / rect.width)));
+    const y = Math.max(0, Math.min(frameH - 1, Math.floor((ev.clientY - rect.top) * frameH / rect.height)));
     return [x, y];
   }
 
   let dragStart = null;
   let lastMoveSent = 0;
+  let relCursor = null;
 
+  stage.addEventListener('pointerenter', () => { hoveringStage = true; });
+  stage.addEventListener('pointerleave', () => {
+    hoveringStage = false;
+    coordReadout.textContent = frameW + 'x' + frameH + ' · ptr (' + pointerPos[0] + ', ' + pointerPos[1] + ')';
+  });
   stage.addEventListener('contextmenu', ev => { if (takeoverActive) ev.preventDefault(); });
 
   stage.addEventListener('pointerdown', ev => {
@@ -968,11 +1050,20 @@ details.inspect summary::-webkit-details-marker{display:none}
     coordReadout.textContent = frameW + 'x' + frameH + ' · hover (' + x + ', ' + y + ')';
     if (!takeoverActive) return;
     const now = performance.now();
-    if (now - lastMoveSent >= 80 && !dragStart) {
-      lastMoveSent = now;
-      pointerPos = [x, y];
-      apiPost('/api/act', { action: 'move', x, y, glide_flips: 1, wait: false, auto_step: false });
+    if (now - lastMoveSent < 80 || dragStart) return;
+    lastMoveSent = now;
+    if (isRelativeMouse()) {
+      const [bx, by] = relCursor || pointerPos;
+      const dx = x - bx;
+      const dy = y - by;
+      if (dx !== 0 || dy !== 0) {
+        relCursor = [x, y];
+        apiPost('/api/act', { action: 'mouse_delta', dx, dy, flips: 1, wait: false, auto_step: false });
+      }
+      return;
     }
+    if (!wsPointerLocked) pointerPos = [x, y];
+    apiPost('/api/act', { action: 'move', x, y, glide_flips: 1, wait: false, auto_step: false });
   });
 
   window.addEventListener('pointerup', ev => {
@@ -984,9 +1075,29 @@ details.inspect summary::-webkit-details-marker{display:none}
     const [x, y] = stageCoords(ev);
     const dist = Math.hypot(x - start.x, y - start.y);
     if (dist >= 10) {
+      if (isRelativeMouse()) relCursor = [x, y];
       apiPost('/api/act', {
         action: 'drag', from_x: start.x, from_y: start.y, to_x: x, to_y: y,
         button: start.button, step_px: 16, wait: false, auto_step: true
+      });
+    } else if (isRelativeMouse()) {
+      const [bx, by] = relCursor || pointerPos;
+      relCursor = [x, y];
+      if (x === bx && y === by) {
+        apiPost('/api/act', {
+          action: 'click', button: start.button, hold_flips: 2, wait: false, auto_step: true
+        });
+      } else {
+        // Core translates absolute click target into multi-flip relative deltas
+        // and sequences Button::Down on the arrival flip.
+        apiPost('/api/act', {
+          action: 'click', x, y, button: start.button, hold_flips: 2, wait: false, auto_step: true
+        });
+      }
+    } else if (requiresPollRelease()) {
+      apiPost('/api/act', {
+        action: 'click_poll', x, y, button: start.button, hold_flips: 2, hold_ms: 150,
+        wait: false, auto_step: true
       });
     } else {
       apiPost('/api/act', {
@@ -1067,6 +1178,8 @@ details.inspect summary::-webkit-details-marker{display:none}
   inspectDrawer.addEventListener('toggle', () => { if (inspectDrawer.open) refreshInspect(); });
 
   // Boot streams
+  fitViewport();
+  loadMeta();
   startWebSocket();
   startSse();
 })();

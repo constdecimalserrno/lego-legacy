@@ -689,7 +689,7 @@ pub fn write_status(out: &mut String, st: &ControlStatus) {
     write_json_f64(out, st.pace);
     let _ = write!(
         out,
-        ",\"route_active\":{},\"route_remaining\":{},\"recording_len\":{},\"pointer\":[{},{}],\"pointer_pos\":[{},{}],\"pointer_shown\":{},\"held_keys\":[",
+        ",\"route_active\":{},\"route_remaining\":{},\"recording_len\":{},\"pointer\":[{},{}],\"pointer_pos\":[{},{}],\"hw_pointer_pos\":[{},{}],\"pointer_shown\":{},\"held_keys\":[",
         st.route_active,
         st.route_remaining,
         st.recording_len,
@@ -697,6 +697,8 @@ pub fn write_status(out: &mut String, st: &ControlStatus) {
         st.pointer_pos.1,
         st.pointer_pos.0,
         st.pointer_pos.1,
+        st.hw_pointer_pos.0,
+        st.hw_pointer_pos.1,
         st.pointer_shown
     );
     for (i, k) in st.held_keys.iter().enumerate() {

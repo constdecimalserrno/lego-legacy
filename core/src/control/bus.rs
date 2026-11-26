@@ -16,7 +16,7 @@ use crate::host::telemetry::{FpsReport, Telemetry};
 use crate::host::{FlipMeta, Host, Input};
 use crate::machine::{Finish, Machine};
 use crate::route::Route;
-use crate::title::{MouseMode, TitleGuide};
+use crate::title::TitleGuide;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -155,6 +155,10 @@ pub struct FrameSnapshot {
     pub frame_hash: String,
     pub diff: FrameDiff,
     pub uniform: bool,
+    /// Frame-locked in-game visual cursor position at `flip` (#327).
+    pub pointer_pos: (i32, i32),
+    /// Frame-locked host cursor visibility (`ShowCursor >= 0`) at `flip` (#327).
+    pub pointer_shown: bool,
 }
 
 /// Lightweight frame metadata returned by [`Command::FrameInfo`].
@@ -220,7 +224,10 @@ pub struct ControlStatus {
     pub route_active: bool,
     pub route_remaining: usize,
     pub recording_len: usize,
+    /// Tracked in-game visual cursor coordinates (#327).
     pub pointer_pos: (i32, i32),
+    /// Tracked Win32 hardware pointer anchor (`last_move`) (#327).
+    pub hw_pointer_pos: (i32, i32),
     pub pointer_shown: bool,
     pub held_keys: Vec<u32>,
     pub pending_actions: usize,
@@ -405,8 +412,6 @@ pub(crate) struct BusState {
     pub force_closes: u32,
     pub last_meta: Option<FlipMeta>,
     pub recording_len: usize,
-    pub pointer_pos: (i32, i32),
-    pub pointer_shown: bool,
     pub held_keys: Vec<u32>,
     pub latest_frame: Option<FrameSnapshot>,
     pub telemetry: Telemetry,
@@ -439,17 +444,7 @@ impl BusState {
             _ => config.pointer_speed,
         };
         let mut timeline = Timeline::new(effective_speed);
-        if guide.resolution.0 > 0 && guide.resolution.1 > 0 {
-            timeline.set_frame_size(guide.resolution.0, guide.resolution.1);
-        }
-        let (pointer_pos, pointer_shown) = match guide.mouse_mode {
-            MouseMode::RelativeSteered { recenter, .. } => {
-                timeline.set_pointer(recenter.0, recenter.1);
-                timeline.set_pointer_shown(false);
-                (recenter, false)
-            }
-            MouseMode::AbsoluteKept | MouseMode::SoftwareAbsolute { .. } => ((0, 0), true),
-        };
+        timeline.configure_mode(guide.mouse_mode, guide.resolution);
         Self {
             title: config.title.to_owned(),
             guide,
@@ -473,8 +468,6 @@ impl BusState {
             force_closes: 0,
             last_meta: None,
             recording_len: 0,
-            pointer_pos,
-            pointer_shown,
             held_keys: Vec::new(),
             latest_frame: None,
             telemetry: Telemetry::new(config.flip_cost),
@@ -520,17 +513,11 @@ impl BusState {
 
     pub(crate) fn record_emitted_inputs(&mut self, inputs: &[Input]) {
         for input in inputs {
-            match *input {
-                Input::Move { x, y } => {
-                    self.pointer_pos = (x, y);
+            if let Input::Key { code, down } = *input {
+                self.held_keys.retain(|k| *k != code);
+                if down {
+                    self.held_keys.push(code);
                 }
-                Input::Key { code, down } => {
-                    self.held_keys.retain(|k| *k != code);
-                    if down {
-                        self.held_keys.push(code);
-                    }
-                }
-                Input::Down(_) | Input::Up(_) | Input::Close => {}
             }
         }
     }
@@ -576,8 +563,9 @@ impl BusState {
             route_active: self.last_meta.is_some_and(|m| m.route_active),
             route_remaining: self.last_meta.map_or(0, |m| m.route_remaining),
             recording_len: self.recording_len,
-            pointer_pos: self.pointer_pos,
-            pointer_shown: self.pointer_shown,
+            pointer_pos: self.timeline.visual_cursor_pos(),
+            hw_pointer_pos: self.timeline.last_pointer(),
+            pointer_shown: self.timeline.pointer_shown(),
             held_keys: self.held_keys.clone(),
             pending_actions: self.timeline.pending_len(),
             frame_width,
@@ -1164,6 +1152,9 @@ impl ControlBus {
         state.latest_frame = None;
         state.held_keys.clear();
         state.timeline.clear();
+        let mode = state.guide.mouse_mode;
+        let res = state.guide.resolution;
+        state.timeline.configure_mode(mode, res);
         state.recording_len = 0;
         Some((name, bm))
     }
