@@ -177,9 +177,11 @@ impl<H: Host> ControlHost<H> {
         self.staged_bgra.clear();
         self.staged_size = (0, 0);
         self.staged_valid = false;
+        self.inner.pointer_shape(None);
         let pace_sleep = self.pace_sleep_nanos();
         let mut state = self.bus.lock();
         state.timeline.reset_polled();
+        state.timeline.set_cursor_blank(false);
         state.last_agent_action_flip = None;
         state.agent_timeline_end_flip = None;
         state.telemetry.rebaseline(0, 0, 0, pace_sleep);
@@ -392,6 +394,8 @@ impl<H: Host> Host for ControlHost<H> {
 
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
         self.inner.pointer_shape(shape);
+        let blank = shape.is_some_and(Cursor::is_blank);
+        self.bus.lock().timeline.set_cursor_blank(blank);
     }
 
     fn closes(&self) -> u32 {
@@ -541,6 +545,7 @@ impl<H: Host> Host for ControlHost<H> {
                     uniform,
                     pointer_pos: state.timeline.visual_cursor_pos(),
                     pointer_shown: state.timeline.pointer_shown(),
+                    cursor_blank: state.timeline.cursor_blank(),
                 };
                 state.latest_frame = Some(snapshot);
                 uniform
@@ -2131,5 +2136,101 @@ mod tests {
         assert_eq!(step(&mut host, 703), [key(0x11, true)]);
         assert_eq!(step(&mut host, 704), [key(0x11, false)]);
         assert_eq!(step(&mut host, 705), [key(0x3c, false)]);
+    }
+
+    #[test]
+    fn blank_cursor_shape_suppresses_crosshair_only_when_os_pointer_is_shown() {
+        use crate::control::observe::{render_frame_png, ObserveOptions};
+        use crate::title::{MouseMode, TitleGuide};
+
+        const ABS: TitleGuide = TitleGuide {
+            display_name: "Blank Cursor Abs",
+            resolution: (64, 48),
+            mouse_mode: MouseMode::AbsoluteKept,
+            ..TitleGuide::EMPTY
+        };
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                title: Title::STUB.key,
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                guide: &ABS,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
+        let bgra = vec![0x20u8; 64 * 48 * 4];
+        let present = |host: &mut ControlHost<Headless>, flip: u64, shown: bool| {
+            host.present(&Frame {
+                width: 64,
+                height: 48,
+                pitch: 64 * 4,
+                pixels: &bgra,
+            });
+            host.observe_flip(&FlipMeta {
+                flip,
+                clock_nanos: flip * 16_000_000,
+                cursor: flip * 100,
+                instructions_passed: 0,
+                pointer_shown: shown,
+                pointer_pos: (32, 24),
+                route_active: false,
+                route_remaining: 0,
+            });
+        };
+        let opts = ObserveOptions {
+            cursor: true,
+            ..ObserveOptions::default()
+        };
+
+        // Visible arrow cursor -> crosshair drawn at (32, 24).
+        let opaque = Cursor {
+            width: 1,
+            height: 1,
+            hot: (0, 0),
+            pixels: vec![255, 255, 255, 255],
+        };
+        assert!(!opaque.is_blank());
+        assert!(Cursor::none().is_blank());
+        host.pointer_shape(Some(&opaque));
+        present(&mut host, 0, true);
+        assert!(!bus.status().cursor_blank);
+        let snap0 = bus.latest_frame().unwrap();
+        let png0 = render_frame_png(&snap0, opts, snap0.pointer_pos).unwrap();
+        assert_eq!(png_crosshair_red_center(&png0), (32, 24));
+
+        // SetCursor(0) while OS cursor is shown -> crosshair suppressed (equals raw PNG).
+        host.pointer_shape(Some(&Cursor::none()));
+        present(&mut host, 1, true);
+        assert!(bus.status().cursor_blank);
+        let snap1 = bus.latest_frame().unwrap();
+        assert!(snap1.cursor_blank);
+        let raw1 = render_frame_png(&snap1, ObserveOptions::default(), snap1.pointer_pos).unwrap();
+        let png1 = render_frame_png(&snap1, opts, snap1.pointer_pos).unwrap();
+        assert_eq!(png1, raw1, "blank OS cursor suppresses --cursor");
+
+        // Software-cursor title (!pointer_shown) keeps crosshair even if shape is blank.
+        present(&mut host, 2, false);
+        let snap2 = bus.latest_frame().unwrap();
+        let png2 = render_frame_png(&snap2, opts, snap2.pointer_pos).unwrap();
+        assert_eq!(png_crosshair_red_center(&png2), (32, 24));
+
+        // Rewind resets cursor_blank and restores host default cursor shape.
+        host.reset_for_rewind();
+        assert!(!bus.status().cursor_blank);
+        assert_eq!(
+            host.inner().shapes.last().and_then(|(_, s)| s.as_ref()),
+            None
+        );
+
+        // Restoring host default arrow (None) re-enables crosshair.
+        host.pointer_shape(Some(&Cursor::none()));
+        host.pointer_shape(None);
+        present(&mut host, 3, true);
+        assert!(!bus.status().cursor_blank);
+        let snap3 = bus.latest_frame().unwrap();
+        let png3 = render_frame_png(&snap3, opts, snap3.pointer_pos).unwrap();
+        assert_eq!(png_crosshair_red_center(&png3), (32, 24));
     }
 }

@@ -466,6 +466,7 @@ pub struct Timeline {
     hw_pointer: (i32, i32),
     visual_cursor: (f64, f64),
     pointer_shown: bool,
+    cursor_blank: bool,
     pointer_speed: (f64, f64),
     mouse_mode: MouseMode,
     frame_size: (u32, u32),
@@ -482,6 +483,7 @@ impl Timeline {
             hw_pointer: (320, 240),
             visual_cursor: (320.0, 240.0),
             pointer_shown: true,
+            cursor_blank: false,
             pointer_speed,
             mouse_mode: MouseMode::AbsoluteKept,
             frame_size: (0, 0),
@@ -547,6 +549,7 @@ impl Timeline {
         self.hw_pointer = hw;
         self.visual_cursor = vis;
         self.pointer_shown = matches!(mode, MouseMode::AbsoluteKept);
+        self.cursor_blank = false;
         self.owed_delta = (0.0, 0.0);
     }
 
@@ -589,6 +592,12 @@ impl Timeline {
     /// Update whether the host pointer is shown (`false` means `Mouse::Steered`).
     pub fn set_pointer_shown(&mut self, shown: bool) {
         self.pointer_shown = shown;
+    }
+
+    /// Update whether the active OS cursor shape is blank (`SetCursor(NULL)` /
+    /// all-transparent `Cursor::none()`).
+    pub fn set_cursor_blank(&mut self, blank: bool) {
+        self.cursor_blank = blank;
     }
 
     /// Update the active guest frame dimensions used to clamp relative moves.
@@ -639,6 +648,11 @@ impl Timeline {
     #[must_use]
     pub fn pointer_shown(&self) -> bool {
         self.pointer_shown
+    }
+
+    #[must_use]
+    pub const fn cursor_blank(&self) -> bool {
+        self.cursor_blank
     }
 
     /// Whether unemitted owed relative delta (> 0.5 px) remains for subsequent

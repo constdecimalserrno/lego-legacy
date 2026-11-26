@@ -450,6 +450,7 @@ details.inspect summary::-webkit-details-marker{display:none}
   let lastStatus = null;
   let lastFeedSeq = 0;
   let pointerPos = [320, 240];
+  let pointerBlank = false;
   let wsPointerLocked = false;
   let hoveringStage = false;
   let mouseMode = { kind: 'absolute_kept' };
@@ -586,9 +587,10 @@ details.inspect summary::-webkit-details-marker{display:none}
   let decodingFrame = false;
   let videoGen = 0;
 
-  function applyWsPointer(framePtr) {
+  function applyWsPointer(framePtr, framePtrBlank) {
     if (!framePtr) return;
     pointerPos = framePtr;
+    pointerBlank = Boolean(framePtrBlank);
     wsPointerLocked = true;
     if (!hoveringStage) {
       coordReadout.textContent = frameW + 'x' + frameH + ' · ptr (' + pointerPos[0] + ', ' + pointerPos[1] + ')';
@@ -625,6 +627,7 @@ details.inspect summary::-webkit-details-marker{display:none}
       const w = view.getUint16(5, true);
       const h = view.getUint16(7, true);
       const framePtr = hasPtr ? [view.getInt16(9, true), view.getInt16(11, true)] : null;
+      const framePtrBlank = hasPtr && (view.getUint8(13) & 0x03) === 0x03;
       const payload = new Uint8Array(buf, hdrLen);
       if (w === 0 || h === 0) continue;
 
@@ -640,7 +643,7 @@ details.inspect summary::-webkit-details-marker{display:none}
           decoded.close();
           fbImageData = decodeCtx.getImageData(0, 0, w, h);
           stageCtx.putImageData(fbImageData, 0, 0);
-          applyWsPointer(framePtr);
+          applyWsPointer(framePtr, framePtrBlank);
         } else if (kind === 1 && fbImageData && w === frameW && h === frameH) {
           const delta = decodePackBits(payload, w * h * 4);
           if (delta && gen === videoGen) {
@@ -652,7 +655,7 @@ details.inspect summary::-webkit-details-marker{display:none}
               dst[i + 3]  = 255;
             }
             stageCtx.putImageData(fbImageData, 0, 0);
-            applyWsPointer(framePtr);
+            applyWsPointer(framePtr, framePtrBlank);
           }
         }
       } catch (_) {
@@ -738,6 +741,8 @@ details.inspect summary::-webkit-details-marker{display:none}
     };
     ws.onclose = () => {
       ws = null;
+      videoGen++;
+      frameQueue.length = 0;
       wsPointerLocked = false;
       if (!useWs) return;
       if (lastStatus && lastStatus.finished) {
@@ -839,8 +844,11 @@ details.inspect summary::-webkit-details-marker{display:none}
     });
 
     // Pointer & held keys (defer to frame-locked WS pointer when active)
-    if (!wsPointerLocked && Array.isArray(st.pointer)) {
-      pointerPos = [st.pointer[0] || 0, st.pointer[1] || 0];
+    if (!wsPointerLocked) {
+      if (Array.isArray(st.pointer)) {
+        pointerPos = [st.pointer[0] || 0, st.pointer[1] || 0];
+      }
+      pointerBlank = Boolean(st.pointer_shown && st.cursor_blank);
     }
     heldKeys = Array.isArray(st.held_keys) ? st.held_keys : [];
     renderInputStrip();
@@ -965,24 +973,26 @@ details.inspect summary::-webkit-details-marker{display:none}
     }
 
     if (showReticle) {
-      const [px, py] = pointerPos;
-      ovCtx.save();
-      ovCtx.strokeStyle = 'rgba(0,0,0,0.85)';
-      ovCtx.lineWidth = 3;
-      ovCtx.beginPath();
-      ovCtx.moveTo(px - 12, py); ovCtx.lineTo(px - 3, py);
-      ovCtx.moveTo(px + 3, py);  ovCtx.lineTo(px + 12, py);
-      ovCtx.moveTo(px, py - 12); ovCtx.lineTo(px, py - 3);
-      ovCtx.moveTo(px, py + 3);  ovCtx.lineTo(px, py + 12);
-      ovCtx.stroke();
+      if (!pointerBlank) {
+        const [px, py] = pointerPos;
+        ovCtx.save();
+        ovCtx.strokeStyle = 'rgba(0,0,0,0.85)';
+        ovCtx.lineWidth = 3;
+        ovCtx.beginPath();
+        ovCtx.moveTo(px - 12, py); ovCtx.lineTo(px - 3, py);
+        ovCtx.moveTo(px + 3, py);  ovCtx.lineTo(px + 12, py);
+        ovCtx.moveTo(px, py - 12); ovCtx.lineTo(px, py - 3);
+        ovCtx.moveTo(px, py + 3);  ovCtx.lineTo(px, py + 12);
+        ovCtx.stroke();
 
-      ovCtx.strokeStyle = takeoverActive ? '#f5b82e' : '#38bdf8';
-      ovCtx.lineWidth = 1.5;
-      ovCtx.stroke();
+        ovCtx.strokeStyle = takeoverActive ? '#f5b82e' : '#38bdf8';
+        ovCtx.lineWidth = 1.5;
+        ovCtx.stroke();
 
-      ovCtx.fillStyle = '#f87171';
-      ovCtx.fillRect(px - 1, py - 1, 2, 2);
-      ovCtx.restore();
+        ovCtx.fillStyle = '#f87171';
+        ovCtx.fillRect(px - 1, py - 1, 2, 2);
+        ovCtx.restore();
+      }
 
       // Expanding click ripples
       ripples = ripples.filter(r => now - r.t0 < 520);

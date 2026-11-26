@@ -188,6 +188,13 @@ impl Cursor {
             pixels: vec![0; 4],
         }
     }
+
+    /// Whether every pixel in this cursor shape is completely transparent
+    /// (e.g. [`Cursor::none`] from `SetCursor(NULL)`).
+    #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 0)
+    }
 }
 
 /// A region of host memory the guest's arena lives in.

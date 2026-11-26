@@ -408,6 +408,9 @@ fn sync_after_live_restore(
     machine.sync_host_after_restore(host);
 
     let pointer_shown = machine.state.cursor_shown >= 0;
+    let cursor_blank = machine.state.cursor.is_some_and(|c| {
+        crate::win32::user32::shape(&machine.state, c).is_some_and(|s| s.is_blank())
+    });
     let pointer_pos = machine.state.pointer;
     let hw_pointer = machine.state.last_move;
     if let Some(ref f) = restored_frame {
@@ -437,6 +440,7 @@ fn sync_after_live_restore(
             uniform,
             pointer_pos,
             pointer_shown,
+            cursor_blank,
         });
     }
 
@@ -477,6 +481,7 @@ fn sync_after_live_restore(
     state.last_agent_action_flip = None;
     state.agent_timeline_end_flip = None;
     state.timeline.set_pointer_shown(pointer_shown);
+    state.timeline.set_cursor_blank(cursor_blank);
     if state.timeline.mouse_mode().is_relative() {
         state.timeline.set_pointer(hw_pointer.0, hw_pointer.1);
         if let Some((vx, vy)) = restored_visual {
