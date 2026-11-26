@@ -308,6 +308,10 @@ pub(crate) fn setup(
     }
     machine.screenshots = cli.screenshots.clone();
     machine.snapshot_every = cli.snapshot_every;
+    if let Some(args) = &cli.guest_args {
+        machine.state.guest_args = args.clone();
+        log.line(&format!("guest-args {args}"));
+    }
     machine.tree.set_profile(profile_dir(title, cli));
     Ok((machine, log))
 }

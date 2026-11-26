@@ -71,6 +71,9 @@ pub struct Cli {
     pub control_mode: Option<crate::control::ExecMode>,
     /// Start paused on the first post-route flip (#308).
     pub paused: bool,
+    /// Extra command-line arguments appended after the quoted guest image path
+    /// in `GetCommandLineA`/`W` (#370).
+    pub guest_args: Option<String>,
 }
 
 impl Cli {
@@ -158,6 +161,7 @@ usage: <title> [flags]
                            (also read from LEGO_LEGACY_TOKEN)
   --control-mode step|live initial control mode (default: step when control active)
   --paused                 start paused on the first post-route flip
+  --guest-args <args>      append arguments to the guest process command line
   -h, --help               this";
 
 impl Cli {
@@ -230,6 +234,16 @@ impl Cli {
                     cli.token = Some(v);
                 }
                 "--paused" => cli.paused = true,
+                "--guest-args" => {
+                    let v = value("--guest-args")?;
+                    if v.is_empty() {
+                        return Err(CliError::BadValue {
+                            flag: "--guest-args",
+                            value: v,
+                        });
+                    }
+                    cli.guest_args = Some(v);
+                }
                 "--control-mode" => {
                     let v = value("--control-mode")?;
                     cli.control_mode = Some(crate::control::ExecMode::parse(&v).ok_or(
@@ -428,5 +442,23 @@ mod tests {
         assert!(Cli::parse(["--control", "badaddr"]).is_err());
         assert!(Cli::parse(["--control-unix"]).is_err());
         assert!(Cli::parse(["--token"]).is_err());
+        assert_eq!(
+            Cli::parse(["--guest-args", "-novideo"])
+                .unwrap()
+                .guest_args
+                .as_deref(),
+            Some("-novideo")
+        );
+        assert!(matches!(
+            Cli::parse(["--guest-args"]).unwrap_err(),
+            CliError::MissingValue("--guest-args")
+        ));
+        assert!(matches!(
+            Cli::parse(["--guest-args", ""]).unwrap_err(),
+            CliError::BadValue {
+                flag: "--guest-args",
+                ..
+            }
+        ));
     }
 }

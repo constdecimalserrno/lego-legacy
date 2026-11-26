@@ -499,3 +499,35 @@ fn truncated_v1_and_route_mismatched_snapshots_are_handled_cleanly() {
     assert!(!profile_dir.parent().unwrap().join("escape.txt").exists());
     let _ = std::fs::remove_dir_all(&profile_dir);
 }
+
+#[test]
+fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2() {
+    let (mut m, _host) = machine_at(4);
+    m.state.guest_args = "-novideo -window".to_owned();
+    m.state
+        .environment
+        .insert("=C:".to_owned(), Some("C:\\Save".to_owned()));
+    m.state.environment.insert("TZ".to_owned(), None);
+    m.state.window_extra = vec![0x44, 0xf4, 0x4e, 0x00, 0x11, 0x22, 0x33, 0x44];
+    m.state.mm_timers.push(7);
+    m.state.next_mm_timer = 8;
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    let mut host = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host).expect("machine");
+    restored.load_stub().expect("stub");
+    restored.restore_v2(&snap).expect("restore v2");
+
+    assert_eq!(restored.state.guest_args, "-novideo -window");
+    assert_eq!(
+        restored.state.environment.get("=C:"),
+        Some(&Some("C:\\Save".to_owned()))
+    );
+    assert_eq!(restored.state.environment.get("TZ"), Some(&None));
+    assert_eq!(
+        restored.state.window_extra,
+        vec![0x44, 0xf4, 0x4e, 0x00, 0x11, 0x22, 0x33, 0x44]
+    );
+    assert_eq!(restored.state.mm_timers, vec![7]);
+    assert_eq!(restored.state.next_mm_timer, 8);
+}

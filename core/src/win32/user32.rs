@@ -17,8 +17,11 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "CreateWindowExA", 12, create_window),
     stdcall("USER32", "DestroyWindow", 1, destroy_window),
     stdcall("USER32", "ShowWindow", 2, succeed),
+    stdcall("USER32", "BringWindowToTop", 1, bring_window_to_top),
     stdcall("USER32", "UpdateWindow", 1, update_window),
     stdcall("USER32", "InvalidateRect", 3, invalidate_rect),
+    stdcall("USER32", "GetUpdateRect", 3, get_update_rect),
+    stdcall("USER32", "FillRect", 3, fill_rect),
     stdcall("USER32", "BeginPaint", 2, begin_paint),
     stdcall("USER32", "EndPaint", 2, succeed),
     stdcall("USER32", "SetFocus", 1, succeed),
@@ -26,6 +29,20 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "LoadAcceleratorsA", 2, load_accelerators),
     stdcall("USER32", "FindWindowA", 2, find_window),
     stdcall("USER32", "GetActiveWindow", 0, active_window),
+    stdcall("USER32", "GetForegroundWindow", 0, active_window),
+    stdcall(
+        "USER32",
+        "GetWindowThreadProcessId",
+        2,
+        window_thread_process_id,
+    ),
+    stdcall("USER32", "EnumDisplaySettingsA", 3, enum_display_settings),
+    stdcall(
+        "USER32",
+        "ChangeDisplaySettingsA",
+        2,
+        change_display_settings,
+    ),
     stdcall("USER32", "WaitMessage", 0, wait_message),
     stdcall("USER32", "PeekMessageA", 5, peek_message),
     stdcall("USER32", "GetMessageA", 4, get_message),
@@ -50,7 +67,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "AdjustWindowRect", 3, succeed),
     stdcall("USER32", "AdjustWindowRectEx", 4, succeed),
     stdcall("USER32", "SetWindowPos", 7, succeed),
-    stdcall("USER32", "SetWindowLongA", 3, succeed_zero),
+    stdcall("USER32", "SetWindowLongA", 3, set_window_long),
     stdcall("USER32", "GetWindowLongA", 2, window_long),
     stdcall("USER32", "MessageBoxA", 4, message_box),
     stdcall("USER32", "GetDC", 1, succeed_zero),
@@ -246,6 +263,8 @@ fn register_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const CS_DBLCLKS: u32 = 0x0008;
     let style = ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?;
     ctx.state.double_clicks = style & CS_DBLCLKS != 0;
+    let cb_wnd_extra = (ctx.mem.read_u32(args[0] + 12).map_err(Stop::Fault)? as i32).clamp(0, 4096);
+    ctx.state.window_extra = vec![0u8; cb_wnd_extra as usize];
     let name = {
         let at = ctx.mem.read_u32(args[0] + 36).map_err(Stop::Fault)?;
         ctx.string(at).map_err(Stop::Fault)?
@@ -271,6 +290,7 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.state.window_thread = super::kernel32::running_thread(ctx);
     ctx.state.window_style = args[3];
     ctx.state.window_instance = args[10];
+    ctx.state.window_extra.fill(0);
     if first {
         let time = u32::try_from(ctx.clock_millis & 0xffff_ffff).unwrap_or(0);
         activate(ctx.state, time);
@@ -278,16 +298,34 @@ fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(WINDOW)
 }
 
+/// Store a 32-bit word in `WNDCLASSA.cbWndExtra` at a non-negative byte offset
+/// and return the previous word; kept accessible through `WM_DESTROY` /
+/// `WM_NCDESTROY` (#370).
+fn set_window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let (window, index, value) = (args[0], args[1] as i32, args[2]);
+    if window == WINDOW && index >= 0 {
+        let off = index as usize;
+        if let Some(slot) = off
+            .checked_add(4)
+            .and_then(|end| ctx.state.window_extra.get_mut(off..end))
+        {
+            let prev = u32::from_le_bytes(slot.try_into().unwrap_or([0; 4]));
+            slot.copy_from_slice(&value.to_le_bytes());
+            return Ok(prev);
+        }
+    }
+    Ok(0)
+}
+
 /// A word of what the window system keeps about a window.
 ///
 /// Its style, which LEGO Island's engine reads to see whether a person could
-/// drag its window's edges before it takes the screen (#114), and its
-/// instance, which the engine reads before it builds its first picture
-/// (#118). Both as `CreateWindowExA` was given them.
-// ponytail: the style as `CreateWindowExA` was given it. `SetWindowLongA`
-// keeps nothing, and the bits Windows adds itself (`WS_VISIBLE` once shown,
-// `WS_CLIPSIBLINGS` on a top-level window) are not added; answer them when a
-// title reads one back.
+/// drag its window's edges before it takes the screen (#114), its instance,
+/// which the engine reads before it builds its first picture (#118), and any
+/// extra per-window bytes requested by `WNDCLASSA.cbWndExtra` (#370).
+// ponytail: style and instance stay as `CreateWindowExA` was given them (the
+// bits Windows adds itself, `WS_VISIBLE` / `WS_CLIPSIBLINGS`, are not added,
+// and `SetWindowLongA` only persists `cbWndExtra` at non-negative offsets).
 fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetWindowLongA(window, index).
     const GWL_STYLE: u32 = -16i32 as u32;
@@ -295,6 +333,18 @@ fn window_long(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     match (args[0], args[1]) {
         (WINDOW, GWL_STYLE) if ctx.state.window_made => Ok(ctx.state.window_style),
         (WINDOW, GWL_HINSTANCE) if ctx.state.window_made => Ok(ctx.state.window_instance),
+        (WINDOW, index)
+            if (index as i32) >= 0
+                && (index as usize)
+                    .checked_add(4)
+                    .is_some_and(|end| end <= ctx.state.window_extra.len()) =>
+        {
+            let off = index as usize;
+            let bytes: [u8; 4] = ctx.state.window_extra[off..off + 4]
+                .try_into()
+                .unwrap_or([0; 4]);
+            Ok(u32::from_le_bytes(bytes))
+        }
         (window, index) => Err(Stop::NotWritten {
             what: format!(
                 "USER32.dll!GetWindowLongA: index {} of window {window:#x}",
@@ -478,6 +528,154 @@ fn find_window(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
 
 fn active_window(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(if ctx.state.window_made { WINDOW } else { 0 })
+}
+
+fn bring_window_to_top(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    if args[0] != WINDOW || !ctx.state.window_made {
+        ctx.state.last_error = ERROR_INVALID_WINDOW_HANDLE;
+        return Ok(0);
+    }
+    Ok(1)
+}
+
+fn window_thread_process_id(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetWindowThreadProcessId(hWnd, lpdwProcessId).
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    let (window, out_pid) = (args[0], args[1]);
+    if window != WINDOW || !ctx.state.window_made {
+        ctx.state.last_error = ERROR_INVALID_WINDOW_HANDLE;
+        return Ok(0);
+    }
+    if out_pid != 0 {
+        ctx.mem
+            .write_u32(out_pid, crate::machine::PROCESS_ID)
+            .map_err(Stop::Fault)?;
+    }
+    Ok(ctx.state.window_thread)
+}
+
+/// `DEVMODEA` through `dmDisplayFrequency` (Win95 minimum size).
+const DEVMODEA_MIN_BYTES: u32 = 124;
+const DM_BITSPERPEL: u32 = 0x0004_0000;
+const DM_PELSWIDTH: u32 = 0x0008_0000;
+const DM_PELSHEIGHT: u32 = 0x0010_0000;
+const DM_DISPLAYFREQUENCY: u32 = 0x0040_0000;
+
+fn enum_display_settings(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // EnumDisplaySettingsA(lpszDeviceName, iModeNum, lpDevMode).
+    const ENUM_CURRENT_SETTINGS: u32 = u32::MAX;
+    let (mode_num, at) = (args[1], args[2]);
+    if at == 0 {
+        return Ok(0);
+    }
+    let (width, height, depth) = if mode_num == ENUM_CURRENT_SETTINGS {
+        ctx.state.display_mode
+    } else {
+        let Some(&mode) = ctx.title.declared.modes.get(mode_num as usize) else {
+            return Ok(0);
+        };
+        mode
+    };
+    // Only zero recognized DEVMODEA struct sizes (124 Win3.1/NT3.5, 148 Win95/98,
+    // 156 Win2000+); uninitialized stack garbage falls back to 124 so we never
+    // overwrite caller stack past DEVMODEA.
+    let caller_size = ctx.mem.read_u32(at + 0x24).map_err(Stop::Fault)? & 0xffff;
+    let size = if matches!(caller_size, 124 | 148 | 156) {
+        caller_size
+    } else {
+        DEVMODEA_MIN_BYTES
+    };
+    ctx.mem
+        .write(at, &vec![0u8; size as usize])
+        .map_err(Stop::Fault)?;
+    // dmSpecVersion (0x0400) | dmDriverVersion (0x0400 << 16).
+    ctx.mem
+        .write_u32(at + 0x20, 0x0400_0400)
+        .map_err(Stop::Fault)?;
+    // dmSize | dmDriverExtra (0).
+    ctx.mem.write_u32(at + 0x24, size).map_err(Stop::Fault)?;
+    ctx.mem
+        .write_u32(
+            at + 0x28,
+            DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
+        )
+        .map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 0x68, depth).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 0x6c, width).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 0x70, height).map_err(Stop::Fault)?;
+    ctx.mem.write_u32(at + 0x74, 0).map_err(Stop::Fault)?;
+    let hz = u32::try_from(super::ddraw::refresh_hz(ctx)).unwrap_or(60);
+    ctx.mem.write_u32(at + 0x78, hz).map_err(Stop::Fault)?;
+    Ok(1)
+}
+
+fn change_display_settings(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // ChangeDisplaySettingsA(lpDevMode, dwFlags).
+    const DISP_CHANGE_SUCCESSFUL: u32 = 0;
+    const DISP_CHANGE_BADMODE: u32 = -2i32 as u32;
+    const CDS_TEST: u32 = 0x0000_0002;
+    let (at, flags) = (args[0], args[1]);
+    let default_mode = ctx
+        .title
+        .declared
+        .modes
+        .first()
+        .copied()
+        .unwrap_or(ctx.state.display_mode);
+    let target = if at == 0 {
+        default_mode
+    } else {
+        let fields = ctx.mem.read_u32(at + 0x28).map_err(Stop::Fault)?;
+        if fields == 0 {
+            default_mode
+        } else {
+            let (mut width, mut height, mut depth) = ctx.state.display_mode;
+            if fields & DM_BITSPERPEL != 0 {
+                depth = ctx.mem.read_u32(at + 0x68).map_err(Stop::Fault)?;
+            }
+            if fields & DM_PELSWIDTH != 0 {
+                width = ctx.mem.read_u32(at + 0x6c).map_err(Stop::Fault)?;
+            }
+            if fields & DM_PELSHEIGHT != 0 {
+                height = ctx.mem.read_u32(at + 0x70).map_err(Stop::Fault)?;
+            }
+            (width, height, depth)
+        }
+    };
+    if target.0 == 0 || target.1 == 0 || target.2 == 0 {
+        return Ok(DISP_CHANGE_BADMODE);
+    }
+    if flags & CDS_TEST == 0 {
+        ctx.state.display_mode = target;
+        let middle = (target.0 as i32 / 2, target.1 as i32 / 2);
+        ctx.state.pointer = middle;
+        ctx.state.last_move = middle;
+        ctx.log.line(&format!(
+            "display mode {}x{}x{} via ChangeDisplaySettingsA",
+            target.0, target.1, target.2
+        ));
+    }
+    Ok(DISP_CHANGE_SUCCESSFUL)
+}
+
+fn get_update_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // GetUpdateRect(hWnd, lpRect, bErase): reports whether the update region is
+    // non-empty without clearing it.
+    let (window, rect_at) = (args[0], args[1]);
+    if window != WINDOW || !ctx.state.window_made {
+        return Ok(0);
+    }
+    let dirty = ctx.state.paint_erase.is_some();
+    if rect_at != 0 {
+        write_rect(ctx, rect_at, if dirty { screen(ctx) } else { [0; 4] })?;
+    }
+    Ok(u32::from(dirty))
+}
+
+fn fill_rect(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // FillRect(hDC, lprc, hbr): GDI does not draw over DirectDraw surfaces here.
+    Ok(u32::from(args[1] != 0 && args[2] != 0))
 }
 
 /// Where the mouse's own data format keeps what moved: the two axes, and the
@@ -2583,5 +2781,137 @@ mod tests {
         // The keyboard's: a key is its own offset.
         let keys: Vec<(u32, u32)> = state.keyboard_data.iter().copied().collect();
         assert_eq!(keys, [(0x39, DOWN), (0x39, 0)]);
+    }
+
+    #[test]
+    fn window_focus_display_and_paint_shims_match_win32() {
+        use super::{
+            bring_window_to_top, change_display_settings, enum_display_settings, fill_rect,
+            get_update_rect, invalidate_rect, window_thread_process_id, DEVMODEA_MIN_BYTES,
+            DM_BITSPERPEL, DM_PELSHEIGHT, DM_PELSWIDTH, WINDOW,
+        };
+        use crate::guest::GuestMem;
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            // Before CreateWindowExA: invalid window handles fail.
+            assert_eq!(super::active_window(ctx, &[]).unwrap(), 0);
+            assert_eq!(bring_window_to_top(ctx, &[WINDOW]).unwrap(), 0);
+            assert_eq!(window_thread_process_id(ctx, &[WINDOW, 0]).unwrap(), 0);
+            assert_eq!(ctx.state.last_error, 1400);
+            assert_eq!(get_update_rect(ctx, &[WINDOW, 0, 0]).unwrap(), 0);
+
+            // RegisterClassA (negative cbWndExtra clamps to 0; positive allocates bytes).
+            let wc = 0x1400u32;
+            let cls_name = 0x1480u32;
+            ctx.mem.write(cls_name, b"TestWnd\0").unwrap();
+            ctx.mem.write(wc, &[0u8; 40]).unwrap();
+            ctx.mem.write_u32(wc + 4, 0x0040_1234).unwrap();
+            ctx.mem.write_u32(wc + 12, (-4i32) as u32).unwrap();
+            ctx.mem.write_u32(wc + 36, cls_name).unwrap();
+            assert_eq!(super::register_class(ctx, &[wc]).unwrap(), 0xc000);
+            assert!(ctx.state.window_extra.is_empty());
+
+            ctx.mem.write_u32(wc + 12, 8).unwrap();
+            assert_eq!(super::register_class(ctx, &[wc]).unwrap(), 0xc000);
+            assert_eq!(ctx.state.window_extra.len(), 8);
+
+            assert_eq!(
+                super::create_window(
+                    ctx,
+                    &[
+                        0,
+                        cls_name,
+                        cls_name,
+                        0,
+                        0,
+                        0,
+                        640,
+                        480,
+                        0,
+                        0,
+                        0x0040_0000,
+                        0
+                    ]
+                )
+                .unwrap(),
+                WINDOW
+            );
+            assert_eq!(super::active_window(ctx, &[]).unwrap(), WINDOW);
+            assert_eq!(bring_window_to_top(ctx, &[WINDOW]).unwrap(), 1);
+            assert_eq!(bring_window_to_top(ctx, &[0xdead]).unwrap(), 0);
+
+            let pid_at = 0x1000u32;
+            let tid = window_thread_process_id(ctx, &[WINDOW, pid_at]).unwrap();
+            assert_eq!(tid, ctx.state.window_thread);
+            assert_eq!(
+                ctx.mem.read_u32(pid_at).unwrap(),
+                crate::machine::PROCESS_ID
+            );
+
+            // EnumDisplaySettingsA: uninitialized stack garbage dmSize falls back to 124
+            // without overwriting sentinel bytes past 124.
+            let dm = 0x1100u32;
+            ctx.mem.write_u32(dm + 0x24, 0xcccc).unwrap();
+            ctx.mem.write_u32(dm + 124, 0xdead_beef).unwrap();
+            assert_eq!(enum_display_settings(ctx, &[0, u32::MAX, dm]).unwrap(), 1);
+            assert_eq!(ctx.mem.read_u32(dm + 0x24).unwrap(), DEVMODEA_MIN_BYTES);
+            assert_eq!(ctx.mem.read_u32(dm + 124).unwrap(), 0xdead_beef);
+            assert_eq!(ctx.mem.read_u32(dm + 0x68).unwrap(), 16);
+            assert_eq!(ctx.mem.read_u32(dm + 0x6c).unwrap(), 640);
+            assert_eq!(ctx.mem.read_u32(dm + 0x70).unwrap(), 480);
+            assert_eq!(enum_display_settings(ctx, &[0, 99, dm]).unwrap(), 0);
+
+            // ChangeDisplaySettingsA: CDS_TEST leaves mode alone; commit updates mode;
+            // zero dimension returns DISP_CHANGE_BADMODE; dmFields == 0 or NULL restores default.
+            ctx.mem
+                .write_u32(dm + 0x28, DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL)
+                .unwrap();
+            ctx.mem.write_u32(dm + 0x68, 32).unwrap();
+            ctx.mem.write_u32(dm + 0x6c, 800).unwrap();
+            ctx.mem.write_u32(dm + 0x70, 600).unwrap();
+            assert_eq!(change_display_settings(ctx, &[dm, 2]).unwrap(), 0);
+            assert_eq!(ctx.state.display_mode, (640, 480, 16));
+            assert_eq!(change_display_settings(ctx, &[dm, 4]).unwrap(), 0);
+            assert_eq!(ctx.state.display_mode, (800, 600, 32));
+            assert_eq!(ctx.state.pointer, (400, 300));
+            ctx.mem.write_u32(dm + 0x6c, 0).unwrap();
+            assert_eq!(
+                change_display_settings(ctx, &[dm, 4]).unwrap(),
+                (-2i32) as u32
+            );
+            ctx.mem.write_u32(dm + 0x28, 0).unwrap();
+            assert_eq!(change_display_settings(ctx, &[dm, 0]).unwrap(), 0);
+            assert_eq!(ctx.state.display_mode, (640, 480, 16));
+
+            // GetUpdateRect + FillRect.
+            let rect_at = 0x1300u32;
+            assert_eq!(get_update_rect(ctx, &[WINDOW, rect_at, 0]).unwrap(), 0);
+            assert_eq!(invalidate_rect(ctx, &[WINDOW, 0, 1]).unwrap(), 1);
+            assert_eq!(get_update_rect(ctx, &[WINDOW, rect_at, 0]).unwrap(), 1);
+            assert_eq!(ctx.mem.read_u32(rect_at + 8).unwrap(), 640);
+            assert_eq!(ctx.mem.read_u32(rect_at + 12).unwrap(), 480);
+            // GetUpdateRect does not clear paint_erase.
+            assert!(ctx.state.paint_erase.is_some());
+            assert_eq!(fill_rect(ctx, &[0x10040, rect_at, 0x0100_0000]).unwrap(), 1);
+            assert_eq!(fill_rect(ctx, &[0x10040, 0, 0x0100_0000]).unwrap(), 0);
+            assert_eq!(fill_rect(ctx, &[0x10040, rect_at, 0]).unwrap(), 0);
+
+            // cbWndExtra SetWindowLongA / GetWindowLongA round-trip, surviving DestroyWindow.
+            assert_eq!(super::window_long(ctx, &[WINDOW, 0]).unwrap(), 0);
+            assert_eq!(
+                super::set_window_long(ctx, &[WINDOW, 0, 0x004e_f444]).unwrap(),
+                0
+            );
+            assert_eq!(super::window_long(ctx, &[WINDOW, 0]).unwrap(), 0x004e_f444);
+            assert_eq!(
+                super::set_window_long(ctx, &[WINDOW, 0, 0x1234_5678]).unwrap(),
+                0x004e_f444
+            );
+            assert_eq!(super::window_long(ctx, &[WINDOW, 0]).unwrap(), 0x1234_5678);
+            assert!(super::window_long(ctx, &[WINDOW, 8]).is_err());
+            assert_eq!(super::destroy_window(ctx, &[WINDOW]).unwrap(), 1);
+            assert_eq!(super::window_long(ctx, &[WINDOW, 0]).unwrap(), 0x1234_5678);
+        });
     }
 }

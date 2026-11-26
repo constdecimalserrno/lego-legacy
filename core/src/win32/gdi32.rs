@@ -8,6 +8,8 @@ use crate::cpu::Stop;
 
 pub const SHIMS: &[Shim] = &[
     stdcall("GDI32", "CreateRectRgn", 4, region),
+    stdcall("GDI32", "CreateSolidBrush", 1, create_solid_brush),
+    stdcall("GDI32", "DeleteObject", 1, delete_object),
     stdcall("GDI32", "GetStockObject", 1, stock_object),
     stdcall(
         "GDI32",
@@ -25,6 +27,17 @@ const REGION: u32 = 0x0002_0010;
 
 fn region(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(REGION)
+}
+
+/// A solid brush handle. GDI does not paint the DirectDraw screen here, so a
+/// distinct non-zero pseudo-handle per colour is all a caller passes to
+/// `FillRect` and `DeleteObject`.
+fn create_solid_brush(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(0x0100_0000 | (args[0] & 0x00ff_ffff))
+}
+
+fn delete_object(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    Ok(u32::from(args[0] != 0))
 }
 
 fn stock_object(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -82,4 +95,22 @@ fn region_data(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         crate::guest::GuestMem::write_u32(ctx.mem, at + offset, value).map_err(Stop::Fault)?;
     }
     Ok(needed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_solid_brush, delete_object};
+    use crate::win32::tests::with_test_ctx;
+
+    #[test]
+    fn solid_brush_and_delete_object_behave_like_gdi() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let black = create_solid_brush(ctx, &[0]).unwrap();
+            let red = create_solid_brush(ctx, &[0x0000_00ff]).unwrap();
+            assert_ne!(black, 0);
+            assert_ne!(black, red);
+            assert_eq!(delete_object(ctx, &[black]).unwrap(), 1);
+            assert_eq!(delete_object(ctx, &[0]).unwrap(), 0);
+        });
+    }
 }

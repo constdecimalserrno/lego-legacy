@@ -9,15 +9,28 @@
 //! a failure.
 
 use lego_legacy_core::cli::{Cli, Trace};
+use lego_legacy_core::host::headless::Headless;
+use lego_legacy_core::machine::Machine;
 use lego_legacy_core::roster::{self, Entry, Found};
+use lego_legacy_core::route::Route;
+use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::{hash, pe, testkit, Title};
 use lego_racers::LEGO_RACERS as RACERS;
+use std::path::PathBuf;
 
 const ROOT: &str = RACERS.install_dir;
 const BOOT_BUDGET: u64 = 100_000;
+const FIRST_LIGHT_BUDGET: u64 = 200_000_000;
 
-/// The boot path, run once and shared by the boot assertions and determinism gate.
+fn route_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("routes")
+        .join(name)
+}
+
+/// The default unflagged boot path, run once and shared by the boot assertions
+/// and determinism gate (stops at DirectShow `CLSID_FilterGraph` until #372).
 fn boot() -> Option<&'static testkit::Ran> {
     static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let cli = Cli {
@@ -25,6 +38,24 @@ fn boot() -> Option<&'static testkit::Ran> {
         ..Cli::default()
     };
     testkit::replay(&RAN, scratch, &RACERS, &cli, &[], BOOT_BUDGET)
+}
+
+/// The `-novideo` first-light route to Main Menu and clean exit (#370).
+fn first_light() -> Option<&'static testkit::Ran> {
+    static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let cli = Cli {
+        route: Some(route_path("first-light.route")),
+        guest_args: Some("-novideo".to_owned()),
+        ..Cli::default()
+    };
+    testkit::replay(
+        &RAN,
+        scratch,
+        &RACERS,
+        &cli,
+        &[60, 300, 330],
+        FIRST_LIGHT_BUDGET,
+    )
 }
 
 /// LEGO Racers pointed at its original 1999 pressing, whose cabinet-packed
@@ -202,7 +233,8 @@ fn the_entry_image_loads_from_the_cabinet_and_starts_calling() {
     ran.assert_logged("image LEGORacers.exe")
         .assert_logged("base 0x00400000")
         .assert_logged("imports 147")
-        .assert_logged("installed 56 files");
+        .assert_logged("installed 56 files")
+        .assert_logged("ole32.dll!CoCreateInstance: class e436ebb3-524f-11ce-9f53-0020af0ba770");
     assert!(
         ran.finish.cursor > 100,
         "the run should get past its own entry code, not stop at {}",
@@ -221,4 +253,107 @@ fn the_boot_replays_to_the_same_machine_every_time() {
     };
     let second = testkit::run_headless(&RACERS, &cli, BOOT_BUDGET);
     first.assert_same_machine(&second);
+}
+
+#[test]
+fn first_light_reaches_main_menu_and_exits_cleanly() {
+    let Some(ran) = first_light() else {
+        return;
+    };
+    ran.assert_exited(0)
+        .assert_flips(331)
+        .assert_logged("load library GolDP.DLL")
+        .assert_logged("d3d3 device at")
+        .assert_logged("winmm timer 1:")
+        .assert_logged("winmm timer 1 killed");
+
+    // Flip 60 is the LEGO Media splash; flips 300 and 330 are the animated 3D
+    // Captain Redbeard Main Menu. All three are non-uniform, and the 3D scene
+    // changes from splash -> menu and animates across Main Menu flips.
+    let splash = ran.host.frame(60).expect("flip 60 kept");
+    let menu_start = ran.host.frame(300).expect("flip 300 kept");
+    let menu_end = ran.host.frame(330).expect("flip 330 kept");
+    assert_eq!((menu_start.width, menu_start.height), (640, 480));
+    assert!(!splash.is_uniform(), "splash frame 60 is non-uniform");
+    assert!(
+        !menu_start.is_uniform(),
+        "main menu flip 300 is non-uniform"
+    );
+    assert!(!menu_end.is_uniform(), "main menu flip 330 is non-uniform");
+    assert_ne!(
+        splash.pixels, menu_start.pixels,
+        "splash transitions cleanly into main menu"
+    );
+    assert_ne!(
+        menu_start.pixels, menu_end.pixels,
+        "3D main menu animates across flips 300..330"
+    );
+}
+
+#[test]
+fn first_light_replays_to_the_same_machine_every_time() {
+    let Some(first) = first_light() else {
+        return;
+    };
+    let cli = Cli {
+        route: Some(route_path("first-light.route")),
+        guest_args: Some("-novideo".to_owned()),
+        ..Cli::default()
+    };
+    let second = testkit::run_headless(&RACERS, &cli, FIRST_LIGHT_BUDGET);
+    first.assert_same_machine(&second);
+}
+
+#[test]
+fn first_light_main_menu_snapshot_round_trips_bit_exact() {
+    let Some(baseline) = first_light() else {
+        return;
+    };
+    let route = Route::load(&route_path("first-light.route")).expect("load first-light.route");
+    let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("racers-snap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_root);
+    let profile_a = data_root.join("profile-a");
+    let profile_b = data_root.join("profile-b");
+
+    // 1. Run to flip 305 (live on Main Menu) and capture LLSNAP v2.
+    let mut host_a = Headless::new();
+    let mut machine_a = Machine::new(&RACERS, &mut host_a).expect("machine");
+    machine_a.load_title(&RACERS).expect("load title");
+    machine_a.state.guest_args = "-novideo".to_owned();
+    machine_a.route = Some(route.clone());
+    machine_a.tree.set_profile(profile_a);
+    let mut log_a = RunLog::create("lego-racers-snap-a", Trace::Off).expect("log");
+    let dir_a = log_a.dir().to_path_buf();
+    while machine_a.flips() < 305 {
+        assert!(
+            machine_a.tick(&mut host_a, &mut log_a).is_none(),
+            "should reach flip 305 without ending"
+        );
+    }
+    let snap = machine_a.snapshot_v2().expect("capture LLSNAP v2");
+
+    // 2. Cold-restore into a fresh Machine and finish to flip 330 close.
+    let mut host_b = Headless::new();
+    let mut machine_b = Machine::new(&RACERS, &mut host_b).expect("machine");
+    machine_b.load_title(&RACERS).expect("load title");
+    machine_b.state.guest_args = "-novideo".to_owned();
+    machine_b.route = Some(route);
+    machine_b.tree.set_profile(profile_b);
+    machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
+    let mut log_b = RunLog::create("lego-racers-snap-b", Trace::Off).expect("log");
+    let dir_b = log_b.dir().to_path_buf();
+    let finish_b = machine_b.run(&mut host_b, &mut log_b, FIRST_LIGHT_BUDGET);
+
+    assert_eq!(finish_b.outcome, baseline.finish.outcome);
+    assert_eq!(finish_b.cursor, baseline.finish.cursor);
+    assert_eq!(finish_b.flips, baseline.finish.flips);
+    assert_eq!(finish_b.declared_millis, baseline.finish.declared_millis);
+    assert_eq!(machine_b.state_digest(), baseline.digest);
+
+    drop(log_a);
+    drop(log_b);
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
+    let _ = std::fs::remove_dir_all(data_root);
 }

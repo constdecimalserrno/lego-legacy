@@ -1,0 +1,19 @@
+#lego-legacy-route 1
+# LEGO Racers: cold boot to rendered Main Menu under `--guest-args -novideo` (#370).
+#
+# Run with `--guest-args -novideo` until #372 lands DirectShow `CLSID_FilterGraph`
+# playback for the three intro AVIs (`lmicmp.avi`, `HVSCmp.avi`, `introcmp.avi`).
+#
+# Sequence:
+# - Loads `GolDP.dll` (DirectDraw 4 + Direct3D 3 IM), initializes DirectInput
+#   keyboard/mouse (`IDirectInputDevice2A::Poll` + buffered `GetDeviceData`) and
+#   DirectSound (22050 Hz 16-bit stereo), and opens `LEGO.JAM`.
+# - Flips 0..298: LEGO Media splash screen fades in, holds, and fades out while
+#   Main Menu assets and 3D minifigure models load.
+# - Flip 299 -> 300: registers the 100 ms multimedia timer (`WINMM!timeSetEvent`,
+#   periodic `.tun` callback dispatch follows in #371) and presents the animated
+#   3D Captain Redbeard Main Menu (640x480x16) with software cursor `ARROW.BMP`
+#   initially at (0, 0).
+# - Flip 330: closes the window cleanly (`WM_SYSCOMMAND SC_CLOSE` ->
+#   `timeKillEvent` -> `DestroyWindow` -> `PostQuitMessage(0)` -> exit 0).
+flip 330 close

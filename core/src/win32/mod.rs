@@ -237,6 +237,12 @@ pub struct State {
     handles: Vec<Option<Object>>,
     /// The command line the guest reads, once it has asked for it.
     pub command_line: Option<u32>,
+    /// Optional arguments appended after the quoted image path in
+    /// `GetCommandLineA`/`W` (#370).
+    pub guest_args: String,
+    /// Per-process environment variable overrides set via
+    /// `SetEnvironmentVariableA` (keyed ASCII-uppercase; `None` = removed, #370).
+    pub environment: BTreeMap<String, Option<String>>,
     /// What the guest will read from `GetLastError`.
     pub last_error: u32,
     /// Every guest thread but the one running, parked (ADR-0005). Empty until
@@ -311,6 +317,10 @@ pub struct State {
     pub window_style: u32,
     /// The instance its window was made with.
     pub window_instance: u32,
+    /// Extra per-window bytes requested by `WNDCLASSA.cbWndExtra`, stored via
+    /// `SetWindowLongA` at non-negative offsets and read back via
+    /// `GetWindowLongA` (#370).
+    pub window_extra: Vec<u8>,
     /// Where the pointer is, in the guest's own coordinates.
     pub pointer: (i32, i32),
     /// Where a person last put the pointer, which is what the mouse moved
@@ -360,6 +370,9 @@ pub struct State {
     /// The MIDI out's player and the stream on it, once a title has opened
     /// one (#154).
     pub midi: Option<winmm::Midi>,
+    /// Active multimedia timer IDs registered via `WINMM!timeSetEvent` (#370, #371).
+    pub mm_timers: Vec<u32>,
+    pub next_mm_timer: u32,
     /// Which keys are down, as the guest's own device numbers them.
     pub keys_down: Vec<u32>,
     /// Which virtual keys have gone down since the guest last asked
@@ -463,6 +476,8 @@ impl State {
             heap: Heap::new(),
             handles: Vec::new(),
             command_line: None,
+            guest_args: String::new(),
+            environment: BTreeMap::new(),
             last_error: 0,
             error_mode: 0,
             // The thread a title starts on is in the list from the start, so
@@ -501,6 +516,8 @@ impl State {
             frame_getters: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             midi: None,
+            mm_timers: Vec::new(),
+            next_mm_timer: 1,
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
             installed_files: 0,
@@ -510,6 +527,7 @@ impl State {
             window_thread: crate::machine::THREAD_ID,
             window_style: 0,
             window_instance: 0,
+            window_extra: Vec::new(),
             // The middle of the screen: where Windows leaves the pointer when
             // a mode is set, and so where a title that draws its own starts
             // it. The first thing the mouse does is measured from here, and
@@ -2327,6 +2345,8 @@ impl crate::snap::Snap for State {
             heap,
             handles,
             command_line,
+            guest_args,
+            environment,
             last_error,
             threads,
             thread,
@@ -2351,6 +2371,7 @@ impl crate::snap::Snap for State {
             window_thread,
             window_style,
             window_instance,
+            window_extra,
             pointer,
             last_move,
             display_mode,
@@ -2372,6 +2393,8 @@ impl crate::snap::Snap for State {
             frame_getters,
             cd,
             midi,
+            mm_timers,
+            next_mm_timer,
             keys_down,
             keys_pressed,
             keys_read,
@@ -2414,6 +2437,13 @@ impl crate::snap::Snap for State {
             crate::snap::snap_option_with(v, slot, || Object::Heap, |obj, v| obj.snap(v));
         });
         crate::snap::snap_option(v, command_line, |c, v| v.u32(c));
+        v.string(guest_args);
+        crate::snap::snap_btree_map(
+            v,
+            environment,
+            |k, v| v.string(k),
+            |val, v| crate::snap::snap_option(v, val, |s, v| v.string(s)),
+        );
         v.u32(last_error);
         crate::snap::snap_vec_with(
             v,
@@ -2477,6 +2507,7 @@ impl crate::snap::Snap for State {
         v.u32(window_thread);
         v.u32(window_style);
         v.u32(window_instance);
+        v.byte_vec(window_extra);
         v.i32(&mut pointer.0);
         v.i32(&mut pointer.1);
         v.i32(&mut last_move.0);
@@ -2543,6 +2574,8 @@ impl crate::snap::Snap for State {
         );
         cd.snap(v);
         crate::snap::snap_option_with(v, midi, winmm::Midi::empty_for_snap, |m, v| m.snap(v));
+        crate::snap::snap_u32_vec(v, mm_timers);
+        v.u32(next_mm_timer);
         crate::snap::snap_u32_vec(v, keys_down);
         crate::snap::snap_u32_vec(v, keys_pressed);
         crate::snap::snap_u32_vec(v, keys_read);

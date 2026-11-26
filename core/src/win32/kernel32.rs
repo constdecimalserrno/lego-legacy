@@ -20,6 +20,12 @@ pub const SHIMS: &[Shim] = &[
     ),
     stdcall(
         "KERNEL32",
+        "SetEnvironmentVariableA",
+        2,
+        set_environment_variable,
+    ),
+    stdcall(
+        "KERNEL32",
         "GetSystemTimeAsFileTime",
         1,
         get_system_time_as_file_time,
@@ -239,6 +245,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "CreateThread", 6, create_thread),
     stdcall("KERNEL32", "ResumeThread", 1, resume_thread),
     stdcall("KERNEL32", "SetThreadPriority", 2, set_thread_priority),
+    stdcall("KERNEL32", "SetPriorityClass", 2, set_priority_class),
     stdcall("KERNEL32", "ExitThread", 1, exit_thread),
     stdcall("KERNEL32", "GetExitCodeThread", 2, get_exit_code_thread),
     stdcall("KERNEL32", "OutputDebugStringA", 1, output_debug_string),
@@ -252,6 +259,16 @@ fn set_thread_priority(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     ctx.log.line(&format!(
         "thread {:#x} would rather run at priority {}",
         args[0], args[1] as i32
+    ));
+    Ok(1)
+}
+
+fn set_priority_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetPriorityClass(hProcess, dwPriorityClass): single cooperative process
+    // on the declared machine, so record and succeed as SetThreadPriority does.
+    ctx.log.line(&format!(
+        "process {:#x} would rather run at priority class {:#x}",
+        args[0], args[1]
     ));
     Ok(1)
 }
@@ -309,10 +326,14 @@ fn get_command_line(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     if let Some(addr) = ctx.state.command_line {
         return Ok(addr);
     }
-    // The launch quotes the program's own path and passes nothing else: what
-    // a player double-clicking the game would produce. The path is the one
-    // GetModuleFileNameA gives, the running title's own (#93).
-    let line = format!("\"{}\"", image_path(ctx));
+    // The launch quotes the program's own path and appends any declared guest
+    // arguments when given (`--guest-args`, #370); with none it matches what a
+    // player double-clicking the game produces (#93).
+    let line = if ctx.state.guest_args.is_empty() {
+        format!("\"{}\"", image_path(ctx))
+    } else {
+        format!("\"{}\" {}", image_path(ctx), ctx.state.guest_args)
+    };
     let addr = ctx.intern(&line).map_err(Stop::Fault)?;
     ctx.state.command_line = Some(addr);
     Ok(addr)
@@ -953,16 +974,22 @@ fn compare_string_w(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(compare(&left, &right, args[1]))
 }
 
-/// One variable out of the declared environment.
+/// One variable out of the declared environment (with any guest overrides from
+/// `SetEnvironmentVariableA`).
 fn get_environment_variable(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // GetEnvironmentVariableA(name, buffer, size). The environment is the
     // declared one: nothing the host was started with reaches the guest.
     let name = ctx.string(args[0]).map_err(Stop::Fault)?;
-    let found = ENVIRONMENT
-        .split('\0')
-        .filter_map(|row| row.split_once('='))
-        .find(|(key, _)| key.eq_ignore_ascii_case(&name))
-        .map(|(_, value)| value.to_owned());
+    let key = name.to_ascii_uppercase();
+    let found = match ctx.state.environment.get(&key) {
+        Some(Some(val)) => Some(val.clone()),
+        Some(None) => None,
+        None => ENVIRONMENT
+            .split('\0')
+            .filter_map(|row| row.split_once('='))
+            .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+            .map(|(_, value)| value.to_owned()),
+    };
     let Some(value) = found else {
         // ERROR_ENVVAR_NOT_FOUND: a variable that is not set is not an empty
         // one, and a runtime asking for TZ has to hear the difference.
@@ -978,6 +1005,28 @@ fn get_environment_variable(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop
     bytes.push(0);
     ctx.mem.write(args[1], &bytes).map_err(Stop::Fault)?;
     Ok(needed)
+}
+
+fn set_environment_variable(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // SetEnvironmentVariableA(lpName, lpValue): updates or deletes a guest
+    // environment variable (e.g. MSVC CRT's `_chdir` setting `=C:`).
+    if args[0] == 0 {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let name = ctx.string(args[0]).map_err(Stop::Fault)?;
+    if name.is_empty() {
+        ctx.state.last_error = 87;
+        return Ok(0);
+    }
+    let key = name.to_ascii_uppercase();
+    if args[1] == 0 {
+        ctx.state.environment.insert(key, None);
+    } else {
+        let value = ctx.string(args[1]).map_err(Stop::Fault)?;
+        ctx.state.environment.insert(key, Some(value));
+    }
+    Ok(1)
 }
 
 /// The declared moment `GetSystemTime` answers with, counted the other way.
@@ -1115,20 +1164,62 @@ fn get_current_thread(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
     Ok(0xffff_fffe)
 }
 
+fn environment_block(ctx: &Ctx<'_>) -> Vec<u8> {
+    if ctx.state.environment.is_empty() {
+        return ENVIRONMENT.as_bytes().to_vec();
+    }
+    let mut out = Vec::new();
+    let mut emitted = std::collections::BTreeSet::new();
+    for row in ENVIRONMENT.split('\0').filter(|r| !r.is_empty()) {
+        if let Some((k, _)) = row.split_once('=') {
+            let upper = k.to_ascii_uppercase();
+            emitted.insert(upper.clone());
+            match ctx.state.environment.get(&upper) {
+                Some(Some(val)) => {
+                    out.extend_from_slice(k.as_bytes());
+                    out.push(b'=');
+                    out.extend_from_slice(val.as_bytes());
+                    out.push(0);
+                }
+                Some(None) => {}
+                None => {
+                    out.extend_from_slice(row.as_bytes());
+                    out.push(0);
+                }
+            }
+        }
+    }
+    for (k, val) in &ctx.state.environment {
+        if !emitted.contains(k) {
+            if let Some(val) = val {
+                out.extend_from_slice(k.as_bytes());
+                out.push(b'=');
+                out.extend_from_slice(val.as_bytes());
+                out.push(0);
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(0);
+    }
+    out.push(0);
+    out
+}
+
 fn get_environment_strings(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    let bytes = ENVIRONMENT.as_bytes();
+    let bytes = environment_block(ctx);
     let addr = ctx
         .state
         .heap
         .alloc(u32::try_from(bytes.len()).unwrap_or(0));
     if addr != 0 {
-        ctx.mem.write(addr, bytes).map_err(Stop::Fault)?;
+        ctx.mem.write(addr, &bytes).map_err(Stop::Fault)?;
     }
     Ok(addr)
 }
 
 fn get_environment_strings_w(ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
-    let wide = wide(ENVIRONMENT.as_bytes());
+    let wide = wide(&environment_block(ctx));
     let addr = ctx.state.heap.alloc(u32::try_from(wide.len()).unwrap_or(0));
     if addr != 0 {
         ctx.mem.write(addr, &wide).map_err(Stop::Fault)?;
@@ -3848,6 +3939,78 @@ mod tests {
             assert!(ctx.state.threads[1].waiting_on.is_empty());
             assert_eq!(leave_critical_section(ctx, &[cs]).unwrap(), 0);
             assert!(ctx.state.sections.is_empty());
+        });
+    }
+
+    #[test]
+    fn set_priority_class_and_guest_command_line_args() {
+        use super::{get_command_line, set_priority_class};
+        use crate::guest::GuestMem;
+        use crate::win32::tests::with_test_ctx;
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            assert_eq!(set_priority_class(ctx, &[0xffff_ffff, 0x80]).unwrap(), 1);
+
+            ctx.state.guest_args = "-novideo -window".to_owned();
+            let addr = get_command_line(ctx, &[]).unwrap();
+            let line = ctx.string(addr).unwrap();
+            assert!(line.ends_with("\" -novideo -window"), "got {line:?}");
+            // Subsequent call returns cached address.
+            assert_eq!(get_command_line(ctx, &[]).unwrap(), addr);
+
+            // SetEnvironmentVariableA / GetEnvironmentVariableA / GetEnvironmentStrings
+            // round-trip, case-insensitivity, built-in override/deletion, and invalid-arg checks.
+            let name_at = 0x1000u32;
+            let val_at = 0x1040u32;
+            let out_at = 0x1080u32;
+            assert_eq!(
+                super::set_environment_variable(ctx, &[0, val_at]).unwrap(),
+                0
+            );
+            assert_eq!(ctx.state.last_error, 87);
+            ctx.mem.write(name_at, b"\0").unwrap();
+            assert_eq!(
+                super::set_environment_variable(ctx, &[name_at, val_at]).unwrap(),
+                0
+            );
+            assert_eq!(ctx.state.last_error, 87);
+
+            ctx.mem.write(name_at, b"=c:\0").unwrap();
+            ctx.mem.write(val_at, b"C:\\Save\0").unwrap();
+            assert_eq!(
+                super::set_environment_variable(ctx, &[name_at, val_at]).unwrap(),
+                1
+            );
+            ctx.mem.write(name_at, b"=C:\0").unwrap();
+            assert_eq!(
+                super::get_environment_variable(ctx, &[name_at, out_at, 64]).unwrap(),
+                7
+            );
+            assert_eq!(ctx.string(out_at).unwrap(), "C:\\Save");
+
+            // Override and delete built-in TEMP, reflected in GetEnvironmentStrings.
+            ctx.mem.write(name_at, b"temp\0").unwrap();
+            assert_eq!(
+                super::set_environment_variable(ctx, &[name_at, 0]).unwrap(),
+                1
+            );
+            assert_eq!(
+                super::get_environment_variable(ctx, &[name_at, out_at, 64]).unwrap(),
+                0
+            );
+            let block = super::environment_block(ctx);
+            let text = String::from_utf8_lossy(&block);
+            assert!(text.contains("=C:=C:\\Save\0"), "got {text:?}");
+            assert!(!text.contains("TEMP="), "got {text:?}");
+
+            ctx.mem.write(name_at, b"=C:\0").unwrap();
+            assert_eq!(
+                super::set_environment_variable(ctx, &[name_at, 0]).unwrap(),
+                1
+            );
+            assert_eq!(
+                super::get_environment_variable(ctx, &[name_at, out_at, 64]).unwrap(),
+                0
+            );
         });
     }
 }
