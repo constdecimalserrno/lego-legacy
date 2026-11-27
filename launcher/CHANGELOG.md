@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of the launcher's version 
 
 ## 1.2.0 — 2026-10-21
 
+Renders a pure-ASCII LEGO-brick / `LEGO LEGACY` banner (with ANSI brick colors on TTYs when `NO_COLOR` is unset and `TERM` is not `dumb`, plain ASCII otherwise), lists `core::roster::ROSTER` titles with aligned status badges and concise Red Book / MIDI notes, adds a POSIX `termios` interactive picker (`↑`/`↓`, `j`/`k`, `Enter`, `1..N`, `q`/`Esc`, `Ctrl-C`, falling back to line-mode input when stdin or stdout is not a TTY, `TERM=dumb`, or on platforms without POSIX `termios` support), forwards leading/trailing flags with no title (e.g. `lego-legacy --audio`), and resolves unique short/suffix title names (`racers`, `chess`, `island`, `alpha-team`, `rock-raiders`, `hotwheels`) while preserving exact keys and `--help` (#389).
+
 Lists LEGO Racers as the sixth title via `core::roster::ROSTER` and starts it as `lego-legacy lego-racers` when its `masterpiece-racers` rip is present (#369).
 
 Took core 1.2.0: its window changes (#140) change nothing the launcher does, since it uses core
