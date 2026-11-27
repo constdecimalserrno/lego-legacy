@@ -5,6 +5,12 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Single-source `CursorModel` extraction & capability-driven `/watch` (`core/src/control/{cursor,mod,timeline,bus,snapshot,observe,ws,json,meta,spectator,watch.html}`, #409), strictly outside guest state with zero `LLSNAP v2` or guest determinism changes:
+
+- **Dedicated `CursorModel` (`core/src/control/cursor.rs`):** Extracts `hw_pointer`, `visual_cursor`, `pointer_shown`, `cursor_blank`, `mouse_mode`, `pointer_speed`, `frame_size`, and `owed_delta` plus coordinate clamping/translation, `SoftwareRelative` hover-arrival click-move planning, owed-delta payback, and unified `reconcile_flip`/`reconcile_restore` out of `Timeline`, `bus.rs`, and `snapshot.rs` so `Timeline` remains a pure discrete action scheduler.
+- **Single-source overlay visibility (`cursor_visible`):** Centralizes `CursorModel::is_overlay_visible()` / `CursorModel::overlay_visible(shown, blank)` and stores pre-resolved `cursor_visible: bool` on `FrameSnapshot` and `ControlStatus` (emitted alongside backwards-compatible `pointer_shown` and `cursor_blank` in `/api/status`, `/api/frame.json`, and `/api/events`), updating `observe.rs`, `ws.rs`, and `watch.html` to consume one visibility truth.
+- **Capability-driven `/watch` (`core/src/control/{meta.rs,watch.html}`):** Emits `is_relative` and `click_requires_poll_release` booleans in `write_mouse_mode` (preserving all existing fields) so `watch.html` branches on declared capabilities instead of hardcoded `MouseMode` variant names.
+
 Deterministic DirectMusic 6.1/7 RIFF parser, declared-clock sequencer, and COM surface (`core/src/{dmusic,com,machine,roster}.rs`, `core/src/win32/{mod,dmusic,ole32,dsound,kernel32}.rs`, `core/tests/{roster,snapshots}.rs`, #399), strictly generic and true to Windows 98 SE with zero external crates, zero title keying, and exhaustive `LLSNAP v2` `Snap` coverage:
 
 - **DirectMusic RIFF parser & sequencer (`core/src/dmusic.rs`):** Parses standard `RIFF:DMBD` bands, `RIFF:DMST` styles (`styh`, `prth`, `note`, `crve`, `ptnh`, `prfc`), and `RIFF:DMSG` segments (`segh` + chord, command, tempo, style, band, and sequence tracks), resolves `DMUS_PLAYMODE_FIXED` and `DMUS_PLAYMODE_PURPLEIZED` (`0x0e`) chord/scale-relative pitches, and converts DirectMusic ticks (`DMUS_PPQ = 768`) to declared nanoseconds using pure integer math.

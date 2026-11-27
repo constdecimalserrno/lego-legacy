@@ -5,6 +5,7 @@
 //! `POST /api/rewind` at flip boundaries without restarting the machine.
 
 use super::bus::{analyze_frame, ControlBus, FrameSnapshot, RestoreSync};
+use super::cursor::CursorModel;
 use super::http::{HttpContext, HttpRequest, HttpResponse};
 use super::inspect::{execute_inspect, BookmarkData, InspectQuery, InspectReply};
 use super::json::{parse_json, write_json_f64, write_json_str, JsonValue};
@@ -428,6 +429,7 @@ fn sync_after_live_restore(
             pointer_pos,
             pointer_shown,
             cursor_blank,
+            cursor_visible: CursorModel::overlay_visible(pointer_shown, cursor_blank),
         });
     }
 

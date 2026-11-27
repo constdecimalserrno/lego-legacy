@@ -11,16 +11,17 @@ use crate::title::{AgentCadence, ControlHint, Goal, MouseMode, TitleGuide};
 use crate::Title;
 use std::fmt::Write as _;
 
-/// Serialize [`MouseMode`] as a JSON object.
+/// Serialize [`MouseMode`] as a JSON object with explicit capability booleans
+/// (`is_relative`, `click_requires_poll_release`) alongside all legacy fields (#409).
 pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
     match mode {
-        MouseMode::AbsoluteKept => out.push_str("{\"kind\":\"absolute_kept\"}"),
+        MouseMode::AbsoluteKept => out.push_str("{\"kind\":\"absolute_kept\""),
         MouseMode::SoftwareAbsolute {
             requires_poll_release,
         } => {
             let _ = write!(
                 out,
-                "{{\"kind\":\"software_absolute\",\"requires_poll_release\":{requires_poll_release}}}"
+                "{{\"kind\":\"software_absolute\",\"requires_poll_release\":{requires_poll_release}"
             );
         }
         MouseMode::SoftwareRelative {
@@ -29,7 +30,7 @@ pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
         } => {
             let _ = write!(
                 out,
-                "{{\"kind\":\"software_relative\",\"virtual_span\":[{},{}],\"start_pos\":[{},{}],\"recenter_every_flip\":false}}",
+                "{{\"kind\":\"software_relative\",\"virtual_span\":[{},{}],\"start_pos\":[{},{}],\"recenter_every_flip\":false",
                 virtual_span.0, virtual_span.1, start_pos.0, start_pos.1
             );
         }
@@ -40,7 +41,7 @@ pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
         } => {
             let _ = write!(
                 out,
-                "{{\"kind\":\"relative_steered\",\"virtual_span\":[{},{}],\"recenter\":[{},{}],\"start_corner\":[{},{}],\"recenter_every_flip\":true}}",
+                "{{\"kind\":\"relative_steered\",\"virtual_span\":[{},{}],\"recenter\":[{},{}],\"start_corner\":[{},{}],\"recenter_every_flip\":true",
                 virtual_span.0,
                 virtual_span.1,
                 recenter.0,
@@ -50,6 +51,17 @@ pub fn write_mouse_mode(out: &mut String, mode: MouseMode) {
             );
         }
     }
+    let _ = write!(
+        out,
+        ",\"is_relative\":{},\"click_requires_poll_release\":{}}}",
+        mode.is_relative(),
+        matches!(
+            mode,
+            MouseMode::SoftwareAbsolute {
+                requires_poll_release: true
+            }
+        )
+    );
 }
 
 /// Serialize [`AgentCadence`] as a JSON object.
@@ -442,6 +454,66 @@ mod tests {
     }
 
     #[test]
+    fn mouse_mode_emits_capability_flags_across_all_variants() {
+        let cases = [
+            (MouseMode::AbsoluteKept, "absolute_kept", false, false),
+            (
+                MouseMode::SoftwareAbsolute {
+                    requires_poll_release: false,
+                },
+                "software_absolute",
+                false,
+                false,
+            ),
+            (
+                MouseMode::SoftwareAbsolute {
+                    requires_poll_release: true,
+                },
+                "software_absolute",
+                false,
+                true,
+            ),
+            (
+                MouseMode::SoftwareRelative {
+                    virtual_span: (640, 480),
+                    start_pos: (320, 240),
+                },
+                "software_relative",
+                true,
+                false,
+            ),
+            (
+                MouseMode::RelativeSteered {
+                    virtual_span: (1280, 1280),
+                    recenter: (320, 240),
+                    start_corner: (0, 480),
+                },
+                "relative_steered",
+                true,
+                false,
+            ),
+        ];
+
+        for (mode, expected_kind, expected_relative, expected_poll_release) in cases {
+            let mut out = String::new();
+            write_mouse_mode(&mut out, mode);
+            let parsed = parse_json(&out).expect("valid mouse_mode JSON");
+            let obj = parsed.as_object().expect("mouse_mode JSON object");
+            assert_eq!(obj["kind"].as_str(), Some(expected_kind));
+            assert_eq!(
+                obj["is_relative"].as_bool(),
+                Some(expected_relative),
+                "is_relative for {expected_kind}"
+            );
+            assert_eq!(
+                obj["click_requires_poll_release"].as_bool(),
+                Some(expected_poll_release),
+                "click_requires_poll_release for {expected_kind}"
+            );
+        }
+    }
+
+    #[test]
     fn golden_rule_4_zero_hardcoded_title_keys_in_meta_and_control_code() {
         // Golden Rule 4: core is keyed to no title; TitleGuide metadata lives in
         // each title crate, never hardcoded in core's control plane or TitleGuide.
@@ -472,6 +544,7 @@ mod tests {
         // and title.rs contain zero hardcoded title roster keys.
         let checked_files: &[(&str, &str)] = &[
             ("control/bus.rs", include_str!("bus.rs")),
+            ("control/cursor.rs", include_str!("cursor.rs")),
             ("control/host.rs", include_str!("host.rs")),
             ("control/http.rs", include_str!("http.rs")),
             ("title.rs", include_str!("../title.rs")),

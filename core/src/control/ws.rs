@@ -7,6 +7,7 @@
 //! [2B LE w][2B LE h][optional 2B i16 ptr_x + 2B i16 ptr_y + 1B ptr_flags]
 //! [payload]`), and single-pass PackBits-RLE compression over BGRA XOR deltas.
 
+use super::cursor::CursorModel;
 use super::http::HttpRequest;
 use super::json::base64_encode;
 use std::io::{self, Read, Write};
@@ -59,7 +60,7 @@ impl BinaryFrameHeader<'_> {
     #[must_use]
     pub const fn cursor_visible(&self) -> bool {
         match self.pointer {
-            Some((_, shown)) => !(shown && self.pointer_blank),
+            Some((_, shown)) => CursorModel::overlay_visible(shown, self.pointer_blank),
             None => true,
         }
     }
@@ -438,11 +439,12 @@ pub fn encode_binary_frame_with_pointer_state(
     // Only emit `POINTER_FLAG_BLANK` while the OS cursor is shown so byte 13
     // stays `0x00` whenever `!pointer_shown` (backwards-compatible with v2
     // readers checking `data[13] != 0`).
-    let ptr_flags = if pointer_shown {
-        POINTER_FLAG_SHOWN | if cursor_blank { POINTER_FLAG_BLANK } else { 0 }
-    } else {
-        0
-    };
+    let ptr_flags = if pointer_shown { POINTER_FLAG_SHOWN } else { 0 }
+        | if CursorModel::overlay_visible(pointer_shown, cursor_blank) {
+            0
+        } else {
+            POINTER_FLAG_BLANK
+        };
     out.push(ptr_flags);
     out.extend_from_slice(payload);
     out

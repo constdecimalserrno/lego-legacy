@@ -8,6 +8,7 @@
 //! `#lego-legacy-route 1`.
 
 pub mod bus;
+pub mod cursor;
 pub mod host;
 pub mod http;
 pub mod inspect;
@@ -27,6 +28,7 @@ pub use bus::{
     ControlStatus, ExecMode, FrameDiff, FrameInfoData, FrameSnapshot, InputOwner, Response,
     ResponseData, RewindResult, WaitResult,
 };
+pub use cursor::CursorModel;
 pub use host::{service_flip_boundary, ControlHost};
 pub use http::{
     write_session_registry, ExtraRoutes, HttpContext, HttpRequest, HttpResponse, HttpServer,

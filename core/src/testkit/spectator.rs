@@ -1727,6 +1727,7 @@ mod tests {
             pointer_pos,
             pointer_shown: true,
             cursor_blank: blank,
+            cursor_visible: !blank,
         }
     }
 
