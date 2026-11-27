@@ -455,7 +455,11 @@ pub struct State {
     /// segregated from `State::heap` so small guest `malloc`/COM allocations
     /// never hijack large surface buffers (#338).
     surface_pool: BTreeMap<u32, VecDeque<u32>>,
-    /// Freed 8-byte surface COM face slots reused by `make_com` (#338).
+    /// Freed DirectSound sample buffers kept by rounded allocation size,
+    /// segregated from `State::heap` so small guest `malloc`/COM allocations
+    /// never hijack large PCM buffers (#385).
+    sound_pool: BTreeMap<u32, VecDeque<u32>>,
+    /// Freed 8-byte surface/sound COM face slots reused by `make_com` (#338, #385).
     free_com: VecDeque<u32>,
     /// Which vtable an interface's methods live behind, once one is made.
     vtables: BTreeMap<&'static str, u32>,
@@ -584,6 +588,7 @@ impl State {
             com: BTreeMap::new(),
             faces: BTreeMap::new(),
             surface_pool: BTreeMap::new(),
+            sound_pool: BTreeMap::new(),
             free_com: VecDeque::new(),
             vtables: BTreeMap::new(),
             registry: BTreeMap::new(),
@@ -855,6 +860,54 @@ impl State {
         }
     }
 
+    /// Allocate a DirectSound sample buffer, reusing the smallest pooled freed
+    /// sound buffer within 2x of the rounded size before bumping `self.heap`
+    /// (#385).
+    ///
+    /// Returns `(addr, reused)` where `addr == 0` when the heap is exhausted.
+    pub(crate) fn alloc_sound_store(&mut self, size: u32) -> (u32, bool) {
+        let Some(rounded) = size.max(1).checked_next_multiple_of(8) else {
+            return (0, false);
+        };
+        let max_bucket = rounded.saturating_mul(2);
+        let found =
+            self.sound_pool
+                .range_mut(rounded..=max_bucket)
+                .find_map(|(&bucket_size, addrs)| {
+                    addrs
+                        .pop_front()
+                        .map(|addr| (bucket_size, addr, addrs.is_empty()))
+                });
+        if let Some((bucket_size, addr, emptied)) = found {
+            if emptied {
+                self.sound_pool.remove(&bucket_size);
+            }
+            return (addr, true);
+        }
+        (self.heap.alloc(size), false)
+    }
+
+    /// Return a DirectSound-owned sample buffer to `sound_pool` for reuse by
+    /// future sound buffers, keyed by its actual heap allocation size (#385).
+    pub(crate) fn free_sound_store(&mut self, addr: u32) {
+        if let Some(size) = self.heap.size_of(addr) {
+            self.sound_pool.entry(size).or_default().push_back(addr);
+        }
+    }
+
+    /// Remove every COM face belonging to `identity` and return its 8-byte
+    /// guest slot to `free_com` for reuse by `make_com` (#338, #385).
+    pub(crate) fn reclaim_com_faces(&mut self, identity: u32) {
+        loop {
+            let Some((key, face_addr)) = self.face_entries(identity).next() else {
+                break;
+            };
+            self.faces.remove(&key);
+            self.com.remove(&face_addr);
+            self.free_com.push_back(face_addr);
+        }
+    }
+
     /// Remember a COM object the machine handed out.
     pub fn add_com(&mut self, at: u32, interface: &'static str, state: ComState) {
         self.faces.insert((at, interface), at);
@@ -1046,14 +1099,7 @@ impl State {
             return;
         }
 
-        loop {
-            let Some((key, face_addr)) = self.face_entries(identity).next() else {
-                break;
-            };
-            self.faces.remove(&key);
-            self.com.remove(&face_addr);
-            self.free_com.push_back(face_addr);
-        }
+        self.reclaim_com_faces(identity);
 
         self.surface_dcs.retain(|_, &mut s| s != identity);
         self.immediate.remove_handle_for(identity);
@@ -2473,6 +2519,7 @@ impl crate::snap::Snap for State {
             com,
             faces,
             surface_pool,
+            sound_pool,
             free_com,
             vtables,
             registry,
@@ -2747,6 +2794,12 @@ impl crate::snap::Snap for State {
         crate::snap::snap_btree_map(
             v,
             surface_pool,
+            |k, v| v.u32(k),
+            |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
+        );
+        crate::snap::snap_btree_map(
+            v,
+            sound_pool,
             |k, v| v.u32(k),
             |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
         );

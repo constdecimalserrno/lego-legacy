@@ -928,3 +928,82 @@ fn build_racer_and_first_race_match_pure_rust_tier_bit_exact() {
         );
     }
 }
+
+/// Sustained Imperial Grand Prix racing must keep guest heap extent and live
+/// bytes bounded rather than leaking ~45 KB/s per `CreateSoundBuffer`/`Release`
+/// cycle until the 512 MiB ceiling is exhausted (#385).
+#[test]
+fn imperial_grand_prix_keeps_live_heap_bounded_across_sustained_racing() {
+    if !scratch() {
+        return;
+    }
+    let full_route =
+        std::fs::read_to_string(route_path("first-race.route")).expect("read first-race.route");
+    let run_until = |close_flip: u64, label: &str| {
+        let mut lines: Vec<String> = full_route
+            .lines()
+            .take_while(|l| !l.starts_with("flip 1745 "))
+            .map(str::to_owned)
+            .collect();
+        lines.push(format!("flip {close_flip} close"));
+        let route = Route::parse(&lines.join("\n")).expect("parse sustained race route");
+
+        let mut host = Headless::new();
+        let mut machine = Machine::new(&RACERS, &mut host).expect("machine");
+        machine.load_title(&RACERS).expect("load title");
+        machine.route = Some(route);
+        let mut log = RunLog::create(label, Trace::Off).expect("log");
+        let dir = log.dir().to_path_buf();
+        let finish = machine.run(&mut host, &mut log, FIRST_RACE_BUDGET);
+        let extent = machine.state.heap.extent();
+        let live = machine.state.heap.live_bytes();
+        let buffers = machine.state.sound.buffer_count();
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            finish.outcome,
+            lego_legacy_core::machine::Outcome::Exited { code: 0 }
+        );
+        (extent, live, buffers, host)
+    };
+
+    let (extent_2500, live_2500, buffers_2500, _) = run_until(2_500, "lego-racers-heap-2500");
+    let (extent_5500, live_5500, buffers_5500, host_5500) =
+        run_until(5_500, "lego-racers-heap-5500");
+
+    // Non-vacuous liveness proof: Imperial Grand Prix `.tun` music + racing SFX
+    // actively streamed non-silent PCM across flips 2500..5500.
+    let race_pcm: Vec<i16> = host_5500
+        .audio_blocks
+        .iter()
+        .zip(&host_5500.audio_flips)
+        .filter(|(_, &flip)| (2_500..5_500).contains(&flip))
+        .flat_map(|(block, _)| block.iter().copied())
+        .collect();
+    assert!(
+        race_pcm.len() >= 100_000,
+        "expected >= 100,000 stereo PCM samples across racing flips 2500..5500, got {}",
+        race_pcm.len()
+    );
+    let rms = (race_pcm.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>() / race_pcm.len() as f64)
+        .sqrt();
+    assert!(
+        rms > 500.0,
+        "expected active racing audio (RMS > 500) across flips 2500..5500, got {rms:.1}"
+    );
+
+    let live_growth = live_5500.saturating_sub(live_2500);
+    let extent_growth = extent_5500.saturating_sub(extent_2500);
+    assert!(
+        live_growth <= 256 * 1024,
+        "live heap grew by {live_growth} B over 3,000 racing flips (2500->{live_2500}, 5500->{live_5500})"
+    );
+    assert!(
+        extent_growth <= 256 * 1024,
+        "heap extent grew by {extent_growth} B over 3,000 racing flips (2500->{extent_2500}, 5500->{extent_5500})"
+    );
+    assert!(
+        buffers_2500 <= 32 && buffers_5500 <= 32,
+        "live DirectSound buffer count must stay bounded (2500->{buffers_2500}, 5500->{buffers_5500})"
+    );
+}

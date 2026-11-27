@@ -66,9 +66,10 @@ fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop>
 
 /// What every COM object answers in its first three slots.
 ///
-/// Reference counting is real. DirectDraw surfaces reclaim their guest-heap
-/// pixel buffers, COM faces, and side-table entries once all faces reach zero
-/// references (#338); other COM objects stay held until the run ends.
+/// Reference counting is real. DirectDraw surfaces (#338) and DirectSound
+/// buffers (#385) reclaim their guest-heap sample/pixel buffers, COM faces, and
+/// side-table entries once all faces reach zero references; other COM objects
+/// stay held until the run ends.
 pub const QUERY_INTERFACE: Method = method("QueryInterface", 2, query_interface);
 pub const ADD_REF: Method = method("AddRef", 0, add_ref);
 pub const RELEASE: Method = method("Release", 0, release);
