@@ -1928,3 +1928,203 @@ fn a_hand_drags_and_snaps_a_dune_buggy_part_in_the_workshop() {
         "rear-axle target ghost appeared on E4/F4 after front axle snapped"
     );
 }
+
+const WORKSHOP_BUILD: u64 = 10920;
+const RACING_START: u64 = 13420;
+const RACING_CAVE: u64 = 13750;
+const RACING_FINISH: u64 = 23898;
+const PODIUM_RED_BRICK: u64 = 26298;
+const RACE_CREDITS: u64 = 28200;
+const RACE_TRACK_FRAMES: &[u64] = &[
+    WORKSHOP_BUILD,
+    RACING_START,
+    RACING_CAVE,
+    RACING_FINISH,
+    PODIUM_RED_BRICK,
+    RACE_CREDITS,
+];
+
+/// Enough for the route to finish credits and exit cleanly: exited 0 at 14,411,489,537.
+const RACE_TRACK_BUDGET: u64 = 14_500_000_000;
+
+fn race_track(
+    slot: &'static std::sync::OnceLock<Option<Saving>>,
+    root: &str,
+) -> Option<&'static Saving> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("routes/race-track-complete.route"),
+        ),
+        ..Cli::default()
+    };
+    saving(
+        slot,
+        root,
+        || Headless::new().keeping(RACE_TRACK_FRAMES),
+        cli,
+        RACE_TRACK_BUDGET,
+    )
+}
+
+static RACE_TRACK: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+
+#[test]
+fn the_race_track_route_builds_the_car_wins_first_place_and_saves() {
+    let Some(raced) = race_track(&RACE_TRACK, "race-track-complete") else {
+        return;
+    };
+    let ran = &raced.ran;
+    ran.assert_exited(0);
+    assert_eq!(ran.finish.flips, 33_871, "exits cleanly after credits");
+
+    let frame = |flip: u64| ran.host.frame(flip).expect("kept");
+    for &flip in RACE_TRACK_FRAMES {
+        assert!(
+            !frame(flip).is_uniform(),
+            "frame at flip {flip} is non-uniform"
+        );
+    }
+
+    assert!(
+        testkit::differing(frame(RACING_START), frame(RACING_CAVE), (0, 0, 640, 480)) > 100_000,
+        "active 3D race advances from start gantry into skull cave"
+    );
+    assert!(
+        testkit::differing(frame(RACING_CAVE), frame(RACING_FINISH), (0, 0, 640, 480)) > 100_000,
+        "active 3D race advances from skull cave to finish line"
+    );
+
+    let [r, g, b] = pixel(frame(WORKSHOP_BUILD), 250, 330);
+    assert!(
+        g > r.saturating_add(80) && g > b.saturating_add(40),
+        "green #6 chassis in workshop: {:?}",
+        [r, g, b]
+    );
+    let [r, g, b] = pixel(frame(WORKSHOP_BUILD), 325, 215);
+    assert!(
+        r > 180 && g < 60 && b < 60,
+        "red #6 nose decal on shelf: {:?}",
+        [r, g, b]
+    );
+
+    let [r, g, b] = pixel(frame(RACING_CAVE), 320, 415);
+    assert!(
+        r > 200 && g < 40 && b < 40,
+        "steering wheel horn in cave: {:?}",
+        [r, g, b]
+    );
+    let [r, g, b] = pixel(frame(RACING_FINISH), 430, 355);
+    assert!(
+        g > r.saturating_add(100) && g > b.saturating_add(100),
+        "full green race progress bar at finish: {:?}",
+        [r, g, b]
+    );
+
+    let [r, g, b] = pixel(frame(PODIUM_RED_BRICK), 320, 50);
+    assert!(
+        b > 180 && b > r.saturating_add(100),
+        "blue island sky at podium celebration: {:?}",
+        [r, g, b]
+    );
+    let [r, g, b] = pixel(frame(PODIUM_RED_BRICK), 445, 335);
+    assert!(
+        r > 40 && r > g.saturating_mul(4) && r > b.saturating_mul(4),
+        "red 1st-place brick at podium: {:?}",
+        [r, g, b]
+    );
+    for x in [40, 600] {
+        assert_eq!(pixel(frame(RACE_CREDITS), x, 300), [0, 0, 0], "the credits");
+    }
+
+    let racing_audio = ran.loudness(13350, 23790);
+    let mean = racing_audio.iter().sum::<f64>() / racing_audio.len().max(1) as f64;
+    assert!(
+        mean > 500.0,
+        "race track audio is heard across active window: {mean:.0}"
+    );
+
+    let written = |save: &str| {
+        flip_of(
+            ran,
+            &format!(r"file written C:\Program Files\LEGO Island\{save},"),
+        )
+    };
+    assert_eq!(written("Players.gsi"), 2913, "pressing the tick");
+    assert_eq!(written("History.gsi"), 27157, "letting go of yes");
+    assert_eq!(written("G0.GS"), 27157);
+    assert_eq!(raced.saves["PLAYERS.GSI"][2..], name("LEGO"));
+
+    let game = &raced.saves["G0.GS"];
+    assert_eq!(
+        game.get(..9),
+        Some(&[0x0c, 0, 1, 0, 0, 0, 0, 0, 1][..]),
+        "Act 1, Pepper (actor 1)"
+    );
+    let after = |tag: &[u8], len: usize| {
+        let at = game
+            .windows(tag.len())
+            .position(|w| w == tag)
+            .unwrap_or_else(|| panic!("missing save tag {}", String::from_utf8_lossy(tag)))
+            + tag.len();
+        game.get(at..at + len).unwrap_or_else(|| {
+            panic!(
+                "truncated save payload after {}",
+                String::from_utf8_lossy(tag)
+            )
+        })
+    };
+    // RaceCarBuildState payload: [placed_parts_complete, built, anim_done, reserved].
+    assert_eq!(
+        after(b"RaceCarBuildState", 4),
+        &[1, 1, 1, 0],
+        "Race Car built and completed"
+    );
+    // CarRaceState payload: five [actor_id, score_lo, score_hi, high_lo, high_hi] entries; 3 = red (1st place).
+    assert_eq!(
+        after(b"CarRaceState", 25).as_chunks::<5>().0,
+        &[
+            [1, 3, 0, 3, 0],
+            [2, 0, 0, 0, 0],
+            [3, 0, 0, 0, 0],
+            [4, 0, 0, 0, 0],
+            [5, 0, 0, 0, 0],
+        ],
+        "Pepper 1st place (Red Brick), others unplayed"
+    );
+    assert_eq!(
+        raced.saves["HISTORY.GSI"].get(6..10),
+        Some(&[3, 0, 3, 0][..]),
+        "History.gsi records Pepper's 1st-place Red Brick"
+    );
+}
+
+#[test]
+fn the_race_track_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<Saving>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| race_track(&AGAIN, "race-track-complete-again"));
+        (
+            race_track(&RACE_TRACK, "race-track-complete"),
+            second.join().expect("the second replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.ran.assert_exited(0);
+    first.ran.assert_same_machine(&second.ran);
+    for &flip in RACE_TRACK_FRAMES {
+        assert!(
+            first.ran.host.frame(flip).expect("kept").pixels
+                == second.ran.host.frame(flip).expect("kept").pixels,
+            "identical frame at flip {flip}"
+        );
+    }
+    assert!(
+        first.ran.host.audio_flips == second.ran.host.audio_flips
+            && first.ran.host.audio_blocks == second.ran.host.audio_blocks,
+        "identical audio mix"
+    );
+    assert!(first.saves == second.saves, "identical saves");
+}
