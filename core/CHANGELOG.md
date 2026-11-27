@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Public pure-`std` PNG decoder (`core::png::decode_to_bgra`) and reusable spectator test rig (`core::testkit::spectator`, `core/src/png.rs`, `core/src/testkit/{mod,spectator}.rs`, #410), strictly outside guest state with zero external crates and zero hardcoded title keys (Golden Rules 4 & 5):
+
+- **`core::png::decode_to_bgra`:** Exposes `pub fn decode_to_bgra(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String>` validating PNG signature, chunk bounds & CRC-32s, `IHDR` (8-bit non-interlaced RGB/RGBA), RFC 1950 zlib header, Adler-32 checksum, and all five RFC 2083 scanline filters (`None`, `Sub`, `Up`, `Average`, `Paeth`).
+- **`core::testkit::spectator`:** Splits `core/src/testkit.rs` into `core/src/testkit/{mod,spectator}.rs` (preserving all existing `core::testkit` exports) and provides `ControlRig` (`in_process`, `spawn_binary` with panic-safe RAII `Drop` cleanup + stderr draining, `.addr()`, `.bus()`, `.data_root()`, `.http()`, `.connect()`), `HttpClient` (standalone HTTP/1.1 control calls usable before/after WS), `SpectatorClient` (HTTP/1.1 + continuously draining RFC 6455 WebSocket v2 + XOR-PackBits-RLE decoder with `step`, `act`, `act_json`, `status`, `meta`, `pipe`, `frame_png`, `wait_for_any_frame`, `wait_for_matching_frame`, `wait_for_pixels`, and `(keyframes, deltas)` counts), and unified `crosshair_center`, `count_diff_pixels`, and `fraction_diff` helpers.
+
 PE `RT_VERSION` parsing, pure-Rust TrueType GDI-on-DirectDraw rendering, PCM ACM conversion, and Win32 boot shims for LEGOLAND first light (`core/src/{pe,ttf,install,machine}.rs`, `core/src/win32/{mod,version,gdi32,user32,kernel32,ole32,ddraw,avifile,msacm32}.rs`, `core/tests/snapshots.rs`, #394), strictly generic and true to Windows 98 SE with zero title keying and exhaustive `LLSNAP v2` `Snap` coverage:
 
 - **PE `.rsrc` `RT_VERSION` (`core/src/pe.rs`, `core/src/win32/version.rs`):** Adds `pe::version_resource` and `VERSION.dll!GetFileVersionInfoSizeA`, building a self-contained `VS_VERSIONINFO` + ANSI tail block for PEs present in `Tree` so `VerQueryValueA` answers `"\\"`, `"\\VarFileInfo\\Translation"`, and case-insensitive `"\\StringFileInfo\\<langcp>\\<key>"` authentically while preserving the 52-byte DirectX 7 fallback for system DLLs absent from `Tree`.
