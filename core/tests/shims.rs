@@ -2122,6 +2122,9 @@ fn on_a(m: &mut Machine) -> Vec<(&'static str, &'static str, Vec<u32>, u32)> {
         ("KERNEL32", "SetCurrentDirectoryA", vec![root], 0),
         ("KERNEL32", "SetFileAttributesA", vec![file, 0x80], 0),
         ("KERNEL32", "LoadLibraryA", vec![file], 0),
+        ("KERNEL32", "LoadLibraryExA", vec![file, 0, 0], 0),
+        ("GDI32", "AddFontResourceA", vec![file], 0),
+        ("VERSION", "GetFileVersionInfoSizeA", vec![file, OUT], 0),
         (
             "VERSION",
             "GetFileVersionInfoA",
@@ -5322,7 +5325,18 @@ fn acm_decodes_ms_adpcm_a_block_at_a_time() {
     let (mut odd, _) = adpcm_formats(1, 32, 16);
     odd[22] = 1;
     assert!(wall(acm_open(&mut m, &odd, &pcm)), "other predictors");
-    assert!(wall(acm_open(&mut m, &pcm, &pcm)), "PCM to PCM");
+    assert_eq!(acm_open(&mut m, &pcm, &pcm), Ok(0), "PCM to PCM (#394)");
+    let pcm_handle = m.arena.read_u32(OUT).unwrap();
+    assert_eq!(
+        call(&mut m, "MSACM32", "acmStreamClose", &[pcm_handle, 0]),
+        Ok(0)
+    );
+    let mut unknown_tag = pcm.clone();
+    unknown_tag[0..2].copy_from_slice(&99u16.to_le_bytes());
+    assert!(
+        wall(acm_open(&mut m, &unknown_tag, &pcm)),
+        "unknown format tag"
+    );
     let (adpcm, pcm) = adpcm_formats(1, 32, 16);
     m.arena.write(FROM, &adpcm).expect("in the arena");
     m.arena.write(TO, &pcm).expect("in the arena");

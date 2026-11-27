@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-11-27
 
+First light (#394): boots headlessly (`--guest-args -nointro` until #395 adds IMA ADPCM `0x0011` for `Intro.avi`; unflagged boot already plays `lmi.avi` cleanly) through `Player Details` -> creates profile `"ADA"` (`profiles\Profile1.txt`) -> `Accept` -> rendered 640×480×16 `Title Screen` -> `Exit Game` -> `Yes` -> clean `ExitProcess(0)` (`routes/first-light.route`, 105 flips). Verified crisp `Lego.TTF` TrueType GDI text, animated `AD_Blink.avi` advisor orb, `rab over icon.lls` cursor at `(320, 240)`, side-by-side determinism (`assert_same_machine`), and bit-exact `LLSNAP v2` cold snapshot/restore parity at both `Player Details` and `Title Screen` in `tests/legoland.rs`. Untagged until its release.
+
 On the roster (#393): `Legoland.exe` (`802,857` B, MSVC 6.0, linked 2000-04-07, unwrapped,
 statically linked CRT) out of the Masterpiece pressing's InstallShield 3 archive (`main.z`, 331
 members expanded into `C:\Program Files\LEGO Media\Games\LEGOLAND`), beside `Legoland.res`,

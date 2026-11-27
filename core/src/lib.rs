@@ -41,6 +41,7 @@ pub mod stub;
 pub mod synth;
 pub mod testkit;
 pub mod title;
+pub mod ttf;
 pub mod win32;
 
 pub use title::Title;

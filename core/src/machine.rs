@@ -1100,6 +1100,7 @@ const POLLS: &[&str] = &[
     "MsgWaitForMultipleObjects",
     "GetCursorPos",
     "GetAsyncKeyState",
+    "GetKeyState",
     // `IDirectInputDeviceA`'s, the keyboard's and the mouse's.
     "GetDeviceState",
     "GetDeviceData",
@@ -2195,6 +2196,11 @@ impl Machine {
                 graph.set_bytes(bytes);
             }
         }
+        // Rehydrate registered GDI TrueType fonts lazily from `tree`.
+        self.state
+            .gdi
+            .rehydrate_fonts(|path| self.tree.read(path))
+            .map_err(SnapError::Corrupt)?;
 
         if !strict_route {
             let route_len = self.route.as_ref().map_or(0, crate::route::Route::len);
@@ -3054,7 +3060,7 @@ impl Machine {
 mod tests {
     /// Every other call core has written in USER32 and DirectInput: none of
     /// them reads what a person did (#215).
-    const NOT_POLLS: &str = "RegisterClassA CreateWindowExA DestroyWindow ShowWindow \
+    const NOT_POLLS: &str = "RegisterClassA RegisterClassExA CreateWindowExA DestroyWindow ShowWindow \
         BringWindowToTop UpdateWindow InvalidateRect GetUpdateRect FillRect BeginPaint EndPaint \
         SetFocus TranslateAcceleratorA LoadAcceleratorsA FindWindowA GetActiveWindow \
         GetForegroundWindow GetWindowThreadProcessId EnumDisplaySettingsA ChangeDisplaySettingsA \
@@ -3062,7 +3068,8 @@ mod tests {
         ShowCursor SetWindowsHookExA UnhookWindowsHookEx CallNextHookEx SetCursor LoadCursorA \
         LoadIconA GetClientRect GetWindowRect AdjustWindowRect AdjustWindowRectEx SetWindowPos \
         SetWindowLongA GetWindowLongA MessageBoxA GetDC ReleaseDC SetCursorPos ClipCursor \
-        GetClipCursor DialogBoxParamA EndDialog GetDlgItem SendMessageA GetDesktopWindow \
+        GetClipCursor OffsetRect IntersectRect PtInRect DrawTextA DialogBoxParamA EndDialog GetDlgItem \
+        SendMessageA GetDesktopWindow \
         PostMessageA SetActiveWindow SetTimer KillTimer ClientToScreen MoveWindow EnableWindow \
         SetWindowTextA IsWindow SetCapture ReleaseCapture wsprintfA SystemParametersInfoA \
         DirectInputCreateA QueryInterface AddRef Release CreateDevice EnumDevices GetDeviceStatus \

@@ -57,6 +57,18 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "lstrcmpiA", 2, lstrcmpi),
     stdcall("KERNEL32", "CompareFileTime", 2, compare_file_time),
     stdcall("KERNEL32", "GetFileTime", 4, get_file_time),
+    stdcall(
+        "KERNEL32",
+        "FileTimeToLocalFileTime",
+        2,
+        file_time_to_local_file_time,
+    ),
+    stdcall(
+        "KERNEL32",
+        "FileTimeToSystemTime",
+        2,
+        file_time_to_system_time,
+    ),
     stdcall("KERNEL32", "RtlUnwind", 4, rtl_unwind),
     stdcall("KERNEL32", "RaiseException", 4, raise_exception),
     stdcall("KERNEL32", "MulDiv", 3, mul_div),
@@ -229,6 +241,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "Sleep", 1, sleep),
     stdcall("KERNEL32", "GetSystemDirectoryA", 2, get_system_directory),
     stdcall("KERNEL32", "LoadLibraryA", 1, load_library),
+    stdcall("KERNEL32", "LoadLibraryExA", 3, load_library_ex),
     stdcall("KERNEL32", "FreeLibrary", 1, free_library),
     stdcall("KERNEL32", "GetProcAddress", 2, get_proc_address),
     stdcall("KERNEL32", "FindFirstFileA", 2, find_first_file),
@@ -244,6 +257,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("KERNEL32", "GetProfileStringA", 5, get_profile_string),
     stdcall("KERNEL32", "CreateThread", 6, create_thread),
     stdcall("KERNEL32", "ResumeThread", 1, resume_thread),
+    stdcall("KERNEL32", "SuspendThread", 1, suspend_thread),
+    stdcall("KERNEL32", "TerminateThread", 2, terminate_thread),
     stdcall("KERNEL32", "SetThreadPriority", 2, set_thread_priority),
     stdcall("KERNEL32", "SetPriorityClass", 2, set_priority_class),
     stdcall("KERNEL32", "ExitThread", 1, exit_thread),
@@ -2641,6 +2656,75 @@ fn get_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(1)
 }
 
+/// Convert a UTC `FILETIME` to local `FILETIME`: the declared machine's time
+/// zone is UTC (zero bias), so the two values are identical.
+fn file_time_to_local_file_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 || args[1] == 0 {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let bytes = ctx.mem.slice(args[0], 8).map_err(Stop::Fault)?.to_vec();
+    ctx.mem.write(args[1], &bytes).map_err(Stop::Fault)?;
+    Ok(1)
+}
+
+/// Convert a `FILETIME` (100-nanosecond intervals since 1601-01-01 00:00:00)
+/// to a `SYSTEMTIME` (eight little-endian `u16` fields).
+fn file_time_fields(ticks: u64) -> Option<[u16; 8]> {
+    // Per Win32 documentation, values >= 0x80000000_00000000 fail.
+    if ticks >= 0x8000_0000_0000_0000 {
+        return None;
+    }
+    let total_ms = ticks / 10_000;
+    let days_since_1601 = total_ms / 86_400_000;
+    let day_ms = total_ms % 86_400_000;
+    // Hinnant's `civil_from_days`, shifted from 1601-01-01 to 0000-03-01.
+    let days = days_since_1601 + 584_694;
+    let (era, day) = (days / 146_097, days % 146_097);
+    let year = (day - day / 1460 + day / 36_524 - day / 146_096) / 365;
+    let day = day - (365 * year + year / 4 - year / 100);
+    let march = (5 * day + 2) / 153;
+    let date = day - (153 * march + 2) / 5 + 1;
+    let (year, month) = if march < 10 {
+        (era * 400 + year, march + 3)
+    } else {
+        (era * 400 + year + 1, march - 9)
+    };
+    let field = |v: u64| u16::try_from(v).ok();
+    let mut fields = [
+        field(year)?,
+        field(month)?,
+        0,
+        field(date)?,
+        field(day_ms / 3_600_000 % 24)?,
+        field(day_ms / 60_000 % 60)?,
+        field(day_ms / 1000 % 60)?,
+        field(day_ms % 1000)?,
+    ];
+    fields[2] = weekday(&fields).map_or(0, |d| d as u16);
+    Some(fields)
+}
+
+fn file_time_to_system_time(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if args[0] == 0 || args[1] == 0 {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let low = u64::from(ctx.mem.read_u32(args[0]).map_err(Stop::Fault)?);
+    let high = u64::from(ctx.mem.read_u32(args[0] + 4).map_err(Stop::Fault)?);
+    let ticks = low | (high << 32);
+    let Some(fields) = file_time_fields(ticks) else {
+        ctx.state.last_error = 87;
+        return Ok(0);
+    };
+    for (i, value) in fields.iter().enumerate() {
+        ctx.mem
+            .write(args[1] + (i as u32) * 2, &value.to_le_bytes())
+            .map_err(Stop::Fault)?;
+    }
+    Ok(1)
+}
+
 /// The handler this machine puts on the chain while it is running one of the
 /// guest's: `mov eax, 1` — ExceptionContinueSearch — and back.
 ///
@@ -3101,32 +3185,7 @@ const DECLARED_DAY: u64 = 145_667;
 /// second, millisecond. `GetSystemTime`, `GetLocalTime` and a date or time
 /// formatted for "now" (#87) all read it here.
 fn declared_now(millis: u64) -> [u16; 8] {
-    // Hinnant's `civil_from_days`, counted from 0000-03-01 so that every four
-    // hundred years start alike and the leap day falls last.
-    let days = DECLARED_DAY + millis / 86_400_000 + 584_694;
-    let (era, day) = (days / 146_097, days % 146_097);
-    let year = (day - day / 1460 + day / 36_524 - day / 146_096) / 365;
-    let day = day - (365 * year + year / 4 - year / 100);
-    let march = (5 * day + 2) / 153;
-    let date = day - (153 * march + 2) / 5 + 1;
-    let (year, month) = if march < 10 {
-        (era * 400 + year, march + 3)
-    } else {
-        (era * 400 + year + 1, march - 9)
-    };
-    let field = |value: u64| u16::try_from(value).unwrap_or(0);
-    let mut now = [
-        field(year),
-        field(month),
-        0,
-        field(date),
-        field(millis / 3_600_000 % 24),
-        field(millis / 60_000 % 60),
-        field(millis / 1000 % 60),
-        field(millis % 1000),
-    ];
-    now[2] = weekday(&now).map_or(0, |day| day as u16);
-    now
+    file_time_fields(declared_file_time(millis)).unwrap_or([0; 8])
 }
 
 /// The same moment as a FILETIME: hundreds of nanoseconds since the start of
@@ -3287,6 +3346,21 @@ pub(super) fn load_and_bind(ctx: &mut Ctx<'_>, file: &str) -> Result<Option<u32>
         .bind(&imports, ctx.boundary, ctx.mem)
         .map_err(Stop::Fault)?;
     Ok(Some(base))
+}
+
+fn load_library_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // LoadLibraryExA(lpLibFileName, hFile, dwFlags): `hFile` is reserved (must
+    // be NULL). With `dwFlags == 0` it behaves identically to `LoadLibraryA`.
+    if args[1] != 0 || args[2] != 0 {
+        return Err(Stop::NotWritten {
+            what: format!(
+                "KERNEL32.dll!LoadLibraryExA: hFile {:#x}, dwFlags {:#x}",
+                args[1], args[2]
+            ),
+            caller: 0,
+        });
+    }
+    load_library(ctx, &[args[0]])
 }
 
 fn free_library(_ctx: &mut Ctx<'_>, _args: &[u32]) -> Result<u32, Stop> {
@@ -3657,16 +3731,70 @@ pub(super) fn spawn(
 /// enough for each of the threads Alpha Team makes.
 const THREAD_STACK: u32 = 0x0010_0000;
 
-fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let handle = args[0];
-    let Some(thread) = ctx.state.threads.iter_mut().find(|t| t.handle == handle) else {
+fn find_thread(ctx: &mut Ctx<'_>, handle: u32) -> Option<usize> {
+    let idx = if handle == 0xffff_fffe {
+        Some(ctx.state.thread)
+    } else if handle != 0 && ctx.state.object(handle).is_some() {
+        ctx.state.threads.iter().position(|t| t.handle == handle)
+    } else {
+        None
+    };
+    if idx.is_none() {
         ctx.state.last_error = 6; // ERROR_INVALID_HANDLE
+    }
+    idx
+}
+
+fn resume_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let Some(idx) = find_thread(ctx, args[0]) else {
         return Ok(0xffff_ffff);
     };
     // What the count was before this call, which is one when it was suspended.
-    let was = u32::from(thread.suspended);
-    thread.suspended = false;
+    let was = u32::from(ctx.state.threads[idx].suspended);
+    ctx.state.threads[idx].suspended = false;
     Ok(was)
+}
+
+fn suspend_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    let Some(idx) = find_thread(ctx, args[0]) else {
+        return Ok(0xffff_ffff);
+    };
+    let was = u32::from(ctx.state.threads[idx].suspended);
+    ctx.state.threads[idx].suspended = true;
+    if idx == ctx.state.thread {
+        ctx.state.yielded = true;
+    }
+    Ok(was)
+}
+
+fn terminate_thread(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // TerminateThread(hThread, dwExitCode).
+    let (handle, code) = (args[0], args[1]);
+    let Some(idx) = find_thread(ctx, handle) else {
+        return Ok(0);
+    };
+    if ctx.state.threads[idx].time_critical {
+        let who = if ctx.state.mm_timer_thread == Some(idx) {
+            "WINMM's timer thread"
+        } else {
+            "WINMM's MIDI player"
+        };
+        return Err(Stop::NotWritten {
+            what: format!("KERNEL32.dll!TerminateThread on {who}"),
+            caller: 0,
+        });
+    }
+    let thread_handle = ctx.state.threads[idx].handle;
+    ctx.state.threads[idx].ended = true;
+    ctx.state.threads[idx].code = code;
+    if let Some(Object::Named { signalled, .. }) = ctx.state.object_mut(thread_handle) {
+        *signalled = true;
+        wake_waiters(ctx.state, thread_handle);
+    }
+    if idx == ctx.state.thread {
+        return Err(Stop::ThreadEnded);
+    }
+    Ok(1)
 }
 
 /// The thread that is running says it is done. The machine takes it out of the
@@ -4016,6 +4144,60 @@ mod tests {
                 super::get_environment_variable(ctx, &[name_at, out_at, 64]).unwrap(),
                 0
             );
+        });
+    }
+
+    #[test]
+    fn file_time_conversion_and_thread_suspend_terminate_match_win32() {
+        use crate::guest::GuestMem;
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x20_0000, |ctx| {
+            // FileTimeToLocalFileTime + FileTimeToSystemTime match declared_now.
+            let ft = ctx.state.heap.alloc(8);
+            let lft = ctx.state.heap.alloc(8);
+            let st = ctx.state.heap.alloc(16);
+            let ticks = super::declared_file_time(12_345);
+            ctx.mem.write(ft, &ticks.to_le_bytes()).unwrap();
+            assert_eq!(
+                super::file_time_to_local_file_time(ctx, &[ft, lft]).unwrap(),
+                1
+            );
+            assert_eq!(ctx.mem.slice(lft, 8).unwrap(), &ticks.to_le_bytes());
+            assert_eq!(super::file_time_to_system_time(ctx, &[lft, st]).unwrap(), 1);
+            let expected = super::declared_now(12_345);
+            let mut got = [0u16; 8];
+            let raw = ctx.mem.slice(st, 16).unwrap();
+            for (i, slot) in got.iter_mut().enumerate() {
+                *slot = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
+            }
+            assert_eq!(got, expected);
+
+            // NULL handle is refused with ERROR_INVALID_HANDLE (must never match main thread).
+            assert_eq!(super::suspend_thread(ctx, &[0]).unwrap(), u32::MAX);
+            assert_eq!(ctx.state.last_error, 6);
+            assert_eq!(super::terminate_thread(ctx, &[0, 1]).unwrap(), 0);
+            assert_eq!(ctx.state.last_error, 6);
+
+            // SuspendThread + ResumeThread + TerminateThread on a worker thread.
+            let tid_out = ctx.state.heap.alloc(4);
+            let h = super::create_thread(ctx, &[0, 0x4000, 0x0040_1000, 0, 0, tid_out]).unwrap();
+            assert_ne!(h, 0);
+            assert_eq!(super::suspend_thread(ctx, &[h]).unwrap(), 0);
+            assert_eq!(super::suspend_thread(ctx, &[h]).unwrap(), 1);
+            assert_eq!(super::resume_thread(ctx, &[h]).unwrap(), 1);
+            assert_eq!(super::terminate_thread(ctx, &[h, 42]).unwrap(), 1);
+            let code_out = ctx.state.heap.alloc(4);
+            assert_eq!(super::get_exit_code_thread(ctx, &[h, code_out]).unwrap(), 1);
+            assert_eq!(ctx.mem.read_u32(code_out).unwrap(), 42);
+
+            // LoadLibraryExA delegates on dwFlags == 0 and walls on non-zero flags.
+            let dll = ctx.intern("KERNEL32.dll").unwrap();
+            assert_ne!(super::load_library_ex(ctx, &[dll, 0, 0]).unwrap(), 0);
+            assert!(matches!(
+                super::load_library_ex(ctx, &[dll, 0, 1]),
+                Err(crate::cpu::Stop::NotWritten { .. })
+            ));
         });
     }
 }

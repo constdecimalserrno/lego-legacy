@@ -94,6 +94,13 @@ impl FilterGraph {
             .is_some_and(|m| m.running_since.is_some() && !m.completed)
     }
 
+    pub(crate) fn movie_key(&self) -> Option<&str> {
+        self.movie
+            .as_ref()
+            .filter(|m| !m.key.is_empty())
+            .map(|m| m.key.as_str())
+    }
+
     pub(crate) fn movie_key_needing_bytes(&self) -> Option<&str> {
         self.movie
             .as_ref()

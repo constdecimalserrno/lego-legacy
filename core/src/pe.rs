@@ -372,6 +372,61 @@ pub fn exports(bytes: &[u8]) -> Result<Exports, PeError> {
     Ok(out)
 }
 
+/// Extract the first `RT_VERSION` (`16`) resource payload from a 32-bit PE
+/// image's `.rsrc` directory, or `None` when the image carries no version
+/// resource or its directory is malformed.
+#[must_use]
+pub fn version_resource(bytes: &[u8]) -> Option<&[u8]> {
+    inspect(bytes).ok()?;
+    let pe_at = u32_at(bytes, 0x3c)? as usize;
+    let optional = pe_at + 24;
+    let num_dirs = u32_at(bytes, optional + 92)?;
+    if num_dirs < 3 {
+        return None;
+    }
+    // Data directory #2 is `IMAGE_DIRECTORY_ENTRY_RESOURCE`.
+    let rsrc_rva = u32_at(bytes, optional + 96 + 2 * 8)?;
+    let rsrc_size = u32_at(bytes, optional + 96 + 2 * 8 + 4)?;
+    if rsrc_rva == 0 || rsrc_size == 0 {
+        return None;
+    }
+    let base = to_file(bytes, rsrc_rva)?;
+
+    let find_entry = |dir_off: usize, want_id: Option<u32>| -> Option<(bool, usize)> {
+        let named = usize::from(u16_at(bytes, dir_off + 12)?);
+        let id_count = usize::from(u16_at(bytes, dir_off + 14)?);
+        for i in 0..named.checked_add(id_count)? {
+            let entry = dir_off.checked_add(16)?.checked_add(i.checked_mul(8)?)?;
+            let id = u32_at(bytes, entry)?;
+            let data = u32_at(bytes, entry + 4)?;
+            let is_dir = (data & 0x8000_0000) != 0;
+            let offset = (data & 0x7fff_ffff) as usize;
+            if want_id.is_none_or(|want| id == want) {
+                return Some((is_dir, offset));
+            }
+        }
+        None
+    };
+
+    // Level 1: type == RT_VERSION (16).
+    let (true, type_sub) = find_entry(base, Some(16))? else {
+        return None;
+    };
+    // Level 2: first resource name/ID under RT_VERSION.
+    let (true, id_sub) = find_entry(base.checked_add(type_sub)?, None)? else {
+        return None;
+    };
+    // Level 3: first language leaf entry.
+    let (false, leaf_sub) = find_entry(base.checked_add(id_sub)?, None)? else {
+        return None;
+    };
+    let leaf = base.checked_add(leaf_sub)?;
+    let data_rva = u32_at(bytes, leaf)?;
+    let data_size = u32_at(bytes, leaf + 4)? as usize;
+    let data_off = to_file(bytes, data_rva)?;
+    bytes.get(data_off..data_off.checked_add(data_size)?)
+}
+
 /// What an image imports, as addresses inside it once it is at `base`.
 ///
 /// # Errors
@@ -501,5 +556,46 @@ mod tests {
                 iat: 0x1000_1040,
             }])
         );
+    }
+
+    #[test]
+    fn extracts_rt_version_resource_from_pe_rsrc_directory() {
+        let mut bytes = vec![0u8; 0x400];
+        let put = |b: &mut Vec<u8>, at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(&mut bytes, 0, b"MZ");
+        put(&mut bytes, 0x3c, &0x40u32.to_le_bytes());
+        put(&mut bytes, 0x40, b"PE\0\0");
+        put(&mut bytes, 0x44, &0x014cu16.to_le_bytes());
+        put(&mut bytes, 0x46, &1u16.to_le_bytes());
+        put(&mut bytes, 0x54, &0xe0u16.to_le_bytes());
+        put(&mut bytes, 0x58, &0x010bu16.to_le_bytes());
+        put(&mut bytes, 0x58 + 92, &16u32.to_le_bytes()); // NumberOfRvaAndSizes
+                                                          // Resource directory (entry #2) at RVA 0x2000, size 0x200.
+        put(&mut bytes, 0x58 + 96 + 16, &0x2000u32.to_le_bytes());
+        put(&mut bytes, 0x58 + 96 + 20, &0x200u32.to_le_bytes());
+        let sec = 0x58 + 0xe0;
+        put(&mut bytes, sec, b".rsrc\0\0\0");
+        put(&mut bytes, sec + 8, &0x200u32.to_le_bytes());
+        put(&mut bytes, sec + 12, &0x2000u32.to_le_bytes());
+        put(&mut bytes, sec + 16, &0x200u32.to_le_bytes());
+        put(&mut bytes, sec + 20, &0x200u32.to_le_bytes());
+        // Level 1 dir at 0x200: 1 ID entry (RT_VERSION = 16 -> subdir 0x20).
+        put(&mut bytes, 0x200 + 14, &1u16.to_le_bytes());
+        put(&mut bytes, 0x200 + 16, &16u32.to_le_bytes());
+        put(&mut bytes, 0x200 + 20, &(0x8000_0020u32).to_le_bytes());
+        // Level 2 dir at 0x220: 1 ID entry (id = 1 -> subdir 0x40).
+        put(&mut bytes, 0x220 + 14, &1u16.to_le_bytes());
+        put(&mut bytes, 0x220 + 16, &1u32.to_le_bytes());
+        put(&mut bytes, 0x220 + 20, &(0x8000_0040u32).to_le_bytes());
+        // Level 3 dir at 0x240: 1 ID entry (lang = 0x409 -> leaf 0x60).
+        put(&mut bytes, 0x240 + 14, &1u16.to_le_bytes());
+        put(&mut bytes, 0x240 + 16, &0x409u32.to_le_bytes());
+        put(&mut bytes, 0x240 + 20, &0x60u32.to_le_bytes());
+        // Leaf at 0x260: data at RVA 0x2080, len 8.
+        put(&mut bytes, 0x260, &0x2080u32.to_le_bytes());
+        put(&mut bytes, 0x260 + 4, &8u32.to_le_bytes());
+        put(&mut bytes, 0x280, b"VERDATA!");
+
+        assert_eq!(super::version_resource(&bytes), Some(&b"VERDATA!"[..]));
     }
 }

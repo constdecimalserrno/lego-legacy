@@ -51,8 +51,9 @@ Safe Click centers are listed only where both top-left `(x, y)` and sprite `[w×
 | **Title:** Load Game | `Load_on_Title.lls` | `(25, 280)` | `158×158` | `(104, 359)` |
 | **Title:** Movie / Adverts | `MovieOn_On_Title.lls` | `(270, 161)` | `105×90` | `(322, 206)` |
 | **Title:** Exit Game | `Exit_On_Title.lls` | `(481, 19)` | `153×149` | `(557, 93)` |
-| **Profile Details:** Slots `0..7` | `RegProfileON/Off_*.lls` | `(128, 134+38*i)` | — | verify visually |
-| **Profile Details:** Accept | `Accept_On_Reg.lls` | `(495, 335)` | `135×135` | `(562, 402)` |
+| **Profile Details:** Slot 1 (`EMPTY`) | `RegProfileON/Off_*.lls` | `(128, 172)` | — | `(260, 187)` *(verified #394)* |
+| **Profile Details:** Accept | `Accept_On_Reg.lls` | `(495, 335)` | `135×135` | `(562, 402)` *(verified #394)* |
+| **Exit Dialog:** Confirm Yes (green checkmark) | `InitExitCheckBox` | — | — | `(395, 173)` *(verified #394)* |
 | **Progress Map:** Tutorial Screen toggle | `Tutorial_On_Progress.lls` | `(372, 365)` | — | verify visually |
 | **Progress Map:** Accept / Play | `Accept_on_Progress.lls` | `(526, 367)` | `103×103` | `(577, 418)` |
 | **Progress Map:** Go Back | `GoBack_on_Progress.lls` | `(520, 11)` | `112×112` | `(576, 67)` |
