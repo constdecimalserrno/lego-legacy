@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Migrates `tests/cursor_alignment.rs` onto `lego_legacy_core::testkit::spectator` (`ControlRig::in_process`, draining `SpectatorClient`, `crosshair_center`, `fraction_diff`), deleting duplicated PNG decoding, crosshair detection, HTTP/1.1, RFC 6455 WS v2 / XOR-RLE, and RAII rig boilerplate while preserving every Main Menu, Level Select, Training Mission 1, and Priorities HUD alignment assertion (#411). Strictly outside guest state; no route moved.
+
 Adds deterministic Campaign Mission 1 ("Driller Night!") playability TAS route `routes/mission-1-complete.route` (cold boot -> drill cavern walls -> discover Tool Store -> teleport Raiders -> collect 5 Energy Crystals -> Mission Completed summary at 93% score -> save Slot 1 `0.SAV`/`0.DAT`/`0.OSF` -> advance to Level Select with Mission 2 unlocked -> clean `ExitProcess(0)`) with regression and `assert_same_machine` determinism tests in `tests/rock_raiders.rs` (#297, #298). Zero emulator walls needed; active 3D gameplay window `[1245..12014]` measured at `3.36x` real-time pace (`201.9` host FPS, `60.0` guest FPS, `p50=4.70ms`, `p95=7.95ms`, `p99=11.19ms`, `max=26.20ms`). No existing route moved.
 
 Reclassifies `GUIDE.mouse_mode` from `AbsoluteKept` to `SoftwareAbsolute { requires_poll_release: false }` (matching `LegoRR.exe`'s `ShowCursor(FALSE)` + DirectDraw software cursor) and adds a disc-gated headless + loopback `/api/stream` WebSocket v2 cursor alignment test (#331). Strictly outside guest state; no route moved.
