@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-10-21
 
+Re-pins LEGO Chess `intro`'s memory digest for core #385's DirectSound buffer reclamation (`titles/lego-chess/tests/lego_chess.rs`): every flip cursor, presented frame hash, audio mix hash, handoff flip, declared duration, and save byte stays bit-exact, while pooling freed intro movie DirectSound buffers lowers the guest heap extent hashed into `intro`'s `state_digest()`.
+
 Re-pins LEGO Chess route cursor expectations for core #373's truthful D3D triangle alpha/transparency caps (`titles/lego-chess/tests/lego_chess.rs`): every presented frame hash, audio mix hash, handoff flip, flip count, declared duration, and save byte stays bit-exact, while `KLIB_DirectX_PlugIn.dll`'s boot `IDirect3D2::EnumDevices` callback takes a `+10`-instruction branch.
 
 Adds a disc-gated real-disc cursor-to-pointer alignment and live loopback `/api/stream` WebSocket v2 proof (`titles/lego-chess/tests/cursor_alignment.rs`, #330): verifies `(320, 240)` hidden init sync and `/api/meta` `SoftwareAbsolute { requires_poll_release: true }` declaration, proves rendered TGA cursor alignment within `<= 2 px` (`0 px` observed) against `ControlStatus::pointer_pos`, frame-locked WS v2 pointer metadata (both PNG keyframes and XOR+RLE deltas), and `--cursor` crosshairs across New Player, Throne Room, Quick Game, 3D chessboard squares, and 2D overhead board squares, exercises `/watch` Human Take Over `POST /api/act` `click_poll` across UI buttons, the Throne Room Chess Table, 3D pawn movement (`1. e2-e4`), and 3D↔2D view toggling, and pins documented `#235` (`wontfix`) `Tab` `SetCursorPos` behavior + immediate `WM_MOUSEMOVE` re-sync with zero drift on released routes.

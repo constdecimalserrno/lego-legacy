@@ -716,9 +716,12 @@ fn the_intro_plays_the_logo_and_krisalis_through_and_starts_the_intro() {
 /// flip's cursor and leave the mix where it was, #338's DirectDraw surface
 /// reclamation, which pools freed surface buffers (moving only the memory
 /// digest while keeping every flip cursor, audio mix, and handoff flip
-/// bit-exact), and #373's truthful D3D triangle alpha/transparency caps, which
+/// bit-exact), #373's truthful D3D triangle alpha/transparency caps, which
 /// add +10 instructions inside `KLIB_DirectX_PlugIn.dll`'s boot `EnumDevices`
-/// callback while keeping every frame, audio mix, and handoff flip bit-exact.
+/// callback while keeping every frame, audio mix, and handoff flip bit-exact,
+/// and #385's DirectSound buffer reclamation, which pools freed sample stores
+/// (moving only the memory digest while keeping every flip cursor, audio mix,
+/// and handoff flip bit-exact).
 #[test]
 fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() {
     let Some(ran) = intro(&INTRO, true) else {
@@ -752,7 +755,7 @@ fn the_intro_s_clock_spins_are_passed_and_land_where_running_every_pass_lands() 
             hash::sha256_hex(&handed).as_str(),
         ),
         (
-            "4452866fa440c9ff28bac8fa6cdf2a0f8419ab792a785e10bb377b581f2a1c86",
+            "5a051881788abacfe71477bff72d61d6618d984b056ef9c50bbcd2d5274d846e",
             "8750f27e099b58c2ca4afb927ab3faea5025e67682a7532151fe6c16cb911df9",
             "70e84ca87ff3133b07ccc0debb9dd4e8b4a06f368854e780d6ae05a8e8e54ef7",
             "77712d0720f53b658e72e2d3f300da30a2e50d3298feacb51c536e2fba2a7a42",
