@@ -599,6 +599,18 @@ pub(super) enum InteriorKernel {
         flat: bool,
         specular: bool,
     },
+    TexturedModulatePaletted8KeyedOpaque {
+        linear: bool,
+        pot_wrap: bool,
+        z_test: bool,
+        flat: bool,
+    },
+    TexturedModulatePaletted8KeyedBlend {
+        linear: bool,
+        z_le: bool,
+        flat: bool,
+        additive: bool,
+    },
     FastRgb565,
     General,
 }
@@ -643,14 +655,25 @@ impl<'a> DrawPlan<'a> {
         };
 
         let need_z = effective_depth_test.is_some() || states.depth_write;
-        let need_uv = texture.is_some();
-        let need_diffuse_rgb = !states.flat && states.colour != Combine::Texture;
         let blend_uses_src_alpha = states.blend.is_some_and(|(s, d)| {
             matches!(s, Blend::SourceAlpha | Blend::InverseSourceAlpha)
                 || matches!(d, Blend::SourceAlpha | Blend::InverseSourceAlpha)
         });
         let need_alpha_out =
             effective_alpha_test.is_some() || target_format.masks[3] != 0 || blend_uses_src_alpha;
+        // A bound texture with no active colour key whose RGB and (if used) alpha
+        // channels are both ignored (`Combine::Diffuse`) is observably identical to
+        // no texture: drop it once per draw so `DrawPlan` skips palette LUT builds
+        // and UV plane setup and routes straight to the untextured SIMD kernels.
+        let texture_used = prepared_tex.as_ref().is_some_and(|t| {
+            t.active_key.is_some()
+                || states.colour != Combine::Diffuse
+                || (need_alpha_out && states.alpha != Combine::Diffuse)
+        });
+        let prepared_tex = if texture_used { prepared_tex } else { None };
+
+        let need_uv = prepared_tex.is_some();
+        let need_diffuse_rgb = !states.flat && states.colour != Combine::Texture;
         let need_diffuse_a = !states.flat && states.alpha != Combine::Texture && need_alpha_out;
         let need_specular = !states.flat && states.specular;
         let need_fog = states.fog.is_some();
@@ -865,10 +888,49 @@ fn select_kernel(
             InteriorKernel::FastRgb565
         }
         Some(t) => {
-            if !(no_alpha_test || alpha_gt)
-                || !t.in_bounds
-                || t.active_key.is_some()
-                || !is_specialized_tex_format(t.format)
+            if t.active_key.is_some() {
+                if t.in_bounds
+                    && t.format == TexFormat::Paletted8
+                    && no_alpha_test
+                    && z_supported
+                    && !states.specular
+                    && !has_fog
+                    && states.colour == Combine::Modulate
+                {
+                    if effective_blend.is_none() {
+                        return InteriorKernel::TexturedModulatePaletted8KeyedOpaque {
+                            linear: states.linear,
+                            pot_wrap: t.both_pot_wrap,
+                            z_test: z_le,
+                            flat: states.flat,
+                        };
+                    }
+                    if t.both_pot_wrap {
+                        if effective_blend == Some((Blend::SourceAlpha, Blend::InverseSourceAlpha))
+                        {
+                            return InteriorKernel::TexturedModulatePaletted8KeyedBlend {
+                                linear: states.linear,
+                                z_le,
+                                flat: states.flat,
+                                additive: false,
+                            };
+                        }
+                        if effective_blend == Some((Blend::SourceAlpha, Blend::One))
+                            && z_le
+                            && !states.flat
+                        {
+                            return InteriorKernel::TexturedModulatePaletted8KeyedBlend {
+                                linear: states.linear,
+                                z_le: true,
+                                flat: false,
+                                additive: true,
+                            };
+                        }
+                    }
+                }
+                return InteriorKernel::FastRgb565;
+            }
+            if !(no_alpha_test || alpha_gt) || !t.in_bounds || !is_specialized_tex_format(t.format)
             {
                 return InteriorKernel::FastRgb565;
             }
@@ -1016,6 +1078,34 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn run_span(
+        span_fn: SpanFn,
+        plan: &DrawPlan<'_>,
+        init_depth: &[f32],
+        init_pixels: &[u8],
+        pixel_byte_offset: usize,
+        mut value: [f32; PLANES],
+        step: [f32; PLANES],
+        flat: ([f32; 4], [f32; 3]),
+        states: &States,
+    ) -> (Vec<u8>, Vec<u32>) {
+        let mut depth = init_depth.to_vec();
+        let mut pix = vec![0xaa; pixel_byte_offset + init_pixels.len() + 3];
+        pix[pixel_byte_offset..pixel_byte_offset + init_pixels.len()].copy_from_slice(init_pixels);
+        span_fn(
+            plan,
+            &mut depth,
+            &mut pix[pixel_byte_offset..pixel_byte_offset + init_pixels.len()],
+            &mut value,
+            &step,
+            flat,
+            states,
+        );
+        let depth_bits = depth.into_iter().map(f32::to_bits).collect();
+        (pix, depth_bits)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn assert_span_parity(
         plan: &DrawPlan<'_>,
         init_depth: &[f32],
@@ -1027,42 +1117,30 @@ mod tests {
         states: &States,
         label: &str,
     ) {
-        let rust_fn = rust::resolve_span_fn(plan.kernel);
-        let simd_fn = native_span_fn(plan.kernel);
-
-        let mut depth_r = init_depth.to_vec();
-        let mut depth_s = init_depth.to_vec();
-        let mut pix_r = vec![0xaa; pixel_byte_offset + init_pixels.len() + 3];
-        let mut pix_s = vec![0xaa; pixel_byte_offset + init_pixels.len() + 3];
-        pix_r[pixel_byte_offset..pixel_byte_offset + init_pixels.len()]
-            .copy_from_slice(init_pixels);
-        pix_s[pixel_byte_offset..pixel_byte_offset + init_pixels.len()]
-            .copy_from_slice(init_pixels);
-
-        let mut vr = value;
-        let mut vs = value;
-        rust_fn(
+        let (pix_r, bits_r) = run_span(
+            rust::resolve_span_fn(plan.kernel),
             plan,
-            &mut depth_r,
-            &mut pix_r[pixel_byte_offset..pixel_byte_offset + init_pixels.len()],
-            &mut vr,
-            &step,
+            init_depth,
+            init_pixels,
+            pixel_byte_offset,
+            value,
+            step,
             flat,
             states,
         );
-        simd_fn(
+        let (pix_s, bits_s) = run_span(
+            native_span_fn(plan.kernel),
             plan,
-            &mut depth_s,
-            &mut pix_s[pixel_byte_offset..pixel_byte_offset + init_pixels.len()],
-            &mut vs,
-            &step,
+            init_depth,
+            init_pixels,
+            pixel_byte_offset,
+            value,
+            step,
             flat,
             states,
         );
 
         assert_eq!(pix_r, pix_s, "pixel mismatch ({label})");
-        let bits_r: Vec<u32> = depth_r.iter().map(|d| d.to_bits()).collect();
-        let bits_s: Vec<u32> = depth_s.iter().map(|d| d.to_bits()).collect();
         assert_eq!(bits_r, bits_s, "depth mismatch ({label})");
     }
 
@@ -2273,6 +2351,601 @@ mod tests {
                     ([1.2, -0.1, f32::NAN, 0.5], [f32::NAN, 0.8, -0.2]),
                     states,
                     &format!("{sname}/{ename}"),
+                );
+            }
+        }
+    }
+
+    const TEST_PAL8: PixelFormat = PixelFormat {
+        bits: 8,
+        masks: [0; 4],
+    };
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_matches_general(
+        plan: &DrawPlan<'_>,
+        general_plan: &DrawPlan<'_>,
+        init_depth: &[f32],
+        init_pixels: &[u8],
+        pixel_byte_offset: usize,
+        value: [f32; PLANES],
+        step: [f32; PLANES],
+        flat: ([f32; 4], [f32; 3]),
+        states: &States,
+        label: &str,
+    ) {
+        let (pix_g, bits_g) = run_span(
+            rust::span_general_in_bounds,
+            general_plan,
+            init_depth,
+            init_pixels,
+            pixel_byte_offset,
+            value,
+            step,
+            flat,
+            states,
+        );
+        let (pix_r, bits_r) = run_span(
+            rust::resolve_span_fn(plan.kernel),
+            plan,
+            init_depth,
+            init_pixels,
+            pixel_byte_offset,
+            value,
+            step,
+            flat,
+            states,
+        );
+        let (pix_s, bits_s) = run_span(
+            native_span_fn(plan.kernel),
+            plan,
+            init_depth,
+            init_pixels,
+            pixel_byte_offset,
+            value,
+            step,
+            flat,
+            states,
+        );
+
+        assert_eq!(pix_g, pix_r, "rust vs general pixel mismatch ({label})");
+        assert_eq!(pix_g, pix_s, "simd vs general pixel mismatch ({label})");
+        assert_eq!(bits_g, bits_r, "rust vs general depth mismatch ({label})");
+        assert_eq!(bits_g, bits_s, "simd vs general depth mismatch ({label})");
+    }
+
+    #[test]
+    fn unused_bound_texture_with_diffuse_combine_routes_to_untextured_simd() {
+        let palette: [[u8; 4]; 256] = std::array::from_fn(|i| {
+            [
+                (i as u8).wrapping_mul(37),
+                (i as u8).wrapping_mul(73),
+                (i as u8).wrapping_mul(113),
+                (i as u8) ^ 0x5a,
+            ]
+        });
+        let tex_bytes: Vec<u8> = (0..16 * 16).map(|i| (i * 29) as u8).collect();
+        let tex_unkeyed = Texture {
+            bytes: &tex_bytes,
+            width: 16,
+            height: 16,
+            pitch: 16,
+            format: TEST_PAL8,
+            palette: Some(&palette),
+            colour_key: None,
+            clamp: [false, false],
+        };
+        let tex_keyed = Texture {
+            colour_key: Some(7),
+            ..tex_unkeyed
+        };
+
+        let diffuse_cases: &[(&str, States)] = &[
+            (
+                "diffuse_gouraud_noz",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: None,
+                    depth_write: false,
+                    linear: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "diffuse_gouraud_z",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    linear: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "diffuse_opaque_alpha_tex_unused",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Texture,
+                    depth_test: None,
+                    depth_write: false,
+                    linear: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "diffuse_blend_noz",
+                States {
+                    colour: Combine::Diffuse,
+                    alpha: Combine::Diffuse,
+                    depth_test: None,
+                    depth_write: false,
+                    linear: true,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+        ];
+
+        let value: [f32; PLANES] = [0.3, 0.9, -0.4, 1.2, 0.7, 0.4, 0.6, 0.5, 0.1, 0.2, 0.3, 0.5];
+        let step: [f32; PLANES] = [
+            0.005, 0.01, 0.07, -0.05, -0.01, 0.012, 0.008, -0.006, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let flat = ([0.8, 0.4, 0.6, 0.5], [0.0; 3]);
+
+        for (name, states) in diffuse_cases {
+            let plan = DrawPlan::new(PixelFormat::RGB565, Some(&tex_unkeyed), states);
+            assert!(
+                !matches!(
+                    plan.kernel,
+                    InteriorKernel::FastRgb565 | InteriorKernel::General
+                ),
+                "{name} should route to specialized untextured SIMD, got {:?}",
+                plan.kernel
+            );
+            assert!(plan.texture.is_none(), "{name} should drop dead texture");
+            assert!(!plan.need_uv, "{name} should skip dead UV interpolation");
+
+            // Keep the texture attached on the general oracle plan so
+            // `span_general_in_bounds` samples it before combining with Diffuse.
+            let mut general_plan = DrawPlan::new(PixelFormat::RGB565, None, states);
+            general_plan.texture = Some(PreparedTexture::new(&tex_unkeyed, states.colour_key));
+            general_plan.carried = PLANES;
+            for len in 0..=65 {
+                let depth: Vec<f32> = (0..len)
+                    .map(|i| if i % 4 == 0 { 0.1 } else { 0.9 })
+                    .collect();
+                let pixels: Vec<u8> = (0..len * 2).map(|i| (i * 41 + 3) as u8).collect();
+                assert_matches_general(
+                    &plan,
+                    &general_plan,
+                    &depth,
+                    &pixels,
+                    len % 8,
+                    value,
+                    step,
+                    flat,
+                    states,
+                    &format!("{name}/len={len}"),
+                );
+            }
+        }
+
+        let keyed_diffuse = States {
+            colour: Combine::Diffuse,
+            alpha: Combine::Diffuse,
+            colour_key: true,
+            ..States::default()
+        };
+        let p_keyed = DrawPlan::new(PixelFormat::RGB565, Some(&tex_keyed), &keyed_diffuse);
+        assert!(p_keyed.texture.is_some());
+        assert!(p_keyed.need_uv);
+
+        let alpha_from_tex = States {
+            colour: Combine::Diffuse,
+            alpha: Combine::Texture,
+            blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+            ..States::default()
+        };
+        let p_alpha = DrawPlan::new(PixelFormat::RGB565, Some(&tex_unkeyed), &alpha_from_tex);
+        assert!(p_alpha.texture.is_some());
+        assert!(p_alpha.need_uv);
+    }
+
+    #[test]
+    fn bilinear_paletted8_simd_matches_rust_oracle_on_seams_clamp_1x1_and_edge_uvs() {
+        let palette: [[u8; 4]; 256] = std::array::from_fn(|i| {
+            [
+                (i as u8).wrapping_mul(53).wrapping_add(3),
+                (i as u8).wrapping_mul(97).wrapping_add(11),
+                (i as u8).wrapping_mul(163).wrapping_add(19),
+                (i as u8).wrapping_mul(29),
+            ]
+        });
+        let tex_pot_bytes: Vec<u8> = (0..8 * (8 + 3)).map(|i| (i * 31 + 5) as u8).collect();
+        let tex_npot_bytes: Vec<u8> = (0..6 * (5 + 2)).map(|i| (i * 19 + 11) as u8).collect();
+        let tex_1x1_bytes = [42u8];
+
+        let textures = [
+            (
+                "pot8x8",
+                Texture {
+                    bytes: &tex_pot_bytes,
+                    width: 8,
+                    height: 8,
+                    pitch: 11,
+                    format: TEST_PAL8,
+                    palette: Some(&palette),
+                    colour_key: None,
+                    clamp: [false, false],
+                },
+            ),
+            (
+                "pot8x8_clamp",
+                Texture {
+                    bytes: &tex_pot_bytes,
+                    width: 8,
+                    height: 8,
+                    pitch: 11,
+                    format: TEST_PAL8,
+                    palette: Some(&palette),
+                    colour_key: None,
+                    clamp: [true, true],
+                },
+            ),
+            (
+                "npot5x6",
+                Texture {
+                    bytes: &tex_npot_bytes,
+                    width: 5,
+                    height: 6,
+                    pitch: 7,
+                    format: TEST_PAL8,
+                    palette: Some(&palette),
+                    colour_key: None,
+                    clamp: [false, false],
+                },
+            ),
+            (
+                "tiny1x1",
+                Texture {
+                    bytes: &tex_1x1_bytes,
+                    width: 1,
+                    height: 1,
+                    pitch: 1,
+                    format: TEST_PAL8,
+                    palette: Some(&palette),
+                    colour_key: None,
+                    clamp: [false, false],
+                },
+            ),
+        ];
+
+        let states = States {
+            linear: true,
+            ..States::default()
+        };
+        let step: [f32; PLANES] = [
+            0.002, 0.004, 0.123, -0.089, -0.007, 0.009, 0.005, -0.004, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let flat = ([0.9, 0.7, 0.5, 0.8], [0.0; 3]);
+
+        let uv_starts: &[(&str, f32, f32)] = &[
+            ("seam_cross", 0.9375, -0.0625),
+            ("neg_zero", -0.0, 0.0),
+            ("huge_pos", 1.0e9, 2.5e9),
+            ("huge_neg", -1.0e9, -2.5e9),
+            ("inf_uv", f32::INFINITY, f32::NEG_INFINITY),
+            ("nan_uv", f32::NAN, 0.25),
+        ];
+
+        for (tname, tex) in &textures {
+            let plan = DrawPlan::new(PixelFormat::RGB565, Some(tex), &states);
+            for len in 0..=65 {
+                let depth = vec![0.8f32; len];
+                let pixels: Vec<u8> = (0..len * 2).map(|i| (i * 17) as u8).collect();
+                let val = [
+                    0.3, 1.0, 0.9375, -0.125, 0.8, 0.6, 0.4, 0.7, 0.0, 0.0, 0.0, 0.0,
+                ];
+                assert_span_parity(
+                    &plan,
+                    &depth,
+                    &pixels,
+                    len % 8,
+                    val,
+                    step,
+                    flat,
+                    &states,
+                    &format!("{tname}/len={len}"),
+                );
+            }
+            for &(uname, u0, v0) in uv_starts {
+                let depth = vec![0.9f32; 17];
+                let pixels: Vec<u8> = (0..34).map(|i| (i * 23 + 9) as u8).collect();
+                let val = [0.2, 1.0, u0, v0, 0.85, 0.65, 0.45, 0.75, 0.0, 0.0, 0.0, 0.0];
+                assert_span_parity(
+                    &plan,
+                    &depth,
+                    &pixels,
+                    5,
+                    val,
+                    step,
+                    flat,
+                    &states,
+                    &format!("{tname}/{uname}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_paletted8_simd_matches_rust_oracle_and_general_across_opaque_and_blend() {
+        const KEY: u32 = 0;
+        let palette: [[u8; 4]; 256] = std::array::from_fn(|i| {
+            [
+                (i as u8).wrapping_mul(43).wrapping_add(17),
+                (i as u8).wrapping_mul(89).wrapping_add(5),
+                (i as u8).wrapping_mul(151).wrapping_add(9),
+                if i % 3 == 0 {
+                    255
+                } else {
+                    ((i * 37) & 0xff) as u8
+                },
+            ]
+        });
+        let mut tex_pot_bytes = vec![0u8; 8 * 10];
+        for y in 0..8 {
+            for x in 0..8 {
+                tex_pot_bytes[y * 10 + x] = match y {
+                    0 => 0,
+                    1 => ((x + 1) * 19) as u8,
+                    2 => {
+                        if x % 2 == 0 {
+                            0
+                        } else {
+                            (x * 23 + 1) as u8
+                        }
+                    }
+                    _ => {
+                        if (x + y) % 3 == 0 {
+                            0
+                        } else {
+                            ((x * 7 + y * 13) % 255 + 1) as u8
+                        }
+                    }
+                };
+            }
+        }
+        let tex_npot_bytes: Vec<u8> = (0..6 * 7)
+            .map(|i| {
+                if i % 2 == 0 {
+                    0
+                } else {
+                    ((i * 11) % 255 + 1) as u8
+                }
+            })
+            .collect();
+
+        let tex_pot = Texture {
+            bytes: &tex_pot_bytes,
+            width: 8,
+            height: 8,
+            pitch: 10,
+            format: TEST_PAL8,
+            palette: Some(&palette),
+            colour_key: Some(KEY),
+            clamp: [false, false],
+        };
+        let tex_npot = Texture {
+            bytes: &tex_npot_bytes,
+            width: 5,
+            height: 6,
+            pitch: 7,
+            format: TEST_PAL8,
+            palette: Some(&palette),
+            colour_key: Some(KEY),
+            clamp: [true, false],
+        };
+        let tex_high_key = Texture {
+            colour_key: Some(0x123),
+            ..tex_pot
+        };
+
+        let cases: &[(&str, &Texture<'_>, States)] = &[
+            (
+                "keyed_opaque_nearest_pot_z_gouraud",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_opaque_nearest_npot_noz_gouraud",
+                &tex_npot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    depth_test: None,
+                    depth_write: false,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_opaque_nearest_npot_noz_flat",
+                &tex_npot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    depth_test: None,
+                    depth_write: false,
+                    flat: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_opaque_bilinear_pot_z_gouraud",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_opaque_bilinear_pot_z_flat",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    flat: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_opaque_high_key_never_matches",
+                &tex_high_key,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_alpha_bilinear_pot_noz_flat",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    depth_test: None,
+                    depth_write: false,
+                    flat: true,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_alpha_nearest_pot_z_flat",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    flat: true,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_alpha_bilinear_pot_z_flat",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    flat: true,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_alpha_nearest_pot_z_gouraud",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    blend: Some((Blend::SourceAlpha, Blend::InverseSourceAlpha)),
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_additive_nearest_pot_z_gouraud",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: false,
+                    blend: Some((Blend::SourceAlpha, Blend::One)),
+                    ..States::default()
+                },
+            ),
+            (
+                "keyed_blend_additive_bilinear_pot_z_gouraud",
+                &tex_pot,
+                States {
+                    colour_key: true,
+                    linear: true,
+                    blend: Some((Blend::SourceAlpha, Blend::One)),
+                    ..States::default()
+                },
+            ),
+        ];
+
+        let value: [f32; PLANES] = [
+            0.35, 1.0, 0.0, 0.0, 0.82, 0.55, 0.71, 0.63, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let step: [f32; PLANES] = [
+            0.003, 0.005, 0.0625, 0.041, -0.008, 0.006, -0.004, 0.007, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let flat = ([0.85, 0.62, 0.48, 0.55], [0.0; 3]);
+
+        for (name, tex, states) in cases {
+            let plan = DrawPlan::new(PixelFormat::RGB565, Some(tex), states);
+            assert!(
+                !matches!(
+                    plan.kernel,
+                    InteriorKernel::FastRgb565 | InteriorKernel::General
+                ),
+                "{name} should use specialized keyed Paletted8 SIMD kernel, got {:?}",
+                plan.kernel
+            );
+
+            for len in 0..=65 {
+                let depth: Vec<f32> = (0..len)
+                    .map(|i| match i % 5 {
+                        0 => 0.1,
+                        1 => f32::NAN,
+                        _ => 0.9,
+                    })
+                    .collect();
+                let pixels: Vec<u8> = (0..len * 2).map(|i| (i * 59 + 13) as u8).collect();
+                assert_matches_general(
+                    &plan,
+                    &plan,
+                    &depth,
+                    &pixels,
+                    len % 8,
+                    value,
+                    step,
+                    flat,
+                    states,
+                    &format!("{name}/len={len}"),
+                );
+            }
+
+            // Bracket `keyed_w > 0.5` and `keyed_w == 0.5` within one quad
+            // (u0 = 0.1249 steps through 0.1250 on row 2's alternating keys).
+            for (elabel, u0, v0, du) in [
+                ("exact_half_key", 0.1249, 0.3125, 0.0001),
+                ("all_keyed_row", 0.0625, 0.0625, 0.125),
+                ("nan_uv", f32::NAN, 0.3125, 0.0625),
+            ] {
+                let mut ev = value;
+                let mut es = step;
+                ev[2] = u0;
+                ev[3] = v0;
+                es[2] = du;
+                es[3] = 0.0;
+                let depth = vec![0.9f32; 16];
+                let pixels: Vec<u8> = (0..32).map(|i| (i * 29 + 5) as u8).collect();
+                assert_matches_general(
+                    &plan,
+                    &plan,
+                    &depth,
+                    &pixels,
+                    3,
+                    ev,
+                    es,
+                    flat,
+                    states,
+                    &format!("{name}/{elabel}"),
                 );
             }
         }

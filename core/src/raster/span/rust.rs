@@ -11,9 +11,20 @@ pub(super) const BLEND_ADDITIVE_ALPHA: u8 = 1;
 pub(super) const BLEND_INV_SRC_COLOUR: u8 = 2;
 
 /// Compile-time specialized texture sampler for zero-branch interior span loops.
-/// All implementations require `tex.in_bounds == true` and no active colour key.
+/// Non-keyed implementations require `tex.in_bounds == true` and no active colour key;
+/// keyed implementations (`MAY_KEY = true`) return `(texel, keyed)`.
 pub(super) trait TexSample {
+    const MAY_KEY: bool = false;
     fn sample(plan: &DrawPlan<'_>, tex: &PreparedTexture<'_>, u: f32, v: f32) -> [f32; 4];
+    #[inline(always)]
+    fn sample_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: f32,
+        v: f32,
+    ) -> ([f32; 4], bool) {
+        (Self::sample(plan, tex, u, v), false)
+    }
 }
 
 pub(super) struct NearestRgb565<const POT: bool>;
@@ -189,8 +200,9 @@ impl<const POT: bool> TexSample for BilinearArgb4444<POT> {
     }
 }
 
-pub(super) struct NearestPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample for NearestPaletted8<POT> {
+pub(super) struct NearestPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample for NearestPaletted8<POT, KEYED> {
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     fn sample(plan: &DrawPlan<'_>, tex: &PreparedTexture<'_>, u: f32, v: f32) -> [f32; 4] {
         let (x, y) = resolve_xy::<POT>(
@@ -201,12 +213,38 @@ impl<const POT: bool> TexSample for NearestPaletted8<POT> {
         let idx = tex.bytes[y * tex.pitch + x];
         plan.palette_f32()[usize::from(idx)]
     }
+    #[inline(always)]
+    fn sample_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: f32,
+        v: f32,
+    ) -> ([f32; 4], bool) {
+        let (x, y) = resolve_xy::<POT>(
+            tex,
+            (u * tex.width_f).floor() as i32,
+            (v * tex.height_f).floor() as i32,
+        );
+        let idx = tex.bytes[y * tex.pitch + x];
+        let keyed = KEYED && tex.active_key == Some(u32::from(idx));
+        (plan.palette_f32()[usize::from(idx)], keyed)
+    }
 }
 
-pub(super) struct BilinearPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample for BilinearPaletted8<POT> {
+pub(super) struct BilinearPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample for BilinearPaletted8<POT, KEYED> {
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     fn sample(plan: &DrawPlan<'_>, tex: &PreparedTexture<'_>, u: f32, v: f32) -> [f32; 4] {
+        Self::sample_keyed(plan, tex, u, v).0
+    }
+    #[inline(always)]
+    fn sample_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: f32,
+        v: f32,
+    ) -> ([f32; 4], bool) {
         let (x, y) = (u * tex.width_f - 0.5, v * tex.height_f - 0.5);
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
@@ -214,21 +252,26 @@ impl<const POT: bool> TexSample for BilinearPaletted8<POT> {
         let (left, upper) = resolve_xy::<POT>(tex, x0, y0);
         let (right, lower) = resolve_xy::<POT>(tex, x0.wrapping_add(1), y0.wrapping_add(1));
         let pal = plan.palette_f32();
-        let at = |tx: usize, ty: usize| pal[usize::from(tex.bytes[ty * tex.pitch + tx])];
+        let active_key = tex.active_key;
         let mut out = [0.0f32; 4];
+        let mut keyed = 0.0f32;
         for (tx, ty, weight) in [
             (left, upper, (1.0 - fx) * (1.0 - fy)),
             (right, upper, fx * (1.0 - fy)),
             (left, lower, (1.0 - fx) * fy),
             (right, lower, fx * fy),
         ] {
-            let c = at(tx, ty);
+            let idx = tex.bytes[ty * tex.pitch + tx];
+            let c = pal[usize::from(idx)];
             out[0] += weight * c[0];
             out[1] += weight * c[1];
             out[2] += weight * c[2];
             out[3] += weight * c[3];
+            if KEYED && active_key == Some(u32::from(idx)) {
+                keyed += weight;
+            }
         }
-        out
+        (out, KEYED && keyed > 0.5)
     }
 }
 
@@ -287,6 +330,18 @@ pub(super) fn resolve_span_fn(kernel: InteriorKernel) -> SpanFn {
         } => resolve_textured_modulate_blend(
             format, linear, pot_wrap, z_le, alpha_gt, blend, flat, specular,
         ),
+        InteriorKernel::TexturedModulatePaletted8KeyedOpaque {
+            linear,
+            pot_wrap,
+            z_test,
+            flat,
+        } => resolve_paletted8_keyed_opaque(linear, pot_wrap, z_test, flat),
+        InteriorKernel::TexturedModulatePaletted8KeyedBlend {
+            linear,
+            z_le,
+            flat,
+            additive,
+        } => resolve_paletted8_keyed_blend(linear, z_le, flat, additive),
         InteriorKernel::FastRgb565 => span_fast_rgb565,
         InteriorKernel::General => span_general_in_bounds,
     }
@@ -601,7 +656,15 @@ pub(super) fn span_textured_modulate_opaque<
         }
         if !Z_TEST || z <= *d {
             let near = if w > 0.0 { 1.0 / w } else { 0.0 };
-            let texel = S::sample(plan, tex, u * near, v * near);
+            let texel = if S::MAY_KEY {
+                let (t, keyed) = S::sample_keyed(plan, tex, u * near, v * near);
+                if keyed {
+                    continue;
+                }
+                t
+            } else {
+                S::sample(plan, tex, u * near, v * near)
+            };
             let (mut r, mut g, mut b) = if FLAT {
                 (
                     texel[0] * flat_diffuse[0],
@@ -770,7 +833,15 @@ pub(super) fn span_textured_modulate_blend<
         }
         if !Z_LE || z <= *d {
             let near = if w > 0.0 { 1.0 / w } else { 0.0 };
-            let texel = S::sample(plan, tex, u * near, v * near);
+            let texel = if S::MAY_KEY {
+                let (t, keyed) = S::sample_keyed(plan, tex, u * near, v * near);
+                if keyed {
+                    continue;
+                }
+                t
+            } else {
+                S::sample(plan, tex, u * near, v * near)
+            };
             let sa = if alpha_combine == Combine::Texture {
                 texel[3]
             } else {
@@ -918,6 +989,71 @@ fn resolve_textured_modulate_blend(
             (TexFormat::Paletted8, true) => go_gen!(BilinearPaletted8<false>),
             _ => unreachable!("select_kernel only emits specialized texture formats"),
         }
+    }
+}
+
+fn resolve_paletted8_keyed_opaque(
+    linear: bool,
+    pot_wrap: bool,
+    z_test: bool,
+    flat: bool,
+) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (z_test, flat) {
+                (true, false) => {
+                    span_textured_modulate_opaque::<$sampler, true, false, false, false>
+                }
+                (true, true) => span_textured_modulate_opaque::<$sampler, true, true, false, false>,
+                (false, false) => {
+                    span_textured_modulate_opaque::<$sampler, false, false, false, false>
+                }
+                (false, true) => {
+                    span_textured_modulate_opaque::<$sampler, false, true, false, false>
+                }
+            }
+        };
+    }
+    match (linear, pot_wrap) {
+        (false, true) => go!(NearestPaletted8<true, true>),
+        (false, false) => go!(NearestPaletted8<false, true>),
+        (true, true) => go!(BilinearPaletted8<true, true>),
+        (true, false) => go!(BilinearPaletted8<false, true>),
+    }
+}
+
+fn resolve_paletted8_keyed_blend(linear: bool, z_le: bool, flat: bool, additive: bool) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (additive, z_le, flat) {
+                (false, true, false) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, false, false>
+                }
+                (false, true, true) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, true, false>
+                }
+                (false, false, false) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, false, false>
+                }
+                (false, false, true) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, true, false>
+                }
+                (true, true, false) => span_textured_modulate_blend::<
+                    $sampler,
+                    true,
+                    false,
+                    BLEND_ADDITIVE_ALPHA,
+                    false,
+                    false,
+                >,
+                _ => unreachable!("select_kernel only emits supported keyed blend combinations"),
+            }
+        };
+    }
+    if linear {
+        go!(BilinearPaletted8<true, true>)
+    } else {
+        go!(NearestPaletted8<true, true>)
     }
 }
 

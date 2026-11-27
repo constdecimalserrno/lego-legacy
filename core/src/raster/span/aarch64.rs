@@ -13,16 +13,17 @@
 use core::arch::aarch64::{
     float32x4_t, int16x4_t, int16x8_t, int32x4_t, uint16x4_t, uint16x8_t, uint32x4_t, vaddq_f32,
     vaddq_s32, vandq_s32, vandq_u16, vandq_u32, vbsl_u16, vbslq_f32, vceqq_f32, vceqq_s32,
-    vcgtq_f32, vcgtq_u32, vcleq_f32, vcltq_f32, vcombine_s16, vcvtq_f32_s32, vcvtq_f32_u32,
-    vcvtq_s32_f32, vcvtq_u32_f32, vdivq_f32, vdup_n_u16, vdup_n_u64, vdupq_n_f32, vdupq_n_s32,
-    vdupq_n_u16, vdupq_n_u32, vget_high_s16, vget_lane_u64, vget_low_s16, vgetq_lane_f32,
+    vceqq_u32, vcgtq_f32, vcgtq_u32, vcleq_f32, vcltq_f32, vcombine_s16, vcvtq_f32_s32,
+    vcvtq_f32_u32, vcvtq_s32_f32, vcvtq_u32_f32, vdivq_f32, vdup_n_u16, vdup_n_u64, vdupq_n_f32,
+    vdupq_n_s32, vdupq_n_u16, vdupq_n_u32, vget_high_s16, vget_lane_u64, vget_low_s16,
     vgetq_lane_s32, vgetq_lane_u32, vld1q_f32, vmaxnmq_f32, vmaxvq_u32, vminnmq_f32, vminvq_u32,
-    vmlal_s16, vmlaq_s16, vmovl_u16, vmovn_u32, vmulq_f32, vorrq_u32, vreinterpret_s16_u16,
-    vreinterpret_u16_u64, vreinterpret_u64_u16, vreinterpretq_f32_f64, vreinterpretq_f64_f32,
-    vreinterpretq_s16_u16, vreinterpretq_u16_u32, vreinterpretq_u32_s32, vrndaq_f32, vrndmq_f32,
-    vset_lane_u16, vsetq_lane_f32, vsetq_lane_u16, vsetq_lane_u32, vshll_n_s16, vshlq_n_s16,
-    vshlq_n_u32, vshrq_n_u16, vshrq_n_u32, vst1q_f32, vsub_s16, vsubq_f32, vsubq_s16, vtrn1q_f32,
-    vtrn1q_f64, vtrn2q_f32, vtrn2q_f64, vuzp1q_u16, vuzp2q_u16,
+    vmlal_s16, vmlaq_s16, vmovl_u16, vmovn_u32, vmulq_f32, vmulq_laneq_f32, vmvnq_u32, vorrq_u32,
+    vreinterpret_s16_u16, vreinterpret_u16_u64, vreinterpret_u64_u16, vreinterpretq_f32_f64,
+    vreinterpretq_f32_u32, vreinterpretq_f64_f32, vreinterpretq_s16_u16, vreinterpretq_u16_u32,
+    vreinterpretq_u32_f32, vreinterpretq_u32_s32, vrndaq_f32, vrndmq_f32, vset_lane_u16,
+    vsetq_lane_f32, vsetq_lane_u16, vsetq_lane_u32, vshll_n_s16, vshlq_n_s16, vshlq_n_u32,
+    vshrq_n_u16, vshrq_n_u32, vst1q_f32, vsub_s16, vsubq_f32, vsubq_s16, vtrn1q_f32, vtrn1q_f64,
+    vtrn2q_f32, vtrn2q_f64, vuzp1q_u16, vuzp2q_u16,
 };
 
 use super::rust::{self, TexSample, BLEND_ADDITIVE_ALPHA, BLEND_ALPHA, BLEND_INV_SRC_COLOUR};
@@ -91,6 +92,18 @@ pub(super) fn resolve_span_fn(kernel: InteriorKernel) -> SpanFn {
         } => resolve_textured_modulate_blend(
             format, linear, pot_wrap, z_le, alpha_gt, blend, flat, specular,
         ),
+        InteriorKernel::TexturedModulatePaletted8KeyedOpaque {
+            linear,
+            pot_wrap,
+            z_test,
+            flat,
+        } => resolve_paletted8_keyed_opaque(linear, pot_wrap, z_test, flat),
+        InteriorKernel::TexturedModulatePaletted8KeyedBlend {
+            linear,
+            z_le,
+            flat,
+            additive,
+        } => resolve_paletted8_keyed_blend(linear, z_le, flat, additive),
         InteriorKernel::FastRgb565 => rust::span_fast_rgb565,
         InteriorKernel::General => rust::span_general_in_bounds,
     }
@@ -533,12 +546,29 @@ trait TexSample4 {
     /// True when `sample4` always returns finite RGB values strictly in `[0.0, 1.0]`
     /// for all UV inputs (including `NaN` / `±inf`), permitting unclamped RGB565 pack.
     const UNIT_RANGE: bool;
+    const MAY_KEY: bool = false;
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t);
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: float32x4_t,
+        v: float32x4_t,
+    ) -> (
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        uint32x4_t,
+    ) {
+        let (r, g, b, a) = Self::sample4(plan, tex, u, v);
+        (r, g, b, a, vdupq_n_u32(u32::MAX))
+    }
 }
 
 struct NearestRgb565<const POT: bool>;
@@ -740,10 +770,19 @@ impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
     }
 }
 
-struct NearestPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
-    type Scalar = rust::NearestPaletted8<POT>;
+#[inline(always)]
+unsafe fn pack_u8x4_u32(arr: [u8; 4]) -> uint32x4_t {
+    let v = vdupq_n_u32(u32::from(arr[0]));
+    let v = vsetq_lane_u32::<1>(u32::from(arr[1]), v);
+    let v = vsetq_lane_u32::<2>(u32::from(arr[2]), v);
+    vsetq_lane_u32::<3>(u32::from(arr[3]), v)
+}
+
+struct NearestPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample4 for NearestPaletted8<POT, KEYED> {
+    type Scalar = rust::NearestPaletted8<POT, KEYED>;
     const UNIT_RANGE: bool = true;
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -751,6 +790,22 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
+        let (r, g, b, a, _) = Self::sample4_keyed(plan, tex, u, v);
+        (r, g, b, a)
+    }
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: float32x4_t,
+        v: float32x4_t,
+    ) -> (
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        uint32x4_t,
+    ) {
         debug_assert!(tex.in_bounds);
         let xi = vcvtq_s32_f32(vrndmq_f32(vmulq_f32(u, vdupq_n_f32(tex.width_f))));
         let yi = vcvtq_s32_f32(vrndmq_f32(vmulq_f32(v, vdupq_n_f32(tex.height_f))));
@@ -758,18 +813,163 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
         let pal = plan.palette_f32();
         let base = tex.bytes.as_ptr();
         let pitch = tex.pitch;
-        let c0 = vld1q_f32(pal[usize::from(*base.add(ys[0] * pitch + xs[0]))].as_ptr());
-        let c1 = vld1q_f32(pal[usize::from(*base.add(ys[1] * pitch + xs[1]))].as_ptr());
-        let c2 = vld1q_f32(pal[usize::from(*base.add(ys[2] * pitch + xs[2]))].as_ptr());
-        let c3 = vld1q_f32(pal[usize::from(*base.add(ys[3] * pitch + xs[3]))].as_ptr());
-        transpose4(c0, c1, c2, c3)
+        let idx = [
+            *base.add(ys[0] * pitch + xs[0]),
+            *base.add(ys[1] * pitch + xs[1]),
+            *base.add(ys[2] * pitch + xs[2]),
+            *base.add(ys[3] * pitch + xs[3]),
+        ];
+        let alive = if KEYED {
+            vmvnq_u32(vceqq_u32(
+                pack_u8x4_u32(idx),
+                vdupq_n_u32(tex.active_key.unwrap()),
+            ))
+        } else {
+            vdupq_n_u32(u32::MAX)
+        };
+        let c0 = vld1q_f32(pal[usize::from(idx[0])].as_ptr());
+        let c1 = vld1q_f32(pal[usize::from(idx[1])].as_ptr());
+        let c2 = vld1q_f32(pal[usize::from(idx[2])].as_ptr());
+        let c3 = vld1q_f32(pal[usize::from(idx[3])].as_ptr());
+        let (r, g, b, a) = transpose4(c0, c1, c2, c3);
+        (r, g, b, a, alive)
     }
 }
 
-struct BilinearPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
-    type Scalar = rust::BilinearPaletted8<POT>;
+/// Vectorized 4-pixel bilinear `Paletted8` sampler (and optional colour-key
+/// test) matching `rust::BilinearPaletted8` bit-for-bit: exact IEEE-754
+/// `floor`, paired `u16` non-seam byte loads, separate `vmulq_laneq_f32` +
+/// `vaddq_f32` in `(00, 10, 01, 11)` order (zero FMA), and exact `keyed > 0.5`.
+#[inline(always)]
+unsafe fn bilinear_paletted8_sample4<const POT: bool, const KEYED: bool>(
+    plan: &DrawPlan<'_>,
+    tex: &PreparedTexture<'_>,
+    u: float32x4_t,
+    v: float32x4_t,
+) -> (
+    float32x4_t,
+    float32x4_t,
+    float32x4_t,
+    float32x4_t,
+    uint32x4_t,
+) {
+    debug_assert!(tex.in_bounds);
+    let half = vdupq_n_f32(0.5);
+    let one = vdupq_n_f32(1.0);
+    let zero = vdupq_n_f32(0.0);
+
+    let x = vsubq_f32(vmulq_f32(u, vdupq_n_f32(tex.width_f)), half);
+    let y = vsubq_f32(vmulq_f32(v, vdupq_n_f32(tex.height_f)), half);
+    let x0_f = vrndmq_f32(x);
+    let y0_f = vrndmq_f32(y);
+    let fx = vsubq_f32(x, x0_f);
+    let fy = vsubq_f32(y, y0_f);
+    let inv_fx = vsubq_f32(one, fx);
+    let inv_fy = vsubq_f32(one, fy);
+    let w00 = vmulq_f32(inv_fx, inv_fy);
+    let w10 = vmulq_f32(fx, inv_fy);
+    let w01 = vmulq_f32(inv_fx, fy);
+    let w11 = vmulq_f32(fx, fy);
+
+    let x0 = vcvtq_s32_f32(x0_f);
+    let y0 = vcvtq_s32_f32(y0_f);
+    let base = tex.bytes.as_ptr();
+    let pitch = tex.pitch;
+
+    let pot_non_seam = if POT {
+        let mask_x_v = vdupq_n_s32(tex.pot_x_mask);
+        let left_v = vandq_s32(x0, mask_x_v);
+        if vmaxvq_u32(vceqq_s32(left_v, mask_x_v)) == 0 {
+            let mask_y_v = vdupq_n_s32(tex.pot_y_mask);
+            let upper_v = vandq_s32(y0, mask_y_v);
+            let lower_v = vandq_s32(vaddq_s32(y0, vdupq_n_s32(1)), mask_y_v);
+            let left = extract_u32x4_as_usize(vreinterpretq_u32_s32(left_v));
+            let upper = extract_u32x4_as_usize(vreinterpretq_u32_s32(upper_v));
+            let lower = extract_u32x4_as_usize(vreinterpretq_u32_s32(lower_v));
+            let up = [0, 1, 2, 3].map(|k| read_u16_le(base, upper[k] * pitch + left[k]));
+            let lo = [0, 1, 2, 3].map(|k| read_u16_le(base, lower[k] * pitch + left[k]));
+            Some((
+                up.map(|v| v as u8),
+                up.map(|v| (v >> 8) as u8),
+                lo.map(|v| v as u8),
+                lo.map(|v| (v >> 8) as u8),
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (i00, i10, i01, i11) = match pot_non_seam {
+        Some(quad) => quad,
+        None => {
+            let one_i = vdupq_n_s32(1);
+            let (left, upper) = resolve_xy4::<POT>(tex, x0, y0);
+            let (right, lower) =
+                resolve_xy4::<POT>(tex, vaddq_s32(x0, one_i), vaddq_s32(y0, one_i));
+            (
+                [0, 1, 2, 3].map(|k| *base.add(upper[k] * pitch + left[k])),
+                [0, 1, 2, 3].map(|k| *base.add(upper[k] * pitch + right[k])),
+                [0, 1, 2, 3].map(|k| *base.add(lower[k] * pitch + left[k])),
+                [0, 1, 2, 3].map(|k| *base.add(lower[k] * pitch + right[k])),
+            )
+        }
+    };
+
+    let pal = plan.palette_f32();
+    macro_rules! accum_px {
+        ($lane:literal) => {{
+            let c00 = vld1q_f32(pal[usize::from(i00[$lane])].as_ptr());
+            let c10 = vld1q_f32(pal[usize::from(i10[$lane])].as_ptr());
+            let c01 = vld1q_f32(pal[usize::from(i01[$lane])].as_ptr());
+            let c11 = vld1q_f32(pal[usize::from(i11[$lane])].as_ptr());
+            let mut acc = vaddq_f32(zero, vmulq_laneq_f32::<$lane>(c00, w00));
+            acc = vaddq_f32(acc, vmulq_laneq_f32::<$lane>(c10, w10));
+            acc = vaddq_f32(acc, vmulq_laneq_f32::<$lane>(c01, w01));
+            vaddq_f32(acc, vmulq_laneq_f32::<$lane>(c11, w11))
+        }};
+    }
+    let o0 = accum_px!(0);
+    let o1 = accum_px!(1);
+    let o2 = accum_px!(2);
+    let o3 = accum_px!(3);
+    let (r, g, b, a) = transpose4(o0, o1, o2, o3);
+
+    let alive = if KEYED {
+        let key_v = vdupq_n_u32(tex.active_key.unwrap());
+        let m00 = vceqq_u32(pack_u8x4_u32(i00), key_v);
+        let m10 = vceqq_u32(pack_u8x4_u32(i10), key_v);
+        let m01 = vceqq_u32(pack_u8x4_u32(i01), key_v);
+        let m11 = vceqq_u32(pack_u8x4_u32(i11), key_v);
+        let mut k_acc = vaddq_f32(
+            zero,
+            vreinterpretq_f32_u32(vandq_u32(m00, vreinterpretq_u32_f32(w00))),
+        );
+        k_acc = vaddq_f32(
+            k_acc,
+            vreinterpretq_f32_u32(vandq_u32(m10, vreinterpretq_u32_f32(w10))),
+        );
+        k_acc = vaddq_f32(
+            k_acc,
+            vreinterpretq_f32_u32(vandq_u32(m01, vreinterpretq_u32_f32(w01))),
+        );
+        k_acc = vaddq_f32(
+            k_acc,
+            vreinterpretq_f32_u32(vandq_u32(m11, vreinterpretq_u32_f32(w11))),
+        );
+        vmvnq_u32(vcgtq_f32(k_acc, half))
+    } else {
+        vdupq_n_u32(u32::MAX)
+    };
+    (r, g, b, a, alive)
+}
+
+struct BilinearPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample4 for BilinearPaletted8<POT, KEYED> {
+    type Scalar = rust::BilinearPaletted8<POT, KEYED>;
     const UNIT_RANGE: bool = false;
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -777,36 +977,23 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
         u: float32x4_t,
         v: float32x4_t,
     ) -> (float32x4_t, float32x4_t, float32x4_t, float32x4_t) {
-        let c0 = rust::BilinearPaletted8::<POT>::sample(
-            plan,
-            tex,
-            vgetq_lane_f32::<0>(u),
-            vgetq_lane_f32::<0>(v),
-        );
-        let c1 = rust::BilinearPaletted8::<POT>::sample(
-            plan,
-            tex,
-            vgetq_lane_f32::<1>(u),
-            vgetq_lane_f32::<1>(v),
-        );
-        let c2 = rust::BilinearPaletted8::<POT>::sample(
-            plan,
-            tex,
-            vgetq_lane_f32::<2>(u),
-            vgetq_lane_f32::<2>(v),
-        );
-        let c3 = rust::BilinearPaletted8::<POT>::sample(
-            plan,
-            tex,
-            vgetq_lane_f32::<3>(u),
-            vgetq_lane_f32::<3>(v),
-        );
-        transpose4(
-            vld1q_f32(c0.as_ptr()),
-            vld1q_f32(c1.as_ptr()),
-            vld1q_f32(c2.as_ptr()),
-            vld1q_f32(c3.as_ptr()),
-        )
+        let (r, g, b, a, _) = bilinear_paletted8_sample4::<POT, KEYED>(plan, tex, u, v);
+        (r, g, b, a)
+    }
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: float32x4_t,
+        v: float32x4_t,
+    ) -> (
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        float32x4_t,
+        uint32x4_t,
+    ) {
+        bilinear_paletted8_sample4::<POT, KEYED>(plan, tex, u, v)
     }
 }
 
@@ -1563,7 +1750,23 @@ unsafe fn span_textured_modulate_opaque_neon<
         ));
 
         let near = persp4(wv);
-        let (tr, tg, tb, _) = S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
+        let (tr, tg, tb, write_mask) = if S::MAY_KEY {
+            let (tr, tg, tb, _, alive) =
+                S::sample4_keyed(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
+            let wm = if Z_TEST {
+                vandq_u32(z_mask, alive)
+            } else {
+                alive
+            };
+            if vmaxvq_u32(wm) == 0 {
+                i += 4;
+                continue;
+            }
+            (tr, tg, tb, wm)
+        } else {
+            let (tr, tg, tb, _) = S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
+            (tr, tg, tb, z_mask)
+        };
 
         let (mut r, mut g, mut b) = if FLAT {
             (
@@ -1605,20 +1808,20 @@ unsafe fn span_textured_modulate_opaque_neon<
         }
 
         let new_px = pack_rgb565_4(r, g, b);
-        if Z_TEST {
-            if vminvq_u32(z_mask) != 0 {
-                if depth_write {
+        if Z_TEST || S::MAY_KEY {
+            if vminvq_u32(write_mask) != 0 {
+                if Z_TEST && depth_write {
                     vst1q_f32(d_ptr.add(i), zv);
                 }
                 store_u16x4(p_ptr.add(i * 2), new_px);
             } else {
-                if depth_write {
-                    vst1q_f32(d_ptr.add(i), vbslq_f32(z_mask, zv, dv));
+                if Z_TEST && depth_write {
+                    vst1q_f32(d_ptr.add(i), vbslq_f32(write_mask, zv, dv));
                 }
                 let old_px = load_u16x4(p_ptr.add(i * 2));
                 store_u16x4(
                     p_ptr.add(i * 2),
-                    vbsl_u16(vmovn_u32(z_mask), new_px, old_px),
+                    vbsl_u16(vmovn_u32(write_mask), new_px, old_px),
                 );
             }
         } else {
@@ -1856,7 +2059,22 @@ unsafe fn span_textured_modulate_blend_neon<
         ));
 
         let near = persp4(wv);
-        let (tr, tg, tb, ta) = S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
+        let (tr, tg, tb, ta) = if S::MAY_KEY {
+            let (tr, tg, tb, ta, alive) =
+                S::sample4_keyed(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near));
+            write_mask = if Z_LE {
+                vandq_u32(write_mask, alive)
+            } else {
+                alive
+            };
+            if vmaxvq_u32(write_mask) == 0 {
+                i += 4;
+                continue;
+            }
+            (tr, tg, tb, ta)
+        } else {
+            S::sample4(plan, tex, vmulq_f32(uv, near), vmulq_f32(vv, near))
+        };
 
         // When alpha comes solely from the texture and alpha_test is active, test
         // alpha before transposing diffuse RGB or loading the framebuffer so fully
@@ -1864,7 +2082,7 @@ unsafe fn span_textured_modulate_blend_neon<
         let (sa, diffuse_opt) = if alpha_combine == Combine::Texture {
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(ta, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     vandq_u32(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -1879,7 +2097,7 @@ unsafe fn span_textured_modulate_blend_neon<
             let sa = combine_4(alpha_combine, ta, flat_a);
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     vandq_u32(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -1896,7 +2114,7 @@ unsafe fn span_textured_modulate_blend_neon<
             let sa = combine_4(alpha_combine, ta, vmulq_f32(ca, near));
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     vandq_u32(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -1983,7 +2201,7 @@ unsafe fn span_textured_modulate_blend_neon<
             _ => unreachable!(),
         };
         let new_px = pack_rgb565_4(out_r, out_g, out_b);
-        if Z_LE || ALPHA_GT {
+        if Z_LE || ALPHA_GT || S::MAY_KEY {
             store_u16x4(
                 p_ptr.add(i * 2),
                 vbsl_u16(vmovn_u32(write_mask), new_px, old_px),
@@ -2106,10 +2324,76 @@ fn resolve_textured_modulate_blend(
     }
 }
 
+fn resolve_paletted8_keyed_opaque(
+    linear: bool,
+    pot_wrap: bool,
+    z_test: bool,
+    flat: bool,
+) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (z_test, flat) {
+                (true, false) => {
+                    span_textured_modulate_opaque::<$sampler, true, false, false, false>
+                }
+                (true, true) => span_textured_modulate_opaque::<$sampler, true, true, false, false>,
+                (false, false) => {
+                    span_textured_modulate_opaque::<$sampler, false, false, false, false>
+                }
+                (false, true) => {
+                    span_textured_modulate_opaque::<$sampler, false, true, false, false>
+                }
+            }
+        };
+    }
+    match (linear, pot_wrap) {
+        (false, true) => go!(NearestPaletted8<true, true>),
+        (false, false) => go!(NearestPaletted8<false, true>),
+        (true, true) => go!(BilinearPaletted8<true, true>),
+        (true, false) => go!(BilinearPaletted8<false, true>),
+    }
+}
+
+fn resolve_paletted8_keyed_blend(linear: bool, z_le: bool, flat: bool, additive: bool) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (additive, z_le, flat) {
+                (false, true, false) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, false, false>
+                }
+                (false, true, true) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, true, false>
+                }
+                (false, false, false) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, false, false>
+                }
+                (false, false, true) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, true, false>
+                }
+                (true, true, false) => span_textured_modulate_blend::<
+                    $sampler,
+                    true,
+                    false,
+                    BLEND_ADDITIVE_ALPHA,
+                    false,
+                    false,
+                >,
+                _ => unreachable!("select_kernel only emits supported keyed blend combinations"),
+            }
+        };
+    }
+    if linear {
+        go!(BilinearPaletted8<true, true>)
+    } else {
+        go!(NearestPaletted8<true, true>)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::raster::{Blend, Compare, PixelFormat, Texture};
+    use core::arch::aarch64::vgetq_lane_f32;
 
     #[allow(clippy::too_many_arguments)]
     fn assert_neon_matches_rust(
