@@ -785,3 +785,146 @@ fn first_race_mid_race_llsnap_v2_round_trips_bit_exact() {
         2620,
     );
 }
+
+const BUILD_RACER_PARITY_FLIPS: &[u64] = &[1012, 1285, 1485];
+const FIRST_RACE_PARITY_FLIPS: &[u64] = &[1572, 2182, 2619, 4851, 6067, 6368];
+
+fn frames_and_audio_sha256(ran: &testkit::Ran, kept_flips: &[u64]) -> (String, String) {
+    let mut frame_sha = hash::Sha256::new();
+    for &flip in kept_flips {
+        let frame = ran
+            .host
+            .frame(flip)
+            .unwrap_or_else(|| panic!("expected kept parity frame at flip {flip}"));
+        frame_sha.update(&flip.to_le_bytes());
+        frame_sha.update(&frame.width.to_le_bytes());
+        frame_sha.update(&frame.height.to_le_bytes());
+        frame_sha.update(&frame.pixels);
+    }
+    let mut audio_sha = hash::Sha256::new();
+    for block in &ran.host.audio_blocks {
+        audio_sha.update(&(block.len() as u64).to_le_bytes());
+        for &sample in block {
+            audio_sha.update(&sample.to_le_bytes());
+        }
+    }
+    (
+        hash::hex(&frame_sha.finish()),
+        hash::hex(&audio_sha.finish()),
+    )
+}
+
+fn format_arch_summary(route_name: &str, ran: &testkit::Ran, kept_flips: &[u64]) -> String {
+    ran.assert_exited(0);
+    let (frames_hash, audio_hash) = frames_and_audio_sha256(ran, kept_flips);
+    format!(
+        "ARCH_SUMMARY|{}|{:?}|{}|{}|{}|{}|{}|{}",
+        route_name,
+        ran.finish.outcome,
+        ran.finish.cursor,
+        ran.finish.flips,
+        ran.finish.declared_millis,
+        ran.digest,
+        frames_hash,
+        audio_hash,
+    )
+}
+
+fn run_route_summary(route_name: &str, budget: u64, kept_flips: &[u64]) -> String {
+    let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("racers-arch-{route_name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_root);
+    let cli = Cli {
+        route: Some(route_path(route_name)),
+        data_root: Some(data_root.clone()),
+        ..Cli::default()
+    };
+    let ran = testkit::run_on(Headless::new().keeping(kept_flips), &RACERS, &cli, budget);
+    let _ = std::fs::remove_dir_all(&data_root);
+    format_arch_summary(route_name, &ran, kept_flips)
+}
+
+/// ADR-0009 Layer 2 parity: replaying `build-racer.route` and `first-race.route`
+/// under `LEGO_LEGACY_ARCH=rust` produces the exact same outcome, cursor, flips,
+/// declared milliseconds, `Machine::state_digest()`, mid-run 3D frames, and
+/// mixed PCM audio as the native SIMD/assembly tier (#375).
+#[test]
+fn build_racer_and_first_race_match_pure_rust_tier_bit_exact() {
+    if let Ok(route_name) = std::env::var("LEGO_RACERS_ARCH_PARITY_CHILD") {
+        assert!(
+            lego_legacy_core::arch::use_rust(),
+            "parity child must execute on LEGO_LEGACY_ARCH=rust"
+        );
+        if !scratch() {
+            return;
+        }
+        let (budget, kept_flips) = match route_name.as_str() {
+            "build-racer.route" => (BUILD_RACER_BUDGET, BUILD_RACER_PARITY_FLIPS),
+            "first-race.route" => (FIRST_RACE_BUDGET, FIRST_RACE_PARITY_FLIPS),
+            other => panic!("unexpected parity route {other}"),
+        };
+        println!("\n{}", run_route_summary(&route_name, budget, kept_flips));
+        return;
+    }
+
+    if !scratch() {
+        return;
+    }
+    // Avoid spawning nested rust children when the whole suite is already
+    // invoked with `LEGO_LEGACY_ARCH=rust`.
+    if lego_legacy_core::arch::use_rust() {
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("test executable path");
+    let spawn_rust_child = |route_name: &str| {
+        std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "build_racer_and_first_race_match_pure_rust_tier_bit_exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LEGO_LEGACY_ARCH", "rust")
+            .env("LEGO_RACERS_ARCH_PARITY_CHILD", route_name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn pure-Rust parity child")
+    };
+    let build_child = spawn_rust_child("build-racer.route");
+    let race_child = spawn_rust_child("first-race.route");
+
+    let race_baseline = first_race().expect("disc already verified by scratch()");
+    let race_native =
+        format_arch_summary("first-race.route", race_baseline, FIRST_RACE_PARITY_FLIPS);
+    let build_native = run_route_summary(
+        "build-racer.route",
+        BUILD_RACER_BUDGET,
+        BUILD_RACER_PARITY_FLIPS,
+    );
+
+    for (route_name, native_summary, child) in [
+        ("build-racer.route", build_native, build_child),
+        ("first-race.route", race_native, race_child),
+    ] {
+        let output = child.wait_with_output().expect("wait for parity child");
+        assert!(
+            output.status.success(),
+            "pure-Rust parity child failed for {route_name}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let rust_summary = stdout
+            .lines()
+            .find_map(|line| line.find("ARCH_SUMMARY|").map(|idx| &line[idx..]))
+            .unwrap_or_else(|| {
+                panic!("missing ARCH_SUMMARY line for {route_name} in stdout:\n{stdout}")
+            });
+        assert_eq!(
+            native_summary, rust_summary,
+            "native SIMD/asm vs LEGO_LEGACY_ARCH=rust parity mismatch on {route_name}"
+        );
+    }
+}

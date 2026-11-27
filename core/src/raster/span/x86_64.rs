@@ -21,9 +21,9 @@ use core::arch::x86_64::{
     _mm_div_ps, _mm_insert_epi16, _mm_loadu_ps, _mm_loadu_si128, _mm_madd_epi16, _mm_max_ps,
     _mm_min_ps, _mm_movehl_ps, _mm_movelh_ps, _mm_movemask_ps, _mm_mul_ps, _mm_mullo_epi16,
     _mm_or_ps, _mm_or_si128, _mm_packs_epi32, _mm_set1_epi16, _mm_set1_epi32, _mm_set1_ps,
-    _mm_set_epi64x, _mm_set_ps, _mm_setzero_ps, _mm_setzero_si128, _mm_slli_epi16, _mm_slli_epi32,
-    _mm_srai_epi32, _mm_srli_epi16, _mm_srli_epi32, _mm_srli_si128, _mm_storeu_ps, _mm_sub_epi16,
-    _mm_sub_epi32, _mm_sub_ps, _mm_unpackhi_ps, _mm_unpacklo_epi16, _mm_unpacklo_ps,
+    _mm_set_epi64x, _mm_set_ps, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps, _mm_slli_epi16,
+    _mm_slli_epi32, _mm_srai_epi32, _mm_srli_epi16, _mm_srli_epi32, _mm_srli_si128, _mm_storeu_ps,
+    _mm_sub_epi16, _mm_sub_epi32, _mm_sub_ps, _mm_unpackhi_ps, _mm_unpacklo_epi16, _mm_unpacklo_ps,
 };
 
 use super::rust::{self, TexSample, BLEND_ADDITIVE_ALPHA, BLEND_ALPHA, BLEND_INV_SRC_COLOUR};
@@ -92,6 +92,18 @@ pub(super) fn resolve_span_fn(kernel: InteriorKernel) -> SpanFn {
         } => resolve_textured_modulate_blend(
             format, linear, pot_wrap, z_le, alpha_gt, blend, flat, specular,
         ),
+        InteriorKernel::TexturedModulatePaletted8KeyedOpaque {
+            linear,
+            pot_wrap,
+            z_test,
+            flat,
+        } => resolve_paletted8_keyed_opaque(linear, pot_wrap, z_test, flat),
+        InteriorKernel::TexturedModulatePaletted8KeyedBlend {
+            linear,
+            z_le,
+            flat,
+            additive,
+        } => resolve_paletted8_keyed_blend(linear, z_le, flat, additive),
         InteriorKernel::FastRgb565 => rust::span_fast_rgb565,
         InteriorKernel::General => rust::span_general_in_bounds,
     }
@@ -213,10 +225,10 @@ unsafe fn floor_to_i32_slow(x: __m128) -> __m128i {
     _mm_loadu_si128(out.as_ptr().cast())
 }
 
-/// Exact `(x.floor() as i32, ((x - x.floor()) * 256.0) as u32)` across 4 lanes
-/// using baseline SSE2, with a cold scalar fallback for out-of-range/`NaN`.
+/// Shared in-range SSE2 `(x.floor() as i32, x.floor())` fast path for
+/// finite inputs strictly within `[-2^31, 2^31)`.
 #[inline(always)]
-unsafe fn bilinear_floor_frac(x: __m128) -> (__m128i, __m128i) {
+unsafe fn floor_in_range(x: __m128) -> Option<(__m128i, __m128)> {
     let min_i = _mm_set1_ps(-2_147_483_648.0f32);
     let max_i = _mm_set1_ps(2_147_483_648.0f32);
     let in_range = _mm_and_ps(_mm_cmpge_ps(x, min_i), _mm_cmplt_ps(x, max_i));
@@ -226,6 +238,17 @@ unsafe fn bilinear_floor_frac(x: __m128) -> (__m128i, __m128i) {
         let lt = _mm_cmplt_ps(x, tf);
         let x0 = _mm_add_epi32(t, _mm_castps_si128(lt));
         let x0_f = _mm_sub_ps(tf, _mm_and_ps(lt, _mm_set1_ps(1.0)));
+        Some((x0, x0_f))
+    } else {
+        None
+    }
+}
+
+/// Exact `(x.floor() as i32, ((x - x.floor()) * 256.0) as u32)` across 4 lanes
+/// using baseline SSE2, with a cold scalar fallback for out-of-range/`NaN`.
+#[inline(always)]
+unsafe fn bilinear_floor_frac(x: __m128) -> (__m128i, __m128i) {
+    if let Some((x0, x0_f)) = floor_in_range(x) {
         let fx = _mm_cvttps_epi32(_mm_mul_ps(_mm_sub_ps(x, x0_f), _mm_set1_ps(256.0)));
         (x0, fx)
     } else {
@@ -247,6 +270,37 @@ unsafe fn bilinear_floor_frac_slow(x: __m128) -> (__m128i, __m128i) {
     (
         _mm_loadu_si128(x0s.as_ptr().cast()),
         _mm_loadu_si128(fxs.as_ptr().cast()),
+    )
+}
+
+/// Exact `(x.floor() as i32, x - x.floor())` across 4 lanes using baseline
+/// SSE2, with a cold scalar fallback for out-of-range/`NaN` inputs.
+#[inline(always)]
+unsafe fn bilinear_floor_frac_f32(x: __m128) -> (__m128i, __m128) {
+    if let Some((x0, x0_f)) = floor_in_range(x) {
+        // Adding +0.0 turns `(-0.0) - (+0.0) = -0.0` into `+0.0`, matching
+        // `(-0.0f32) - (-0.0f32).floor() == +0.0`.
+        let fx = _mm_add_ps(_mm_sub_ps(x, x0_f), _mm_setzero_ps());
+        (x0, fx)
+    } else {
+        bilinear_floor_frac_f32_slow(x)
+    }
+}
+
+#[cold]
+unsafe fn bilinear_floor_frac_f32_slow(x: __m128) -> (__m128i, __m128) {
+    let mut arr = [0.0f32; 4];
+    _mm_storeu_ps(arr.as_mut_ptr(), x);
+    let mut x0s = [0i32; 4];
+    let mut fxs = [0.0f32; 4];
+    for k in 0..4 {
+        let f = arr[k].floor();
+        x0s[k] = f as i32;
+        fxs[k] = arr[k] - f;
+    }
+    (
+        _mm_loadu_si128(x0s.as_ptr().cast()),
+        _mm_loadu_ps(fxs.as_ptr()),
     )
 }
 
@@ -594,12 +648,23 @@ trait TexSample4 {
     /// True when `sample4` always returns finite RGB values strictly in `[0.0, 1.0]`
     /// for all UV inputs (including `NaN` / `±inf`), permitting unclamped RGB565 pack.
     const UNIT_RANGE: bool;
+    const MAY_KEY: bool = false;
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
         tex: &PreparedTexture<'_>,
         u: __m128,
         v: __m128,
     ) -> (__m128, __m128, __m128, __m128);
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: __m128,
+        v: __m128,
+    ) -> (__m128, __m128, __m128, __m128, __m128) {
+        let (r, g, b, a) = Self::sample4(plan, tex, u, v);
+        (r, g, b, a, _mm_castsi128_ps(_mm_set1_epi32(-1)))
+    }
 }
 
 struct NearestRgb565<const POT: bool>;
@@ -834,10 +899,18 @@ impl<const POT: bool> TexSample4 for BilinearArgb4444<POT> {
     }
 }
 
-struct NearestPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
-    type Scalar = rust::NearestPaletted8<POT>;
+#[inline(always)]
+unsafe fn pack_u8x4_i32(arr: [u8; 4]) -> __m128i {
+    let lo = u64::from(arr[0]) | (u64::from(arr[1]) << 32);
+    let hi = u64::from(arr[2]) | (u64::from(arr[3]) << 32);
+    _mm_set_epi64x(hi as i64, lo as i64)
+}
+
+struct NearestPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample4 for NearestPaletted8<POT, KEYED> {
+    type Scalar = rust::NearestPaletted8<POT, KEYED>;
     const UNIT_RANGE: bool = true;
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -845,6 +918,16 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
         u: __m128,
         v: __m128,
     ) -> (__m128, __m128, __m128, __m128) {
+        let (r, g, b, a, _) = Self::sample4_keyed(plan, tex, u, v);
+        (r, g, b, a)
+    }
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: __m128,
+        v: __m128,
+    ) -> (__m128, __m128, __m128, __m128, __m128) {
         debug_assert!(tex.in_bounds);
         let xi = floor_to_i32(_mm_mul_ps(u, _mm_set1_ps(tex.width_f)));
         let yi = floor_to_i32(_mm_mul_ps(v, _mm_set1_ps(tex.height_f)));
@@ -852,18 +935,145 @@ impl<const POT: bool> TexSample4 for NearestPaletted8<POT> {
         let pal = plan.palette_f32();
         let base = tex.bytes.as_ptr();
         let pitch = tex.pitch;
-        let c0 = _mm_loadu_ps(pal[usize::from(*base.add(ys[0] * pitch + xs[0]))].as_ptr());
-        let c1 = _mm_loadu_ps(pal[usize::from(*base.add(ys[1] * pitch + xs[1]))].as_ptr());
-        let c2 = _mm_loadu_ps(pal[usize::from(*base.add(ys[2] * pitch + xs[2]))].as_ptr());
-        let c3 = _mm_loadu_ps(pal[usize::from(*base.add(ys[3] * pitch + xs[3]))].as_ptr());
-        transpose4(c0, c1, c2, c3)
+        let idx = [
+            *base.add(ys[0] * pitch + xs[0]),
+            *base.add(ys[1] * pitch + xs[1]),
+            *base.add(ys[2] * pitch + xs[2]),
+            *base.add(ys[3] * pitch + xs[3]),
+        ];
+        let all_ones = _mm_castsi128_ps(_mm_set1_epi32(-1));
+        let alive = if KEYED {
+            let key_v = _mm_set1_epi32(tex.active_key.unwrap() as i32);
+            _mm_andnot_ps(
+                _mm_castsi128_ps(_mm_cmpeq_epi32(pack_u8x4_i32(idx), key_v)),
+                all_ones,
+            )
+        } else {
+            all_ones
+        };
+        let c0 = _mm_loadu_ps(pal[usize::from(idx[0])].as_ptr());
+        let c1 = _mm_loadu_ps(pal[usize::from(idx[1])].as_ptr());
+        let c2 = _mm_loadu_ps(pal[usize::from(idx[2])].as_ptr());
+        let c3 = _mm_loadu_ps(pal[usize::from(idx[3])].as_ptr());
+        let (r, g, b, a) = transpose4(c0, c1, c2, c3);
+        (r, g, b, a, alive)
     }
 }
 
-struct BilinearPaletted8<const POT: bool>;
-impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
-    type Scalar = rust::BilinearPaletted8<POT>;
+/// Vectorized 4-pixel baseline SSE2 bilinear `Paletted8` sampler (and optional
+/// colour-key test) matching `rust::BilinearPaletted8` bit-for-bit: exact
+/// IEEE-754 `floor`, paired `u16` non-seam byte loads, separate `_mm_mul_ps` +
+/// `_mm_add_ps` in `(00, 10, 01, 11)` order (zero FMA), and exact `keyed > 0.5`.
+#[inline(always)]
+unsafe fn bilinear_paletted8_sample4<const POT: bool, const KEYED: bool>(
+    plan: &DrawPlan<'_>,
+    tex: &PreparedTexture<'_>,
+    u: __m128,
+    v: __m128,
+) -> (__m128, __m128, __m128, __m128, __m128) {
+    debug_assert!(tex.in_bounds);
+    let half = _mm_set1_ps(0.5);
+    let one = _mm_set1_ps(1.0);
+    let zero = _mm_setzero_ps();
+
+    let x = _mm_sub_ps(_mm_mul_ps(u, _mm_set1_ps(tex.width_f)), half);
+    let y = _mm_sub_ps(_mm_mul_ps(v, _mm_set1_ps(tex.height_f)), half);
+    let (x0, fx) = bilinear_floor_frac_f32(x);
+    let (y0, fy) = bilinear_floor_frac_f32(y);
+    let inv_fx = _mm_sub_ps(one, fx);
+    let inv_fy = _mm_sub_ps(one, fy);
+    let w00 = _mm_mul_ps(inv_fx, inv_fy);
+    let w10 = _mm_mul_ps(fx, inv_fy);
+    let w01 = _mm_mul_ps(inv_fx, fy);
+    let w11 = _mm_mul_ps(fx, fy);
+
+    let base = tex.bytes.as_ptr();
+    let pitch = tex.pitch;
+
+    let pot_non_seam = if POT {
+        let mask_x_v = _mm_set1_epi32(tex.pot_x_mask);
+        let left_v = _mm_and_si128(x0, mask_x_v);
+        let at_seam = _mm_cmpeq_epi32(left_v, mask_x_v);
+        if _mm_movemask_ps(_mm_castsi128_ps(at_seam)) == 0 {
+            let mask_y_v = _mm_set1_epi32(tex.pot_y_mask);
+            let upper_v = _mm_and_si128(y0, mask_y_v);
+            let lower_v = _mm_and_si128(_mm_add_epi32(y0, _mm_set1_epi32(1)), mask_y_v);
+            let left = extract_u32x4_as_usize(left_v);
+            let upper = extract_u32x4_as_usize(upper_v);
+            let lower = extract_u32x4_as_usize(lower_v);
+            let up = [0, 1, 2, 3].map(|k| read_u16_le(base, upper[k] * pitch + left[k]));
+            let lo = [0, 1, 2, 3].map(|k| read_u16_le(base, lower[k] * pitch + left[k]));
+            Some((
+                up.map(|v| v as u8),
+                up.map(|v| (v >> 8) as u8),
+                lo.map(|v| v as u8),
+                lo.map(|v| (v >> 8) as u8),
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (i00, i10, i01, i11) = match pot_non_seam {
+        Some(quad) => quad,
+        None => {
+            let one_i = _mm_set1_epi32(1);
+            let (left, upper) = resolve_xy4::<POT>(tex, x0, y0);
+            let (right, lower) =
+                resolve_xy4::<POT>(tex, _mm_add_epi32(x0, one_i), _mm_add_epi32(y0, one_i));
+            (
+                [0, 1, 2, 3].map(|k| *base.add(upper[k] * pitch + left[k])),
+                [0, 1, 2, 3].map(|k| *base.add(upper[k] * pitch + right[k])),
+                [0, 1, 2, 3].map(|k| *base.add(lower[k] * pitch + left[k])),
+                [0, 1, 2, 3].map(|k| *base.add(lower[k] * pitch + right[k])),
+            )
+        }
+    };
+
+    let pal = plan.palette_f32();
+    macro_rules! accum_px {
+        ($lane:literal, $shuf:literal) => {{
+            let c00 = _mm_loadu_ps(pal[usize::from(i00[$lane])].as_ptr());
+            let c10 = _mm_loadu_ps(pal[usize::from(i10[$lane])].as_ptr());
+            let c01 = _mm_loadu_ps(pal[usize::from(i01[$lane])].as_ptr());
+            let c11 = _mm_loadu_ps(pal[usize::from(i11[$lane])].as_ptr());
+            let mut acc = _mm_add_ps(zero, _mm_mul_ps(_mm_shuffle_ps::<$shuf>(w00, w00), c00));
+            acc = _mm_add_ps(acc, _mm_mul_ps(_mm_shuffle_ps::<$shuf>(w10, w10), c10));
+            acc = _mm_add_ps(acc, _mm_mul_ps(_mm_shuffle_ps::<$shuf>(w01, w01), c01));
+            _mm_add_ps(acc, _mm_mul_ps(_mm_shuffle_ps::<$shuf>(w11, w11), c11))
+        }};
+    }
+    let o0 = accum_px!(0, 0x00);
+    let o1 = accum_px!(1, 0x55);
+    let o2 = accum_px!(2, 0xaa);
+    let o3 = accum_px!(3, 0xff);
+    let (r, g, b, a) = transpose4(o0, o1, o2, o3);
+
+    let alive = if KEYED {
+        let key_v = _mm_set1_epi32(tex.active_key.unwrap() as i32);
+        let all_ones = _mm_castsi128_ps(_mm_set1_epi32(-1));
+        let m00 = _mm_castsi128_ps(_mm_cmpeq_epi32(pack_u8x4_i32(i00), key_v));
+        let m10 = _mm_castsi128_ps(_mm_cmpeq_epi32(pack_u8x4_i32(i10), key_v));
+        let m01 = _mm_castsi128_ps(_mm_cmpeq_epi32(pack_u8x4_i32(i01), key_v));
+        let m11 = _mm_castsi128_ps(_mm_cmpeq_epi32(pack_u8x4_i32(i11), key_v));
+        let mut k_acc = _mm_add_ps(zero, _mm_and_ps(m00, w00));
+        k_acc = _mm_add_ps(k_acc, _mm_and_ps(m10, w10));
+        k_acc = _mm_add_ps(k_acc, _mm_and_ps(m01, w01));
+        k_acc = _mm_add_ps(k_acc, _mm_and_ps(m11, w11));
+        _mm_andnot_ps(_mm_cmpgt_ps(k_acc, half), all_ones)
+    } else {
+        _mm_castsi128_ps(_mm_set1_epi32(-1))
+    };
+    (r, g, b, a, alive)
+}
+
+struct BilinearPaletted8<const POT: bool, const KEYED: bool = false>;
+impl<const POT: bool, const KEYED: bool> TexSample4 for BilinearPaletted8<POT, KEYED> {
+    type Scalar = rust::BilinearPaletted8<POT, KEYED>;
     const UNIT_RANGE: bool = false;
+    const MAY_KEY: bool = KEYED;
     #[inline(always)]
     unsafe fn sample4(
         plan: &DrawPlan<'_>,
@@ -871,20 +1081,17 @@ impl<const POT: bool> TexSample4 for BilinearPaletted8<POT> {
         u: __m128,
         v: __m128,
     ) -> (__m128, __m128, __m128, __m128) {
-        let mut us = [0.0f32; 4];
-        let mut vs = [0.0f32; 4];
-        _mm_storeu_ps(us.as_mut_ptr(), u);
-        _mm_storeu_ps(vs.as_mut_ptr(), v);
-        let c0 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[0], vs[0]);
-        let c1 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[1], vs[1]);
-        let c2 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[2], vs[2]);
-        let c3 = rust::BilinearPaletted8::<POT>::sample(plan, tex, us[3], vs[3]);
-        transpose4(
-            _mm_loadu_ps(c0.as_ptr()),
-            _mm_loadu_ps(c1.as_ptr()),
-            _mm_loadu_ps(c2.as_ptr()),
-            _mm_loadu_ps(c3.as_ptr()),
-        )
+        let (r, g, b, a, _) = bilinear_paletted8_sample4::<POT, KEYED>(plan, tex, u, v);
+        (r, g, b, a)
+    }
+    #[inline(always)]
+    unsafe fn sample4_keyed(
+        plan: &DrawPlan<'_>,
+        tex: &PreparedTexture<'_>,
+        u: __m128,
+        v: __m128,
+    ) -> (__m128, __m128, __m128, __m128, __m128) {
+        bilinear_paletted8_sample4::<POT, KEYED>(plan, tex, u, v)
     }
 }
 
@@ -1602,7 +1809,24 @@ unsafe fn span_textured_modulate_opaque_sse2<
         let vv = _mm_movehl_ps(t3, t1);
 
         let near = persp4(wv);
-        let (tr, tg, tb, _) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+        let (tr, tg, tb, write_mask, write_bits) = if S::MAY_KEY {
+            let (tr, tg, tb, _, alive) =
+                S::sample4_keyed(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+            let wm = if Z_TEST {
+                _mm_and_ps(z_mask, alive)
+            } else {
+                alive
+            };
+            let wb = _mm_movemask_ps(wm);
+            if wb == 0 {
+                i += 4;
+                continue;
+            }
+            (tr, tg, tb, wm, wb)
+        } else {
+            let (tr, tg, tb, _) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+            (tr, tg, tb, z_mask, z_bits)
+        };
 
         let (mut r, mut g, mut b) = if FLAT {
             (
@@ -1644,19 +1868,19 @@ unsafe fn span_textured_modulate_opaque_sse2<
         }
 
         let new_px = pack_rgb565_4(r, g, b);
-        if Z_TEST {
-            if z_bits == 0xf {
-                if depth_write {
+        if Z_TEST || S::MAY_KEY {
+            if write_bits == 0xf {
+                if Z_TEST && depth_write {
                     _mm_storeu_ps(d_ptr.add(i), zv);
                 }
                 store_u16x4(p_ptr.add(i * 2), new_px);
             } else {
-                if depth_write {
-                    _mm_storeu_ps(d_ptr.add(i), select_ps(z_mask, zv, dv));
+                if Z_TEST && depth_write {
+                    _mm_storeu_ps(d_ptr.add(i), select_ps(write_mask, zv, dv));
                 }
                 let old_px = load_u16x4(p_ptr.add(i * 2));
-                let z_mask_i = _mm_castps_si128(z_mask);
-                let mask16 = _mm_packs_epi32(z_mask_i, z_mask_i);
+                let wm_i = _mm_castps_si128(write_mask);
+                let mask16 = _mm_packs_epi32(wm_i, wm_i);
                 store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
             }
         } else {
@@ -1882,12 +2106,27 @@ unsafe fn span_textured_modulate_blend_sse2<
         let vv = _mm_movehl_ps(t3, t1);
 
         let near = persp4(wv);
-        let (tr, tg, tb, ta) = S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+        let (tr, tg, tb, ta) = if S::MAY_KEY {
+            let (tr, tg, tb, ta, alive) =
+                S::sample4_keyed(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near));
+            write_mask = if Z_LE {
+                _mm_and_ps(write_mask, alive)
+            } else {
+                alive
+            };
+            if _mm_movemask_ps(write_mask) == 0 {
+                i += 4;
+                continue;
+            }
+            (tr, tg, tb, ta)
+        } else {
+            S::sample4(plan, tex, _mm_mul_ps(uv, near), _mm_mul_ps(vv, near))
+        };
 
         let (sa, diffuse_opt) = if alpha_combine == Combine::Texture {
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(ta, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     _mm_and_ps(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -1902,7 +2141,7 @@ unsafe fn span_textured_modulate_blend_sse2<
             let sa = combine_4(alpha_combine, ta, flat_a);
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     _mm_and_ps(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -1919,7 +2158,7 @@ unsafe fn span_textured_modulate_blend_sse2<
             let sa = combine_4(alpha_combine, ta, _mm_mul_ps(ca, near));
             if ALPHA_GT {
                 let alpha_mask = alpha_gt_mask4(sa, alpha_ref);
-                write_mask = if Z_LE {
+                write_mask = if Z_LE || S::MAY_KEY {
                     _mm_and_ps(write_mask, alpha_mask)
                 } else {
                     alpha_mask
@@ -2006,7 +2245,7 @@ unsafe fn span_textured_modulate_blend_sse2<
             _ => unreachable!(),
         };
         let new_px = pack_rgb565_4(out_r, out_g, out_b);
-        if Z_LE || ALPHA_GT {
+        if Z_LE || ALPHA_GT || S::MAY_KEY {
             let wm_i = _mm_castps_si128(write_mask);
             let mask16 = _mm_packs_epi32(wm_i, wm_i);
             store_u16x4(p_ptr.add(i * 2), select_si128(mask16, new_px, old_px));
@@ -2125,6 +2364,71 @@ fn resolve_textured_modulate_blend(
             (TexFormat::Paletted8, true) => go_gen!(BilinearPaletted8<false>),
             _ => unreachable!("select_kernel only emits specialized texture formats"),
         }
+    }
+}
+
+fn resolve_paletted8_keyed_opaque(
+    linear: bool,
+    pot_wrap: bool,
+    z_test: bool,
+    flat: bool,
+) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (z_test, flat) {
+                (true, false) => {
+                    span_textured_modulate_opaque::<$sampler, true, false, false, false>
+                }
+                (true, true) => span_textured_modulate_opaque::<$sampler, true, true, false, false>,
+                (false, false) => {
+                    span_textured_modulate_opaque::<$sampler, false, false, false, false>
+                }
+                (false, true) => {
+                    span_textured_modulate_opaque::<$sampler, false, true, false, false>
+                }
+            }
+        };
+    }
+    match (linear, pot_wrap) {
+        (false, true) => go!(NearestPaletted8<true, true>),
+        (false, false) => go!(NearestPaletted8<false, true>),
+        (true, true) => go!(BilinearPaletted8<true, true>),
+        (true, false) => go!(BilinearPaletted8<false, true>),
+    }
+}
+
+fn resolve_paletted8_keyed_blend(linear: bool, z_le: bool, flat: bool, additive: bool) -> SpanFn {
+    macro_rules! go {
+        ($sampler:ty) => {
+            match (additive, z_le, flat) {
+                (false, true, false) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, false, false>
+                }
+                (false, true, true) => {
+                    span_textured_modulate_blend::<$sampler, true, false, BLEND_ALPHA, true, false>
+                }
+                (false, false, false) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, false, false>
+                }
+                (false, false, true) => {
+                    span_textured_modulate_blend::<$sampler, false, false, BLEND_ALPHA, true, false>
+                }
+                (true, true, false) => span_textured_modulate_blend::<
+                    $sampler,
+                    true,
+                    false,
+                    BLEND_ADDITIVE_ALPHA,
+                    false,
+                    false,
+                >,
+                _ => unreachable!("select_kernel only emits supported keyed blend combinations"),
+            }
+        };
+    }
+    if linear {
+        go!(BilinearPaletted8<true, true>)
+    } else {
+        go!(NearestPaletted8<true, true>)
     }
 }
 
