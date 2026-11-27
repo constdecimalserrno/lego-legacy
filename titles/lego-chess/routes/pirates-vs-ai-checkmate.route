@@ -1,0 +1,238 @@
+#lego-legacy-route 1
+# LEGO Chess: Full Quick Game Victory vs Computer AI on the Pirates 3D Theme (#303, #304).
+#
+# Reuses throne-room.route's boot -> Ada profile -> Throne Room -> Quick Game prefix (flips
+# 290..431), switches the Quick Game theme from Western to Pirates via Choose Theme (320,65) while
+# keeping Black as the Oxford Softworks Computer AI (default difficulty 25, matched Blue Soldiers
+# vs Red Pirates sets, capture cartoons enabled), and plays a 26-move (51-ply) legal game with
+# nine captures (triggering 3D Pirate capture cartoons) through to Checkmate ("Checkmate!
+# Congratulations, you win!"), returning to the Throne Room via the green tick and closing cleanly.
+#
+# Replay with a fresh `--data-root <empty dir>`, never beside the rip: it reaches the New Player
+# form only with no profile saved and writes profiles\prof1.lcp and profiles\1save.lcs.
+#
+# Landmarks (fresh --data-root, with GM16.DLS):
+# - Boot & profile: flips 0..391 (New Player "Ada", "Who's playing?", Throne Room at flip 392).
+# - Quick Game setup: flip 432 -> Choose Theme (320,65) -> Pirates at flip 440 -> Start (590,410)
+#   at flip 450 (loads PIRATES.RES, staunton\ptune.mid, Advisors\admiral.avi & pirate.avi).
+# - Active 3D gameplay window: flips 555..18800 (Pirates 3D board ready -> Checkmate victory).
+# - Verified 3D Pirate capture cartoon landmarks:
+#     * Pawn-vs-Pawn (3. exd5 & 3... exd5): flips ~1684..3084 (samples: 1984, 2584, 2884)
+#     * Bishop-vs-Queen & Knight-vs-Bishop (8. Bxd7+ & 8... Nxd7): flips ~5614..7114 (samples: 5614, 6814)
+#     * Bishop-vs-Knight (9. Bxe7): flips ~7560..8440 (sample: 7560)
+#     * Queen-vs-Rook Checkmate (26. Qxa8#): flips ~18352..18652 (sample: 18352, iris wipe at 18652)
+# - Full move sequence (White Human Blue Soldiers vs Black Computer AI Red Pirates):
+#     1.  e2-e4     (flip 560..581)     1...  e7-e6
+#     2.  d2-d4     (flip 936..957)     2...  d7-d5
+#     3.  e4xd5     (flip 1362..1383)   3...  e6xd5   [Captures #1 & #2: Pawn-vs-Pawn cartoons]
+#     4.  Qd1-h5    (flip 3148..3169)   4...  Qd8-d7
+#     5.  Bf1-b5    (flip 3554..3575)   5...  Ke8-e7
+#     6.  Bc1-g5+   (flip 4000..4021)   6...  Ke7-e8
+#     7.  Qh5-e2+   (flip 4646..4667)   7...  Ng8-e7
+#     8.  Bb5xd7+   (flip 5292..5313)   8...  Nb8xd7  [Captures #3 & #4: Bishop-vs-Queen & Knight-vs-Bishop cartoons]
+#     9.  Bg5xe7    (flip 7238..7259)   9...  c7-c5   [Capture #5: Bishop-vs-Knight cartoon]
+#    10.  Be7-d6+   (flip 8464..8485)  10...  Ke8-d8
+#    11.  Bd6-e7+   (flip 8890..8911)  11...  Kd8-c7
+#    12.  Nb1-c3    (flip 9366..9387)  12...  c5xd4   [Capture #6: Pawn-vs-Pawn cartoon]
+#    13.  Nc3-b5+   (flip 10692..10713) 13... Kc7-c6
+#    14.  Nb5xd4+   (flip 11118..11139) 14... Kc6-b6  [Capture #7: Knight-vs-Pawn cartoon]
+#    15.  Qe2-b5+   (flip 12444..12465) 15... Kb6-c7
+#    16.  Qb5-a5+   (flip 12870..12891) 16... b7-b6
+#    17.  Nd4-b5+   (flip 13296..13317) 17... Kc7-c6
+#    18.  a2-a4     (flip 13722..13743) 18... Nd7-e5
+#    19.  Qa5-c3+   (flip 14148..14169) 19... Ne5-c4
+#    20.  Nb5-d4+   (flip 14574..14595) 20... Kc6-b7
+#    21.  Qc3-b4    (flip 15000..15021) 21... a7-a5
+#    22.  Qb4-b5    (flip 15426..15447) 22... Nc4xb2  [Capture #8: Knight-vs-Pawn cartoon]
+#    23.  Qb5-c6+   (flip 16752..16773) 23... Kb7-a7
+#    24.  Nd4-b5+   (flip 17178..17199) 24... Ka7-a6
+#    25.  Nb5-c7+   (flip 17604..17625) 25... Ka6-a7
+#    26.  Qc6xa8#   (flip 18030..18051)               [Capture #9: Queen-vs-Rook cartoon -> Checkmate!]
+# - Victory & clean exit: Checkmate dialog at flip 18800 -> green tick (320,232) at flip 18811
+#   (poll 300 up) -> Throne Room return -> close at flip 18860 -> Exited(0).
+flip 290 key Space down
+flip 290 poll 300 key Space up
+flip 300 key Space down
+flip 300 poll 300 key Space up
+flip 320 key LeftShift down
+flip 321 key A down
+flip 324 key A up
+flip 325 key LeftShift up
+flip 328 key D down
+flip 331 key D up
+flip 334 key A down
+flip 337 key A up
+flip 345 move 576 420
+flip 350 down
+flip 350 poll 300 up
+flip 390 down
+flip 390 poll 300 up
+flip 405 move 385 285
+flip 430 down
+flip 431 up
+flip 435 move 320 65
+flip 440 down
+flip 440 poll 300 up
+flip 445 move 590 410
+flip 450 down
+flip 450 poll 300 up
+flip 560 move 356 308
+flip 565 down
+flip 568 up
+flip 573 move 351 241
+flip 578 down
+flip 581 up
+flip 936 move 284 308
+flip 941 down
+flip 944 up
+flip 949 move 289 241
+flip 954 down
+flip 957 up
+flip 1362 move 351 250
+flip 1367 down
+flip 1370 up
+flip 1375 move 291 222
+flip 1380 down
+flip 1383 up
+flip 3148 move 282 355
+flip 3153 down
+flip 3156 up
+flip 3161 move 521 222
+flip 3166 down
+flip 3169 up
+flip 3554 move 435 355
+flip 3559 down
+flip 3562 up
+flip 3567 move 176 222
+flip 3572 down
+flip 3575 up
+flip 4000 move 205 355
+flip 4005 down
+flip 4008 up
+flip 4013 move 464 222
+flip 4018 down
+flip 4021 up
+flip 4646 move 521 222
+flip 4651 down
+flip 4654 up
+flip 4659 move 356 315
+flip 4664 down
+flip 4667 up
+flip 5292 move 176 222
+flip 5297 down
+flip 5300 up
+flip 5305 move 295 179
+flip 5310 down
+flip 5313 up
+flip 7238 move 464 222
+flip 7243 down
+flip 7246 up
+flip 7251 move 345 179
+flip 7256 down
+flip 7259 up
+flip 8464 move 345 179
+flip 8469 down
+flip 8472 up
+flip 8477 move 293 199
+flip 8482 down
+flip 8485 up
+flip 8890 move 293 199
+flip 8895 down
+flip 8898 up
+flip 8903 move 345 179
+flip 8908 down
+flip 8911 up
+flip 9366 move 129 355
+flip 9371 down
+flip 9374 up
+flip 9379 move 221 280
+flip 9384 down
+flip 9387 up
+flip 10692 move 221 280
+flip 10697 down
+flip 10700 up
+flip 10705 move 176 222
+flip 10710 down
+flip 10713 up
+flip 11118 move 176 222
+flip 11123 down
+flip 11126 up
+flip 11131 move 289 250
+flip 11136 down
+flip 11139 up
+flip 12444 move 356 315
+flip 12449 down
+flip 12452 up
+flip 12457 move 176 222
+flip 12462 down
+flip 12465 up
+flip 12870 move 176 222
+flip 12875 down
+flip 12878 up
+flip 12883 move 119 222
+flip 12888 down
+flip 12891 up
+flip 13296 move 289 250
+flip 13301 down
+flip 13304 up
+flip 13309 move 176 222
+flip 13314 down
+flip 13317 up
+flip 13722 move 68 315
+flip 13727 down
+flip 13730 up
+flip 13735 move 105 250
+flip 13740 down
+flip 13743 up
+flip 14148 move 119 222
+flip 14153 down
+flip 14156 up
+flip 14161 move 221 280
+flip 14166 down
+flip 14169 up
+flip 14574 move 176 222
+flip 14579 down
+flip 14582 up
+flip 14587 move 289 250
+flip 14592 down
+flip 14595 up
+flip 15000 move 221 280
+flip 15005 down
+flip 15008 up
+flip 15013 move 167 250
+flip 15018 down
+flip 15021 up
+flip 15426 move 167 250
+flip 15431 down
+flip 15434 up
+flip 15439 move 176 222
+flip 15444 down
+flip 15447 up
+flip 16752 move 176 222
+flip 16757 down
+flip 16760 up
+flip 16765 move 239 199
+flip 16770 down
+flip 16773 up
+flip 17178 move 289 250
+flip 17183 down
+flip 17186 up
+flip 17191 move 176 222
+flip 17196 down
+flip 17199 up
+flip 17604 move 176 222
+flip 17609 down
+flip 17612 up
+flip 17617 move 244 179
+flip 17622 down
+flip 17625 up
+flip 18030 move 239 199
+flip 18035 down
+flip 18038 up
+flip 18043 move 152 161
+flip 18048 down
+flip 18051 up
+flip 18806 move 320 232
+flip 18811 down
+flip 18811 poll 300 up
+flip 18860 close
