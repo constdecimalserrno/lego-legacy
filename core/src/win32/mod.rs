@@ -12,6 +12,7 @@ pub mod d3d;
 pub mod d3drm;
 pub mod ddraw;
 pub mod dinput;
+pub mod dmusic;
 pub mod dshow;
 pub mod dsound;
 pub mod gdi32;
@@ -357,6 +358,8 @@ pub struct State {
     pub mixer: crate::sound::Mixer,
     /// DirectSound's buffers and listener.
     pub sound: dsound::Sounds,
+    /// DirectMusic loader, performance, ports, segments, and declared-clock sequencer (#399).
+    pub dmusic: dmusic::DirectMusic,
     /// The multimedia streams a title has made, by the object it holds.
     pub players: BTreeMap<u32, amstream::Player>,
     /// DirectShow filter graphs (`CLSID_FilterGraph`) keyed by COM identity (#372).
@@ -533,6 +536,7 @@ impl State {
             mm_timer_thread: None,
             mixer: crate::sound::Mixer::default(),
             sound: dsound::Sounds::default(),
+            dmusic: dmusic::DirectMusic::default(),
             installed_files: 0,
             window_procedure: 0,
             window_made: false,
@@ -1772,6 +1776,7 @@ const INTERFACE_SETS: &[&[&crate::com::Interface]] = &[
     amstream::INTERFACES,
     dshow::INTERFACES,
     avifile::INTERFACES,
+    dmusic::INTERFACES,
 ];
 
 /// The interfaces this machine can hand the guest.
@@ -2508,6 +2513,7 @@ impl crate::snap::Snap for State {
             present,
             mixer,
             sound,
+            dmusic,
             players,
             filter_graphs,
             avi_files,
@@ -2680,6 +2686,7 @@ impl crate::snap::Snap for State {
         );
         mixer.snap(v);
         sound.snap(v);
+        dmusic.snap(v);
         crate::snap::snap_btree_map(v, players, |k, v| v.u32(k), |p, v| p.snap(v));
         crate::snap::snap_btree_map(v, filter_graphs, |k, v| v.u32(k), |g, v| g.snap(v));
         crate::snap::snap_btree_map_with(

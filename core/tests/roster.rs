@@ -306,11 +306,12 @@ fn find_bank_reports_missing_and_damaged_rips_without_a_disc() {
             && err.contains("; the bad-dir rip will not give it up:"),
         "both present-rip failures reported in order: {err}"
     );
-    // The roster names LEGO Chess's bank, and no other title's.
+    // The roster names the General MIDI bank for LEGO Chess and LEGOLAND, and no other title.
     assert_eq!(roster::LEGO_CHESS.bank.len(), 4);
+    assert_eq!(roster::LEGOLAND.bank.len(), 4);
     for entry in roster::ROSTER
         .iter()
-        .filter(|e| e.key != roster::LEGO_CHESS.key)
+        .filter(|e| e.key != roster::LEGO_CHESS.key && e.key != roster::LEGOLAND.key)
     {
         assert!(entry.bank.is_empty(), "{} has no MIDI bank", entry.key);
     }

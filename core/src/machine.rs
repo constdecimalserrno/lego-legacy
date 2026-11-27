@@ -2201,6 +2201,11 @@ impl Machine {
             .gdi
             .rehydrate_fonts(|path| self.tree.read(path))
             .map_err(SnapError::Corrupt)?;
+        // Rehydrate file-backed DirectMusic styles lazily from `tree`.
+        self.state
+            .dmusic
+            .rehydrate_styles(|path| self.tree.read(path))
+            .map_err(SnapError::Corrupt)?;
 
         if !strict_route {
             let route_len = self.route.as_ref().map_or(0, crate::route::Route::len);
@@ -2739,7 +2744,13 @@ impl Machine {
     #[cold]
     #[inline(never)]
     fn mix_slow(&mut self, host: &mut dyn Host) {
-        for block in self.state.mixer.due(self.clock.nanos(), &self.arena) {
+        let nanos = self.clock.nanos();
+        if self.state.dmusic.is_active() {
+            if let Some(event) = self.state.dmusic.advance(nanos, &mut self.state.mixer) {
+                win32::kernel32::signal_event(&mut self.state, event);
+            }
+        }
+        for block in self.state.mixer.due(nanos, &self.arena) {
             host.audio(&block);
         }
         self.next_mix_cycle = self

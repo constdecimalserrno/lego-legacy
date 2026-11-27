@@ -84,7 +84,7 @@ on an unmounted disc).
 | Alpha Team | `game-data/alpha-team/alpha-team/alpha-team.iso` | The original pressing. |
 | LEGO Island | `game-data/lego-island/lego-island/lego-island.iso` | The original 1997 pressing. |
 | LEGO Chess | `game-data/chess/masterpiece-chess/masterpiece-chess.iso` | The **Masterpiece** re-release, whose game is V2.06. The original pressing's V2.05 is a different executable and is not accepted. |
-| LEGO Chess music (optional) | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` or `game-data/racers/racers/racers.iso`, or either Rock Raiders image above | Roland's General MIDI bank, `GM16.DLS`, which LEGO Chess's music is played with. It lies loose on both pressings of LEGO Racers (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`) and of Rock Raiders (`DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS`), and is read there, checked by its SHA-256, and never copied out. Without it the game runs without music. |
+| LEGO Chess & LEGOLAND music (optional) | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` or `game-data/racers/racers/racers.iso`, or either Rock Raiders image above | Roland's General MIDI bank, `GM16.DLS`, which LEGO Chess's MIDI and LEGOLAND's DirectMusic soundtrack are played with. It lies loose on both pressings of LEGO Racers (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`) and of Rock Raiders (`DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS`), and is read there, checked by its SHA-256, and never copied out. Without it both games run without music. |
 | LEGO Racers | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` | The **Masterpiece** re-release. The original 1999 pressing's cabinet-packed executable is wrapped in SafeDisc v1 copy protection beside `LEGORacers.icd`, which is recognised and refused, never bypassed ([ADR-0006](docs/adr/0006-a-title-may-be-two-pressings.md)). |
 | LEGO Racers original (tests only) | `game-data/racers/racers/racers.iso` | The original 1999 pressing's data track. Needed only by the tests that check its cabinet-packed SafeDisc wrapper is named and refused; the game never runs from it. |
 | LEGOLAND | `game-data/legoland/masterpiece-legoland/masterpiece-legoland.iso` | The **Masterpiece** re-release. Unwrapped `Legoland.exe` is unpacked from InstallShield 3 `main.z` (`331` members); `Legoland.res`, `Graphics1.res`, `Graphics2.res`, `Speech\*.wav`, and fullscreen `.avi` movies are read from disc through Joliet. |
@@ -95,7 +95,7 @@ operating system products only. All other uses require a separate written licens
 the licence means for your use of it is for you to read.
 
 Running the launcher with no arguments lists each title and says whether its image was found
-and is the right one, and where Rock Raiders' and LEGO Chess's music comes from. Saves land
+and is the right one, and where Rock Raiders', LEGO Chess's and LEGOLAND's music comes from. Saves land
 beside the rip, in `game-data/<disc>/profile/`.
 
 ## Playing

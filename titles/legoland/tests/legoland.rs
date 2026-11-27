@@ -12,12 +12,14 @@
 //! a failure.
 
 use lego_legacy_core::cli::{Cli, Trace};
+use lego_legacy_core::dls::Bank;
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::Machine;
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::route::Route;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::snap::{Reader, Snap, Visitor, Writer};
+use lego_legacy_core::synth::Synth;
 use lego_legacy_core::title::EntryImage;
 use lego_legacy_core::{avi, disc, hash, iv32, iv50, pe, sound, testkit, Title};
 use legoland::LEGOLAND;
@@ -260,8 +262,33 @@ fn first_light_plays_intros_with_audio_creates_ada_reaches_title_and_exits_clean
         .assert_logged("movie D:\\Intro.avi opened through AVIFile: 2 streams")
         .assert_logged("IMA ADPCM at 22050 Hz in 2 channels to 16-bit PCM")
         .assert_logged("MS ADPCM at 22050 Hz in 1 channels to 16-bit PCM")
-        .assert_logged("com: d2ac2890-b39b-11d1-8704-00600893b1bd is not registered")
         .assert_logged("movie AD_Blink.avi opened through AVIFile: 1 streams");
+
+    if roster::find_bank(roster::LEGOLAND.bank).is_ok() {
+        ran.assert_logged("dmusic: performance initialized")
+            .assert_logged("dmusic: created software synthesizer port")
+            .assert_logged("dmusic: ScanDirectory d2ac288a-b39b-11d1-8704-00600893b1bd *.sty")
+            .assert_logged("dmusic: PlaySegment \"themeintro\"");
+        // Flips 42..76 sit on Player Details before any speech WAV triggers (flip 77):
+        // non-silent RMS here proves DirectMusic synthesized Segtheme1.sgt into the mix.
+        let details_rms = ran.loudness(42, 76);
+        let details_peak = details_rms.iter().copied().fold(0.0f64, f64::max);
+        assert!(
+            details_peak > 50.0,
+            "DirectMusic should play audible themeintro music on Player Details (peak RMS {details_peak:.1}, blocks={})",
+            details_rms.len()
+        );
+        // Title Screen flips 102..130 also carry continuous DirectMusic playback.
+        let title_rms = ran.loudness(102, 130);
+        let title_peak = title_rms.iter().copied().fold(0.0f64, f64::max);
+        assert!(
+            title_peak > 50.0,
+            "DirectMusic should play audible themeintro music on Title Screen (peak RMS {title_peak:.1}, blocks={})",
+            title_rms.len()
+        );
+    } else {
+        ran.assert_logged("com: d2ac2890-b39b-11d1-8704-00600893b1bd is not registered");
+    }
 
     let intro = ran.host.frame(25).expect("Intro.avi flip 25 kept");
     let details = ran.host.frame(45).expect("Player Details flip 45 kept");
@@ -336,7 +363,7 @@ fn first_light_replays_to_the_same_machine_every_time() {
     first.assert_same_machine(&second);
     assert_eq!(
         first.host.audio_blocks, second.host.audio_blocks,
-        "mixed PCM audio matches bit-for-bit across replays"
+        "DirectMusic + SFX mixed PCM audio is bit-exact across replays"
     );
 }
 
@@ -497,6 +524,47 @@ fn parse_riff_wav(wav: &[u8]) -> (&[u8], &[u8]) {
     (fmt.expect("WAV fmt chunk"), data.expect("WAV data chunk"))
 }
 
+#[test]
+fn first_light_without_gm16_bank_disables_directmusic_cleanly() {
+    if !scratch() {
+        return;
+    }
+    let route = Route::load(&route_path("first-light.route")).expect("load first-light.route");
+    let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("legoland-nobank-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_root);
+
+    let mut host = Headless::new();
+    let mut machine = Machine::new(&LEGOLAND, &mut host).expect("machine");
+    machine.load_title(&LEGOLAND).expect("load title");
+    machine.route = Some(route);
+    machine.tree.set_profile(data_root.clone());
+    let mut log = RunLog::create("legoland-nobank", Trace::Off).expect("log");
+    let dir = log.dir().to_path_buf();
+    let finish = machine.run(&mut host, &mut log, FIRST_LIGHT_BUDGET);
+    drop(log);
+    let text = std::fs::read_to_string(dir.join("log")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&data_root);
+
+    assert_eq!(
+        finish.outcome,
+        lego_legacy_core::machine::Outcome::Exited { code: 0 }
+    );
+    assert_eq!(finish.flips, 145);
+    assert!(
+        text.contains("com: d2ac2890-b39b-11d1-8704-00600893b1bd is not registered"),
+        "without GM16.DLS DirectMusic must refuse cleanly via REGDB_E_CLASSNOTREG"
+    );
+}
+
+fn open_gm16_if_present(machine: &mut Machine) {
+    if let Ok((_, bytes)) = roster::find_bank(roster::LEGOLAND.bank) {
+        let bank = Bank::parse(&bytes).expect("parse GM16.DLS");
+        machine.state.mixer.open_synth(Synth::new(bank));
+    }
+}
+
 fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u64) {
     let route = Route::load(&route_path("first-light.route")).expect("load first-light.route");
     let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -506,6 +574,7 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
     let mut host_a = Headless::new();
     let mut machine_a = Machine::new(&LEGOLAND, &mut host_a).expect("machine");
     machine_a.load_title(&LEGOLAND).expect("load title");
+    open_gm16_if_present(&mut machine_a);
     machine_a.route = Some(route.clone());
     machine_a.tree.set_profile(data_root.join("a"));
     let mut log_a = RunLog::create(&format!("legoland-snap-{label}-a"), Trace::Off).expect("log");
@@ -531,6 +600,7 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
     let mut host_b = Headless::new();
     let mut machine_b = Machine::new(&LEGOLAND, &mut host_b).expect("machine");
     machine_b.load_title(&LEGOLAND).expect("load title");
+    open_gm16_if_present(&mut machine_b);
     machine_b.route = Some(route);
     machine_b.tree.set_profile(prof_b);
     machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");

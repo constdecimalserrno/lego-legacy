@@ -470,9 +470,17 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         }),
         method("SetFormat", 1, set_format),
         method("SetVolume", 1, |ctx, this, args| {
-            change(ctx, this, true, |b| {
-                b.volume = (args[0] as i32).clamp(-10_000, 0)
-            })
+            let vol = (args[0] as i32).clamp(-10_000, 0);
+            let identity = ctx.state.identity(this);
+            if ctx.state.dmusic.is_bound_dsound_buffer(identity) {
+                let now_nanos = ctx.declared_millis().saturating_mul(1_000_000);
+                ctx.state.mixer.midi_volume(
+                    now_nanos,
+                    &*ctx.mem,
+                    super::dmusic::dsound_volume_to_synth_attenuation(vol),
+                );
+            }
+            change(ctx, this, true, |b| b.volume = vol)
         }),
         method("SetPan", 1, |ctx, this, args| {
             change(ctx, this, true, |b| {
@@ -919,6 +927,9 @@ fn release_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, St
     if left == 0 && !ctx.state.has_live_refs(identity) {
         let nanos = ctx.clock_millis * 1_000_000;
         ctx.state.mixer.stop(identity, nanos);
+        if ctx.state.dmusic.bound_dsound_buffer == identity {
+            ctx.state.dmusic.bound_dsound_buffer = 0;
+        }
         if let Some(removed) = ctx.state.sound.buffers.remove(&identity) {
             if !ctx
                 .state

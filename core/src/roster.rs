@@ -270,9 +270,9 @@ pub const LEGOLAND: Entry = Entry {
     },
     // Neither pressing carries Red Book audio tracks: speech is 1,266 MS ADPCM
     // WAVs in `Speech\` on disc and music is DirectMusic segments in `IMusic\`
-    // inside `main.z`.
+    // inside `main.z`, played through Windows' General MIDI DLS bank (#399).
     red_book: None,
-    bank: &[],
+    bank: &GM16,
 };
 
 /// The roster's titles that have a crate, in the order they were taken: the

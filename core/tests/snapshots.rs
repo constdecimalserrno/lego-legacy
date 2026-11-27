@@ -831,3 +831,136 @@ fn gdi_state_and_pcm_acm_stream_round_trip_through_llsnap_v2_and_rehydrate_fonts
     let bad_snap = bad_m.snapshot_v2().expect("serialize bad acm stream");
     assert!(restored.restore_v2(&bad_snap).is_err());
 }
+
+#[test]
+fn directmusic_state_and_file_backed_styles_round_trip_through_llsnap_v2() {
+    use lego_legacy_core::dls::Bank;
+    use lego_legacy_core::dmusic::{parse_style, Segment, StyleRef};
+    use lego_legacy_core::synth::Synth;
+    use lego_legacy_core::win32::dmusic::{LoadedStyle, Notification, PlayingSegment};
+
+    // Build a valid minimal RIFF:DMST style file for Tree rehydration.
+    let mut styh = vec![4u8, 4, 8, 0];
+    styh.extend_from_slice(&60.0f64.to_le_bytes());
+    let mut style_body = Vec::new();
+    style_body.extend_from_slice(b"DMST");
+    style_body.extend_from_slice(b"styh");
+    style_body.extend_from_slice(&(styh.len() as u32).to_le_bytes());
+    style_body.extend_from_slice(&styh);
+    let mut style_bytes = Vec::new();
+    style_bytes.extend_from_slice(b"RIFF");
+    style_bytes.extend_from_slice(&(style_body.len() as u32).to_le_bytes());
+    style_bytes.extend_from_slice(&style_body);
+    let parsed_style = parse_style(&style_bytes).expect("parse minimal DMST");
+
+    let (mut m, _host) = machine_at(4);
+    let bank = Bank::default();
+    m.state.mixer.open_synth(Synth::new(bank.clone()));
+    m.tree
+        .declare("C:\\GAME\\IMUSIC\\SNAP.STY", style_bytes.clone());
+    m.state
+        .dmusic
+        .search_dirs
+        .insert("all".to_owned(), "C:\\GAME\\IMUSIC".to_owned());
+    m.state.dmusic.styles.insert(
+        10,
+        LoadedStyle {
+            guid: [3u8; 16],
+            name: "SnapStyle".to_owned(),
+            filename: "SNAP.STY".to_owned(),
+            source_path: Some("C:\\GAME\\IMUSIC\\SNAP.STY".to_owned()),
+            raw_memory: Vec::new(),
+            parsed: Some(parsed_style.clone()),
+        },
+    );
+    m.state.dmusic.styles.insert(
+        11,
+        LoadedStyle {
+            guid: [4u8; 16],
+            name: "MemStyle".to_owned(),
+            filename: String::new(),
+            source_path: None,
+            raw_memory: style_bytes.clone(),
+            parsed: Some(parsed_style),
+        },
+    );
+    m.state.dmusic.segments.insert(
+        20,
+        Segment {
+            name: "SnapSeg".to_owned(),
+            length: 3072,
+            styles: vec![StyleRef {
+                time: 0,
+                guid: [3u8; 16],
+                name: "SnapStyle".to_owned(),
+                file: "SNAP.STY".to_owned(),
+            }],
+            ..Segment::default()
+        },
+    );
+    m.state.dmusic.notify_event = 0x104;
+    m.state.dmusic.notify_segment = true;
+    m.state.dmusic.notify_measure_beat = true;
+    m.state.dmusic.bound_dsound_buffer = 0x2000_0100;
+    m.state.dmusic.master_groove_offset = 2;
+    m.state.dmusic.playing = Some(PlayingSegment {
+        seg_id: 20,
+        anchor_nanos: 1_000_000,
+        anchor_tick: 0,
+        millibpm: 60_000,
+        next_measure_tick: 3072,
+        next_beat_tick: 768,
+        measure_index: 0,
+        beat_index: 1,
+        repeats_left: 5,
+        almost_end_sent: false,
+    });
+    m.state.dmusic.notifications.push_back(Notification {
+        guid_type: [7u8; 16],
+        option: 0,
+        field1: 1,
+        field2: 0,
+        music_time: 768,
+        ref_time: 10_000,
+    });
+
+    let snap = m.snapshot_v2().expect("capture DirectMusic LLSNAP v2");
+
+    let mut host = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host).expect("machine");
+    restored.load_stub().expect("stub");
+    restored.state.mixer.open_synth(Synth::new(bank.clone()));
+    restored
+        .tree
+        .declare("C:\\GAME\\IMUSIC\\SNAP.STY", style_bytes);
+    restored
+        .restore_v2(&snap)
+        .expect("cold restore DirectMusic");
+
+    assert_eq!(restored.state.dmusic.playing, m.state.dmusic.playing);
+    assert_eq!(
+        restored.state.dmusic.notifications,
+        m.state.dmusic.notifications
+    );
+    assert_eq!(restored.state.dmusic.master_groove_offset, 2);
+    assert_eq!(restored.state.dmusic.bound_dsound_buffer, 0x2000_0100);
+    assert!(restored
+        .state
+        .dmusic
+        .styles
+        .get(&10)
+        .is_some_and(|s| s.parsed.is_some()));
+    assert!(restored
+        .state
+        .dmusic
+        .styles
+        .get(&11)
+        .is_some_and(|s| s.parsed.is_some() && !s.raw_memory.is_empty()));
+
+    // Missing file-backed style in Tree must fail cold restore as corrupt.
+    let mut host_missing = Headless::new();
+    let mut missing = Machine::new(&STUB, &mut host_missing).expect("machine");
+    missing.load_stub().expect("stub");
+    missing.state.mixer.open_synth(Synth::new(bank));
+    assert!(missing.restore_v2(&snap).is_err());
+}

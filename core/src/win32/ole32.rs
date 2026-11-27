@@ -252,25 +252,59 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
 
     // DirectMusic (`CLSID_DirectMusic`, `Performance`, `Composer`, `Segment`,
-    // `Loader`): DirectMusic was an optional DirectX 6.1+ component absent on
-    // stock Windows 98 SE; returning `REGDB_E_CLASSNOTREG` with `*ppv = NULL`
-    // lets titles that check `FAILED(hr)` disable interactive music cleanly (#394).
-    if matches!(
-        class.as_str(),
-        "636b9f10-0c7d-11d1-95b2-0020afdc7421"
-            | "d2ac2890-b39b-11d1-8704-00600893b1bd"
-            | "d2ac2881-b39b-11d1-8704-00600893b1bd"
-            | "d2ac2882-b39b-11d1-8704-00600893b1bd"
-            | "d2ac2892-b39b-11d1-8704-00600893b1bd"
-    ) {
-        if args[4] != 0 {
-            ctx.mem.write_u32(args[4], 0).map_err(Stop::Fault)?;
+    // `Loader`): instantiate when the declared machine carries a General MIDI
+    // DLS bank (`mixer.midi_out()`, ADR-0008, #399); without a bank, return
+    // `REGDB_E_CLASSNOTREG` with `*ppv = NULL` so titles fall back to silence
+    // cleanly (#394).
+    let dmusic_class = match class.as_str() {
+        "636b9f10-0c7d-11d1-95b2-0020afdc7421" => Some((
+            "6536115a-7b2d-11d2-ba18-0000f875ac12",
+            &super::dmusic::DIRECT_MUSIC,
+        )),
+        "d2ac2890-b39b-11d1-8704-00600893b1bd" => Some((
+            "d2ac28bf-b39b-11d1-8704-00600893b1bd",
+            &super::dmusic::DIRECT_MUSIC_COMPOSER,
+        )),
+        "d2ac2881-b39b-11d1-8704-00600893b1bd" => Some((
+            "07d43d03-6523-11d2-871d-00600893b1bd",
+            &super::dmusic::DIRECT_MUSIC_PERFORMANCE,
+        )),
+        "d2ac2882-b39b-11d1-8704-00600893b1bd" => Some((
+            "f96029a2-4282-11d2-8717-00600893b1bd",
+            &super::dmusic::DIRECT_MUSIC_SEGMENT,
+        )),
+        "d2ac2892-b39b-11d1-8704-00600893b1bd" => Some((
+            "2ffaaca2-5dca-11d2-afa6-00aa0024d8b6",
+            &super::dmusic::DIRECT_MUSIC_LOADER,
+        )),
+        _ => None,
+    };
+    if let Some((expected_iid, iface)) = dmusic_class {
+        if args[1] == 0 {
+            if args[4] == 0 {
+                return Ok(0x8000_4003); // E_POINTER
+            }
+            if !ctx.state.mixer.midi_out() {
+                ctx.mem.write_u32(args[4], 0).map_err(Stop::Fault)?;
+                ctx.log.line(&format!(
+                    "com: {class} is not registered on the declared machine"
+                ));
+                return Ok(0x8004_0154);
+            }
+            if interface != expected_iid && interface != "00000000-0000-0000-c000-000000000046" {
+                return Err(Stop::NotWritten {
+                    what: format!(
+                        "ole32.dll!CoCreateInstance: DirectMusic {class} as {interface} is not a \
+                         face this machine has"
+                    ),
+                    caller: 0,
+                });
+            }
+            let object =
+                super::State::make_com(ctx, iface, super::ComState::None).map_err(Stop::Fault)?;
+            ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
+            return Ok(S_OK);
         }
-        ctx.log.line(&format!(
-            "com: {class} is not registered on the declared machine"
-        ));
-        // REGDB_E_CLASSNOTREG.
-        return Ok(0x8004_0154);
     }
 
     // A class the title's own disc ships a server for is made by that server,

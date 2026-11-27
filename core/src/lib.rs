@@ -13,6 +13,7 @@ pub mod control;
 pub mod cpu;
 pub mod disc;
 pub mod dls;
+pub mod dmusic;
 pub mod explode;
 pub mod guest;
 pub mod hash;
