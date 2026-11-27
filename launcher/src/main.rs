@@ -667,6 +667,8 @@ mod tests {
             ("lego-racers", "lego-racers"),
             ("racers", "lego-racers"),
             ("RACERS", "lego-racers"),
+            ("legoland", "legoland"),
+            ("LEGOLAND", "legoland"),
         ];
         for (query, expected) in cases {
             let entry = resolve_title(query).unwrap_or_else(|e| panic!("`{query}` failed: {e:?}"));

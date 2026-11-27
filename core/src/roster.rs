@@ -248,10 +248,37 @@ pub const LEGO_RACERS: Entry = Entry {
     bank: &[],
 };
 
+/// LEGOLAND, the roster's seventh title (#393).
+pub const LEGOLAND: Entry = Entry {
+    key: "legoland",
+    name: "LEGOLAND",
+    image: EntryImage {
+        disc_dir: "legoland",
+        pressing: "masterpiece-legoland",
+        // At the root of the pressing's InstallShield 3 archive (`main.z`, 331
+        // members): `Legoland.exe`, `Lego.TTF`, `strings\stab.str`, `IMusic\*`,
+        // `zbuffers\*`, `RollerCoaster\*`, and `AD_*.avi` are unpacked from
+        // `main.z`, while the three `.res` volumes, `Speech\*.wav`, and
+        // fullscreen `.avi` movies stay on disc (#393).
+        path: "Legoland.exe",
+        kept: Kept::Imploded("main.z"),
+        sha256: "c50865b60bfcb26c0a7329a75fb772b10ae234af324f669901906e5abb0e2bd9",
+        why: "the Masterpiece pressing ships the unwrapped Legoland.exe (MSVC 6.0, 2000-04-07), \
+              with main.z, .res volumes, speech WAVs and movies byte-identical to the original \
+              2000 pressing, in a clean single-track ISO with zero bad sectors and a Joliet tree \
+              (ADR-0006)",
+    },
+    // Neither pressing carries Red Book audio tracks: speech is 1,266 MS ADPCM
+    // WAVs in `Speech\` on disc and music is DirectMusic segments in `IMusic\`
+    // inside `main.z`.
+    red_book: None,
+    bank: &[],
+};
+
 /// The roster's titles that have a crate, in the order they were taken: the
-/// three v1 titles, LEGO Island, LEGO Chess and LEGO Racers. A title joins
-/// when its own crate does, so the launcher never offers something that cannot
-/// be started.
+/// three v1 titles, LEGO Island, LEGO Chess, LEGO Racers and LEGOLAND. A title
+/// joins when its own crate does, so the launcher never offers something that
+/// cannot be started.
 pub const ROSTER: &[&Entry] = &[
     &ROCK_RAIDERS,
     &HOT_WHEELS,
@@ -259,6 +286,7 @@ pub const ROSTER: &[&Entry] = &[
     &LEGO_ISLAND,
     &LEGO_CHESS,
     &LEGO_RACERS,
+    &LEGOLAND,
 ];
 
 /// What the launcher found when it went looking for a title.

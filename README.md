@@ -14,6 +14,7 @@ one seam, and each operating system is one backend. macOS has its backend today;
 | LEGO Island | **Playable**: Nick Brick's pizza delivery plays from the intro to a save and its own exit, and a person has signed it off |
 | LEGO Chess | In progress ([#142](https://github.com/constdecimalserrno/lego-legacy/issues/142)): a route reaches its throne room, where the King speaks; typing a name waits on [#157](https://github.com/constdecimalserrno/lego-legacy/issues/157) |
 | LEGO Racers | In progress ([#369](https://github.com/constdecimalserrno/lego-legacy/issues/369)): on the roster with its crate (`masterpiece-racers` pressing); first-light bringup is next |
+| LEGOLAND | In progress ([#393](https://github.com/constdecimalserrno/lego-legacy/issues/393)): on the roster with its crate (`masterpiece-legoland` pressing); first-light bringup is next |
 
 It is not a reimplementation of any game and not a general PC emulator. It runs each title's own
 retail executable: an x86 interpreter for the guest's code, and the Win32 and DirectX calls the
@@ -86,6 +87,7 @@ on an unmounted disc).
 | LEGO Chess music (optional) | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` or `game-data/racers/racers/racers.iso`, or either Rock Raiders image above | Roland's General MIDI bank, `GM16.DLS`, which LEGO Chess's music is played with. It lies loose on both pressings of LEGO Racers (`REDIST/DIRECTX6/DIRECTX/GM16.DLS`) and of Rock Raiders (`DIRECTX6/DIRECTX6/DIRECTX/GM16.DLS`), and is read there, checked by its SHA-256, and never copied out. Without it the game runs without music. |
 | LEGO Racers | `game-data/racers/masterpiece-racers/masterpiece-racers.iso` | The **Masterpiece** re-release. The original 1999 pressing's cabinet-packed executable is wrapped in SafeDisc v1 copy protection beside `LEGORacers.icd`, which is recognised and refused, never bypassed ([ADR-0006](docs/adr/0006-a-title-may-be-two-pressings.md)). |
 | LEGO Racers original (tests only) | `game-data/racers/racers/racers.iso` | The original 1999 pressing's data track. Needed only by the tests that check its cabinet-packed SafeDisc wrapper is named and refused; the game never runs from it. |
+| LEGOLAND | `game-data/legoland/masterpiece-legoland/masterpiece-legoland.iso` | The **Masterpiece** re-release. Unwrapped `Legoland.exe` is unpacked from InstallShield 3 `main.z` (`331` members); `Legoland.res`, `Graphics1.res`, `Graphics2.res`, `Speech\*.wav`, and fullscreen `.avi` movies are read from disc through Joliet. |
 
 Roland licenses `GM16.DLS` "under Microsoft's End User License Agreement for use with Microsoft
 operating system products only. All other uses require a separate written license from Roland."

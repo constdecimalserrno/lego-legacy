@@ -78,6 +78,7 @@ fn no_args_renders_plain_ascii_banner_and_roster_only_when_piped() {
         "LEGO Island",
         "LEGO Chess",
         "LEGO Racers",
+        "LEGOLAND",
     ] {
         assert!(
             stdout.contains(expected),
@@ -164,11 +165,13 @@ fn short_names_and_leading_or_trailing_flags_forward_to_matching_binary() {
             "lego-island",
             "lego-chess",
             "lego-racers",
+            "legoland",
         ],
     );
 
     let cases: &[(&[&str], &str, &str)] = &[
         (&["racers", "--audio"], "lego-racers", "--audio"),
+        (&["legoland", "--audio"], "legoland", "--audio"),
         (
             &["--audio", "racers", "--record"],
             "lego-racers",
@@ -212,8 +215,13 @@ fn short_names_and_leading_or_trailing_flags_forward_to_matching_binary() {
 }
 
 #[cfg(unix)]
-#[test]
-fn piped_picker_forwards_leading_flags_when_disc_is_ready() {
+fn run_piped_picker(
+    name: &str,
+    stub_key: &str,
+    iso_rel: &str,
+    flags: &[&str],
+    choice: &str,
+) -> Option<String> {
     use std::io::Write;
     use std::path::Path;
 
@@ -224,16 +232,21 @@ fn piped_picker_forwards_leading_flags_when_disc_is_ready() {
                 .join("..")
                 .join("game-data")
         });
-    if !repo_game_data
-        .join("rock-raiders/masterpiece-rock-raiders/masterpiece-rock-raiders.iso")
-        .is_file()
-    {
-        return;
+    let iso = repo_game_data.join(iso_rel);
+    if !iso.is_file() {
+        let required = std::env::var("LEGO_LEGACY_REQUIRE_DISC").is_ok_and(|v| v != "0");
+        assert!(
+            !required,
+            "LEGO_LEGACY_REQUIRE_DISC is set but {} is absent",
+            iso.display()
+        );
+        eprintln!("skipping: no {} (rip your own discs there)", iso.display());
+        return None;
     }
 
-    let (_dir, launcher) = install_stub_dir("piped-picker", &["lego-rock-raiders"]);
+    let (_dir, launcher) = install_stub_dir(name, &[stub_key]);
     let mut child = Command::new(&launcher)
-        .args(["--audio", "--record"])
+        .args(flags)
         .env("LEGO_LEGACY_GAME_DATA", &repo_game_data)
         .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
@@ -243,14 +256,53 @@ fn piped_picker_forwards_leading_flags_when_disc_is_ready() {
         .expect("spawn launcher");
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin.write_all(b"1\n").expect("write choice");
+        stdin.write_all(choice.as_bytes()).expect("write choice");
     }
     let out = child.wait_with_output().expect("wait launcher");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr:\n{stderr}\nstdout:\n{stdout}");
+    Some(stdout)
+}
+
+#[cfg(unix)]
+#[test]
+fn piped_picker_forwards_leading_flags_when_disc_is_ready() {
+    let Some(stdout) = run_piped_picker(
+        "piped-picker",
+        "lego-rock-raiders",
+        "rock-raiders/masterpiece-rock-raiders/masterpiece-rock-raiders.iso",
+        &["--audio", "--record"],
+        "1\n",
+    ) else {
+        return;
+    };
     assert!(
         stdout.contains("BIN=lego-rock-raiders ARGS=--audio --record"),
         "expected piped picker to forward flags to chosen title:\n{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn piped_picker_lists_legoland_seventh_and_ready_when_disc_is_present() {
+    let Some(stdout) = run_piped_picker(
+        "piped-picker-legoland",
+        "legoland",
+        "legoland/masterpiece-legoland/masterpiece-legoland.iso",
+        &["--headless"],
+        "7\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stdout.lines().any(|l| {
+            l.contains("7. LEGOLAND") && l.contains("[ready]") && l.contains("masterpiece-legoland")
+        }),
+        "expected `7. LEGOLAND` ready from masterpiece-legoland:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("BIN=legoland ARGS=--headless"),
+        "expected piped picker choice 7 to launch legoland:\n{stdout}"
     );
 }
