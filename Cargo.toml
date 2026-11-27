@@ -11,6 +11,7 @@ members = [
     "titles/lego-island",
     "titles/lego-chess",
     "titles/lego-racers",
+    "titles/legoland",
 ]
 
 # ADR-0001: zero external crates, forever. Nothing may appear here or in any

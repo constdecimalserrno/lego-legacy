@@ -247,6 +247,10 @@ fn tool_schema_json_is_valid_and_contains_all_nine_tools() {
         launch_desc.contains("lego-racers"),
         "game_launch title examples must include lego-racers: {launch_desc}"
     );
+    assert!(
+        launch_desc.contains("legoland"),
+        "game_launch title examples must include legoland: {launch_desc}"
+    );
 }
 
 #[test]

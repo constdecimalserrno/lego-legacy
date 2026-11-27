@@ -65,3 +65,10 @@ version = "1.0.1"
 dependencies = [
  "lego-legacy-core",
 ]
+
+[[package]]
+name = "legoland"
+version = "0.1.0"
+dependencies = [
+ "lego-legacy-core",
+]
