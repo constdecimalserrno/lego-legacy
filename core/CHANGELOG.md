@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+`USER32.dll!PostMessageA` now queues `WM_DESTROY` (`0x0002`) alongside `WM_CLOSE` (`0x0010`) for the title's live window (`core/src/win32/user32.rs`, `core/tests/shims.rs`, #299) and fails with `ERROR_INVALID_WINDOW_HANDLE` (`1400`, returning `0`) once the window is destroyed: neither message carries a pointer, so real Windows posts `WM_DESTROY` to the thread's message queue without tearing down the window itself; LEGO Alpha Team posts `WM_DESTROY` when confirming `Exit Game -> Yes` to run its `WndProc` shutdown (`PostQuitMessage(0)` -> `Game.txt` flush -> `ExitProcess(0)`). Adds no `State` fields; no existing route moves.
+
 DirectSound buffer reclamation on final `Release` (`core/src/win32/{mod,dsound}.rs`, `core/src/com.rs`, #385) fixes the 512 MiB guest-heap exhaustion (`0x004bd518` writing `0x00000002` after 3+ hours of continuous racing SFX `CreateSoundBuffer`/`Release` churn):
 
 - **Segregated `sound_pool` & COM-face reuse across all buffer faces:** Mirrors `#338`'s `surface_pool` pattern with a size-keyed best-fit FIFO `State::sound_pool` (capped at `2×` rounded size so small buffers never hijack large `.tun` music buffers; exhaustively snapshotted in `LLSNAP v2` `State::snap`) and shared `State::reclaim_com_faces`, keeping freed DirectSound sample stores segregated from `State::heap`'s general free list so small `malloc`/`HeapAlloc` calls never hijack large PCM buffers. Reused stores are zeroed on creation to match fresh guest-heap allocations.

@@ -521,6 +521,78 @@ fn wm_char_stays_in_the_posted_queue() {
     );
 }
 
+/// `PostMessageA` posts `WM_DESTROY` (`0x0002`) onto the title's window queue
+/// behind earlier posted messages and ahead of raw input, just like `WM_CLOSE`,
+/// without destroying the window itself, and fails with
+/// `ERROR_INVALID_WINDOW_HANDLE` once the window is gone (#299).
+#[test]
+fn post_message_queues_wm_destroy_without_destroying_window() {
+    const WM_DESTROY: u32 = 0x0002;
+    const WM_CLOSE: u32 = 0x0010;
+    const WM_UNSUPPORTED_CREATE: u32 = 0x0001;
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    let mut m = machine();
+    window(&mut m, 0x0040_1000);
+    m.state.messages.clear();
+
+    win32::user32::deliver(
+        &mut m.state,
+        Input::Key {
+            code: 0x1e,
+            down: true,
+        },
+        0,
+    );
+    assert_eq!(
+        call(&mut m, "USER32", "PostMessageA", &[WINDOW, WM_CLOSE, 0, 0]),
+        Ok(1)
+    );
+    assert_eq!(
+        call(
+            &mut m,
+            "USER32",
+            "PostMessageA",
+            &[WINDOW, WM_DESTROY, 0, 0]
+        ),
+        Ok(1)
+    );
+    assert!(
+        m.state.window_made,
+        "posting WM_DESTROY queues it without tearing down the window"
+    );
+    assert!(
+        matches!(
+            call(
+                &mut m,
+                "USER32",
+                "PostMessageA",
+                &[WINDOW, WM_UNSUPPORTED_CREATE, 0, 0]
+            ),
+            Err(Stop::NotWritten { .. })
+        ),
+        "pointer-carrying system messages remain refused"
+    );
+
+    let taken: Vec<u32> = pump(&mut m).into_iter().map(|(msg, ..)| msg).collect();
+    assert_eq!(taken, [WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_CHAR]);
+
+    assert_eq!(call(&mut m, "USER32", "DestroyWindow", &[WINDOW]), Ok(1));
+    assert_eq!(
+        call(
+            &mut m,
+            "USER32",
+            "PostMessageA",
+            &[WINDOW, WM_DESTROY, 0, 0]
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        call(&mut m, "KERNEL32", "GetLastError", &[]),
+        Ok(ERROR_INVALID_WINDOW_HANDLE)
+    );
+    assert!(m.state.messages.is_empty());
+}
+
 /// `keys_read` updates only when a key message is removed (`PM_REMOVE`),
 /// keeps Shift held while either side stays down, and deduplicates repeat
 /// `WM_KEYDOWN`s so one `WM_KEYUP` releases the key (#157).

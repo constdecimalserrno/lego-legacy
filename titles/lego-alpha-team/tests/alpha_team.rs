@@ -1,7 +1,7 @@
 //! LEGO Alpha Team, run headless from the player's rip: its declared tree and
 //! the binaries it ships, its DirectX 7 device, its boot and intro, and its
-//! committed routes through the menu, the training mission and Select
-//! Adventure, the boot and the first two replayed to the same machine every
+//! committed routes through the menu, the training mission, Select Adventure,
+//! and Adventure Mode Mission 1 (`M1010`), replayed to the same machine every
 //! time.
 //!
 //! Everything here goes through the run seam or the declared tree: this title
@@ -1043,4 +1043,182 @@ fn a_saved_adventure_is_labelled_with_the_date_it_was_saved_on() {
     let (first, third) = (differing_in(122, 84), differing_in(399, 84));
     assert!(first > 10_800 / 2, "the first slot is still New: {first}");
     assert!(third < 10_800 / 50, "the third slot changed: {third}");
+}
+
+/// Landmark flips kept from `adventure-mission-1.route` (#299, #300):
+/// Cam 1 overview (3744), rotated Direction Tile + Unit Menu (3825),
+/// Dash crossing the bridge (3920), Dash turning off the tile (4010),
+/// Skull Door opening (4130), Mission Victory reward screen (4460),
+/// and Main Menu after returning to HQ (4700).
+const ADV1_KEPT: &[u64] = &[3744, 3825, 3920, 4010, 4130, 4460, 4700];
+
+/// Instruction ceiling for `adventure-mission-1.route`: exits cleanly at
+/// flip 4,847 (~14.89 billion instructions).
+const ADV1_BUDGET: u64 = 16_000_000_000;
+
+fn adventure_mission_1(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+) -> Option<&'static testkit::Ran> {
+    testkit::replay(
+        slot,
+        scratch,
+        &ALPHA_TEAM,
+        &route("adventure-mission-1.route"),
+        ADV1_KEPT,
+        ADV1_BUDGET,
+    )
+}
+
+static ADV1_FIRST: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+static ADV1_SECOND: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// Persisted `Game.txt` path written by `adventure-mission-1.route`, verified
+/// across all 5 saves to one fresh profile path.
+fn saved_game_txt(ran: &testkit::Ran) -> &str {
+    let paths: Vec<&str> = ran
+        .log
+        .lines()
+        .filter_map(|l| l.strip_prefix("file written ")?.rsplit_once(", to "))
+        .filter(|(guest, _)| guest.contains("Game.txt"))
+        .map(|(_, host)| host)
+        .collect();
+    assert_eq!(paths.len(), 5, "Game.txt is saved 5 times");
+    assert!(
+        paths.iter().all(|p| *p == paths[0]),
+        "Game.txt writes to one profile path"
+    );
+    paths[0]
+}
+
+/// Adventure Mode Mission 1 ("Mission One", `M1010`) completes end-to-end from
+/// a fresh `--data-root`, persists adventure progress (`HighSpace M1010`,
+/// `P0Space M1020`) to `Game.txt`, returns to HQ, and exits cleanly via
+/// `Exit Game -> Yes` (`PostMessageA(WM_DESTROY)` -> `Exited(0)`) (#299, #300).
+#[test]
+fn the_adventure_mission_1_route_completes_m1010_saves_and_exits_cleanly() {
+    let Some(ran) = adventure_mission_1(&ADV1_FIRST) else {
+        return;
+    };
+    ran.assert_exited(0).assert_flips(4847);
+    assert_eq!(ran.finish.cursor, 14_885_345_496);
+    assert_eq!(ran.finish.declared_millis, 227_086);
+
+    let pos = |needle: &str| {
+        ran.log
+            .find(needle)
+            .unwrap_or_else(|| panic!("expected `{needle}` in run log"))
+    };
+    let reward = pos("Reward_EN.dds");
+    let hq_reload = reward
+        + ran.log[reward..]
+            .find("MM.PUZ")
+            .expect("expected MM.PUZ reload after Reward_EN.dds");
+    let landmarks = [
+        pos("M0010.PUZ"),
+        pos("Game.txt, 109 bytes"),
+        pos("M1010.PUZ"),
+        pos("RotateCW.tga"),
+        pos("RotateCW_selected.tga"),
+        pos("Game.txt, 127 bytes"),
+        pos("T0011_VICTORY.dds"),
+        reward,
+        hq_reload,
+        pos("window procedure given message 0x0002"),
+        pos("guest asked to quit with 0"),
+        pos("guest exit 0"),
+    ];
+    assert!(
+        landmarks.is_sorted_by(|a, b| a < b),
+        "M1010 progression landmarks out of order: {landmarks:?}"
+    );
+
+    let pixels = 640 * 480;
+    let frames: Vec<(u64, &Presented)> = ADV1_KEPT
+        .iter()
+        .map(|&flip| {
+            let frame = ran
+                .host
+                .frame(flip)
+                .unwrap_or_else(|| panic!("flip {flip} kept"));
+            assert_eq!((frame.width, frame.height), (640, 480));
+            assert!(!frame.is_uniform(), "flip {flip} must not be uniform");
+            (flip, frame)
+        })
+        .collect();
+    for (i, &(a_flip, a)) in frames.iter().enumerate() {
+        for &(b_flip, b) in &frames[i + 1..] {
+            let diff = differing(a, b, SCREEN);
+            assert!(
+                diff > pixels / 20,
+                "flips {a_flip} and {b_flip} should differ visually (only {diff} px)"
+            );
+        }
+    }
+
+    // Active 3D gameplay audio streams continuously across [3591..4480].
+    for start in (3591..4480).step_by(100) {
+        let end = (start + 100).min(4480);
+        let rms = ran.loudness(start, end);
+        let mean_rms = rms.iter().sum::<f64>() / rms.len().max(1) as f64;
+        assert!(
+            !rms.is_empty() && mean_rms > 300.0,
+            "M1010 audio dropped in [{start}..{end}] (mean RMS {mean_rms:.1} over {} blocks)",
+            rms.len()
+        );
+    }
+
+    let save_text = std::fs::read_to_string(saved_game_txt(ran)).expect("Game.txt reads");
+    assert_eq!(save_text.len(), 127, "final Game.txt length");
+    assert!(
+        save_text.contains("HighSpace  M1010"),
+        "expected HighSpace M1010 in Game.txt:\n{save_text}"
+    );
+    assert!(
+        save_text.contains("P0Space  M1020"),
+        "expected P0Space M1020 in Game.txt:\n{save_text}"
+    );
+}
+
+/// Two fresh `--data-root` replays of `adventure-mission-1.route` produce the
+/// exact same machine state, kept frames, mixed audio, and persisted `Game.txt`
+/// bytes (#299, #300).
+#[test]
+fn the_adventure_mission_1_route_replays_to_the_same_machine_every_time() {
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| adventure_mission_1(&ADV1_SECOND));
+        (
+            adventure_mission_1(&ADV1_FIRST),
+            second.join().expect("second M1010 replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    for &flip in ADV1_KEPT {
+        let a = first
+            .host
+            .frame(flip)
+            .unwrap_or_else(|| panic!("first flip {flip} kept"));
+        let b = second
+            .host
+            .frame(flip)
+            .unwrap_or_else(|| panic!("second flip {flip} kept"));
+        assert!(
+            a.pixels == b.pixels,
+            "presented frame at flip {flip} matches bit-for-bit"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks
+            && first.host.audio_flips == second.host.audio_flips,
+        "mixed audio matches bit-for-bit"
+    );
+    let (one, two) = (saved_game_txt(first), saved_game_txt(second));
+    assert_ne!(one, two, "two replays use two distinct fresh data roots");
+    assert_eq!(
+        std::fs::read(one).expect("first Game.txt reads"),
+        std::fs::read(two).expect("second Game.txt reads"),
+        "persisted Game.txt matches byte-for-byte"
+    );
 }
