@@ -5,6 +5,8 @@
 //! the behaviour a player would see: what was presented, what was logged, and
 //! how the run ended.
 
+pub mod spectator;
+
 use crate::cli::Cli;
 use crate::disc;
 use crate::host::headless::{Headless, Presented};
@@ -134,18 +136,22 @@ impl Ran {
     }
 }
 
-/// A directory of this run's own, under the scratch root the tests run in,
-/// for whatever the guest writes.
-fn scratch_data_root() -> PathBuf {
+/// A fresh directory path under [`crate::runlog::runs_root`] unique to this
+/// process and call, with any prior directory at that path cleared.
+pub(crate) fn scratch_dir(prefix: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let at = crate::runlog::runs_root().join(format!(
-        "data-{}-{}",
+        "{prefix}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&at);
     at
+}
+
+fn scratch_data_root() -> PathBuf {
+    scratch_dir("data")
 }
 
 /// Run a title headless within an instruction budget.
