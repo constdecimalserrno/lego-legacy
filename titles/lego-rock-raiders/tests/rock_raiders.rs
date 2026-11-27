@@ -1032,3 +1032,168 @@ fn the_first_mission_route_replays_to_the_same_machine_every_time() {
         "and mixes the same"
     );
 }
+
+// Mission 1 ("Driller Night!") playability landmarks and active window (#297, #298).
+const M1_LEVEL_SELECT_BEFORE: u64 = 930;
+const M1_ACTIVE_START: u64 = 1_245;
+const M1_DRILLING: u64 = 3_689;
+const M1_TOOLSTORE_BASE: u64 = 8_734;
+const M1_ACTIVE_END: u64 = 12_014;
+const M1_REWARD_SUMMARY: u64 = 12_263;
+const M1_MISSION_2_UNLOCKED: u64 = 12_500;
+const M1_COMPLETE_FLIPS: u64 = 12_657;
+const M1_COMPLETE_BUDGET: u64 = 25_000_000_000;
+
+const M1_FLIPS: [u64; 5] = [
+    M1_LEVEL_SELECT_BEFORE,
+    M1_DRILLING,
+    M1_TOOLSTORE_BASE,
+    M1_REWARD_SUMMARY,
+    M1_MISSION_2_UNLOCKED,
+];
+const M1_SAVES_REL: &str = "profile/C/LEGORR/DATA/SAVES";
+const M1_SAVES: [&str; 3] = ["0.SAV", "0.DAT", "0.OSF"];
+
+struct Mission1Run {
+    ran: testkit::Ran,
+    saves: [Vec<u8>; 3],
+}
+
+fn mission_1_complete(
+    slot: &'static std::sync::OnceLock<Option<Mission1Run>>,
+    tag: &str,
+) -> Option<&'static Mission1Run> {
+    slot.get_or_init(|| {
+        if !scratch() {
+            return None;
+        }
+        let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("rr-mission1-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_root);
+        let cli = Cli {
+            route: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("routes")
+                    .join("mission-1-complete.route"),
+            ),
+            data_root: Some(data_root.clone()),
+            ..Cli::default()
+        };
+        let ran = testkit::run_on(
+            Headless::new().keeping(&M1_FLIPS),
+            &ROCK_RAIDERS,
+            &cli,
+            M1_COMPLETE_BUDGET,
+        );
+        let saves_dir = data_root.join(M1_SAVES_REL);
+        let saves = M1_SAVES.map(|name| {
+            std::fs::read(saves_dir.join(name))
+                .unwrap_or_else(|e| panic!("Slot 1 save {name} missing: {e}"))
+        });
+        let _ = std::fs::remove_dir_all(&data_root);
+        Some(Mission1Run { ran, saves })
+    })
+    .as_ref()
+}
+
+static MISSION_1_FIRST: std::sync::OnceLock<Option<Mission1Run>> = std::sync::OnceLock::new();
+static MISSION_1_SECOND: std::sync::OnceLock<Option<Mission1Run>> = std::sync::OnceLock::new();
+
+#[test]
+fn completing_mission_1_drills_collects_five_crystals_saves_and_unlocks_mission_2() {
+    let Some(run) = mission_1_complete(&MISSION_1_FIRST, "first") else {
+        return;
+    };
+    run.ran.assert_exited(0).assert_flips(M1_COMPLETE_FLIPS);
+
+    let [before_m1, drilling, base, reward, unlocked] = M1_FLIPS.map(|f| {
+        run.ran
+            .host
+            .frame(f)
+            .unwrap_or_else(|| panic!("flip {f} kept"))
+    });
+    for (flip, frame) in M1_FLIPS
+        .into_iter()
+        .zip([before_m1, drilling, base, reward, unlocked])
+    {
+        assert_eq!((frame.width, frame.height), (640, 480), "flip {flip} size");
+        assert!(
+            busy(frame, (180, 120, 460, 360)) > 0.3,
+            "flip {flip} is textured 3D/artwork"
+        );
+    }
+
+    assert!(
+        differing(drilling, base, SCREEN) > A_NEW_SCREEN / 2,
+        "cavern view advances from north shaft drilling to Tool Store base"
+    );
+    assert!(
+        differing(base, reward, SCREEN) > A_NEW_SCREEN,
+        "Mission Complete summary replaces the 3D cavern"
+    );
+    assert!(
+        differing(reward, unlocked, SCREEN) > A_NEW_SCREEN,
+        "advancing from Reward Summary returns to Level Select"
+    );
+    // Mission 2 caverns (Rubble Trouble! & The Path To Power) lose their yellow
+    // hazard crosses after Driller Night! completes.
+    assert!(
+        differing(before_m1, unlocked, (150, 180, 520, 340)) > 5_000,
+        "Level Select changes where Mission 2 caverns unlock"
+    );
+
+    let [sav, dat, osf] = &run.saves;
+    assert!(
+        sav.len() > 400_000 && sav.iter().any(|&b| b != 0),
+        "0.SAV populated"
+    );
+    assert!(
+        dat.len() > 10_000 && dat.iter().any(|&b| b != 0),
+        "0.DAT populated"
+    );
+    assert!(
+        osf.len() == 8 && osf.iter().any(|&b| b != 0),
+        "0.OSF populated"
+    );
+
+    assert!(
+        run.ran
+            .loudness(M1_ACTIVE_START, M1_ACTIVE_END)
+            .iter()
+            .any(|&rms| rms > 0.0),
+        "active Mission 1 gameplay mixes non-silent audio"
+    );
+}
+
+#[test]
+fn the_mission_1_complete_route_replays_to_the_same_machine_every_time() {
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| mission_1_complete(&MISSION_1_SECOND, "second"));
+        (
+            mission_1_complete(&MISSION_1_FIRST, "first"),
+            second.join().expect("the second Mission 1 replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.ran.assert_same_machine(&second.ran);
+    for flip in M1_FLIPS {
+        let a = first.ran.host.frame(flip).expect("first frame kept");
+        let b = second.ran.host.frame(flip).expect("second frame kept");
+        assert!(
+            a.pixels == b.pixels,
+            "presents flip {flip} identically across fresh data roots"
+        );
+    }
+    assert!(
+        first.ran.host.audio_blocks == second.ran.host.audio_blocks,
+        "mixes identical audio across fresh data roots"
+    );
+    for (name, (a, b)) in M1_SAVES
+        .into_iter()
+        .zip(first.saves.iter().zip(&second.saves))
+    {
+        assert!(a == b, "saved {name} is bit-exact across fresh data roots");
+    }
+}

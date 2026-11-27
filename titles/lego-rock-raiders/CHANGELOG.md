@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 1.0.1 — 2026-10-18
 
+Adds deterministic Campaign Mission 1 ("Driller Night!") playability TAS route `routes/mission-1-complete.route` (cold boot -> drill cavern walls -> discover Tool Store -> teleport Raiders -> collect 5 Energy Crystals -> Mission Completed summary at 93% score -> save Slot 1 `0.SAV`/`0.DAT`/`0.OSF` -> advance to Level Select with Mission 2 unlocked -> clean `ExitProcess(0)`) with regression and `assert_same_machine` determinism tests in `tests/rock_raiders.rs` (#297, #298). Zero emulator walls needed; active 3D gameplay window `[1245..12014]` measured at `3.36x` real-time pace (`201.9` host FPS, `60.0` guest FPS, `p50=4.70ms`, `p95=7.95ms`, `p99=11.19ms`, `max=26.20ms`). No existing route moved.
+
 Reclassifies `GUIDE.mouse_mode` from `AbsoluteKept` to `SoftwareAbsolute { requires_poll_release: false }` (matching `LegoRR.exe`'s `ShowCursor(FALSE)` + DirectDraw software cursor) and adds a disc-gated headless + loopback `/api/stream` WebSocket v2 cursor alignment test (#331). Strictly outside guest state; no route moved.
 
 Documents `LegoRR.exe` (`0x0041C370`) sidebar slide-in settlement (~15 flips before `0x004DF1F8` bit `0x80` accepts `F2+<Key>` chords) and tile-context selection for `F2+W`/`F2+Q` in `AGENTS.md` and `GUIDE` (#348). Strictly outside guest state; no route moved.

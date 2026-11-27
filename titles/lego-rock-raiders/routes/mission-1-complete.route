@@ -1,0 +1,272 @@
+#lego-legacy-route 1
+# LEGO Rock Raiders: cold boot from a fresh --data-root through Campaign
+# Mission 1 ("Driller Night!") Complete, Slot 1 save, Level Select showing
+# Mission 2 unlocked (Rubble Trouble! & The Path To Power), and clean exit
+# (#297, #298).
+#
+# Active 3D gameplay window for --fps-report: [1245..12014]
+#
+# Flip landmarks (60 Hz declared display, ExitProcess(0) at flip 12657):
+# - Flips 0..299:       plays lmi640.avi (279 frames); skips intro.avi via
+#                       Escape at flip 297.
+# - Flip 790:           Main Menu settled; clicks Start Game (320, 222).
+# - Flips 894..935:     Level Select settled; scrolls down 31 flips via bottom
+#                       border (320, 478) (flip 930 shows locked Mission 2
+#                       caverns), clicks Driller Night! (315, 165) at flip 932.
+# - Flip 1056:          skips Mission 1 intro cutscene via Escape.
+# - Flips 1179..1214:   dismisses Mission Brief pages via Space.
+# - Flip 1245:          active 3D gameplay starts; zooms out (Minus), opens
+#                       Radar Map View, and pans north to the cavern wall.
+# - Flip 1403:          first drill order (F2+W / Drill HUD icon); Space at
+#                       flip 1672 enables overhead task bubbles.
+# - Flips 2423..5420:   drills north Dirt shaft through (12,10), opening the
+#                       Tool Store cavern and exposing Energy Crystal #1
+#                       (flip 3689: two Raiders drilling side-by-side).
+# - Flips 5801..5824:   teleports two additional Raiders via Tool Store.
+# - Flips 5915..7233:   drills perimeter Dirt Crystal walls around Tool Store.
+# - Flips 8734..11534:  stores 1/5 (flip 8734) -> 3/5 -> 4/5 -> 5/5 Energy
+#                       Crystals; Raiders and Tool Store teleport out.
+# - Flip 12014:         "Mission Completed!" banner; Space advances to Reward
+#                       Summary (flips 12137, 12200).
+# - Flips 12263..12332: Reward Summary (Score 93%, 100% Crystals, 00:02.47);
+#                       Save (40, 440) -> Slot 1 (240, 120) writes 0.SAV,
+#                       0.DAT, and 0.OSF.
+# - Flips 12393..12500: Advance (600, 440) -> scrolls Level Select down
+#                       confirming Rubble Trouble! & The Path To Power unlocked.
+# - Flips 12500..12657: Back (24, 454) -> Quit (320, 382) -> Yes (320, 280) ->
+#                       clean ExitProcess(0).
+flip 10 key Space down
+flip 12 key Space up
+flip 23 key Space down
+flip 25 key Space up
+flip 46 key Escape down
+flip 48 key Escape up
+flip 64 key Escape down
+flip 66 key Escape up
+flip 297 key Escape down
+flip 299 key Escape up
+flip 790 move 320 222
+flip 791 down
+flip 793 up
+flip 894 move 320 478
+flip 925 move 315 165
+flip 931 move 315 165
+flip 932 down
+flip 934 up
+flip 935 move 320 240
+flip 1056 key Escape down
+flip 1058 key Escape up
+flip 1179 key Space down
+flip 1181 key Space up
+flip 1212 key Space down
+flip 1214 key Space up
+flip 1245 key Minus down
+flip 1275 key Minus up
+flip 1276 move 24 52
+flip 1277 down
+flip 1279 up
+flip 1280 move 320 2
+flip 1299 move 320 240
+flip 1305 move 32 183
+flip 1306 down
+flip 1308 up
+flip 1309 move 320 2
+flip 1345 move 320 240
+flip 1351 move 320 2
+flip 1397 move 320 240
+flip 1403 move 365 55
+flip 1404 down
+flip 1406 up
+flip 1427 key F2 down
+flip 1428 key W down
+flip 1430 key W up
+flip 1431 key F2 up
+flip 1432 move 320 240
+flip 1523 move 365 55
+flip 1524 down
+flip 1526 up
+flip 1547 move 584 38
+flip 1548 down
+flip 1550 up
+flip 1551 move 320 240
+flip 1672 key Space down
+flip 1674 key Space up
+flip 1675 move 365 55
+flip 1686 move 365 55
+flip 1687 down
+flip 1689 up
+flip 1710 move 584 38
+flip 1721 move 584 38
+flip 1722 down
+flip 1724 up
+flip 1735 move 320 240
+flip 2256 move 320 2
+flip 2297 move 320 240
+flip 2423 move 330 185
+flip 2424 down
+flip 2426 up
+flip 2447 key F2 down
+flip 2448 key W down
+flip 2450 key W up
+flip 2451 key F2 up
+flip 2452 move 320 240
+flip 2693 move 345 115
+flip 2694 down
+flip 2696 up
+flip 2717 key F2 down
+flip 2718 key W down
+flip 2720 key W up
+flip 2721 key F2 up
+flip 2722 move 320 2
+flip 2758 move 320 240
+flip 2959 move 330 195
+flip 2960 down
+flip 2962 up
+flip 2983 key F2 down
+flip 2984 key W down
+flip 2986 key W up
+flip 2987 key F2 up
+flip 3003 move 410 130
+flip 3004 down
+flip 3006 up
+flip 3027 key F2 down
+flip 3028 key W down
+flip 3030 key W up
+flip 3031 key F2 up
+flip 3032 move 320 240
+flip 3353 move 350 125
+flip 3354 down
+flip 3356 up
+flip 3377 key F2 down
+flip 3378 key W down
+flip 3380 key W up
+flip 3381 key F2 up
+flip 3382 move 320 2
+flip 3428 move 320 240
+flip 3949 move 345 200
+flip 3950 down
+flip 3952 up
+flip 3973 key F2 down
+flip 3974 key W down
+flip 3976 key W up
+flip 3977 key F2 up
+flip 3978 move 320 2
+flip 4009 move 320 240
+flip 4450 move 330 190
+flip 4451 down
+flip 4453 up
+flip 4474 key F2 down
+flip 4475 key W down
+flip 4477 key W up
+flip 4478 key F2 up
+flip 4479 move 320 2
+flip 4515 move 320 240
+flip 4796 move 320 240
+flip 4797 down
+flip 4799 up
+flip 4820 key F2 down
+flip 4821 key W down
+flip 4823 key W up
+flip 4824 key F2 up
+flip 5365 move 330 190
+flip 5366 down
+flip 5368 up
+flip 5389 key F2 down
+flip 5390 key W down
+flip 5392 key W up
+flip 5393 key F2 up
+flip 5394 move 320 2
+flip 5420 move 320 240
+flip 5801 move 584 38
+flip 5802 down
+flip 5804 up
+flip 5820 move 584 38
+flip 5821 down
+flip 5823 up
+flip 5824 move 320 240
+flip 5915 move 285 365
+flip 5916 down
+flip 5918 up
+flip 5939 key F2 down
+flip 5940 key W down
+flip 5942 key W up
+flip 5943 key F2 up
+flip 5959 move 445 130
+flip 5960 down
+flip 5962 up
+flip 5983 key F2 down
+flip 5984 key W down
+flip 5986 key W up
+flip 5987 key F2 up
+flip 5988 move 320 2
+flip 6039 move 320 240
+flip 6070 move 290 195
+flip 6071 down
+flip 6073 up
+flip 6094 key F2 down
+flip 6095 key W down
+flip 6097 key W up
+flip 6098 key F2 up
+flip 6114 move 225 195
+flip 6115 down
+flip 6117 up
+flip 6138 key F2 down
+flip 6139 key W down
+flip 6141 key W up
+flip 6142 key F2 up
+flip 6158 move 450 260
+flip 6159 down
+flip 6161 up
+flip 6182 key F2 down
+flip 6183 key W down
+flip 6185 key W up
+flip 6186 key F2 up
+flip 6187 move 320 478
+flip 6223 move 320 240
+flip 6674 move 450 195
+flip 6675 down
+flip 6677 up
+flip 6698 key F2 down
+flip 6699 key W down
+flip 6701 key W up
+flip 6702 key F2 up
+flip 6703 move 320 240
+flip 7204 move 450 120
+flip 7205 down
+flip 7207 up
+flip 7228 key F2 down
+flip 7229 key W down
+flip 7231 key W up
+flip 7232 key F2 up
+flip 7233 move 320 240
+flip 12014 key Space down
+flip 12016 key Space up
+flip 12137 key Space down
+flip 12139 key Space up
+flip 12200 key Space down
+flip 12202 key Space up
+flip 12263 move 40 440
+flip 12264 down
+flip 12266 up
+flip 12267 move 320 240
+flip 12328 move 240 120
+flip 12329 down
+flip 12331 up
+flip 12332 move 320 240
+flip 12393 move 600 440
+flip 12394 down
+flip 12396 up
+flip 12397 move 320 240
+flip 12458 move 320 478
+flip 12489 move 320 240
+flip 12500 move 24 454
+flip 12501 down
+flip 12503 up
+flip 12504 move 320 240
+flip 12565 move 320 382
+flip 12566 down
+flip 12568 up
+flip 12569 move 320 240
+flip 12650 move 320 280
+flip 12651 down
+flip 12653 up
