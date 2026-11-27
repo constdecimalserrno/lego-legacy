@@ -875,24 +875,15 @@ fn handle_frame_json(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
             Err(e) => return HttpResponse::error_json(400, &e),
         },
     };
-    let (snap, paused, finished, active_driving) = {
-        let state = ctx.bus.lock();
-        let Some(snap) = state.latest_frame.clone() else {
-            return HttpResponse::error_json(404, "no frame presented yet");
-        };
-        (
-            snap,
-            state.is_paused,
-            state.finished,
-            state.is_agent_driving(),
-        )
+    let Some((frame, paused, finished, active_driving)) = ctx.bus.frame_json_snapshot() else {
+        return HttpResponse::error_json(404, "no frame presented yet");
     };
     let json = format_frame_json(
-        &snap,
+        &frame,
         cols,
         rows,
-        snap.pointer_pos,
-        snap.pointer_shown,
+        frame.pointer_pos,
+        frame.pointer_shown,
         paused,
         finished,
         active_driving,
@@ -2423,36 +2414,39 @@ mod tests {
 
     #[test]
     fn http_act_source_labeling_and_frame_json_idle_stuck_loop_suppression() {
-        use crate::control::bus::{FrameDiff, FrameSnapshot};
         use crate::control::observe::STUCK_LOOP_THRESHOLD;
+        use crate::host::{FlipMeta, Frame, Host};
 
-        let bus = ControlBus::new(ControlConfig {
-            mode: ExecMode::Live,
-            owner: InputOwner::Agent,
-            ..ControlConfig::default()
-        });
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
         let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
 
         // 1. Static menu idle (unchanged_streak >= 180, no actions) -> /api/frame.json emits NO stuck_loop.
-        {
-            let mut st = bus.lock();
-            st.latest_frame = Some(FrameSnapshot {
-                flip: STUCK_LOOP_THRESHOLD + 40,
+        let mut pixels = vec![0u8; 64];
+        pixels[0] = 0x42;
+        for flip in 0..=(STUCK_LOOP_THRESHOLD + 40) {
+            host.present(&Frame {
                 width: 4,
                 height: 4,
-                bgra: Arc::new(vec![0u8; 64]),
-                frame_hash: "0123456789abcdef".to_owned(),
-                diff: FrameDiff {
-                    diff_pixels: 0,
-                    total_pixels: 16,
-                    diff_pct: 0.0,
-                    diff_bbox: None,
-                    unchanged_streak: STUCK_LOOP_THRESHOLD + 40,
-                },
-                uniform: false,
-                pointer_pos: (320, 240),
+                pitch: 16,
+                pixels: &pixels,
+            });
+            host.observe_flip(&FlipMeta {
+                flip,
+                clock_nanos: flip * 16_000_000,
+                cursor: flip * 100,
+                instructions_passed: 0,
                 pointer_shown: true,
-                cursor_blank: false,
+                pointer_pos: (320, 240),
+                route_active: false,
+                route_remaining: 0,
             });
         }
         let idle_resp = dispatch_http(

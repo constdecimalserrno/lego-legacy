@@ -255,35 +255,118 @@ pub struct RewindResult {
     pub restore_ms: Option<f64>,
 }
 
-struct InspectSlot {
-    reply: Mutex<Option<InspectReply>>,
+/// 60 Hz window-pump interval while paused at a flip boundary.
+const PAUSE_PUMP_INTERVAL: Duration = Duration::from_millis(16);
+
+struct TicketSlot<T> {
+    reply: Mutex<Option<T>>,
     ready: Condvar,
 }
 
-pub(crate) struct InspectTicket {
+impl<T> TicketSlot<T> {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reply: Mutex::new(None),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn complete(&self, value: T) {
+        let mut guard = self
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(value);
+        self.ready.notify_all();
+    }
+
+    fn try_take(&self) -> Option<T> {
+        self.reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn wait(&self, timeout: Option<Duration>) -> Option<T> {
+        let deadline = timeout.map(|d| Instant::now() + d);
+        let mut guard = self
+            .reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while guard.is_none() {
+            guard = match deadline {
+                Some(dl) => {
+                    let rem = dl.checked_duration_since(Instant::now())?;
+                    if rem.is_zero() {
+                        return None;
+                    }
+                    let (g, _) = self
+                        .ready
+                        .wait_timeout(guard, rem)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g
+                }
+                None => self
+                    .ready
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
+        }
+        guard.take()
+    }
+}
+
+struct InspectTicket {
     query: InspectQuery,
-    slot: Arc<InspectSlot>,
+    slot: Arc<TicketSlot<InspectReply>>,
 }
 
-struct SnapshotTicketSlot {
-    reply: Mutex<Option<SnapshotReply>>,
-    ready: Condvar,
-}
-
-pub(crate) struct SnapshotTicket {
+struct SnapshotTicket {
     op: SnapshotOp,
-    slot: Arc<SnapshotTicketSlot>,
+    slot: Arc<TicketSlot<SnapshotReply>>,
 }
 
-struct RewindSlot {
-    reply: Mutex<Option<Result<RewindResult, String>>>,
-    ready: Condvar,
+struct PendingRewind {
+    name: String,
+    bookmark: BookmarkData,
+    slot: Arc<TicketSlot<Result<RewindResult, String>>>,
 }
 
-pub(crate) struct PendingRewind {
-    pub name: String,
-    pub bookmark: BookmarkData,
-    slot: Arc<RewindSlot>,
+#[derive(Clone)]
+pub(crate) struct BookmarkSnapshot {
+    pub bytes: Arc<Vec<u8>>,
+    pub frame: Option<FrameSnapshot>,
+}
+
+/// Atomic pacing/reset snapshot read by `ControlHost::pace`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PaceSnapshot {
+    pub uncapped: bool,
+    pub wall_pace_live: bool,
+    pub pace: f64,
+    pub pace_epoch: u64,
+    pub runtime_reset_epoch: u64,
+    pub reset_clock_nanos: u64,
+}
+
+/// Inputs required to rebaseline [`ControlBus`] after a live `LLSNAP v2` restore.
+pub(crate) struct RestoreSync {
+    pub meta: FlipMeta,
+    pub restored_frame: Option<FrameSnapshot>,
+    pub held_keys: Vec<u32>,
+    pub held_buttons: Vec<Button>,
+    pub recording_len: usize,
+    pub cursor_blank: bool,
+    pub hw_pointer: (i32, i32),
+    pub pace_sleep_nanos: u64,
+}
+
+/// Atomic snapshot served to `/api/events` SSE streams.
+pub(crate) struct SseSnapshot {
+    pub status: ControlStatus,
+    pub agent_state: AgentState,
+    pub uniform: bool,
+    pub active_driving: bool,
 }
 
 /// Result of a `Wait`, `WaitUntilChange`, or `WaitUntilSettled` command.
@@ -375,7 +458,7 @@ pub struct Response {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum WaitCondition {
+enum WaitCondition {
     Fixed {
         start_flip: u64,
         target_flip: Option<u64>,
@@ -396,50 +479,52 @@ pub(crate) enum WaitCondition {
     },
 }
 
-pub(crate) struct BusState {
-    pub title: String,
-    pub guide: &'static TitleGuide,
-    pub mode: ExecMode,
-    pub owner: InputOwner,
-    pub pause_requested: bool,
-    pub is_paused: bool,
-    pub step_budget: u64,
-    pub step_uncapped: bool,
-    pub pace: f64,
-    pub pace_epoch: u64,
-    pub active_wait: Option<WaitCondition>,
-    pub last_wait_result: Option<WaitResult>,
-    pub wait_epoch: u64,
-    pub step_epoch: u64,
-    pub finished: bool,
-    pub outcome: Option<String>,
-    pub digest: Option<String>,
-    pub transport_eof: bool,
-    pub close_pending: bool,
-    pub force_closes: u32,
-    pub last_meta: Option<FlipMeta>,
-    pub recording_len: usize,
-    pub held_keys: Vec<u32>,
-    pub held_buttons: Vec<Button>,
-    pub pending_releases: Vec<Input>,
-    pub latest_frame: Option<FrameSnapshot>,
-    pub telemetry: Telemetry,
-    pub audio_underruns: Option<u64>,
-    pub timeline: Timeline,
-    pub last_agent_action_flip: Option<u64>,
-    pub agent_timeline_end_flip: Option<u64>,
-    pub agent_state: AgentState,
-    pub feed_seq: u64,
-    pub machine_attached: bool,
-    pub pending_inspects: VecDeque<InspectTicket>,
-    pub pending_snapshots: VecDeque<SnapshotTicket>,
-    pub snapshots: BTreeMap<String, SnapshotSlot>,
-    pub bookmarks: BTreeMap<String, BookmarkData>,
-    pub bookmark_snapshots: BTreeMap<String, (Arc<Vec<u8>>, Option<FrameSnapshot>)>,
-    pub rewind_abort: bool,
-    pub pending_rewind: Option<PendingRewind>,
-    pub replaying_rewind: Option<PendingRewind>,
-    pub rewind_target_flip: Option<u64>,
+struct BusState {
+    title: String,
+    guide: &'static TitleGuide,
+    mode: ExecMode,
+    owner: InputOwner,
+    pause_requested: bool,
+    is_paused: bool,
+    step_budget: u64,
+    step_uncapped: bool,
+    pace: f64,
+    pace_epoch: u64,
+    runtime_reset_epoch: u64,
+    reset_clock_nanos: u64,
+    active_wait: Option<WaitCondition>,
+    last_wait_result: Option<WaitResult>,
+    wait_epoch: u64,
+    step_epoch: u64,
+    finished: bool,
+    outcome: Option<String>,
+    digest: Option<String>,
+    transport_eof: bool,
+    close_pending: bool,
+    force_closes: u32,
+    last_meta: Option<FlipMeta>,
+    recording_len: usize,
+    held_keys: Vec<u32>,
+    held_buttons: Vec<Button>,
+    pending_releases: Vec<Input>,
+    latest_frame: Option<FrameSnapshot>,
+    telemetry: Telemetry,
+    audio_underruns: Option<u64>,
+    timeline: Timeline,
+    last_agent_action_flip: Option<u64>,
+    agent_timeline_end_flip: Option<u64>,
+    agent_state: AgentState,
+    feed_seq: u64,
+    machine_attached: bool,
+    pending_inspects: VecDeque<InspectTicket>,
+    pending_snapshots: VecDeque<SnapshotTicket>,
+    snapshots: BTreeMap<String, SnapshotSlot>,
+    bookmarks: BTreeMap<String, BookmarkData>,
+    bookmark_snapshots: BTreeMap<String, BookmarkSnapshot>,
+    rewind_abort: bool,
+    pending_rewind: Option<PendingRewind>,
+    replaying_rewind: Option<PendingRewind>,
+    rewind_target_flip: Option<u64>,
 }
 
 impl BusState {
@@ -467,6 +552,8 @@ impl BusState {
             step_uncapped: config.step_uncapped,
             pace: clamp_pace(config.pace),
             pace_epoch: 0,
+            runtime_reset_epoch: 0,
+            reset_clock_nanos: 0,
             active_wait: None,
             last_wait_result: None,
             wait_epoch: 0,
@@ -503,11 +590,11 @@ impl BusState {
         }
     }
 
-    pub(crate) fn current_flip(&self) -> u64 {
+    fn current_flip(&self) -> u64 {
         self.last_meta.map_or(0, |m| m.flip)
     }
 
-    pub(crate) fn observed_flip(&self) -> u64 {
+    fn observed_flip(&self) -> u64 {
         self.last_meta
             .map(|m| m.flip)
             .or_else(|| self.latest_frame.as_ref().map(|f| f.flip))
@@ -517,7 +604,7 @@ impl BusState {
     /// Whether the agent is actively driving (queued agent actions or a recent
     /// agent action at/after the current unchanged-frame streak began), used to
     /// suppress false `stuck_loop` warnings on static menu idle or Human Take Over (#350).
-    pub(crate) fn is_agent_driving(&self) -> bool {
+    fn is_agent_driving(&self) -> bool {
         if self.owner == InputOwner::Human || self.last_meta.is_some_and(|m| m.route_active) {
             return false;
         }
@@ -545,11 +632,11 @@ impl BusState {
             && current_flip.saturating_sub(last_active) <= STUCK_LOOP_THRESHOLD
     }
 
-    pub(crate) fn current_declared_ms(&self) -> u64 {
+    fn current_declared_ms(&self) -> u64 {
         self.last_meta.map_or(0, |m| m.clock_nanos / 1_000_000)
     }
 
-    pub(crate) fn push_feed(&mut self, source: &str, summary: String) {
+    fn push_feed(&mut self, source: &str, summary: String) {
         self.feed_seq += 1;
         let entry = ActionFeedEntry {
             seq: self.feed_seq,
@@ -564,7 +651,7 @@ impl BusState {
         self.agent_state.action_feed.push_back(entry);
     }
 
-    pub(crate) fn record_emitted_inputs(&mut self, inputs: &[Input]) {
+    fn record_emitted_inputs(&mut self, inputs: &[Input]) {
         for input in inputs {
             match *input {
                 Input::Key { code, down } => {
@@ -586,7 +673,31 @@ impl BusState {
         }
     }
 
-    pub(crate) fn should_pause(&self, route_active: bool) -> bool {
+    fn should_eof_close(&self) -> bool {
+        self.transport_eof && self.mode == ExecMode::Step && self.owner == InputOwner::Agent
+    }
+
+    fn consume_step_budget(&mut self, route_active: bool) {
+        if !route_active
+            && !self.rewind_abort
+            && self.rewind_target_flip.is_none()
+            && self.active_wait.is_none()
+            && self.step_budget > 0
+        {
+            self.step_budget -= 1;
+        }
+    }
+
+    fn sse_snapshot(&self) -> SseSnapshot {
+        SseSnapshot {
+            status: self.status(),
+            agent_state: self.agent_state.clone(),
+            uniform: self.latest_frame.as_ref().is_some_and(|f| f.uniform),
+            active_driving: self.is_agent_driving(),
+        }
+    }
+
+    fn should_pause(&self, route_active: bool) -> bool {
         if self.finished || self.close_pending || self.force_closes > 0 || self.rewind_abort {
             return false;
         }
@@ -605,7 +716,111 @@ impl BusState {
         }
     }
 
-    pub(crate) fn status(&self) -> ControlStatus {
+    fn evaluate_wait(&mut self, meta: &FlipMeta) -> bool {
+        let Some(mut cond) = self.active_wait.take() else {
+            return false;
+        };
+        let frame = self.latest_frame.as_ref();
+        let declared_ms = meta.clock_nanos / 1_000_000;
+        let done = match &mut cond {
+            WaitCondition::Fixed {
+                start_flip,
+                target_flip,
+                target_ms,
+            } => {
+                let by_flip = target_flip.is_some_and(|tf| meta.flip >= tf);
+                let by_ms = target_ms.is_some_and(|tm| declared_ms >= tm);
+                if by_flip || by_ms {
+                    Some(WaitResult {
+                        satisfied: true,
+                        flips_elapsed: meta.flip.saturating_sub(*start_flip),
+                        diff_pct: frame.map_or(0.0, |f| f.diff.diff_pct),
+                    })
+                } else {
+                    None
+                }
+            }
+            WaitCondition::UntilChange {
+                start_flip,
+                max_flips,
+                min_diff_pct,
+                baseline,
+            } => {
+                if meta.flip <= *start_flip {
+                    None
+                } else {
+                    let elapsed = meta.flip.saturating_sub(*start_flip);
+                    let pct = match (baseline.as_ref(), frame) {
+                        (Some((bw, bh, base)), Some(curr)) => {
+                            diff_pct_between(base, *bw, *bh, &curr.bgra, curr.width, curr.height)
+                        }
+                        (None, Some(curr)) => curr.diff.diff_pct,
+                        _ => 0.0,
+                    };
+                    if pct >= *min_diff_pct {
+                        Some(WaitResult {
+                            satisfied: true,
+                            flips_elapsed: elapsed,
+                            diff_pct: pct,
+                        })
+                    } else if elapsed >= *max_flips {
+                        Some(WaitResult {
+                            satisfied: false,
+                            flips_elapsed: elapsed,
+                            diff_pct: pct,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            }
+            WaitCondition::UntilSettled {
+                start_flip,
+                max_flips,
+                stable_flips,
+                max_diff_pct,
+                stable_count,
+            } => {
+                if meta.flip <= *start_flip {
+                    None
+                } else {
+                    let elapsed = meta.flip.saturating_sub(*start_flip);
+                    let pct = frame.map_or(0.0, |f| f.diff.diff_pct);
+                    if pct <= *max_diff_pct {
+                        *stable_count += 1;
+                    } else {
+                        *stable_count = 0;
+                    }
+                    if *stable_count >= *stable_flips {
+                        Some(WaitResult {
+                            satisfied: true,
+                            flips_elapsed: elapsed,
+                            diff_pct: pct,
+                        })
+                    } else if elapsed >= *max_flips {
+                        Some(WaitResult {
+                            satisfied: false,
+                            flips_elapsed: elapsed,
+                            diff_pct: pct,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(result) = done {
+            self.last_wait_result = Some(result);
+            self.wait_epoch += 1;
+            true
+        } else {
+            self.active_wait = Some(cond);
+            false
+        }
+    }
+
+    fn status(&self) -> ControlStatus {
         let (frame_width, frame_height, frame_hash, diff) = match &self.latest_frame {
             Some(f) => (f.width, f.height, Some(f.frame_hash.clone()), f.diff),
             None => (0, 0, None, FrameDiff::default()),
@@ -666,14 +881,14 @@ impl ControlBus {
         }
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, BusState> {
+    fn lock(&self) -> MutexGuard<'_, BusState> {
         self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub(crate) fn wait_for_host_wake<'a>(
+    fn wait_for_host_wake<'a>(
         &self,
         guard: MutexGuard<'a, BusState>,
         timeout: Duration,
@@ -686,11 +901,11 @@ impl ControlBus {
         guard
     }
 
-    pub(crate) fn notify_client(&self) {
+    fn notify_client(&self) {
         self.inner.wake_client.notify_all();
     }
 
-    pub(crate) fn notify_host(&self) {
+    fn notify_host(&self) {
         self.inner.wake_host.notify_all();
     }
 
@@ -698,6 +913,18 @@ impl ControlBus {
     #[must_use]
     pub fn status(&self) -> ControlStatus {
         self.lock().status()
+    }
+
+    /// Monotonic reset epoch incremented on live restore and rewind so
+    /// [`super::host::ControlHost`] resets pacing/staging anchors atomically (#408).
+    #[must_use]
+    pub fn runtime_reset_epoch(&self) -> u64 {
+        self.lock().runtime_reset_epoch
+    }
+
+    pub(crate) fn runtime_reset_state(&self) -> (u64, u64) {
+        let state = self.lock();
+        (state.runtime_reset_epoch, state.reset_clock_nanos)
     }
 
     /// Static per-title [`TitleGuide`] configured on this control plane (#311).
@@ -731,118 +958,407 @@ impl ControlBus {
         self.lock().force_closes
     }
 
-    /// Mark that the guest run has finished, waking any waiting clients.
-    pub fn mark_finished(&self, finish: &Finish, digest: &str) {
+    pub(crate) fn set_telemetry_paused(&self, paused: bool) {
+        self.lock().telemetry.set_paused(paused);
+    }
+
+    pub(crate) fn set_pointer_shown(&self, show: bool) {
+        self.lock().timeline.set_pointer_shown(show);
+    }
+
+    pub(crate) fn set_pointer(&self, x: i32, y: i32) {
+        self.lock().timeline.set_pointer(x, y);
+    }
+
+    pub(crate) fn set_cursor_blank(&self, blank: bool) {
+        self.lock().timeline.set_cursor_blank(blank);
+    }
+
+    pub(crate) fn pace_snapshot(&self) -> PaceSnapshot {
+        let state = self.lock();
+        let route_active = state.last_meta.is_some_and(|m| m.route_active);
+        let uncapped = route_active
+            || state.rewind_target_flip.is_some()
+            || (state.mode == ExecMode::Step && state.step_uncapped);
+        let wall_pace_live =
+            state.mode == ExecMode::Live && !state.is_paused && !route_active && state.pace > 0.0;
+        PaceSnapshot {
+            uncapped,
+            wall_pace_live,
+            pace: state.pace,
+            pace_epoch: state.pace_epoch,
+            runtime_reset_epoch: state.runtime_reset_epoch,
+            reset_clock_nanos: state.reset_clock_nanos,
+        }
+    }
+
+    pub(crate) fn poll_input_step(
+        &self,
+        flip: u64,
+        poll_index: u64,
+        declared_ms: u64,
+        human: Vec<Input>,
+    ) -> Vec<Input> {
         let mut state = self.lock();
+        if state.rewind_abort || state.rewind_target_flip.is_some() {
+            return Vec::new();
+        }
+        state.timeline.note_polled(flip);
+        let owner = state.owner;
+
+        let mut out = Vec::new();
+        if !state.pending_releases.is_empty() {
+            out.append(&mut state.pending_releases);
+        }
+        if matches!(owner, InputOwner::Human | InputOwner::Shared) {
+            for ev in &human {
+                if let Input::Move { x, y } = *ev {
+                    state.timeline.observe_emitted_move(x, y);
+                }
+            }
+            out.extend(human);
+        } else {
+            // Keep windowed host non-hijacking: ignore stray human
+            // mouse/key events while still honoring OS window Close.
+            for ev in human {
+                if ev == Input::Close {
+                    out.push(ev);
+                }
+            }
+        }
+        if matches!(owner, InputOwner::Agent | InputOwner::Shared) {
+            let scheduled = state.timeline.drain_due(flip, poll_index, declared_ms);
+            for ev in scheduled {
+                if ev == Input::Close && out.contains(&Input::Close) {
+                    continue;
+                }
+                out.push(ev);
+            }
+        }
+
+        if state.close_pending {
+            state.close_pending = false;
+            if !out.contains(&Input::Close) {
+                out.push(Input::Close);
+            }
+        }
+
+        state.record_emitted_inputs(&out);
+        out
+    }
+
+    pub(crate) fn observe_flip(
+        &self,
+        meta: &FlipMeta,
+        staged: Option<(&[u8], u32, u32)>,
+        underruns: Option<u64>,
+        pace_sleep: u64,
+        notify_now: bool,
+    ) -> bool {
+        let wait_completed = {
+            let mut state = self.lock();
+            state.last_meta = Some(*meta);
+            state.timeline.set_pointer_shown(meta.pointer_shown);
+            let mode = state.timeline.mouse_mode();
+            if !mode.is_relative()
+                && (meta.pointer_shown
+                    || matches!(mode, crate::title::MouseMode::SoftwareAbsolute { .. }))
+            {
+                state
+                    .timeline
+                    .set_pointer(meta.pointer_pos.0, meta.pointer_pos.1);
+            }
+            state.audio_underruns = underruns;
+
+            let uniform = if let Some((bgra, w, h)) = staged {
+                state.timeline.set_frame_size(w, h);
+                let prev_streak = state
+                    .latest_frame
+                    .as_ref()
+                    .map_or(0, |f| f.diff.unchanged_streak);
+                let (diff, frame_hash, uniform) = {
+                    let prev = state
+                        .latest_frame
+                        .as_ref()
+                        .map(|f| (f.bgra.as_slice(), f.width, f.height));
+                    analyze_frame(prev, bgra, w, h, prev_streak)
+                };
+                let snapshot = FrameSnapshot {
+                    flip: meta.flip,
+                    width: w,
+                    height: h,
+                    bgra: Arc::new(bgra.to_vec()),
+                    frame_hash,
+                    diff,
+                    uniform,
+                    pointer_pos: state.timeline.visual_cursor_pos(),
+                    pointer_shown: state.timeline.pointer_shown(),
+                    cursor_blank: state.timeline.cursor_blank(),
+                };
+                state.latest_frame = Some(snapshot);
+                uniform
+            } else {
+                true
+            };
+
+            state.telemetry.record_flip(meta, uniform, pace_sleep);
+            state.evaluate_wait(meta)
+        };
+        if wait_completed && notify_now {
+            self.notify_client();
+        }
+        wait_completed
+    }
+
+    /// Unified flip-boundary pause / `step_budget` / `transport_eof` / pump
+    /// loop shared by `ControlHost::observe_flip` (`!defer_pause`) and
+    /// `service_flip_boundary` (`defer_pause`) (#408).
+    pub(crate) fn pause_loop(
+        &self,
+        host: &mut dyn Host,
+        mut machine: Option<&mut Machine>,
+        static_route_active: bool,
+        extra_notify_client: bool,
+    ) {
+        let route_active = |m: &Option<&mut Machine>| {
+            m.as_ref()
+                .map_or(static_route_active, |m| m.undelivered() > 0)
+        };
+        let initial_route_active = route_active(&machine);
+        let initial_closes = host.closes();
+        let mut notify_clients = extra_notify_client;
+        let mut enter_pause = false;
+        {
+            let mut state = self.lock();
+            if initial_closes == 0 && state.should_pause(initial_route_active) {
+                if state.should_eof_close() {
+                    state.close_pending = true;
+                } else {
+                    state.is_paused = true;
+                    state.step_epoch += 1;
+                    notify_clients = true;
+                    enter_pause = true;
+                }
+            } else {
+                state.consume_step_budget(initial_route_active);
+            }
+        }
+
+        if notify_clients {
+            self.notify_client();
+        }
+
+        if !enter_pause {
+            return;
+        }
+
+        host.set_paused(true);
+        loop {
+            if let Some(m) = machine.as_deref_mut() {
+                self.drain_inspects(m);
+                self.drain_snapshots(m, host);
+            }
+            let active_route = route_active(&machine);
+            let host_closes = host.closes();
+            let mut state = self.lock();
+            if host_closes > 0 || state.rewind_abort || !state.should_pause(active_route) {
+                state.is_paused = false;
+                state.consume_step_budget(active_route);
+                drop(state);
+                break;
+            }
+            if state.should_eof_close() {
+                state.is_paused = false;
+                state.close_pending = true;
+                drop(state);
+                break;
+            }
+            if machine.is_some()
+                && (!state.pending_inspects.is_empty() || !state.pending_snapshots.is_empty())
+            {
+                drop(state);
+                continue;
+            }
+            let state = self.wait_for_host_wake(state, PAUSE_PUMP_INTERVAL);
+            // Release the bus lock before pumping OS events so clients can
+            // query status/frames concurrently without waiting on AppKit/X11/Win32.
+            drop(state);
+            host.pump();
+        }
+        host.set_paused(false);
+        if let Some(m) = machine {
+            self.drain_inspects(m);
+            self.drain_snapshots(m, host);
+        }
+    }
+
+    pub(crate) fn rebaseline_for_rewind(&self, pace_sleep_nanos: u64) -> u64 {
+        let mut state = self.lock();
+        state.timeline.reset_polled();
+        state.timeline.set_cursor_blank(false);
+        state.last_agent_action_flip = None;
+        state.agent_timeline_end_flip = None;
+        state.telemetry.rebaseline(0, 0, 0, pace_sleep_nanos);
+        state.pace_epoch = state.pace_epoch.wrapping_add(1);
+        state.reset_clock_nanos = 0;
+        state.runtime_reset_epoch = state.runtime_reset_epoch.wrapping_add(1);
+        state.runtime_reset_epoch
+    }
+
+    pub(crate) fn rebaseline_after_restore(&self, sync: RestoreSync) {
+        let mut state = self.lock();
+        state.last_meta = Some(sync.meta);
+        let restored_visual = sync.restored_frame.as_ref().map(|f| f.pointer_pos);
+        if let Some(f) = sync.restored_frame {
+            state.timeline.set_frame_size(f.width, f.height);
+            state.latest_frame = Some(f);
+        }
+        state.held_keys = sync.held_keys;
+        state.held_buttons = sync.held_buttons;
+        state.pending_releases.clear();
+        state.recording_len = sync.recording_len;
+        state.timeline.clear();
+        state.timeline.reset_polled();
+        state.last_agent_action_flip = None;
+        state.agent_timeline_end_flip = None;
+        state.timeline.set_pointer_shown(sync.meta.pointer_shown);
+        state.timeline.set_cursor_blank(sync.cursor_blank);
+        if state.timeline.mouse_mode().is_relative() {
+            state
+                .timeline
+                .set_pointer(sync.hw_pointer.0, sync.hw_pointer.1);
+            if let Some((vx, vy)) = restored_visual {
+                state.timeline.set_visual_cursor(vx, vy);
+            }
+        } else {
+            state
+                .timeline
+                .set_pointer(sync.meta.pointer_pos.0, sync.meta.pointer_pos.1);
+        }
+        state.active_wait = None;
+        state.step_budget = 0;
+        state.close_pending = false;
+        state.pace_epoch = state.pace_epoch.wrapping_add(1);
+        state.reset_clock_nanos = sync.meta.clock_nanos;
+        state.runtime_reset_epoch = state.runtime_reset_epoch.wrapping_add(1);
+        state.telemetry.rebaseline(
+            sync.meta.clock_nanos,
+            sync.meta.cursor,
+            sync.meta.instructions_passed,
+            sync.pace_sleep_nanos,
+        );
+        state.force_closes = 0;
+    }
+
+    pub(crate) fn store_snapshot(&self, key: String, slot: SnapshotSlot, feed_summary: String) {
+        let mut state = self.lock();
+        state.snapshots.insert(key, slot);
+        state.push_feed("control", feed_summary);
+    }
+
+    pub(crate) fn get_snapshot(&self, name: &str) -> Option<SnapshotSlot> {
+        self.lock().snapshots.get(name).cloned()
+    }
+
+    pub(crate) fn store_bookmark(
+        &self,
+        name: String,
+        data: BookmarkData,
+        snap_bytes: Arc<Vec<u8>>,
+        frame: Option<FrameSnapshot>,
+        feed_summary: String,
+    ) {
+        let mut state = self.lock();
+        state.bookmarks.insert(name.clone(), data);
+        state.bookmark_snapshots.insert(
+            name,
+            BookmarkSnapshot {
+                bytes: snap_bytes,
+                frame,
+            },
+        );
+        state.push_feed("control", feed_summary);
+    }
+
+    pub(crate) fn get_bookmark_snapshot(
+        &self,
+        name: &str,
+    ) -> Option<(BookmarkData, Option<BookmarkSnapshot>)> {
+        let state = self.lock();
+        let bm = state.bookmarks.get(name).cloned()?;
+        let snap = state.bookmark_snapshots.get(name).cloned();
+        Some((bm, snap))
+    }
+
+    pub(crate) fn push_feed(&self, source: &str, summary: String) {
+        self.lock().push_feed(source, summary);
+    }
+
+    pub(crate) fn frame_json_snapshot(&self) -> Option<(FrameSnapshot, bool, bool, bool)> {
+        let state = self.lock();
+        let frame = state.latest_frame.clone()?;
+        Some((
+            frame,
+            state.is_paused,
+            state.finished,
+            state.is_agent_driving(),
+        ))
+    }
+
+    pub(crate) fn snapshot_for_sse(&self) -> SseSnapshot {
+        self.lock().sse_snapshot()
+    }
+
+    pub(crate) fn snapshot_for_sse_with_telemetry(&self) -> (SseSnapshot, FpsReport) {
+        let state = self.lock();
+        let snap = state.sse_snapshot();
+        let report = state.telemetry.report(None, state.audio_underruns);
+        (snap, report)
+    }
+
+    fn finish_run(&self, outcome: Option<(String, String)>, reason: &str) {
+        let mut state = self.lock();
+        if outcome.is_none() && state.finished {
+            return;
+        }
         state.finished = true;
         state.is_paused = false;
         state.active_wait = None;
         state.machine_attached = false;
-        state.outcome = Some(finish.outcome.to_string());
-        state.digest = Some(digest.to_owned());
+        if let Some((out, dig)) = outcome {
+            state.outcome = Some(out);
+            state.digest = Some(dig);
+        }
         state.step_epoch += 1;
         state.wait_epoch += 1;
-        let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
-        let orphaned_snapshots: Vec<_> = state.pending_snapshots.drain(..).collect();
-        let orphaned_rewind = state
-            .pending_rewind
-            .take()
-            .or_else(|| state.replaying_rewind.take());
+        let inspects: Vec<_> = state.pending_inspects.drain(..).collect();
+        let snapshots: Vec<_> = state.pending_snapshots.drain(..).collect();
+        let mut rewinds = Vec::new();
+        if let Some(rw) = state.pending_rewind.take() {
+            rewinds.push(rw);
+        }
+        if let Some(rw) = state.replaying_rewind.take() {
+            rewinds.push(rw);
+        }
         state.rewind_abort = false;
         state.rewind_target_flip = None;
         drop(state);
-        for ticket in orphaned_inspects {
-            let mut slot = ticket
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(InspectReply::Error {
-                status: 410,
-                message: "run has finished".to_owned(),
-            });
-            ticket.slot.ready.notify_all();
-        }
-        for ticket in orphaned_snapshots {
-            let mut slot = ticket
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(SnapshotReply::Error {
-                status: 410,
-                message: "run has finished".to_owned(),
-            });
-            ticket.slot.ready.notify_all();
-        }
-        if let Some(rw) = orphaned_rewind {
-            let mut slot = rw
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(Err("run finished before rewind completed".to_owned()));
-            rw.slot.ready.notify_all();
-        }
+        fail_pending_ops(inspects, snapshots, rewinds, reason);
         self.notify_client();
         self.notify_host();
     }
 
+    /// Mark that the guest run has finished, waking any waiting clients.
+    pub fn mark_finished(&self, finish: &Finish, digest: &str) {
+        self.finish_run(
+            Some((finish.outcome.to_string(), digest.to_owned())),
+            "run has finished",
+        );
+    }
+
     /// Mark finished without a [`Finish`] (e.g. host dropped on unwind).
     pub(crate) fn mark_dropped(&self) {
-        let mut state = self.lock();
-        if !state.finished {
-            state.finished = true;
-            state.is_paused = false;
-            state.active_wait = None;
-            state.machine_attached = false;
-            state.step_epoch += 1;
-            state.wait_epoch += 1;
-            let orphaned_inspects: Vec<_> = state.pending_inspects.drain(..).collect();
-            let orphaned_snapshots: Vec<_> = state.pending_snapshots.drain(..).collect();
-            let orphaned_rewind = state
-                .pending_rewind
-                .take()
-                .or_else(|| state.replaying_rewind.take());
-            state.rewind_abort = false;
-            state.rewind_target_flip = None;
-            drop(state);
-            for ticket in orphaned_inspects {
-                let mut slot = ticket
-                    .slot
-                    .reply
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *slot = Some(InspectReply::Error {
-                    status: 410,
-                    message: "control host closed".to_owned(),
-                });
-                ticket.slot.ready.notify_all();
-            }
-            for ticket in orphaned_snapshots {
-                let mut slot = ticket
-                    .slot
-                    .reply
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *slot = Some(SnapshotReply::Error {
-                    status: 410,
-                    message: "control host closed".to_owned(),
-                });
-                ticket.slot.ready.notify_all();
-            }
-            if let Some(rw) = orphaned_rewind {
-                let mut slot = rw
-                    .slot
-                    .reply
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *slot = Some(Err("control host closed before rewind completed".to_owned()));
-                rw.slot.ready.notify_all();
-            }
-            self.notify_client();
-            self.notify_host();
-        }
+        self.finish_run(None, "control host closed");
     }
 
     /// Declare whether a live flip-boundary machine inspector is attached (#309).
@@ -859,10 +1375,7 @@ impl ControlBus {
     /// next flip boundary (deadlock-free when paused in `Step` mode, #309).
     #[must_use]
     pub fn request_inspect(&self, query: InspectQuery, timeout: Option<Duration>) -> InspectReply {
-        let slot = Arc::new(InspectSlot {
-            reply: Mutex::new(None),
-            ready: Condvar::new(),
-        });
+        let slot = TicketSlot::new();
         {
             let mut state = self.lock();
             if state.finished {
@@ -884,36 +1397,18 @@ impl ControlBus {
         }
         self.notify_host();
 
-        let deadline = timeout.map(|d| Instant::now() + d);
-        let mut guard = slot
-            .reply
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while guard.is_none() {
-            guard = match deadline {
-                Some(dl) => {
-                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
-                        return InspectReply::Error {
-                            status: 504,
-                            message: "inspect request timed out waiting for flip boundary"
-                                .to_owned(),
-                        };
-                    };
-                    let (g, _) = slot
-                        .ready
-                        .wait_timeout(guard, rem)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    g
-                }
-                None => slot
-                    .ready
-                    .wait(guard)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            };
+        if let Some(reply) = slot.wait(timeout) {
+            return reply;
         }
-        guard.take().unwrap_or(InspectReply::Error {
-            status: 500,
-            message: "empty inspect reply".to_owned(),
+        {
+            let mut state = self.lock();
+            state
+                .pending_inspects
+                .retain(|t| !Arc::ptr_eq(&t.slot, &slot));
+        }
+        slot.try_take().unwrap_or_else(|| InspectReply::Error {
+            status: 504,
+            message: "inspect request timed out waiting for flip boundary".to_owned(),
         })
     }
 
@@ -927,14 +1422,7 @@ impl ControlBus {
             state.pending_inspects.drain(..).collect()
         };
         for ticket in tickets {
-            let reply = execute_inspect(machine, ticket.query);
-            let mut slot = ticket
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(reply);
-            ticket.slot.ready.notify_all();
+            ticket.slot.complete(execute_inspect(machine, ticket.query));
         }
     }
 
@@ -942,10 +1430,7 @@ impl ControlBus {
     /// `&mut Machine` at the active or next flip boundary (#313).
     #[must_use]
     pub fn request_snapshot_op(&self, op: SnapshotOp, timeout: Option<Duration>) -> SnapshotReply {
-        let slot = Arc::new(SnapshotTicketSlot {
-            reply: Mutex::new(None),
-            ready: Condvar::new(),
-        });
+        let slot = TicketSlot::new();
         {
             let mut state = self.lock();
             if state.finished {
@@ -967,36 +1452,18 @@ impl ControlBus {
         }
         self.notify_host();
 
-        let deadline = timeout.map(|d| Instant::now() + d);
-        let mut guard = slot
-            .reply
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while guard.is_none() {
-            guard = match deadline {
-                Some(dl) => {
-                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
-                        return SnapshotReply::Error {
-                            status: 504,
-                            message: "snapshot operation timed out waiting for flip boundary"
-                                .to_owned(),
-                        };
-                    };
-                    let (g, _) = slot
-                        .ready
-                        .wait_timeout(guard, rem)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    g
-                }
-                None => slot
-                    .ready
-                    .wait(guard)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            };
+        if let Some(reply) = slot.wait(timeout) {
+            return reply;
         }
-        guard.take().unwrap_or(SnapshotReply::Error {
-            status: 500,
-            message: "empty snapshot reply".to_owned(),
+        {
+            let mut state = self.lock();
+            state
+                .pending_snapshots
+                .retain(|t| !Arc::ptr_eq(&t.slot, &slot));
+        }
+        slot.try_take().unwrap_or_else(|| SnapshotReply::Error {
+            status: 504,
+            message: "snapshot operation timed out waiting for flip boundary".to_owned(),
         })
     }
 
@@ -1010,14 +1477,9 @@ impl ControlBus {
             state.pending_snapshots.drain(..).collect()
         };
         for ticket in tickets {
-            let reply = execute_snapshot_op(self, machine, host, ticket.op);
-            let mut slot = ticket
+            ticket
                 .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(reply);
-            ticket.slot.ready.notify_all();
+                .complete(execute_snapshot_op(self, machine, host, ticket.op));
         }
     }
 
@@ -1122,10 +1584,7 @@ impl ControlBus {
             };
         }
 
-        let slot = Arc::new(RewindSlot {
-            reply: Mutex::new(None),
-            ready: Condvar::new(),
-        });
+        let slot = TicketSlot::new();
         {
             let mut state = self.lock();
             if state.finished {
@@ -1154,32 +1613,30 @@ impl ControlBus {
         }
         self.notify_host();
 
-        let deadline = timeout.map(|d| Instant::now() + d);
-        let mut guard = slot
-            .reply
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while guard.is_none() {
-            guard = match deadline {
-                Some(dl) => {
-                    let Some(rem) = dl.checked_duration_since(Instant::now()) else {
-                        return Err("rewind timed out".to_owned());
-                    };
-                    let (g, _) = slot
-                        .ready
-                        .wait_timeout(guard, rem)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    g
-                }
-                None => slot
-                    .ready
-                    .wait(guard)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            };
+        if let Some(reply) = slot.wait(timeout) {
+            return reply;
         }
-        guard
-            .take()
-            .unwrap_or_else(|| Err("empty rewind reply".to_owned()))
+        {
+            let mut state = self.lock();
+            if state
+                .pending_rewind
+                .as_ref()
+                .is_some_and(|rw| Arc::ptr_eq(&rw.slot, &slot))
+            {
+                state.pending_rewind = None;
+                state.rewind_abort = false;
+            }
+            if state
+                .replaying_rewind
+                .as_ref()
+                .is_some_and(|rw| Arc::ptr_eq(&rw.slot, &slot))
+            {
+                state.replaying_rewind = None;
+                state.rewind_target_flip = None;
+            }
+        }
+        slot.try_take()
+            .unwrap_or_else(|| Err("rewind timed out".to_owned()))
     }
 
     #[must_use]
@@ -1226,6 +1683,8 @@ impl ControlBus {
         let res = state.guide.resolution;
         state.timeline.configure_mode(mode, res);
         state.recording_len = 0;
+        state.reset_clock_nanos = 0;
+        state.runtime_reset_epoch = state.runtime_reset_epoch.wrapping_add(1);
         Some((name, bm))
     }
 
@@ -1263,13 +1722,7 @@ impl ControlBus {
                 mode: "route_replay",
                 restore_ms: None,
             };
-            let mut slot = rw
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(Ok(result));
-            rw.slot.ready.notify_all();
+            rw.slot.complete(Ok(result));
             true
         } else {
             false
@@ -1288,13 +1741,7 @@ impl ControlBus {
                 .or_else(|| state.pending_rewind.take())
         };
         if let Some(rw) = rw {
-            let mut slot = rw
-                .slot
-                .reply
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(Err(message));
-            rw.slot.ready.notify_all();
+            rw.slot.complete(Err(message));
         }
     }
 
@@ -1508,6 +1955,47 @@ impl ControlBus {
             }
         }
         resp
+    }
+
+    #[cfg(test)]
+    fn seed_route_bookmark(&self, name: &str, data: BookmarkData) {
+        self.lock().bookmarks.insert(name.to_owned(), data);
+    }
+
+    #[cfg(test)]
+    fn pending_op_counts(&self) -> (usize, usize, usize) {
+        let state = self.lock();
+        let rewinds = usize::from(state.pending_rewind.is_some())
+            + usize::from(state.replaying_rewind.is_some());
+        (
+            state.pending_inspects.len(),
+            state.pending_snapshots.len(),
+            rewinds,
+        )
+    }
+}
+
+fn fail_pending_ops(
+    inspects: Vec<InspectTicket>,
+    snapshots: Vec<SnapshotTicket>,
+    rewinds: Vec<PendingRewind>,
+    reason: &str,
+) {
+    for ticket in inspects {
+        ticket.slot.complete(InspectReply::Error {
+            status: 410,
+            message: reason.to_owned(),
+        });
+    }
+    for ticket in snapshots {
+        ticket.slot.complete(SnapshotReply::Error {
+            status: 410,
+            message: reason.to_owned(),
+        });
+    }
+    for rw in rewinds {
+        rw.slot
+            .complete(Err(format!("{reason} before rewind completed")));
     }
 }
 
@@ -2081,7 +2569,7 @@ pub fn analyze_frame(
 /// Compute RGB diff percentage between two dense BGRA buffers (used by
 /// `WaitUntilChange` against its captured baseline).
 #[must_use]
-pub(crate) fn diff_pct_between(a: &[u8], aw: u32, ah: u32, b: &[u8], bw: u32, bh: u32) -> f64 {
+fn diff_pct_between(a: &[u8], aw: u32, ah: u32, b: &[u8], bw: u32, bh: u32) -> f64 {
     if aw != bw || ah != bh {
         return 100.0;
     }
@@ -2401,25 +2889,63 @@ mod tests {
         assert!(!failed.ok);
         assert_eq!(bus.status().pending_actions, 0);
         assert_eq!(bus.agent_state().action_feed.len(), feed_before);
-        assert!(!bus.lock().is_agent_driving());
+        assert!(!bus.snapshot_for_sse().active_driving);
     }
 
     #[test]
     fn clear_queue_cancels_step_budget_and_wakes_blocked_wait() {
+        use crate::control::host::ControlHost;
+        use crate::host::headless::Headless;
+
+        let flip_meta = |flip: u64| FlipMeta {
+            flip,
+            clock_nanos: flip * 16_000_000,
+            cursor: flip * 100,
+            instructions_passed: 0,
+            pointer_shown: true,
+            pointer_pos: (0, 0),
+            route_active: false,
+            route_remaining: 0,
+        };
+
         let bus = ControlBus::new(ControlConfig {
             mode: ExecMode::Step,
             ..ControlConfig::default()
         });
-        // Schedule a huge future pipe with auto_step=true, setting a large step_budget.
+        // Schedule a huge future pipe with auto_step=true, setting a large step_budget,
+        // then clear it before the first flip so flip 0 must pause instead of burning 5011 flips.
         let sched = bus.dispatch(Command::PipeRoute {
             route_text: "flip 5000 down\nflip 5010 up\n".to_owned(),
             relative: false,
             auto_step: true,
         });
         assert!(sched.ok);
-        assert_eq!(bus.lock().step_budget, 5011);
+        assert_eq!(sched.status.pending_actions, 2);
 
-        // Start a blocking Wait on another thread, then cancel via ClearQueue.
+        let clear = bus.dispatch(Command::ClearQueue);
+        assert!(clear.ok);
+        assert!(matches!(clear.data, ResponseData::Cleared { cleared: 2 }));
+        assert_eq!(clear.status.pending_actions, 0);
+
+        // Drive flips under a channel gate so each flip advances only when requested.
+        let (tx, rx) = std::sync::mpsc::channel::<Option<u64>>();
+        let host_bus = bus.clone();
+        let host_thread = std::thread::spawn(move || {
+            let mut host = ControlHost::with_bus(Headless::new(), host_bus);
+            while let Ok(Some(flip)) = rx.recv() {
+                host.observe_flip(&flip_meta(flip));
+                let _ = host.poll_input(flip);
+            }
+        });
+
+        // Flip 0 must pause immediately because ClearQueue zeroed step_budget.
+        tx.send(Some(0)).unwrap();
+        let paused = bus.wait_until_paused(Some(Duration::from_secs(2)));
+        assert!(paused.paused);
+        assert_eq!(paused.flip, Some(0));
+
+        // Start a blocking Wait on another thread (host finishes flip 0 and waits on rx,
+        // so flip 500 is never reached), then cancel via ClearQueue.
         let waiter_bus = bus.clone();
         let waiter = std::thread::spawn(move || {
             waiter_bus.dispatch_sync(
@@ -2430,21 +2956,21 @@ mod tests {
                 Some(Duration::from_secs(5)),
             )
         });
-        // Wait briefly until the waiter has registered `active_wait`.
         for _ in 0..200 {
-            if bus.lock().active_wait.is_some() {
+            if !bus.status().paused
+                && bus
+                    .agent_state()
+                    .action_feed
+                    .iter()
+                    .any(|e| e.summary == "wait 500f")
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(bus.lock().active_wait.is_some());
-
-        let clear = bus.dispatch(Command::ClearQueue);
-        assert!(clear.ok);
-        assert!(matches!(clear.data, ResponseData::Cleared { cleared: 2 }));
-        assert_eq!(clear.status.pending_actions, 0);
-        assert_eq!(bus.lock().step_budget, 0);
-
+        assert!(!bus.status().paused);
+        let clear_wait = bus.dispatch(Command::ClearQueue);
+        assert!(clear_wait.ok);
         let wait_resp = waiter.join().unwrap();
         assert!(wait_resp.ok);
         assert!(matches!(
@@ -2455,9 +2981,13 @@ mod tests {
             })
         ));
 
-        // Clearing while paused in Step mode must also wake a blocked `SyncKind::Step`
-        // caller (e.g. `PipeRoute { auto_step: true }`) immediately instead of hanging.
-        bus.lock().is_paused = true;
+        // Pause at flip 1, start a huge Step-mode PipeRoute, cancel with ClearQueue,
+        // then advance one flip (flip 2): stepper wakes cleanly at flip 2 (not 9000).
+        tx.send(Some(1)).unwrap();
+        let paused1 = bus.wait_until_paused(Some(Duration::from_secs(2)));
+        assert!(paused1.paused);
+        assert_eq!(paused1.flip, Some(1));
+
         let step_bus = bus.clone();
         let stepper = std::thread::spawn(move || {
             step_bus.dispatch_sync(
@@ -2470,19 +3000,142 @@ mod tests {
             )
         });
         for _ in 0..200 {
-            if bus.lock().step_budget > 0 {
+            if bus.status().pending_actions == 2 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(bus.lock().step_budget > 0);
+        assert_eq!(bus.status().pending_actions, 2);
         let clear_step = bus.dispatch(Command::ClearQueue);
         assert!(matches!(
             clear_step.data,
             ResponseData::Cleared { cleared: 2 }
         ));
+        tx.send(Some(2)).unwrap();
         let step_resp = stepper.join().unwrap();
         assert!(step_resp.ok);
         assert_eq!(step_resp.status.pending_actions, 0);
+        assert!(step_resp.status.flip.unwrap_or(u64::MAX) <= 2);
+
+        tx.send(None).unwrap();
+        assert!(bus.dispatch(Command::Close { force: true }).ok);
+        host_thread.join().unwrap();
+    }
+
+    #[test]
+    fn mark_finished_and_mark_dropped_unblock_concurrent_inspect_snapshot_and_rewind_waiters() {
+        use crate::control::host::ControlHost;
+        use crate::host::headless::Headless;
+        use crate::machine::Outcome;
+
+        let dummy_bookmark = BookmarkData {
+            flip: 5,
+            cursor: 500,
+            declared_ms: 80,
+            digest: "deadbeef".to_owned(),
+            route_text: "#lego-legacy-route 1\n".to_owned(),
+        };
+
+        for via_drop in [false, true] {
+            let host = ControlHost::new(Headless::new(), ControlConfig::default());
+            let bus = host.bus();
+            bus.set_machine_attached(true);
+            bus.seed_route_bookmark("cp", dummy_bookmark.clone());
+
+            let b_ins = bus.clone();
+            let t_ins = std::thread::spawn(move || {
+                b_ins.request_inspect(InspectQuery::Cpu, Some(Duration::from_secs(5)))
+            });
+
+            let b_snap = bus.clone();
+            let t_snap = std::thread::spawn(move || {
+                b_snap.request_snapshot_op(
+                    SnapshotOp::Save {
+                        name: Some("s".into()),
+                        path: None,
+                    },
+                    Some(Duration::from_secs(5)),
+                )
+            });
+
+            let b_rw = bus.clone();
+            let t_rw =
+                std::thread::spawn(move || b_rw.request_rewind("cp", Some(Duration::from_secs(5))));
+
+            for _ in 0..500 {
+                if bus.pending_op_counts() == (1, 1, 1) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(
+                bus.pending_op_counts(),
+                (1, 1, 1),
+                "all three waiters must be queued concurrently"
+            );
+
+            let expected_reason = if via_drop {
+                drop(host);
+                "control host closed"
+            } else {
+                host.mark_finished(
+                    &Finish {
+                        outcome: Outcome::Exited { code: 0 },
+                        cursor: 0,
+                        flips: 0,
+                        declared_millis: 0,
+                    },
+                    "0000000000000000",
+                );
+                "run has finished"
+            };
+
+            match t_ins.join().unwrap() {
+                InspectReply::Error { status, message } => {
+                    assert_eq!(status, 410);
+                    assert_eq!(message, expected_reason);
+                }
+                other => panic!("expected 410 inspect error, got {other:?}"),
+            }
+            match t_snap.join().unwrap() {
+                SnapshotReply::Error { status, message } => {
+                    assert_eq!(status, 410);
+                    assert_eq!(message, expected_reason);
+                }
+                other => panic!("expected 410 snapshot error, got {other:?}"),
+            }
+            let rw_err = t_rw.join().unwrap().expect_err("rewind must fail");
+            assert_eq!(rw_err, format!("{expected_reason} before rewind completed"));
+            assert_eq!(bus.pending_op_counts(), (0, 0, 0));
+        }
+
+        // Also verify a rewind already transitioned into `replaying_rewind` unblocks on finish.
+        let bus = ControlBus::new(ControlConfig::default());
+        bus.set_machine_attached(true);
+        bus.seed_route_bookmark("cp2", dummy_bookmark);
+        let b_rw = bus.clone();
+        let t_rw =
+            std::thread::spawn(move || b_rw.request_rewind("cp2", Some(Duration::from_secs(5))));
+        for _ in 0..500 {
+            if bus.is_rewind_aborting() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(bus.take_pending_rewind().is_some());
+        bus.mark_finished(
+            &Finish {
+                outcome: Outcome::Exited { code: 0 },
+                cursor: 0,
+                flips: 0,
+                declared_millis: 0,
+            },
+            "0000000000000000",
+        );
+        let rw_err = t_rw
+            .join()
+            .unwrap()
+            .expect_err("replaying rewind must fail");
+        assert_eq!(rw_err, "run has finished before rewind completed");
     }
 }

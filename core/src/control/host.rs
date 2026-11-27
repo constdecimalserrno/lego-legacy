@@ -8,19 +8,11 @@
 //! equal-citizen [`InputOwner`] arbitration, and drives [`super::timeline::Timeline`]
 //! events deterministically at flip boundaries and between-flip polls.
 
-use super::bus::{
-    analyze_frame, diff_pct_between, BusState, ControlBus, ControlConfig, ExecMode, FrameSnapshot,
-    InputOwner, WaitCondition, WaitResult,
-};
+use super::bus::{ControlBus, ControlConfig};
 use crate::host::pace::Pace;
 use crate::host::telemetry::FpsReport;
 use crate::host::{Cursor, FlipMeta, Frame, Host, HostError, Input, Mapping};
 use crate::machine::Finish;
-use std::sync::Arc;
-use std::time::Duration;
-
-/// 60 Hz window-pump interval while paused inside [`ControlHost::observe_flip`].
-const PAUSE_PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Drop guard that notifies any blocked clients if [`ControlHost`] unwinds or
 /// drops without an explicit [`ControlHost::mark_finished`] call.
@@ -43,11 +35,12 @@ pub struct ControlHost<H> {
     last_flip_observed: Option<u64>,
     polls_since_flip: u64,
     host_paused: bool,
-    pace_anchor_declared: u64,
+    pace_anchor_declared: Option<u64>,
     pace_anchor_scaled: u64,
     wall_pace: Pace,
     wall_pace_anchored: bool,
     last_pace_epoch: u64,
+    last_reset_epoch: u64,
     staged_bgra: Vec<u8>,
     staged_size: (u32, u32),
     staged_valid: bool,
@@ -62,6 +55,7 @@ impl<H> ControlHost<H> {
     #[must_use]
     pub fn with_bus(inner: H, bus: ControlBus) -> Self {
         let guard = FinishGuard(bus.clone());
+        let last_reset_epoch = bus.runtime_reset_epoch();
         Self {
             inner,
             bus,
@@ -71,11 +65,12 @@ impl<H> ControlHost<H> {
             last_flip_observed: None,
             polls_since_flip: 0,
             host_paused: false,
-            pace_anchor_declared: 0,
+            pace_anchor_declared: None,
             pace_anchor_scaled: 0,
             wall_pace: Pace::new(),
             wall_pace_anchored: false,
             last_pace_epoch: 0,
+            last_reset_epoch,
             staged_bgra: Vec::new(),
             staged_size: (0, 0),
             staged_valid: false,
@@ -128,6 +123,25 @@ impl<H> ControlHost<H> {
         self.bus.telemetry_report(window)
     }
 
+    fn reset_local_anchors(&mut self, epoch: u64, clock_nanos: u64) {
+        self.last_clock_nanos = clock_nanos;
+        self.last_flip_observed = None;
+        self.polls_since_flip = 0;
+        self.pace_anchor_declared = None;
+        self.wall_pace_anchored = false;
+        self.staged_bgra.clear();
+        self.staged_size = (0, 0);
+        self.staged_valid = false;
+        self.last_reset_epoch = epoch;
+    }
+
+    fn sync_runtime_reset(&mut self) {
+        let (epoch, clock_nanos) = self.bus.runtime_reset_state();
+        if epoch != self.last_reset_epoch {
+            self.reset_local_anchors(epoch, clock_nanos);
+        }
+    }
+
     fn stage_frame(&mut self, frame: &Frame<'_>) {
         let row_bytes = (frame.width as usize).saturating_mul(4);
         let total_bytes = row_bytes.saturating_mul(frame.height as usize);
@@ -166,25 +180,12 @@ impl<H> ControlHost<H> {
 
 impl<H: Host> ControlHost<H> {
     /// Reset per-run staging, pacing, and telemetry anchors across an
-    /// outer-loop Tier-1 rewind (#309, #349).
+    /// outer-loop Tier-1 rewind (#309, #349, #408).
     pub fn reset_for_rewind(&mut self) {
-        self.last_clock_nanos = 0;
-        self.last_flip_observed = None;
-        self.polls_since_flip = 0;
-        self.pace_anchor_declared = 0;
-        self.pace_anchor_scaled = 0;
-        self.wall_pace_anchored = false;
-        self.staged_bgra.clear();
-        self.staged_size = (0, 0);
-        self.staged_valid = false;
         self.inner.pointer_shape(None);
         let pace_sleep = self.pace_sleep_nanos();
-        let mut state = self.bus.lock();
-        state.timeline.reset_polled();
-        state.timeline.set_cursor_blank(false);
-        state.last_agent_action_flip = None;
-        state.agent_timeline_end_flip = None;
-        state.telemetry.rebaseline(0, 0, 0, pace_sleep);
+        let epoch = self.bus.rebaseline_for_rewind(pace_sleep);
+        self.reset_local_anchors(epoch, 0);
     }
 
     fn set_host_paused(&mut self, paused: bool) {
@@ -193,121 +194,20 @@ impl<H: Host> ControlHost<H> {
             self.wall_pace.set_paused(paused);
             self.wall_pace_anchored = false;
             self.inner.set_paused(paused);
-            self.bus.lock().telemetry.set_paused(paused);
+            self.bus.set_telemetry_paused(paused);
         }
-    }
-}
-
-fn evaluate_wait(state: &mut BusState, meta: &FlipMeta, frame: Option<&FrameSnapshot>) -> bool {
-    let Some(mut cond) = state.active_wait.take() else {
-        return false;
-    };
-    let declared_ms = meta.clock_nanos / 1_000_000;
-    let done = match &mut cond {
-        WaitCondition::Fixed {
-            start_flip,
-            target_flip,
-            target_ms,
-        } => {
-            let by_flip = target_flip.is_some_and(|tf| meta.flip >= tf);
-            let by_ms = target_ms.is_some_and(|tm| declared_ms >= tm);
-            if by_flip || by_ms {
-                Some(WaitResult {
-                    satisfied: true,
-                    flips_elapsed: meta.flip.saturating_sub(*start_flip),
-                    diff_pct: frame.map_or(0.0, |f| f.diff.diff_pct),
-                })
-            } else {
-                None
-            }
-        }
-        WaitCondition::UntilChange {
-            start_flip,
-            max_flips,
-            min_diff_pct,
-            baseline,
-        } => {
-            if meta.flip <= *start_flip {
-                None
-            } else {
-                let elapsed = meta.flip.saturating_sub(*start_flip);
-                let pct = match (baseline.as_ref(), frame) {
-                    (Some((bw, bh, base)), Some(curr)) => {
-                        diff_pct_between(base, *bw, *bh, &curr.bgra, curr.width, curr.height)
-                    }
-                    (None, Some(curr)) => curr.diff.diff_pct,
-                    _ => 0.0,
-                };
-                if pct >= *min_diff_pct {
-                    Some(WaitResult {
-                        satisfied: true,
-                        flips_elapsed: elapsed,
-                        diff_pct: pct,
-                    })
-                } else if elapsed >= *max_flips {
-                    Some(WaitResult {
-                        satisfied: false,
-                        flips_elapsed: elapsed,
-                        diff_pct: pct,
-                    })
-                } else {
-                    None
-                }
-            }
-        }
-        WaitCondition::UntilSettled {
-            start_flip,
-            max_flips,
-            stable_flips,
-            max_diff_pct,
-            stable_count,
-        } => {
-            if meta.flip <= *start_flip {
-                None
-            } else {
-                let elapsed = meta.flip.saturating_sub(*start_flip);
-                let pct = frame.map_or(0.0, |f| f.diff.diff_pct);
-                if pct <= *max_diff_pct {
-                    *stable_count += 1;
-                } else {
-                    *stable_count = 0;
-                }
-                if *stable_count >= *stable_flips {
-                    Some(WaitResult {
-                        satisfied: true,
-                        flips_elapsed: elapsed,
-                        diff_pct: pct,
-                    })
-                } else if elapsed >= *max_flips {
-                    Some(WaitResult {
-                        satisfied: false,
-                        flips_elapsed: elapsed,
-                        diff_pct: pct,
-                    })
-                } else {
-                    None
-                }
-            }
-        }
-    };
-
-    if let Some(result) = done {
-        state.last_wait_result = Some(result);
-        state.wait_epoch += 1;
-        true
-    } else {
-        state.active_wait = Some(cond);
-        false
     }
 }
 
 impl<H: Host> Host for ControlHost<H> {
     fn present(&mut self, frame: &Frame<'_>) {
+        self.sync_runtime_reset();
         self.stage_frame(frame);
         self.inner.present(frame);
     }
 
     fn poll_input(&mut self, flip: u64) -> Vec<Input> {
+        self.sync_runtime_reset();
         let human = self.inner.poll_input(flip);
 
         let poll_index = if self.last_flip_observed == Some(flip) {
@@ -321,52 +221,8 @@ impl<H: Host> Host for ControlHost<H> {
         };
 
         let declared_ms = self.last_clock_nanos / 1_000_000;
-        let mut state = self.bus.lock();
-        if state.rewind_abort || state.rewind_target_flip.is_some() {
-            return Vec::new();
-        }
-        state.timeline.note_polled(flip);
-        let owner = state.owner;
-
-        let mut out = Vec::new();
-        if !state.pending_releases.is_empty() {
-            out.append(&mut state.pending_releases);
-        }
-        if matches!(owner, InputOwner::Human | InputOwner::Shared) {
-            for ev in &human {
-                if let Input::Move { x, y } = *ev {
-                    state.timeline.observe_emitted_move(x, y);
-                }
-            }
-            out.extend(human);
-        } else {
-            // Keep windowed host non-hijacking: ignore stray human
-            // mouse/key events while still honoring OS window Close.
-            for ev in human {
-                if ev == Input::Close {
-                    out.push(ev);
-                }
-            }
-        }
-        if matches!(owner, InputOwner::Agent | InputOwner::Shared) {
-            let scheduled = state.timeline.drain_due(flip, poll_index, declared_ms);
-            for ev in scheduled {
-                if ev == Input::Close && out.contains(&Input::Close) {
-                    continue;
-                }
-                out.push(ev);
-            }
-        }
-
-        if state.close_pending {
-            state.close_pending = false;
-            if !out.contains(&Input::Close) {
-                out.push(Input::Close);
-            }
-        }
-
-        state.record_emitted_inputs(&out);
-        out
+        self.bus
+            .poll_input_step(flip, poll_index, declared_ms, human)
     }
 
     fn audio(&mut self, samples: &[i16]) {
@@ -379,7 +235,7 @@ impl<H: Host> Host for ControlHost<H> {
 
     fn show_pointer(&mut self, show: bool) {
         self.inner.show_pointer(show);
-        self.bus.lock().timeline.set_pointer_shown(show);
+        self.bus.set_pointer_shown(show);
     }
 
     fn free_mouse(&mut self) {
@@ -388,14 +244,13 @@ impl<H: Host> Host for ControlHost<H> {
 
     fn put_pointer(&mut self, x: i32, y: i32) {
         self.inner.put_pointer(x, y);
-        let mut state = self.bus.lock();
-        state.timeline.set_pointer(x, y);
+        self.bus.set_pointer(x, y);
     }
 
     fn pointer_shape(&mut self, shape: Option<&Cursor>) {
         self.inner.pointer_shape(shape);
         let blank = shape.is_some_and(Cursor::is_blank);
-        self.bus.lock().timeline.set_cursor_blank(blank);
+        self.bus.set_cursor_blank(blank);
     }
 
     fn closes(&self) -> u32 {
@@ -411,45 +266,34 @@ impl<H: Host> Host for ControlHost<H> {
     }
 
     fn pace(&mut self, declared_nanos: u64) -> f64 {
+        let snap = self.bus.pace_snapshot();
+        if snap.runtime_reset_epoch != self.last_reset_epoch {
+            self.reset_local_anchors(snap.runtime_reset_epoch, snap.reset_clock_nanos);
+        }
         self.last_clock_nanos = declared_nanos;
-        let (mode, paused, route_active, uncapped, pace_mult, pace_epoch) = {
-            let state = self.bus.lock();
-            let route_active = state.last_meta.is_some_and(|m| m.route_active);
-            let uncapped = route_active
-                || state.rewind_target_flip.is_some()
-                || (state.mode == ExecMode::Step && state.step_uncapped);
-            (
-                state.mode,
-                state.is_paused,
-                route_active,
-                uncapped,
-                state.pace,
-                state.pace_epoch,
-            )
-        };
 
-        if uncapped {
-            self.pace_anchor_declared = declared_nanos;
+        if snap.uncapped {
+            self.pace_anchor_declared = Some(declared_nanos);
             self.wall_pace_anchored = false;
-            self.last_pace_epoch = pace_epoch;
+            self.last_pace_epoch = snap.pace_epoch;
             return 1.0;
         }
 
-        let epoch_changed = pace_epoch != self.last_pace_epoch;
-        self.last_pace_epoch = pace_epoch;
+        let epoch_changed = snap.pace_epoch != self.last_pace_epoch;
+        self.last_pace_epoch = snap.pace_epoch;
 
-        let backward = declared_nanos < self.pace_anchor_declared;
-        if backward {
-            self.pace_anchor_declared = declared_nanos;
-        }
-        let delta = declared_nanos.saturating_sub(self.pace_anchor_declared);
-        let scaled_delta = if (pace_mult - 1.0).abs() < 1e-6 {
+        let (backward, delta) = match self.pace_anchor_declared {
+            None => (true, 0),
+            Some(prev) if declared_nanos < prev => (true, 0),
+            Some(prev) => (false, declared_nanos - prev),
+        };
+        let scaled_delta = if (snap.pace - 1.0).abs() < 1e-6 {
             delta
         } else {
-            (delta as f64 / pace_mult) as u64
+            (delta as f64 / snap.pace) as u64
         };
         let scaled = self.pace_anchor_scaled.saturating_add(scaled_delta);
-        self.pace_anchor_declared = declared_nanos;
+        self.pace_anchor_declared = Some(declared_nanos);
         self.pace_anchor_scaled = scaled;
 
         let inner_pace = self.inner.pace(scaled);
@@ -458,12 +302,7 @@ impl<H: Host> Host for ControlHost<H> {
         // For unpaced hosts (`Headless`), enforce wall-clock `declared / pace`
         // in `Live` mode (while unpaused and not replaying a route) so `/watch`
         // honors the pace slider instead of running uncapped (#325).
-        if !self.inner.is_paced()
-            && mode == ExecMode::Live
-            && !paused
-            && !route_active
-            && pace_mult > 0.0
-        {
+        if !self.inner.is_paced() && snap.wall_pace_live {
             if !self.wall_pace_anchored || epoch_changed || backward {
                 self.wall_pace.resync(scaled);
                 self.wall_pace_anchored = true;
@@ -495,6 +334,7 @@ impl<H: Host> Host for ControlHost<H> {
     }
 
     fn observe_flip(&mut self, meta: &FlipMeta) {
+        self.sync_runtime_reset();
         self.last_clock_nanos = meta.clock_nanos;
         self.last_flip_observed = Some(meta.flip);
         self.polls_since_flip = 0;
@@ -502,120 +342,18 @@ impl<H: Host> Host for ControlHost<H> {
         self.inner.observe_flip(meta);
         let underruns = self.inner.audio_underruns();
         let pace_sleep = self.pace_sleep_nanos();
+        let staged = self.staged_valid.then_some((
+            self.staged_bgra.as_slice(),
+            self.staged_size.0,
+            self.staged_size.1,
+        ));
+        let wait_completed =
+            self.bus
+                .observe_flip(meta, staged, underruns, pace_sleep, self.defer_pause);
 
-        // Update frame snapshot, diff, telemetry, and active wait conditions.
-        let mut notify_clients = false;
-        let mut enter_pause = false;
-        {
-            let mut state = self.bus.lock();
-            state.last_meta = Some(*meta);
-            state.timeline.set_pointer_shown(meta.pointer_shown);
-            let mode = state.timeline.mouse_mode();
-            if !mode.is_relative()
-                && (meta.pointer_shown
-                    || matches!(mode, crate::title::MouseMode::SoftwareAbsolute { .. }))
-            {
-                state
-                    .timeline
-                    .set_pointer(meta.pointer_pos.0, meta.pointer_pos.1);
-            }
-            state.audio_underruns = underruns;
-
-            let uniform = if self.staged_valid {
-                let (w, h) = self.staged_size;
-                state.timeline.set_frame_size(w, h);
-                let prev_streak = state
-                    .latest_frame
-                    .as_ref()
-                    .map_or(0, |f| f.diff.unchanged_streak);
-                let (diff, frame_hash, uniform) = {
-                    let prev = state
-                        .latest_frame
-                        .as_ref()
-                        .map(|f| (f.bgra.as_slice(), f.width, f.height));
-                    analyze_frame(prev, &self.staged_bgra, w, h, prev_streak)
-                };
-                let snapshot = FrameSnapshot {
-                    flip: meta.flip,
-                    width: w,
-                    height: h,
-                    bgra: Arc::new(self.staged_bgra.clone()),
-                    frame_hash,
-                    diff,
-                    uniform,
-                    pointer_pos: state.timeline.visual_cursor_pos(),
-                    pointer_shown: state.timeline.pointer_shown(),
-                    cursor_blank: state.timeline.cursor_blank(),
-                };
-                state.latest_frame = Some(snapshot);
-                uniform
-            } else {
-                true
-            };
-
-            state.telemetry.record_flip(meta, uniform, pace_sleep);
-
-            let latest_ref = state.latest_frame.clone();
-            if evaluate_wait(&mut state, meta, latest_ref.as_ref()) {
-                notify_clients = true;
-            }
-
-            if !self.defer_pause {
-                if self.inner.closes() == 0 && state.should_pause(meta.route_active) {
-                    if state.transport_eof
-                        && state.mode == ExecMode::Step
-                        && state.owner == InputOwner::Agent
-                    {
-                        // Piped stdin finished with no more commands coming; close
-                        // cleanly so automated pipelines never hang.
-                        state.close_pending = true;
-                    } else {
-                        state.is_paused = true;
-                        state.step_epoch += 1;
-                        notify_clients = true;
-                        enter_pause = true;
-                    }
-                } else if !meta.route_active && state.active_wait.is_none() && state.step_budget > 0
-                {
-                    state.step_budget -= 1;
-                }
-            }
-        }
-
-        if notify_clients {
-            self.bus.notify_client();
-        }
-
-        if enter_pause {
-            self.set_host_paused(true);
-            loop {
-                let state = self.bus.lock();
-                if self.inner.closes() > 0 || !state.should_pause(meta.route_active) {
-                    let mut state = state;
-                    state.is_paused = false;
-                    if !meta.route_active && state.active_wait.is_none() && state.step_budget > 0 {
-                        state.step_budget -= 1;
-                    }
-                    drop(state);
-                    break;
-                }
-                if state.transport_eof
-                    && state.mode == ExecMode::Step
-                    && state.owner == InputOwner::Agent
-                {
-                    let mut state = state;
-                    state.is_paused = false;
-                    state.close_pending = true;
-                    drop(state);
-                    break;
-                }
-                let state = self.bus.wait_for_host_wake(state, PAUSE_PUMP_INTERVAL);
-                // Release the bus lock before pumping OS events so clients can
-                // query status/frames concurrently without waiting on AppKit/X11/Win32.
-                drop(state);
-                self.inner.pump();
-            }
-            self.set_host_paused(false);
+        if !self.defer_pause {
+            let bus = self.bus.clone();
+            bus.pause_loop(self, None, meta.route_active, wait_completed);
         }
     }
 }
@@ -640,81 +378,7 @@ pub fn service_flip_boundary(
     let _ = bus.complete_rewind_if_reached(machine);
     bus.drain_inspects(machine);
     bus.drain_snapshots(machine, host);
-
-    let route_active = machine.undelivered() > 0;
-    let host_closes = host.closes();
-    let mut notify_clients = false;
-    let mut enter_pause = false;
-    {
-        let mut state = bus.lock();
-        if host_closes == 0 && state.should_pause(route_active) {
-            if state.transport_eof
-                && state.mode == ExecMode::Step
-                && state.owner == InputOwner::Agent
-            {
-                state.close_pending = true;
-            } else {
-                state.is_paused = true;
-                state.step_epoch += 1;
-                notify_clients = true;
-                enter_pause = true;
-            }
-        } else if !route_active
-            && state.rewind_target_flip.is_none()
-            && state.active_wait.is_none()
-            && state.step_budget > 0
-        {
-            state.step_budget -= 1;
-        }
-    }
-
-    if notify_clients {
-        bus.notify_client();
-    }
-
-    if enter_pause {
-        host.set_paused(true);
-        loop {
-            bus.drain_inspects(machine);
-            bus.drain_snapshots(machine, host);
-            let route_active = machine.undelivered() > 0;
-            let host_closes = host.closes();
-            let state = bus.lock();
-            if host_closes > 0 || state.rewind_abort || !state.should_pause(route_active) {
-                let mut state = state;
-                state.is_paused = false;
-                if !route_active
-                    && !state.rewind_abort
-                    && state.active_wait.is_none()
-                    && state.step_budget > 0
-                {
-                    state.step_budget -= 1;
-                }
-                drop(state);
-                break;
-            }
-            if state.transport_eof
-                && state.mode == ExecMode::Step
-                && state.owner == InputOwner::Agent
-            {
-                let mut state = state;
-                state.is_paused = false;
-                state.close_pending = true;
-                drop(state);
-                break;
-            }
-            if !state.pending_inspects.is_empty() || !state.pending_snapshots.is_empty() {
-                drop(state);
-                continue;
-            }
-            let state = bus.wait_for_host_wake(state, PAUSE_PUMP_INTERVAL);
-            drop(state);
-            host.pump();
-        }
-        host.set_paused(false);
-        bus.drain_inspects(machine);
-        bus.drain_snapshots(machine, host);
-    }
+    bus.pause_loop(host, Some(machine), false, false);
 }
 
 #[cfg(test)]
@@ -768,7 +432,7 @@ pub(crate) fn png_crosshair_red_center(png: &[u8]) -> (i32, i32) {
 mod tests {
     use super::*;
     use crate::cli::Cli;
-    use crate::control::bus::Command;
+    use crate::control::bus::{Command, ExecMode, InputOwner, WaitResult};
     use crate::control::timeline::Action;
     use crate::guest::GuestMem;
     use crate::host::headless::Headless;
@@ -778,6 +442,7 @@ mod tests {
     use crate::runlog::RunLog;
     use crate::stub;
     use crate::Title;
+    use std::time::Duration;
 
     struct FakeWindowHost {
         inner: Headless,

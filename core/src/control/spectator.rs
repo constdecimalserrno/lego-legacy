@@ -467,15 +467,11 @@ impl SseFingerprint {
 fn format_sse_event_with_fp(
     ctx: &HttpContext,
 ) -> (String, ControlStatus, AgentState, SseFingerprint) {
-    let (status, agent, report, uniform, active_driving) = {
-        let state = ctx.bus.lock();
-        let status = state.status();
-        let agent = state.agent_state.clone();
-        let report = state.telemetry.report(None, state.audio_underruns);
-        let uniform = state.latest_frame.as_ref().is_some_and(|f| f.uniform);
-        let active_driving = state.is_agent_driving();
-        (status, agent, report, uniform, active_driving)
-    };
+    let (snap, report) = ctx.bus.snapshot_for_sse_with_telemetry();
+    let status = snap.status;
+    let agent = snap.agent_state;
+    let uniform = snap.uniform;
+    let active_driving = snap.active_driving;
     let fp = SseFingerprint::from_snapshot(&status, &agent, uniform, active_driving);
 
     let mut warnings: Vec<String> = Vec::new();
@@ -540,16 +536,14 @@ fn serve_sse_events(ctx: &HttpContext, stream: &mut dyn StreamIo) -> io::Result<
 
     loop {
         let (fp, mut finished) = {
-            let state = ctx.bus.lock();
-            let status = state.status();
-            let uniform = state.latest_frame.as_ref().is_some_and(|f| f.uniform);
+            let snap = ctx.bus.snapshot_for_sse();
             let fp = SseFingerprint::from_snapshot(
-                &status,
-                &state.agent_state,
-                uniform,
-                state.is_agent_driving(),
+                &snap.status,
+                &snap.agent_state,
+                snap.uniform,
+                snap.active_driving,
             );
-            (fp, status.finished)
+            (fp, snap.status.finished)
         };
         let now = Instant::now();
 
@@ -1028,38 +1022,46 @@ mod tests {
 
     #[test]
     fn sse_event_json_suppresses_stuck_loop_while_paused_finished_or_below_180_flips() {
-        use crate::control::bus::FrameDiff;
         use crate::control::observe::STUCK_LOOP_THRESHOLD;
+        use crate::host::{FlipMeta, Frame, Host};
+        use crate::machine::{Finish, Outcome};
 
-        let bus = ControlBus::new(ControlConfig::default());
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
         let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
 
-        let set_streak = |streak: u64, paused: bool, finished: bool| {
-            let mut state = bus.lock();
-            state.is_paused = paused;
-            state.finished = finished;
-            state.latest_frame = Some(FrameSnapshot {
-                flip: streak,
+        let mut pixels = vec![0u8; 64];
+        pixels[0] = 0x55;
+        let present = |h: &mut ControlHost<Headless>, flip: u64| {
+            h.present(&Frame {
                 width: 4,
                 height: 4,
-                bgra: Arc::new(vec![0u8; 64]),
-                frame_hash: "0123456789abcdef".to_owned(),
-                diff: FrameDiff {
-                    diff_pixels: 0,
-                    total_pixels: 16,
-                    diff_pct: 0.0,
-                    diff_bbox: None,
-                    unchanged_streak: streak,
-                },
-                uniform: false,
-                pointer_pos: (320, 240),
+                pitch: 16,
+                pixels: &pixels,
+            });
+            h.observe_flip(&FlipMeta {
+                flip,
+                clock_nanos: flip * 16_000_000,
+                cursor: flip * 100,
+                instructions_passed: 0,
                 pointer_shown: true,
-                cursor_blank: false,
+                pointer_pos: (320, 240),
+                route_active: false,
+                route_remaining: 0,
             });
         };
 
         // 88-flip idle loop in active play: no stuck_loop warning.
-        set_streak(88, false, false);
+        for flip in 0..=88 {
+            present(&mut host, flip);
+        }
         let (json, _, _) = format_sse_event_json(&ctx);
         let parsed = parse_json(&json).unwrap();
         assert!(parsed.as_object().unwrap()["warnings"]
@@ -1067,26 +1069,11 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // 180+ flips while paused: suppressed.
-        set_streak(STUCK_LOOP_THRESHOLD + 20, true, false);
-        let (json, _, _) = format_sse_event_json(&ctx);
-        let parsed = parse_json(&json).unwrap();
-        assert!(parsed.as_object().unwrap()["warnings"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-
-        // 180+ flips once finished: suppressed.
-        set_streak(STUCK_LOOP_THRESHOLD + 20, false, true);
-        let (json, _, _) = format_sse_event_json(&ctx);
-        let parsed = parse_json(&json).unwrap();
-        assert!(parsed.as_object().unwrap()["warnings"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-
-        // 180+ flips in active play while agent is driving: warning emitted.
-        set_streak(STUCK_LOOP_THRESHOLD, false, false);
+        // Advance past STUCK_LOOP_THRESHOLD and schedule an agent action so
+        // active play WOULD emit stuck_loop.
+        for flip in 89..=STUCK_LOOP_THRESHOLD {
+            present(&mut host, flip);
+        }
         assert!(
             bus.dispatch(Command::Act {
                 action: crate::control::timeline::Action::KeyHold {
@@ -1098,11 +1085,64 @@ mod tests {
             })
             .ok
         );
+
+        // 180+ flips in active play while agent is driving: warning emitted.
         let (json, _, _) = format_sse_event_json(&ctx);
         let parsed = parse_json(&json).unwrap();
         let warnings = parsed.as_object().unwrap()["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].as_str().unwrap().starts_with("stuck_loop:"));
+
+        // 180+ flips while paused: suppressed (pause genuinely via ControlHost::observe_flip).
+        assert!(bus.dispatch(Command::Pause).ok);
+        let pause_pixels = pixels.clone();
+        let pause_flip = STUCK_LOOP_THRESHOLD + 1;
+        let paused_thread = thread::spawn(move || {
+            host.present(&Frame {
+                width: 4,
+                height: 4,
+                pitch: 16,
+                pixels: &pause_pixels,
+            });
+            host.observe_flip(&FlipMeta {
+                flip: pause_flip,
+                clock_nanos: pause_flip * 16_000_000,
+                cursor: pause_flip * 100,
+                instructions_passed: 0,
+                pointer_shown: true,
+                pointer_pos: (320, 240),
+                route_active: false,
+                route_remaining: 0,
+            });
+            host
+        });
+        let st = bus.wait_until_paused(Some(Duration::from_secs(2)));
+        assert!(st.paused);
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        assert!(parsed.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(bus.dispatch(Command::Resume).ok);
+        let host = paused_thread.join().unwrap();
+
+        // 180+ flips once finished: suppressed.
+        host.mark_finished(
+            &Finish {
+                outcome: Outcome::Exited { code: 0 },
+                cursor: 0,
+                flips: pause_flip,
+                declared_millis: pause_flip * 16,
+            },
+            "0000000000000000",
+        );
+        let (json, _, _) = format_sse_event_json(&ctx);
+        let parsed = parse_json(&json).unwrap();
+        assert!(parsed.as_object().unwrap()["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1343,37 +1383,45 @@ mod tests {
 
     #[test]
     fn sse_event_json_suppresses_stuck_loop_on_static_menu_idle_and_fires_when_agent_stuck() {
-        use crate::control::bus::FrameDiff;
         use crate::control::observe::STUCK_LOOP_THRESHOLD;
         use crate::control::timeline::Action;
-        use crate::host::Button;
+        use crate::host::{Button, FlipMeta, Frame, Host};
 
-        let bus = ControlBus::new(ControlConfig {
-            mode: ExecMode::Live,
-            owner: InputOwner::Agent,
-            ..ControlConfig::default()
-        });
+        let mut host = ControlHost::new(
+            Headless::new(),
+            ControlConfig {
+                mode: ExecMode::Live,
+                owner: InputOwner::Agent,
+                ..ControlConfig::default()
+            },
+        );
+        let bus = host.bus();
         let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
 
-        let set_frame = |flip: u64, streak: u64| {
-            bus.lock().latest_frame = Some(FrameSnapshot {
-                flip,
+        let present_only = |h: &mut ControlHost<Headless>, flip: u64, tag: u8| {
+            let mut pixels = vec![0u8; 64];
+            pixels[0] = tag;
+            pixels[4] = 0xff;
+            h.present(&Frame {
                 width: 4,
                 height: 4,
-                bgra: Arc::new(vec![0u8; 64]),
-                frame_hash: "0123456789abcdef".to_owned(),
-                diff: FrameDiff {
-                    diff_pixels: 0,
-                    total_pixels: 16,
-                    diff_pct: 0.0,
-                    diff_bbox: None,
-                    unchanged_streak: streak,
-                },
-                uniform: false,
-                pointer_pos: (320, 240),
-                pointer_shown: true,
-                cursor_blank: false,
+                pitch: 16,
+                pixels: &pixels,
             });
+            h.observe_flip(&FlipMeta {
+                flip,
+                clock_nanos: flip * 16_000_000,
+                cursor: flip * 100,
+                instructions_passed: 0,
+                pointer_shown: true,
+                pointer_pos: (320, 240),
+                route_active: false,
+                route_remaining: 0,
+            });
+        };
+        let step_flip = |h: &mut ControlHost<Headless>, flip: u64, tag: u8| {
+            present_only(h, flip, tag);
+            let _ = h.poll_input(flip);
         };
         let warnings = || -> Vec<String> {
             let (json, _, _) = format_sse_event_json(&ctx);
@@ -1394,7 +1442,11 @@ mod tests {
         };
 
         // 1. Static menu idle in live 1.0x (empty queue, no agent actions): suppressed even at 300 flips.
-        set_frame(300, 300);
+        let mut flip = 0u64;
+        while flip <= 300 {
+            step_flip(&mut host, flip, 1);
+            flip += 1;
+        }
         assert!(warnings().is_empty(), "idle static menu must not warn");
 
         // 2. Human Take Over (owner=shared, source="human") queued on static screen: suppressed!
@@ -1417,9 +1469,8 @@ mod tests {
         assert!(bus.dispatch(Command::ClearQueue).ok);
         assert!(bus.dispatch(Command::SetOwner(InputOwner::Agent)).ok);
 
-        // 3. Agent acted BEFORE frame changed to static menu (action at flip 50, frame static since flip 55):
-        //    at flip 255 (streak 200), still idle -> suppressed.
-        set_frame(50, 0);
+        // 3. Agent acted BEFORE frame changed to static menu:
+        //    action drains, frame changes (streak resets to 0), then 200 static flips -> suppressed.
         assert!(
             bus.dispatch(Command::Act {
                 action: click.clone(),
@@ -1427,16 +1478,24 @@ mod tests {
             })
             .ok
         );
-        bus.lock().timeline.clear();
-        set_frame(255, 200);
+        for _ in 0..5 {
+            step_flip(&mut host, flip, 1);
+            flip += 1;
+        }
+        assert_eq!(bus.status().pending_actions, 0);
+        // Transition to a new static screen (tag 2) and sit idle for 200 flips.
+        for _ in 0..=200 {
+            step_flip(&mut host, flip, 2);
+            flip += 1;
+        }
         assert!(
             warnings().is_empty(),
             "post-transition idle menu must not emit stuck_loop"
         );
 
-        // 4. Agent acts right on transition flip K=55 (act_flip == streak_start) and stays stuck 180 flips:
+        // 4. Agent acts right on transition flip K (act_flip == streak_start) and stays stuck 180 flips:
         //    must fire stuck_loop (no off-by-one miss)!
-        set_frame(55, 0);
+        present_only(&mut host, flip, 3);
         assert!(
             bus.dispatch(Command::Act {
                 action: click.clone(),
@@ -1444,8 +1503,13 @@ mod tests {
             })
             .ok
         );
-        bus.lock().timeline.clear();
-        set_frame(55 + STUCK_LOOP_THRESHOLD, STUCK_LOOP_THRESHOLD);
+        let _ = host.poll_input(flip);
+        flip += 1;
+        for _ in 0..STUCK_LOOP_THRESHOLD {
+            step_flip(&mut host, flip, 3);
+            flip += 1;
+        }
+        assert_eq!(bus.status().pending_actions, 0);
         let w = warnings();
         assert_eq!(w.len(), 1);
         assert!(w[0].starts_with("stuck_loop:"));
@@ -1454,9 +1518,8 @@ mod tests {
         assert!(bus.dispatch(Command::ClearQueue).ok);
         assert!(warnings().is_empty());
 
-        // 6. Agent acts ON the unchanged static frame (flip 200, streak 145 -> flip 255, streak 200),
-        //    then stops past STUCK_LOOP_THRESHOLD flips (flip 200 + 181 = 381) -> clears automatically.
-        set_frame(200, 145);
+        // 6. Agent acts ON the unchanged static frame, drains its action, emits stuck_loop,
+        //    then stops past STUCK_LOOP_THRESHOLD flips -> clears automatically.
         assert!(
             bus.dispatch(Command::Act {
                 action: click.clone(),
@@ -1464,15 +1527,20 @@ mod tests {
             })
             .ok
         );
-        bus.lock().timeline.clear();
-        set_frame(255, 200);
+        for _ in 0..5 {
+            step_flip(&mut host, flip, 3);
+            flip += 1;
+        }
+        assert_eq!(bus.status().pending_actions, 0);
         assert_eq!(warnings().len(), 1);
-        set_frame(200 + STUCK_LOOP_THRESHOLD + 1, 326);
+        for _ in 0..=STUCK_LOOP_THRESHOLD {
+            step_flip(&mut host, flip, 3);
+            flip += 1;
+        }
         assert!(warnings().is_empty());
 
         // 7. While owner == Human, stuck_loop is suppressed even with queued actions.
         assert!(bus.dispatch(Command::SetOwner(InputOwner::Human)).ok);
-        set_frame(400, 345);
         assert!(
             bus.dispatch(Command::Act {
                 action: click,
