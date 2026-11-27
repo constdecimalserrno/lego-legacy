@@ -1908,3 +1908,217 @@ fn the_save_and_load_routes_replay_to_the_same_machine_every_time() {
         "both runs wrote and kept byte-identical profiles and saves"
     );
 }
+
+/// Flips kept from `routes/pirates-vs-ai-checkmate.route` (#303, #304): the
+/// Pirates 3D board ready with Admiral and Pirate Advisors, a mid-game 3D board
+/// frame (`7... Ng8-e7`), the `8. Bb5xd7+` Bishop-takes-Queen 3D Pirate capture
+/// cartoon, the `26. Qc6xa8#` Queen-takes-Rook Checkmate capture cartoon, the
+/// `"Checkmate! Congratulations, you win!"` dialog, and the Throne Room after
+/// clicking its green tick.
+const PIRATES_BOARD_READY: u64 = 555;
+const PIRATES_MIDGAME: u64 = 5288;
+const PIRATES_CAPTURE_BISHOP_QUEEN: u64 = 5614;
+const PIRATES_CAPTURE_CHECKMATE: u64 = 18352;
+const PIRATES_CHECKMATE_DIALOG: u64 = 18800;
+const PIRATES_RETURNED_TO_THRONE: u64 = 18850;
+const PIRATES_AI_KEPT: [u64; 6] = [
+    PIRATES_BOARD_READY,
+    PIRATES_MIDGAME,
+    PIRATES_CAPTURE_BISHOP_QUEEN,
+    PIRATES_CAPTURE_CHECKMATE,
+    PIRATES_CHECKMATE_DIALOG,
+    PIRATES_RETURNED_TO_THRONE,
+];
+
+/// Enough instructions for the 26-move Pirates 3D Quick Game vs Computer AI
+/// route to play all 51 plies, nine captures (3D Pirate capture cartoons),
+/// Checkmate victory, Throne Room return, and clean exit 0 at 57,479,034,089.
+const PIRATES_AI_BUDGET: u64 = 60_000_000_000;
+
+fn pirates_vs_ai(
+    slot: &'static std::sync::OnceLock<Option<testkit::Ran>>,
+    shots: bool,
+) -> Option<&'static testkit::Ran> {
+    let cli = Cli {
+        route: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("routes/pirates-vs-ai-checkmate.route"),
+        ),
+        screenshots: Screenshots {
+            at: if shots {
+                PIRATES_AI_KEPT.to_vec()
+            } else {
+                Vec::new()
+            },
+            every: None,
+        },
+        ..Cli::default()
+    };
+    testkit::replay(
+        slot,
+        || scratch() && testkit::any_rip(&roster::GM16).is_some(),
+        &CHESS,
+        &cli,
+        &PIRATES_AI_KEPT,
+        PIRATES_AI_BUDGET,
+    )
+}
+
+static PIRATES_AI: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+
+/// A full Quick Game against the Oxford Softworks Computer AI in the Pirates 3D
+/// theme played to Checkmate (#303, #304). Boots from a fresh `--data-root`,
+/// registers `Ada`, switches Quick Game Theme to Pirates while keeping Black as
+/// Computer AI (default difficulty 25, matched sets, cartoons on), loads
+/// `Advisors\admiral.avi` and `Advisors\pirate.avi` with `ptune.mid`, plays 26
+/// legal moves (51 plies, 9 captures triggering 3D Pirate capture cartoons) to
+/// `26. Qc6xa8#`, reaches `"Checkmate! Congratulations, you win!"`, returns to
+/// the Throne Room via `(320,232)`, and exits 0 cleanly.
+#[test]
+fn a_quick_game_against_the_computer_in_pirates_theme_reaches_checkmate() {
+    let Some(ran) = pirates_vs_ai(&PIRATES_AI, true) else {
+        return;
+    };
+    ran.assert_exited(0)
+        .assert_flips(18_861)
+        .assert_logged("midi bank ")
+        .assert_logged("GM16.DLS from ")
+        .assert_logged("movie Advisors\\admiral.avi opened through AVIFile: 1 streams")
+        .assert_logged("movie Advisors\\pirate.avi opened through AVIFile: 1 streams")
+        .assert_logged("flip 555 cursor 3740281865 640x480x16")
+        .assert_logged("flip 5288 cursor 18995341063 640x480x16")
+        .assert_logged("flip 5614 cursor 19749024596 640x480x16")
+        .assert_logged("flip 18352 cursor 56607183199 640x480x16")
+        .assert_logged("flip 18800 cursor 57272521987 640x480x16")
+        .assert_logged("flip 18850 cursor 57456415643 640x480x16")
+        .assert_logged("end exited 0 cursor 57479034089 flips 18861 declared-ms 500683");
+
+    // Three MIDI opens, none refused: boot init (tune.mid), Pirates match
+    // (ptune.mid), and Throne Room return (tune.mid).
+    assert_eq!(ran.log.matches("midi stream open answered").count(), 3);
+    assert_eq!(ran.log.matches("midi stream open answered 0").count(), 3);
+    // 27 menu/Throne Room + Pirates board + 9 Pirate capture cartoons +
+    // checkmate fanfare + 12 Throne Room re-entry.
+    assert_eq!(ran.log.matches("acm stream ").count(), 82);
+
+    for flip in PIRATES_AI_KEPT {
+        let frame = ran.host.frame(flip).expect("presented");
+        assert!(!frame.is_uniform(), "flip {flip} is non-uniform");
+    }
+    assert_pinned_frames(
+        ran,
+        &[
+            (
+                PIRATES_BOARD_READY,
+                "038b08957a52e51ce163eecf7a401dae5b10fed0bddee1c0fb453692c294f578",
+            ),
+            (
+                PIRATES_MIDGAME,
+                "a0d6f75cc4d904cffe7061228ed930dc6520dd64f9257bec016385f2bfc3a9ec",
+            ),
+            (
+                PIRATES_CAPTURE_BISHOP_QUEEN,
+                "f51b5161c824fb097a67ff038cd2531c1a6546e6efa6cd1866a4d689c7b3de1a",
+            ),
+            (
+                PIRATES_CAPTURE_CHECKMATE,
+                "7fa4d42ae0ce4e15fc667dd535d00ba1368b28ee591d535f37763dcb7c7493e2",
+            ),
+            (
+                PIRATES_CHECKMATE_DIALOG,
+                "78cb87f1066b6c76f42f52cf88e6dcb2199ad36eff9f59ec40b236f0b147b3c8",
+            ),
+            (
+                PIRATES_RETURNED_TO_THRONE,
+                "316fce2dd184ded7d07383ab1ce238169a40bc35773bed1dff92fca453bd059f",
+            ),
+        ],
+        "pirates-vs-ai",
+    );
+
+    let checkmate_frame = ran.host.frame(PIRATES_CHECKMATE_DIALOG).expect("presented");
+    let green_tick = |[b, g, r]: [u8; 3]| g > 140 && r < 80 && b < 80;
+    assert!(
+        matching_pixels(checkmate_frame, (295, 205, 345, 260), green_tick) > 400,
+        "Checkmate victory dialog shows the green confirmation tick at (320, 232)"
+    );
+
+    for (label, from, to) in [
+        (
+            "Pirates match",
+            PIRATES_BOARD_READY,
+            PIRATES_CAPTURE_BISHOP_QUEEN,
+        ),
+        (
+            "Pirates capture cartoons",
+            PIRATES_CAPTURE_BISHOP_QUEEN,
+            PIRATES_CHECKMATE_DIALOG,
+        ),
+        (
+            "Checkmate fanfare",
+            PIRATES_CHECKMATE_DIALOG,
+            PIRATES_RETURNED_TO_THRONE,
+        ),
+    ] {
+        let rms = ran.loudness(from, to);
+        assert!(
+            !rms.is_empty() && rms.iter().any(|r| *r > 0.0),
+            "{label} is heard"
+        );
+    }
+
+    // Profile is written at creation plus once per capture cartoon (10 writes)
+    // and records 6 distinct Pirate capture cartoon scrapbook unlocks.
+    let prof_path = saved_times(ran, "prof1.lcp", 10);
+    let prof = std::fs::read(&prof_path).expect("prof1.lcp reads");
+    assert_eq!(prof.len(), 4_544);
+    assert!(prof.starts_with(b"Ada\0"));
+    assert_eq!(
+        prof[0x002C..0x112C].iter().filter(|&&b| b != 0).count(),
+        6,
+        "6 distinct Pirate capture cartoons unlocked in Scrapbook"
+    );
+    assert_eq!(
+        hash::sha256_hex(&prof),
+        "b629d3c62284f55276fc3c29ccfca4cbe92b0377d174c545a14b663c3149dc07"
+    );
+}
+
+#[test]
+fn the_pirates_vs_ai_checkmate_route_replays_to_the_same_machine_every_time() {
+    static AGAIN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| pirates_vs_ai(&AGAIN, false));
+        (
+            pirates_vs_ai(&PIRATES_AI, true),
+            second.join().expect("the second Pirates AI replay ran"),
+        )
+    });
+    let (Some(first), Some(second)) = (first, second) else {
+        return;
+    };
+    first.assert_same_machine(second);
+    for flip in PIRATES_AI_KEPT {
+        assert!(
+            first.host.frame(flip).map(|f| &f.pixels) == second.host.frame(flip).map(|f| &f.pixels),
+            "including what it presented at flip {flip}"
+        );
+    }
+    assert!(
+        first.host.audio_blocks == second.host.audio_blocks
+            && first.host.audio_flips == second.host.audio_flips,
+        "and what it mixed"
+    );
+    for (name, writes) in [("prof1.lcp", 10), ("1save.lcs", 1)] {
+        let (one, two) = (
+            saved_times(first, name, writes),
+            saved_times(second, name, writes),
+        );
+        assert_ne!(one, two, "two replays, two fresh data roots");
+        assert!(
+            std::fs::read(&one).expect("first save is there")
+                == std::fs::read(&two).expect("second save is there"),
+            "and saved {name} the same"
+        );
+    }
+}
