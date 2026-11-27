@@ -1,37 +1,47 @@
 #lego-legacy-route 1
-# LEGOLAND: cold boot (`--guest-args -nointro` until #395 adds IMA ADPCM
-# 0x0011 for `Intro.avi`) through `Player Details` -> create profile "ADA" ->
+# LEGOLAND: unflagged cold boot through `D:\lmi.avi` (skipped via
+# `LeftControl+Q`) -> `D:\Intro.avi` (`IV50` + `0x0011` IMA ADPCM audio,
+# skipped via `Space`) -> `Player Details` -> create profile "ADA" ->
 # `Accept` -> rendered `Title Screen` -> `Exit Game` -> `Yes` -> clean exit 0
-# (#394).
+# (#394, #395).
 #
 # Sequence:
-# - Flips 0..9: `Player Details` renders with `Lego.TTF` GDI text, animated
+# - Flips 0..6: `D:\lmi.avi` plays (`IV50` + 8-bit PCM); `LeftControl+Q` skips.
+# - Flips 7..35: `D:\Intro.avi` plays (`IV50` + `0x0011` IMA ADPCM stereo via
+#   MSACM32); `Space` skips cleanly to `Player Details`.
+# - Flips 38..49: `Player Details` renders with `Lego.TTF` GDI text, animated
 #   `AD_Blink.avi` advisor orb, and `rab over icon.lls` cursor at (320, 240).
-# - Flips 10..16: move to profile slot 1 (260, 187) and click to activate entry.
-# - Flips 22..36: type "ADA" and confirm with Return (`profiles\Profile1.txt`).
-# - Flips 50..56: move to `Accept` (562, 402) and click to enter `Title Screen`.
-# - Flips 57..79: animated 640x480x16 `Title Screen` with `Start Game` unlocked.
-# - Flips 80..86: click `Exit Game` (557, 93) to open `EXIT / Are you sure?`.
-# - Flips 96..102: click green checkmark (395, 173) -> clean `ExitProcess(0)`.
-flip 10 move 260 187
-flip 14 down left
-flip 16 up left
-flip 22 key LeftShift down
-flip 23 key A down
-flip 24 key A up
-flip 25 key D down
-flip 26 key D up
-flip 27 key A down
-flip 28 key A up
-flip 29 key LeftShift up
-flip 34 key Return down
-flip 36 key Return up
-flip 50 move 562 402
+# - Flips 50..56: move to profile slot 1 (260, 187) and click to activate entry.
+# - Flips 62..76: type "ADA" and confirm with Return (`profiles\Profile1.txt`).
+# - Flips 90..96: move to `Accept` (562, 402) and click to enter `Title Screen`.
+# - Flips 97..119: animated 640x480x16 `Title Screen` with `Start Game` unlocked.
+# - Flips 120..126: click `Exit Game` (557, 93) to open `EXIT / Are you sure?`.
+# - Flips 136..142: click green checkmark (395, 173) -> clean `ExitProcess(0)`.
+flip 4 key LeftControl down
+flip 5 key Q down
+flip 6 key Q up
+flip 7 key LeftControl up
+flip 35 key Space down
+flip 37 key Space up
+flip 50 move 260 187
 flip 54 down left
 flip 56 up left
-flip 80 move 557 93
-flip 84 down left
-flip 86 up left
-flip 96 move 395 173
-flip 100 down left
-flip 102 up left
+flip 62 key LeftShift down
+flip 63 key A down
+flip 64 key A up
+flip 65 key D down
+flip 66 key D up
+flip 67 key A down
+flip 68 key A up
+flip 69 key LeftShift up
+flip 74 key Return down
+flip 76 key Return up
+flip 90 move 562 402
+flip 94 down left
+flip 96 up left
+flip 120 move 557 93
+flip 124 down left
+flip 126 up left
+flip 136 move 395 173
+flip 140 down left
+flip 142 up left

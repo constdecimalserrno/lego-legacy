@@ -54,6 +54,8 @@ Safe Click centers are listed only where both top-left `(x, y)` and sprite `[w×
 | **Profile Details:** Slot 1 (`EMPTY`) | `RegProfileON/Off_*.lls` | `(128, 172)` | — | `(260, 187)` *(verified #394)* |
 | **Profile Details:** Accept | `Accept_On_Reg.lls` | `(495, 335)` | `135×135` | `(562, 402)` *(verified #394)* |
 | **Exit Dialog:** Confirm Yes (green checkmark) | `InitExitCheckBox` | — | — | `(395, 173)` *(verified #394)* |
+| **Movie / Adverts:** California / Windsor / Billund | Park advert buttons | — | — | `(115, 75)`, `(320, 75)`, `(525, 75)` *(verified #395)* |
+| **Movie / Adverts:** Go Back | Purple orb | — | — | `(88, 395)` *(verified #395)* |
 | **Progress Map:** Tutorial Screen toggle | `Tutorial_On_Progress.lls` | `(372, 365)` | — | verify visually |
 | **Progress Map:** Accept / Play | `Accept_on_Progress.lls` | `(526, 367)` | `103×103` | `(577, 418)` |
 | **Progress Map:** Go Back | `GoBack_on_Progress.lls` | `(520, 11)` | `112×112` | `(576, 67)` |

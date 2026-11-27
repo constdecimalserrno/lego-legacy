@@ -1,8 +1,10 @@
 //! LEGOLAND, run headless from the player's rip: the launcher finding the
 //! Masterpiece pressing, its declared InstallShield 3 `main.z` tree and Joliet
-//! `.res` access, its first-light route through `Player Details` -> `"ADA"` ->
-//! `Title Screen` -> clean exit, determinism, and `LLSNAP v2` cold snapshot
-//! restore parity (#393, #394).
+//! `.res` access, its unflagged first-light route through `lmi.avi` ->
+//! `Intro.avi` (`0x0011` IMA ADPCM) -> `Player Details` -> `"ADA"` ->
+//! `Title Screen` -> clean exit, media codecs (`IV32`, `0x0011` IMA ADPCM,
+//! `0x0002` MS ADPCM `Speech/*.wav`, `AD_*.avi` overlays), determinism, and
+//! `LLSNAP v2` cold snapshot restore parity (#393, #394, #395).
 //!
 //! Disc tests need the player's own rip under `game-data/`. Without it the
 //! disc tests print a skip line and pass, which is a gate that did not run
@@ -15,19 +17,34 @@ use lego_legacy_core::machine::Machine;
 use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::route::Route;
 use lego_legacy_core::runlog::RunLog;
+use lego_legacy_core::snap::{Reader, Snap, Visitor, Writer};
 use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::{disc, hash, pe, testkit, Title};
+use lego_legacy_core::{avi, disc, hash, iv32, iv50, pe, sound, testkit, Title};
 use legoland::LEGOLAND;
 use std::path::PathBuf;
 
 const ROOT: &str = LEGOLAND.install_dir;
 const UNFLAGGED_BOOT_BUDGET: u64 = 50_000_000;
-const FIRST_LIGHT_BUDGET: u64 = 2_000_000_000;
+const FIRST_LIGHT_BUDGET: u64 = 3_000_000_000;
 
 fn route_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("routes")
         .join(name)
+}
+
+fn pcm_rms(samples: &[i16]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples
+        .iter()
+        .map(|&s| {
+            let x = f64::from(s);
+            x * x
+        })
+        .sum();
+    (sum_sq / samples.len() as f64).sqrt()
 }
 
 /// Unflagged cold boot: loads `Legoland.exe`, reads PE `RT_VERSION`, mounts
@@ -49,15 +66,14 @@ fn boot() -> Option<&'static testkit::Ran> {
     )
 }
 
-/// First-light route (`--guest-args -nointro` until #395 adds IMA ADPCM 0x0011
-/// for `Intro.avi`): boots to `Player Details`, creates profile `"ADA"`,
-/// clicks `Accept`, renders `Title Screen`, and exits cleanly via
-/// `Exit Game -> Yes` (#394).
+/// Unflagged first-light route: plays `lmi.avi` (skipped via `LeftControl+Q`),
+/// plays `Intro.avi` (`IV50` + `0x0011` IMA ADPCM, skipped via `Space`),
+/// boots to `Player Details`, creates profile `"ADA"`, clicks `Accept`,
+/// renders `Title Screen`, and exits cleanly via `Exit Game -> Yes` (#394, #395).
 fn first_light() -> Option<&'static testkit::Ran> {
     static RAN: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
     let cli = Cli {
         route: Some(route_path("first-light.route")),
-        guest_args: Some("-nointro".to_owned()),
         ..Cli::default()
     };
     testkit::replay(
@@ -65,7 +81,7 @@ fn first_light() -> Option<&'static testkit::Ran> {
         scratch,
         &LEGOLAND,
         &cli,
-        &[5, 32, 70, 94],
+        &[25, 45, 72, 110, 134],
         FIRST_LIGHT_BUDGET,
     )
 }
@@ -233,21 +249,27 @@ fn unflagged_boot_loads_fonts_resources_and_plays_lmi_avi() {
 }
 
 #[test]
-fn first_light_creates_ada_profile_reaches_title_screen_and_exits_cleanly() {
+fn first_light_plays_intros_with_audio_creates_ada_reaches_title_and_exits_cleanly() {
     let Some(ran) = first_light() else {
         return;
     };
     ran.assert_exited(0)
-        .assert_flips(105)
+        .assert_flips(145)
         .assert_logged("gdi AddFontResourceA: Lego.ttf -> family \"Lego\"")
+        .assert_logged("movie D:\\lmi.avi opened through AVIFile: 2 streams")
+        .assert_logged("movie D:\\Intro.avi opened through AVIFile: 2 streams")
+        .assert_logged("IMA ADPCM at 22050 Hz in 2 channels to 16-bit PCM")
+        .assert_logged("MS ADPCM at 22050 Hz in 1 channels to 16-bit PCM")
         .assert_logged("com: d2ac2890-b39b-11d1-8704-00600893b1bd is not registered")
         .assert_logged("movie AD_Blink.avi opened through AVIFile: 1 streams");
 
-    let details = ran.host.frame(5).expect("Player Details flip 5 kept");
-    let typed = ran.host.frame(32).expect("ADA typed flip 32 kept");
-    let title = ran.host.frame(70).expect("Title Screen flip 70 kept");
-    let exit_dlg = ran.host.frame(94).expect("Exit dialog flip 94 kept");
+    let intro = ran.host.frame(25).expect("Intro.avi flip 25 kept");
+    let details = ran.host.frame(45).expect("Player Details flip 45 kept");
+    let typed = ran.host.frame(72).expect("ADA typed flip 72 kept");
+    let title = ran.host.frame(110).expect("Title Screen flip 110 kept");
+    let exit_dlg = ran.host.frame(134).expect("Exit dialog flip 134 kept");
     for (name, frame) in [
+        ("Intro.avi", intro),
         ("Player Details", details),
         ("ADA typed", typed),
         ("Title Screen", title),
@@ -256,6 +278,10 @@ fn first_light_creates_ada_profile_reaches_title_screen_and_exits_cleanly() {
         assert_eq!((frame.width, frame.height), (640, 480), "{name} resolution");
         assert!(!frame.is_uniform(), "{name} renders non-uniform pixels");
     }
+    assert_ne!(
+        intro.pixels, details.pixels,
+        "Space skips Intro.avi to Player Details"
+    );
     assert_ne!(
         details.pixels, typed.pixels,
         "typing ADA visibly updates Player Details"
@@ -268,6 +294,33 @@ fn first_light_creates_ada_profile_reaches_title_screen_and_exits_cleanly() {
         title.pixels, exit_dlg.pixels,
         "Exit Game opens the Exit confirmation dialog"
     );
+
+    // Mixed PCM audio during Intro.avi (0x0011 IMA ADPCM) and UI/speech must be non-silent.
+    assert!(
+        ran.host.audio_blocks.len() >= 40,
+        "expected >= 40 mixed audio blocks across unflagged first-light, got {}",
+        ran.host.audio_blocks.len()
+    );
+    let intro_window: Vec<i16> = ran.host.audio_blocks[10..35]
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    let intro_rms = pcm_rms(&intro_window);
+    assert!(
+        intro_rms > 50.0,
+        "Intro.avi 0x0011 IMA ADPCM audio should be non-silent (RMS={intro_rms:.2})"
+    );
+    let post_intro_window: Vec<i16> = ran.host.audio_blocks[35..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    let post_rms = pcm_rms(&post_intro_window);
+    assert!(
+        post_rms > 5.0,
+        "UI SFX / MS ADPCM audio after Intro.avi should be non-silent (RMS={post_rms:.2})"
+    );
 }
 
 #[test]
@@ -277,11 +330,171 @@ fn first_light_replays_to_the_same_machine_every_time() {
     };
     let cli = Cli {
         route: Some(route_path("first-light.route")),
-        guest_args: Some("-nointro".to_owned()),
         ..Cli::default()
     };
     let second = testkit::run_headless(&LEGOLAND, &cli, FIRST_LIGHT_BUDGET);
     first.assert_same_machine(&second);
+    assert_eq!(
+        first.host.audio_blocks, second.host.audio_blocks,
+        "mixed PCM audio matches bit-for-bit across replays"
+    );
+}
+
+#[test]
+fn disc_media_decodes_ima_adpcm_speech_ms_adpcm_advisors_and_iv32_california() {
+    if !scratch() {
+        return;
+    }
+    let mut tree = testkit::tree(&LEGOLAND);
+
+    // 1. California.avi: IV32 Indeo 3.2 (320x200, 587 frames) + mid-stream LLSNAP v2 parity.
+    let cal_bytes = tree
+        .read("D:\\California.avi")
+        .expect("California.avi on disc");
+    let cal_avi = avi::parse(&cal_bytes).expect("parse California.avi");
+    let cal_vid = cal_avi
+        .streams
+        .iter()
+        .find(|s| s.is_video())
+        .expect("California.avi video stream");
+    assert_eq!(&cal_vid.compression(), b"IV32");
+    assert_eq!(cal_vid.picture_size(), (320, 200));
+    assert_eq!(cal_vid.chunks.len(), 587);
+
+    let mut dec = iv32::Decoder::new();
+    let mut pic = iv50::Picture::default();
+    let mut snap_bytes = None;
+    let mut snap_pic = None;
+    let mut frames_after_snap = Vec::new();
+    for (idx, &(start, len)) in cal_vid.chunks.iter().enumerate() {
+        dec.decode(&cal_bytes[start..start + len], &mut pic)
+            .unwrap_or_else(|e| panic!("California.avi IV32 frame {idx} failed: {e}"));
+        assert_eq!((pic.width, pic.height), (320, 200));
+        if idx == 150 {
+            let mut w = Writer::new();
+            dec.snap(&mut w);
+            snap_bytes = Some(w.out);
+            snap_pic = Some(pic.clone());
+        } else if idx > 150 && idx <= 170 {
+            frames_after_snap.push(pic.clone());
+        }
+    }
+    // Confirm non-uniform decoded frame and exact mid-movie IV32 snapshot continuity.
+    assert!(pic.y.iter().any(|&p| p != pic.y[0]));
+    let mut restored_dec = iv32::Decoder::new();
+    let mut r = Reader::new(snap_bytes.as_ref().expect("snapshot captured"));
+    restored_dec.snap(&mut r);
+    assert!(!r.failed());
+    let mut restored_pic = snap_pic.expect("snap pic");
+    for (offset, &(start, len)) in cal_vid.chunks[151..=170].iter().enumerate() {
+        restored_dec
+            .decode(&cal_bytes[start..start + len], &mut restored_pic)
+            .expect("restored IV32 decode");
+        assert_eq!(
+            restored_pic,
+            frames_after_snap[offset],
+            "IV32 frame {} after LLSNAP v2 restore matches baseline bit-exact",
+            151 + offset
+        );
+    }
+
+    // 2. All 6 IMA ADPCM (0x0011) FMVs decode to non-silent PCM.
+    for name in [
+        "Intro.avi",
+        "Billund.avi",
+        "egypt.avi",
+        "INCA.AVI",
+        "Medieval.avi",
+        "SPIDER.AVI",
+    ] {
+        let bytes = tree
+            .read(&format!("D:\\{name}"))
+            .unwrap_or_else(|| panic!("{name} on disc"));
+        let parsed = avi::parse(&bytes).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+        let audio = parsed
+            .streams
+            .iter()
+            .find(|s| s.is_audio())
+            .unwrap_or_else(|| panic!("{name} audio stream"));
+        let fmt = sound::Format::parse(&audio.format).expect("parse WAVEFORMATEX");
+        assert_eq!(fmt.tag, 0x0011, "{name} should be IMA ADPCM");
+        let pcm = parsed
+            .decode_audio(&bytes)
+            .unwrap_or_else(|e| panic!("decode {name} audio: {e}"))
+            .expect("audio decoded");
+        let rms = pcm_rms(&pcm);
+        assert!(
+            rms > 50.0,
+            "{name} IMA ADPCM decoded audio should be non-silent (RMS={rms:.2})"
+        );
+    }
+
+    // 3. Speech/*.wav (0x0002 MS ADPCM mono 22,050 Hz) decodes to non-silent PCM.
+    let wav = tree
+        .read("D:\\Speech\\BRIEFING TUTORIAL TWO_01.wav")
+        .expect("Speech WAV on disc");
+    let (fmt_bytes, data_bytes) = parse_riff_wav(&wav);
+    let speech_fmt = sound::Format::parse(fmt_bytes).expect("parse speech WAVEFORMATEX");
+    assert_eq!(speech_fmt.tag, 2);
+    assert_eq!((speech_fmt.channels, speech_fmt.rate), (1, 22_050));
+    let speech_pcm = speech_fmt.decode(data_bytes).expect("decode speech WAV");
+    let speech_rms = pcm_rms(&speech_pcm);
+    assert!(
+        speech_rms > 100.0,
+        "Speech MS ADPCM WAV should be non-silent (RMS={speech_rms:.2})"
+    );
+
+    // 4. AD_Blink.avi (112x96 IV50 advisor overlay from main.z) decodes distinct frames.
+    let adv_bytes = tree
+        .read(&format!("{ROOT}\\AD_Blink.avi"))
+        .expect("AD_Blink.avi unpacked from main.z");
+    let adv_avi = avi::parse(&adv_bytes).expect("parse AD_Blink.avi");
+    let adv_vid = adv_avi
+        .streams
+        .iter()
+        .find(|s| s.is_video())
+        .expect("AD_Blink.avi video");
+    assert_eq!(adv_vid.picture_size(), (112, 96));
+    let mut adv_dec = iv50::Decoder::new();
+    let mut adv_pic = iv50::Picture::default();
+    let mut first_y = None;
+    let mut changed = false;
+    for &(start, len) in &adv_vid.chunks {
+        if len > 0 {
+            adv_dec
+                .decode(&adv_bytes[start..start + len], &mut adv_pic)
+                .expect("decode AD_Blink.avi frame");
+            if let Some(ref f) = first_y {
+                if &adv_pic.y != f {
+                    changed = true;
+                }
+            } else {
+                first_y = Some(adv_pic.y.clone());
+            }
+        }
+    }
+    assert!(changed, "AD_Blink.avi should produce animating frames");
+}
+
+fn parse_riff_wav(wav: &[u8]) -> (&[u8], &[u8]) {
+    assert_eq!(&wav[0..4], b"RIFF");
+    assert_eq!(&wav[8..12], b"WAVE");
+    let mut pos = 12;
+    let mut fmt = None;
+    let mut data = None;
+    while pos + 8 <= wav.len() {
+        let id = &wav[pos..pos + 4];
+        let len =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
+        let body = &wav[pos + 8..(pos + 8 + len).min(wav.len())];
+        if id == b"fmt " {
+            fmt = Some(body);
+        } else if id == b"data" {
+            data = Some(body);
+        }
+        pos += 8 + len + (len & 1);
+    }
+    (fmt.expect("WAV fmt chunk"), data.expect("WAV data chunk"))
 }
 
 fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u64) {
@@ -292,7 +505,6 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
 
     let mut host_a = Headless::new();
     let mut machine_a = Machine::new(&LEGOLAND, &mut host_a).expect("machine");
-    machine_a.state.guest_args = "-nointro".to_owned();
     machine_a.load_title(&LEGOLAND).expect("load title");
     machine_a.route = Some(route.clone());
     machine_a.tree.set_profile(data_root.join("a"));
@@ -318,7 +530,6 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
 
     let mut host_b = Headless::new();
     let mut machine_b = Machine::new(&LEGOLAND, &mut host_b).expect("machine");
-    machine_b.state.guest_args = "-nointro".to_owned();
     machine_b.load_title(&LEGOLAND).expect("load title");
     machine_b.route = Some(route);
     machine_b.tree.set_profile(prof_b);
@@ -364,11 +575,15 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 }
 
 #[test]
-fn first_light_player_details_and_title_screen_snapshots_round_trip_bit_exact() {
+fn first_light_mid_movie_player_details_and_title_screen_snapshots_round_trip_bit_exact() {
     let Some(baseline) = first_light() else {
         return;
     };
-    for (label, snap_flip) in [("player-details", 20u64), ("title-screen", 70u64)] {
+    for (label, snap_flip) in [
+        ("intro-avi", 20u64),
+        ("player-details", 55u64),
+        ("title-screen", 110u64),
+    ] {
         assert_snapshot_round_trip(baseline, label, snap_flip);
     }
 }
