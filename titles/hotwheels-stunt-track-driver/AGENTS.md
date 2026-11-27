@@ -81,3 +81,4 @@ Landing inverted or sideways triggers a crash and costs race time.
 - **Committed reference routes:**
   - [`routes/first-race.route`](routes/first-race.route): boot → Track 1 finish (`saves\times.dat`) → `Escape` quit.
   - [`routes/secret-track.route`](routes/secret-track.route): clean profile → Championship Tracks 1–6 → Mattel `"TT"` right-click unlock → `WIRE` finish → `Escape` quit.
+  - [`routes/wire-gold-medal.route`](routes/wire-gold-medal.route): clean profile → Championship Tracks 1–6 → Mattel `"TT"` right-click unlock → `WIRE` 1:08 Gold Medal (`0` crashes, `54` stunts) → `Escape` quit.
