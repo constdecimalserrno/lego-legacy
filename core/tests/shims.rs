@@ -5247,7 +5247,8 @@ fn acm_decodes_ms_adpcm_a_block_at_a_time() {
     }
 
     // A destination shorter than a block's PCM, which Windows fills from the
-    // whole source, and the codec's END, are not written.
+    // whole source, and unknown convert flags, are not written; END (0x20) is
+    // accepted cleanly on stateless block ADPCM streams (#395).
     acm_header(&mut m, 32, 100);
     assert_eq!(prepare(&mut m, 0), Ok(0));
     assert!(matches!(
@@ -5256,8 +5257,10 @@ fn acm_decodes_ms_adpcm_a_block_at_a_time() {
     ));
     acm_header(&mut m, 32, 104);
     assert_eq!(prepare(&mut m, 0), Ok(0));
+    assert_eq!(convert(&mut m, 0x30), Ok(0));
+    assert_eq!((read(&m, 0x14), read(&m, 0x24)), (32, 104));
     assert!(matches!(
-        convert(&mut m, 0x30),
+        convert(&mut m, 0x40),
         Err(Stop::NotWritten { .. })
     ));
 
@@ -5300,8 +5303,7 @@ fn acm_decodes_ms_adpcm_a_block_at_a_time() {
     // handle; nor is eight bits at a rate off `msadp32`'s table. Eight bits
     // at one of its rates, a block too small for its own header, another
     // format, other predictors, being asked only whether it can, no format or
-    // no handle to answer, a stream the machine never made, or sizing from
-    // the destination, is not written.
+    // no handle to answer, or a stream the machine never made is not written.
     let (adpcm, mut pcm) = adpcm_formats(1, 32, 16);
     pcm[2] = 2;
     m.arena.write(OUT, &words(&[0x1234])).expect("in the arena");
@@ -5352,12 +5354,13 @@ fn acm_decodes_ms_adpcm_a_block_at_a_time() {
     }
     let unknown = call(&mut m, "MSACM32", "acmStreamSize", &[99, 64, OUT, 0]);
     assert_eq!(unknown, Ok(5), "MMSYSERR_INVALHANDLE");
-    assert!(wall(call(
-        &mut m,
-        "MSACM32",
-        "acmStreamSize",
-        &[stream, 64, OUT, 1]
-    )));
+    // ACM_STREAMSIZEF_DESTINATION (1) rounds destination bytes up to whole
+    // source ADPCM blocks (#395): 64 PCM bytes <= 104-byte block -> 32 src B.
+    assert_eq!(
+        call(&mut m, "MSACM32", "acmStreamSize", &[stream, 64, OUT, 1]),
+        Ok(0)
+    );
+    assert_eq!(m.arena.read_u32(OUT), Ok(32));
 }
 
 /// A sound off the disc decodes through ACM to what FFmpeg decodes it to

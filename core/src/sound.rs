@@ -97,6 +97,7 @@ impl Format {
                 .collect(),
             (1, 8) => data.iter().map(|b| (i16::from(*b) - 128) << 8).collect(),
             (2, 4) => self.ms_adpcm(data)?,
+            (0x0011, 4) => self.ima_adpcm(data)?,
             (tag, bits) => {
                 return Err(Error(format!(
                     "format tag {tag} at {bits} bits, which nothing here decodes"
@@ -168,6 +169,94 @@ impl Format {
                     delta[c] =
                         (ADAPTATION[usize::from(nibble)].wrapping_mul(delta[c]) >> 8).max(16);
                     out.push(sample as i16);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Microsoft IMA/DVI ADPCM (`0x0011`): each block starts with a 4-byte
+    /// per-channel header (`[predictor: i16, step_index: u8, reserved: u8]`),
+    /// followed by low-nibble-first 4-bit codes (byte-by-byte for mono, or
+    /// interleaved 4-byte / 8-sample channel chunks for stereo).
+    pub(crate) fn ima_adpcm(&self, data: &[u8]) -> Result<Vec<i16>, Error> {
+        const INDEX_TABLE: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+        const STEP_TABLE: [i32; 89] = [
+            7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55,
+            60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+            337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411,
+            1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+            5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500,
+            20350, 22385, 24623, 27086, 29794, 32767,
+        ];
+        let step_nibble = |nibble: u8, predictor: &mut i32, index: &mut i32| -> i16 {
+            let step = STEP_TABLE[*index as usize];
+            let mut diff = step >> 3;
+            if nibble & 1 != 0 {
+                diff += step >> 2;
+            }
+            if nibble & 2 != 0 {
+                diff += step >> 1;
+            }
+            if nibble & 4 != 0 {
+                diff += step;
+            }
+            if nibble & 8 != 0 {
+                *predictor -= diff;
+            } else {
+                *predictor += diff;
+            }
+            *predictor = (*predictor).clamp(-32768, 32767);
+            *index = (*index + INDEX_TABLE[usize::from(nibble & 0x0f)]).clamp(0, 88);
+            *predictor as i16
+        };
+
+        let channels = usize::from(self.channels);
+        if !(1..=2).contains(&channels) {
+            return Err(Error(format!(
+                "IMA ADPCM with {channels} channels is unsupported"
+            )));
+        }
+        let align = usize::from(self.block_align);
+        let header = 4 * channels;
+        if align < header || (channels == 2 && !align.is_multiple_of(8)) {
+            return Err(Error(format!(
+                "an IMA ADPCM block of {align} bytes for {channels} channels is invalid"
+            )));
+        }
+
+        let per_block = ((align - header) * 2 / channels + 1) * channels;
+        let mut out = Vec::with_capacity((data.len() / align) * per_block);
+        for block in data.chunks_exact(align) {
+            let mut predictor = [0i32; 2];
+            let mut index = [0i32; 2];
+            for c in 0..channels {
+                let off = c * 4;
+                predictor[c] = i32::from(i16::from_le_bytes([block[off], block[off + 1]]));
+                index[c] = i32::from(block[off + 2]).clamp(0, 88);
+                out.push(predictor[c] as i16);
+            }
+            if channels == 1 {
+                for &packed in &block[header..] {
+                    out.push(step_nibble(packed & 0x0f, &mut predictor[0], &mut index[0]));
+                    out.push(step_nibble(packed >> 4, &mut predictor[0], &mut index[0]));
+                }
+            } else {
+                for chunk in block[header..].as_chunks::<8>().0 {
+                    for i in 0..4 {
+                        for shift in [0u8, 4] {
+                            out.push(step_nibble(
+                                (chunk[i] >> shift) & 0x0f,
+                                &mut predictor[0],
+                                &mut index[0],
+                            ));
+                            out.push(step_nibble(
+                                (chunk[i + 4] >> shift) & 0x0f,
+                                &mut predictor[1],
+                                &mut index[1],
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1199,5 +1288,82 @@ mod tests {
         let whole_samples = (target as usize / BLOCK_FRAMES) * BLOCK_FRAMES * 2;
         assert_eq!(actual, expected[..whole_samples]);
         assert_eq!(mixer.block, expected[whole_samples..]);
+    }
+
+    #[test]
+    fn ima_adpcm_decodes_mono_and_stereo_blocks_with_predictor_and_index_clamping() {
+        // Mono 1-block (4-byte header + 2 bytes = 5 samples):
+        // Header: predictor = 32700, index = 200 (clamped to 88 -> step 32767).
+        // Byte 0: low nibble 0x07 (+diff = +61436 -> clamped to 32767, index stays 88),
+        //         high nibble 0x0f (-diff = -61436 -> 32767 - 61436 = -28669, index stays 88).
+        // Byte 1: low nibble 0x08 (-diff = -4095 -> -32764, index 87 -> step 29794),
+        //         high nibble 0x08 (-diff = -3724 -> clamped to -32768, index 86).
+        let mono_fmt = Format {
+            tag: 0x0011,
+            channels: 1,
+            rate: RATE,
+            block_align: 6,
+            bits: 4,
+            coefficients: Vec::new(),
+        };
+        let mut mono_blk = Vec::new();
+        mono_blk.extend_from_slice(&32700i16.to_le_bytes());
+        mono_blk.extend_from_slice(&[200, 0, 0xf7, 0x88]);
+        assert_eq!(
+            mono_fmt.ima_adpcm(&mono_blk),
+            Ok(vec![32700, 32767, -28669, -32764, -32768])
+        );
+        // Format::decode duplicates mono into stereo.
+        assert_eq!(
+            mono_fmt.decode(&mono_blk),
+            Ok(vec![
+                32700, 32700, 32767, 32767, -28669, -28669, -32764, -32764, -32768, -32768
+            ])
+        );
+
+        // Stereo 1-block (8-byte header + 8-byte interleaved chunk = 9 stereo frames = 18 samples):
+        // Left: predictor = 0, index = 0 (step 7), bytes [0x04, 0x00, 0x00, 0x00]:
+        //   nib0=4: diff=(7>>3)+7=7 -> +7, idx=2 (step 9)
+        //   nib1=0: diff=9>>3=1 -> +8, idx=1 (step 8)
+        //   nib2=0: diff=8>>3=1 -> +9, idx=0 (step 7)
+        //   nib3=0: diff=7>>3=0 -> +9, idx=0 (step 7)
+        //   nib4..7=0: stay +9, idx=0 (clamped at 0).
+        // Right: predictor = -100, index = 0 (step 7), bytes [0x8c, 0x00, 0x00, 0x00]:
+        //   nib0=12 (sign + 4): diff=7 -> -107, idx=2 (step 9)
+        //   nib1=8 (sign + 0): diff=1 -> -108, idx=1 (step 8)
+        //   nib2=0: diff=1 -> -107, idx=0 (step 7)
+        //   nib3..7=0: stay -107.
+        let stereo_fmt = Format {
+            tag: 0x0011,
+            channels: 2,
+            rate: RATE,
+            block_align: 16,
+            bits: 4,
+            coefficients: Vec::new(),
+        };
+        let mut stereo_blk = Vec::new();
+        stereo_blk.extend_from_slice(&0i16.to_le_bytes());
+        stereo_blk.extend_from_slice(&[0, 0]);
+        stereo_blk.extend_from_slice(&(-100i16).to_le_bytes());
+        stereo_blk.extend_from_slice(&[0, 0]);
+        stereo_blk.extend_from_slice(&[0x04, 0x00, 0x00, 0x00, 0x8c, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            stereo_fmt.ima_adpcm(&stereo_blk),
+            Ok(vec![
+                0, -100, 7, -107, 8, -108, 9, -107, 9, -107, 9, -107, 9, -107, 9, -107, 9, -107
+            ])
+        );
+
+        // Invalid block alignment is refused cleanly.
+        let bad_mono = Format {
+            block_align: 3,
+            ..mono_fmt
+        };
+        assert!(bad_mono.ima_adpcm(&[0; 3]).is_err());
+        let bad_stereo = Format {
+            block_align: 12,
+            ..stereo_fmt
+        };
+        assert!(bad_stereo.ima_adpcm(&[0; 12]).is_err());
     }
 }

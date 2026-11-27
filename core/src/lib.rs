@@ -20,6 +20,7 @@ pub mod host;
 pub mod inflate;
 pub mod install;
 pub mod is3;
+pub mod iv32;
 pub mod iv50;
 pub mod loader;
 pub mod machine;

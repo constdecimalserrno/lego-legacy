@@ -7,7 +7,7 @@
 //! streams and reads their headers and formats, and takes each frame as a
 //! DIB, which its DirectX plugin draws with DrawDib on its back buffer's
 //! device context. The file is read by [`crate::avi`], its pictures by
-//! [`crate::iv50`] and [`crate::msv1`].
+//! [`crate::iv32`], [`crate::iv50`], and [`crate::msv1`].
 //! Its handles are the COM objects Windows hands out, with
 //! every method of their own tables a wall, so a title that calls through
 //! one stops at a name; the C API is what is written. Every other entry
@@ -167,6 +167,7 @@ pub static INTERFACES: &[&Interface] = &[&AVI_FILE, &AVI_STREAM, &GET_FRAME];
 enum Codec {
     Iv50(Box<crate::iv50::Decoder>, crate::iv50::Picture),
     Video1(crate::msv1::Picture),
+    Iv32(Box<crate::iv32::Decoder>, crate::iv50::Picture),
 }
 
 /// What `AVIStreamGetFrameOpen` made: the stream it decodes, its picture so
@@ -201,6 +202,7 @@ impl crate::snap::Snap for Codec {
         let mut tag = match self {
             Self::Iv50(_, _) => 0u8,
             Self::Video1(_) => 1u8,
+            Self::Iv32(_, _) => 2u8,
         };
         v.u8(&mut tag);
         if v.is_reading() {
@@ -217,6 +219,13 @@ impl crate::snap::Snap for Codec {
                     pic.snap(v);
                     *self = Self::Video1(pic);
                 }
+                2 => {
+                    let mut dec = Box::new(crate::iv32::Decoder::new());
+                    let mut pic = crate::iv50::Picture::default();
+                    dec.snap(v);
+                    pic.snap(v);
+                    *self = Self::Iv32(dec, pic);
+                }
                 _ => v.mark_corrupt("avifile::Codec tag"),
             }
         } else {
@@ -226,6 +235,10 @@ impl crate::snap::Snap for Codec {
                     pic.snap(v);
                 }
                 Self::Video1(pic) => pic.snap(v),
+                Self::Iv32(dec, pic) => {
+                    dec.snap(v);
+                    pic.snap(v);
+                }
             }
         }
     }
@@ -908,10 +921,11 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let codec = s.compression();
     let (width, height) = s.picture_size();
     let is_iv50 = codec.eq_ignore_ascii_case(b"IV50");
+    let is_iv32 = codec.eq_ignore_ascii_case(b"IV32") || codec.eq_ignore_ascii_case(b"IV31");
     let is_video1 = codec.eq_ignore_ascii_case(b"CRAM")
         || codec.eq_ignore_ascii_case(b"MSVC")
         || codec.eq_ignore_ascii_case(b"WHAM");
-    if !is_iv50 && !is_video1 {
+    if !is_iv50 && !is_iv32 && !is_video1 {
         return Err(Stop::NotWritten {
             what: format!(
                 "AVIFIL32.dll!AVIStreamGetFrameOpen: {name} is {}, which nothing here decodes",
@@ -994,6 +1008,8 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     let codec = if is_iv50 {
         Codec::Iv50(Box::default(), crate::iv50::Picture::default())
+    } else if is_iv32 {
+        Codec::Iv32(Box::default(), crate::iv50::Picture::default())
     } else {
         let picture = crate::msv1::Picture::new(width as usize, height as usize).map_err(|e| {
             Stop::NotWritten {
@@ -1065,6 +1081,10 @@ fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
                 **decoder = crate::iv50::Decoder::new();
                 *picture = crate::iv50::Picture::default();
             }
+            Codec::Iv32(decoder, picture) => {
+                **decoder = crate::iv32::Decoder::new();
+                *picture = crate::iv50::Picture::default();
+            }
             Codec::Video1(picture) => picture.clear(),
         }
         getter.decoded = None;
@@ -1076,6 +1096,10 @@ fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             let chunk = &file.bytes[start..start + len];
             let result = match &mut getter.codec {
                 Codec::Iv50(decoder, picture) => decoder
+                    .decode(chunk, picture)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                Codec::Iv32(decoder, picture) => decoder
                     .decode(chunk, picture)
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
@@ -1092,7 +1116,7 @@ fn get_frame(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         getter.decoded = Some(n);
     }
     let bits = match &getter.codec {
-        Codec::Iv50(_, picture) => {
+        Codec::Iv50(_, picture) | Codec::Iv32(_, picture) => {
             let (width, height) = s.picture_size();
             if (picture.width, picture.height) != (width as usize, height as usize) {
                 return Err(Stop::NotWritten {

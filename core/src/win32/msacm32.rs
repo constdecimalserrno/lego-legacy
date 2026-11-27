@@ -1,9 +1,9 @@
 //! The Audio Compression Manager: MSACM32's streams, which turn sound in one
-//! wave format into another (#153, #394).
+//! wave format into another (#153, #394, #395).
 //!
-//! Supports Microsoft ADPCM (`2 -> 1`, 16-bit PCM) and Windows' built-in
-//! Microsoft PCM Converter (`1 -> 1`, 8/16-bit, 1/2-channel PCM at any positive
-//! sample rate).
+//! Supports Microsoft ADPCM (`2 -> 1`, 16-bit PCM), Microsoft IMA/DVI ADPCM
+//! (`0x0011 -> 1`, 16-bit PCM), and Windows' built-in Microsoft PCM Converter
+//! (`1 -> 1`, 8/16-bit, 1/2-channel PCM at any positive sample rate).
 
 use super::{stdcall, Ctx, Shim};
 use crate::cpu::Stop;
@@ -19,7 +19,8 @@ pub const SHIMS: &[Shim] = &[
     stdcall("MSACM32", "acmStreamConvert", 3, convert),
 ];
 
-/// An open stream: MS ADPCM (`2 -> 1`) or Windows' built-in PCM converter (`1 -> 1`).
+/// An open stream: MS ADPCM (`2 -> 1`), IMA ADPCM (`0x0011 -> 1`), or Windows'
+/// built-in PCM converter (`1 -> 1`).
 #[derive(Clone, Debug)]
 pub struct Stream {
     source: Format,
@@ -48,6 +49,16 @@ impl crate::snap::Snap for Stream {
                     (1..=2).contains(&source.channels)
                         && source.block_align >= 7 * source.channels
                         && source.rate > 0
+                }
+                (0x0011, 1) => {
+                    (1..=2).contains(&source.channels)
+                        && source.bits == 4
+                        && source.block_align >= 4 * source.channels
+                        && (source.channels == 1 || source.block_align.is_multiple_of(8))
+                        && source.rate > 0
+                        && destination.rate == source.rate
+                        && destination.channels == source.channels
+                        && destination.bits == 16
                 }
                 _ => false,
             };
@@ -100,9 +111,7 @@ impl Stream {
         }
     }
 
-    /// Bytes of PCM one MS ADPCM block decodes to: the header's two samples a
-    /// channel, and two a byte after it, as `ADPCMWAVEFORMAT`'s page and
-    /// `msadp32` count them.
+    /// Bytes of 16-bit PCM one ADPCM block decodes to.
     fn block_out(&self) -> u32 {
         samples_per_block(&self.source) * u32::from(self.source.channels) * 2
     }
@@ -111,7 +120,13 @@ impl Stream {
 /// Samples a channel in one block of `format`, which must hold at least its
 /// header.
 fn samples_per_block(format: &Format) -> u32 {
-    u32::from(format.block_align) * 2 / u32::from(format.channels) - 12
+    let ch = u32::from(format.channels);
+    let align = u32::from(format.block_align);
+    if format.tag == 0x0011 {
+        (align - 4 * ch) * 2 / ch + 1
+    } else {
+        align * 2 / ch - 12
+    }
 }
 
 /// mmsystem.h's and msacm.h's answers.
@@ -240,6 +255,34 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
                 source.rate, destination.bits
             )
         }
+        (0x0011, 1) => {
+            let channels = source.channels;
+            if source.bits != 4
+                || !(1..=2).contains(&channels)
+                || (source.rate, channels) != (destination.rate, destination.channels)
+                || !matches!(destination.bits, 8 | 16)
+                || source.rate == 0
+            {
+                return refused(ctx, ACMERR_NOTPOSSIBLE);
+            }
+            let valid_align = source.block_align >= 4 * channels
+                && (channels == 1 || source.block_align.is_multiple_of(8));
+            if !valid_align || (per_block != 0 && per_block != samples_per_block(&source)) {
+                return Err(unwritten(format!(
+                    "acmStreamOpen: IMA ADPCM of {per_block} samples a block of {}",
+                    source.block_align
+                )));
+            }
+            if destination.bits == 8 {
+                return Err(unwritten(format!(
+                    "acmStreamOpen: IMA ADPCM to eight-bit PCM ({per_block} samples a block)"
+                )));
+            }
+            format!(
+                "IMA ADPCM at {} Hz in {channels} channels to {}-bit PCM",
+                source.rate, destination.bits
+            )
+        }
         (src_tag, dst_tag) => {
             return Err(unwritten(format!(
                 "acmStreamOpen: format tag {src_tag} to {dst_tag}"
@@ -313,16 +356,18 @@ fn size(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(MMSYSERR_NOERROR);
     }
     let (align, block_out) = (stream.align(), stream.block_out());
-    match args[3] {
-        SOURCE => {}
-        DESTINATION => return Err(unwritten("acmStreamSize from the destination".to_owned())),
+    let (min_in, unit_in, unit_out) = match args[3] {
+        SOURCE => (align, align, block_out),
+        DESTINATION => (pcm_frame_bytes(&stream.destination), block_out, align),
         _ => return Ok(MMSYSERR_INVALFLAG),
-    }
+    };
     ctx.mem.write_u32(args[2], 0).map_err(Stop::Fault)?;
-    if args[1] < align {
+    if args[1] < min_in {
         return Ok(ACMERR_NOTPOSSIBLE);
     }
-    let bytes = args[1].div_ceil(align).wrapping_mul(block_out);
+    let Some(bytes) = args[1].div_ceil(unit_in).checked_mul(unit_out) else {
+        return Ok(ACMERR_NOTPOSSIBLE);
+    };
     ctx.mem.write_u32(args[2], bytes).map_err(Stop::Fault)?;
     Ok(MMSYSERR_NOERROR)
 }
@@ -412,9 +457,12 @@ fn unprepare(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 
 fn decoded(ctx: &Ctx<'_>, format: &Format, at: u32, bytes: u32) -> Result<Vec<i16>, Stop> {
     let adpcm = ctx.mem.slice(at, bytes as usize).map_err(Stop::Fault)?;
-    format
-        .ms_adpcm(adpcm)
-        .map_err(|e| unwritten(format!("acmStreamConvert: {e}")))
+    let result = if format.tag == 0x0011 {
+        format.ima_adpcm(adpcm)
+    } else {
+        format.ms_adpcm(adpcm)
+    };
+    result.map_err(|e| unwritten(format!("acmStreamConvert: {e}")))
 }
 
 /// Convert PCM frames from `src_fmt` to `dst_fmt`, bounded by `max_dst_bytes`.
@@ -512,11 +560,7 @@ fn convert(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if !as_prepared(ctx, header)? {
         return Ok(MMSYSERR_INVALPARAM);
     }
-    let allowed = if stream.is_pcm() {
-        BLOCKALIGN | START | END
-    } else {
-        BLOCKALIGN | START
-    };
+    let allowed = BLOCKALIGN | START | END;
     if args[2] & !allowed != 0 {
         return Err(unwritten(format!("acmStreamConvert: flags {:#x}", args[2])));
     }
@@ -541,14 +585,24 @@ fn convert(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         let mut samples = decoded(ctx, &stream.source, from, used)?;
         let rest = from_bytes - used;
         let channels = u32::from(stream.source.channels);
-        if args[2] & BLOCKALIGN == 0 && blocks == from_bytes / align && rest >= 7 * channels {
+        let min_short = if stream.source.tag == 0x0011 {
+            4 * channels
+        } else {
+            7 * channels
+        };
+        let short_len = if stream.source.tag == 0x0011 && channels == 2 {
+            rest - (rest % 8)
+        } else {
+            rest
+        };
+        if args[2] & BLOCKALIGN == 0 && blocks == from_bytes / align && short_len >= min_short {
             let short = Format {
-                block_align: u16::try_from(rest).expect("shorter than a block"),
+                block_align: u16::try_from(short_len).expect("shorter than a block"),
                 ..stream.source.clone()
             };
-            if blocks * block_out + 2 * channels * samples_per_block(&short) <= to_bytes {
-                samples.extend(decoded(ctx, &short, from + used, rest)?);
-                used = from_bytes;
+            if 2 * channels * samples_per_block(&short) <= to_bytes - blocks * block_out {
+                samples.extend(decoded(ctx, &short, from + used, short_len)?);
+                used += short_len;
             }
         }
         (used, samples.iter().flat_map(|s| s.to_le_bytes()).collect())
@@ -650,6 +704,113 @@ mod tests {
             assert_eq!(close(ctx, &[h, 1]).unwrap(), MMSYSERR_INVALFLAG);
             assert_eq!(close(ctx, &[h, 0]).unwrap(), MMSYSERR_NOERROR);
             assert_eq!(close(ctx, &[h, 0]).unwrap(), MMSYSERR_INVALHANDLE);
+        });
+    }
+
+    fn write_ima_fmt(
+        mem: &mut crate::guest::Arena,
+        at: u32,
+        ch: u16,
+        rate: u32,
+        align: u16,
+        samples_per_blk: u16,
+    ) {
+        let avg = rate * u32::from(align) / u32::from(samples_per_blk.max(1));
+        let mut buf = [0u8; 20];
+        buf[0..2].copy_from_slice(&0x0011u16.to_le_bytes());
+        buf[2..4].copy_from_slice(&ch.to_le_bytes());
+        buf[4..8].copy_from_slice(&rate.to_le_bytes());
+        buf[8..12].copy_from_slice(&avg.to_le_bytes());
+        buf[12..14].copy_from_slice(&align.to_le_bytes());
+        buf[14..16].copy_from_slice(&4u16.to_le_bytes());
+        buf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        buf[18..20].copy_from_slice(&samples_per_blk.to_le_bytes());
+        mem.write(at, &buf).unwrap();
+    }
+
+    #[test]
+    fn ima_adpcm_stream_opens_sizes_both_ways_converts_and_snaps() {
+        use crate::snap::{Reader, Snap, Visitor, Writer};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let out_h = ctx.state.heap.alloc(4);
+            let src_fmt = ctx.state.heap.alloc(20);
+            let dst_fmt = ctx.state.heap.alloc(18);
+            // Stereo 22,050 Hz, block_align = 1024 -> 1017 samples/block (4068 PCM bytes/block).
+            write_ima_fmt(ctx.mem, src_fmt, 2, 22_050, 1024, 1017);
+            write_pcm_fmt(ctx.mem, dst_fmt, 2, 22_050, 16);
+            assert_eq!(
+                open(ctx, &[out_h, 0, src_fmt, dst_fmt, 0, 0, 0, 0x4]).unwrap(),
+                MMSYSERR_NOERROR
+            );
+            let h = ctx.mem.read_u32(out_h).unwrap();
+            assert_ne!(h, 0);
+
+            // acmStreamSize SOURCE (0) and DESTINATION (1).
+            let sz_out = ctx.state.heap.alloc(4);
+            assert_eq!(size(ctx, &[h, 1024, sz_out, 0]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(ctx.mem.read_u32(sz_out).unwrap(), 4068);
+            assert_eq!(
+                size(ctx, &[h, 1023, sz_out, 0]).unwrap(),
+                ACMERR_NOTPOSSIBLE
+            );
+            assert_eq!(size(ctx, &[h, 5880, sz_out, 1]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(ctx.mem.read_u32(sz_out).unwrap(), 2048);
+            assert_eq!(size(ctx, &[h, 4068, sz_out, 1]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(ctx.mem.read_u32(sz_out).unwrap(), 1024);
+            assert_eq!(size(ctx, &[h, 0, sz_out, 1]).unwrap(), ACMERR_NOTPOSSIBLE);
+
+            // Convert 1 block (2048 src offered, 5880 dst offered -> 1 block = 1024 -> 4068).
+            let src_buf = ctx.state.heap.alloc(2048);
+            let dst_buf = ctx.state.heap.alloc(5880);
+            let mut block = vec![0u8; 2048];
+            block[0..2].copy_from_slice(&1000i16.to_le_bytes());
+            block[4..6].copy_from_slice(&(-1000i16).to_le_bytes());
+            block[8] = 0x04;
+            block[12] = 0x0c;
+            ctx.mem.write(src_buf, &block).unwrap();
+
+            let hdr = ctx.state.heap.alloc(HEADER_BYTES);
+            ctx.mem.write(hdr, &[0u8; HEADER_BYTES as usize]).unwrap();
+            ctx.mem.write_u32(hdr, HEADER_BYTES).unwrap();
+            ctx.mem.write_u32(hdr + 0x0c, src_buf).unwrap();
+            ctx.mem.write_u32(hdr + 0x10, 2048).unwrap();
+            ctx.mem.write_u32(hdr + 0x1c, dst_buf).unwrap();
+            ctx.mem.write_u32(hdr + 0x20, 5880).unwrap();
+
+            assert_eq!(prepare(ctx, &[h, hdr, 0]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(convert(ctx, &[h, hdr, 0x10]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(ctx.mem.read_u32(hdr + 0x14).unwrap(), 1024);
+            assert_eq!(ctx.mem.read_u32(hdr + 0x24).unwrap(), 4068);
+            let out = ctx.mem.slice(dst_buf, 8).unwrap();
+            assert_eq!(i16::from_le_bytes([out[0], out[1]]), 1000);
+            assert_eq!(i16::from_le_bytes([out[2], out[3]]), -1000);
+            assert_eq!(i16::from_le_bytes([out[4], out[5]]), 1007);
+            assert_eq!(i16::from_le_bytes([out[6], out[7]]), -1007);
+
+            // LLSNAP v2 Snap round-trip for IMA ADPCM Stream.
+            let mut stream = ctx.state.acm_streams[&h].clone();
+            let mut w = Writer::new();
+            stream.snap(&mut w);
+            let mut restored = Stream::empty_for_snap();
+            let mut r = Reader::new(&w.out);
+            restored.snap(&mut r);
+            assert!(!r.failed());
+            assert_eq!(restored.source, stream.source);
+            assert_eq!(restored.destination, stream.destination);
+
+            // Corrupt IMA ADPCM stream snapshot (misaligned stereo block_align) is refused.
+            let mut bad = stream;
+            bad.source.block_align = 12;
+            let mut w_bad = Writer::new();
+            bad.snap(&mut w_bad);
+            let mut restored_bad = Stream::empty_for_snap();
+            let mut r_bad = Reader::new(&w_bad.out);
+            restored_bad.snap(&mut r_bad);
+            assert!(r_bad.failed());
+
+            assert_eq!(unprepare(ctx, &[h, hdr, 0]).unwrap(), MMSYSERR_NOERROR);
+            assert_eq!(close(ctx, &[h, 0]).unwrap(), MMSYSERR_NOERROR);
         });
     }
 }

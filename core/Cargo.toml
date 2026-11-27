@@ -4,7 +4,7 @@ version = "1.2.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-# The Indeo Video 5 decoder (src/iv50*) is LGPL-2.1-or-later, derived from FFmpeg; see NOTICE.
+# The Indeo Video 3 and 5 decoders (src/iv32*, src/iv50*) are LGPL-2.1-or-later, derived from FFmpeg; see NOTICE.
 license = "(MIT OR Apache-2.0) AND LGPL-2.1-or-later"
 repository.workspace = true
 

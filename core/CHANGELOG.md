@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Microsoft IMA ADPCM (`0x0011`) audio decoding, `ACM_STREAMSIZEF_DESTINATION` sizing, and pure-Rust Indeo 3 (`IV31`/`IV32`) video decoding (`core/src/{lib,sound,iv32,iv32/tables}.rs`, `core/src/win32/{msacm32,avifile}.rs`, `NOTICE`, #395), strictly generic and true to Windows with zero title keying and exhaustive `LLSNAP v2` `Snap` coverage:
+
+- **Microsoft IMA/DVI ADPCM (`0x0011`, `core/src/sound.rs`, `core/src/win32/msacm32.rs`):** Adds block-based 4-bit mono and interleaved 4-byte/8-sample stereo IMA ADPCM decoding (`Format::ima_adpcm`, `(0x0011, 4)` in `Format::stereo`) with predictor/step-index clamping, opens `(0x0011 -> 1)` streams in `MSACM32!acmStreamOpen`, adds `ACM_STREAMSIZEF_DESTINATION` (`1`) sizing and `ACM_STREAMCONVERTF_END` (`0x20`) handling for ADPCM streams (`2 -> 1` and `0x0011 -> 1`), and validates `(0x0011, 1)` streams in `msacm32::Stream::snap`.
+- **Indeo Video 3 (`IV31`/`IV32`, `core/src/iv32.rs`, `core/src/iv32/tables.rs`, `core/src/win32/avifile.rs`, `NOTICE`):** Adds a zero-crate pure-Rust Indeo 3 decoder (binary space partition tree, motion compensation, VQ delta & requantisation tables derived from FFmpeg's LGPL-2.1 `indeo3.c`/`indeo3data.h`) outputting 4:1:0 planar YUV (`iv50::Picture`) wired as `avifile::Codec::Iv32` (tag `2`) in `AVIStreamGetFrameOpen`/`AVIStreamGetFrame` with full dual-buffer `LLSNAP v2` `Snap` round-trip and invariant validation.
+
 Public pure-`std` PNG decoder (`core::png::decode_to_bgra`) and reusable spectator test rig (`core::testkit::spectator`, `core/src/png.rs`, `core/src/testkit/{mod,spectator}.rs`, #410), strictly outside guest state with zero external crates and zero hardcoded title keys (Golden Rules 4 & 5):
 
 - **`core::png::decode_to_bgra`:** Exposes `pub fn decode_to_bgra(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String>` validating PNG signature, chunk bounds & CRC-32s, `IHDR` (8-bit non-interlaced RGB/RGBA), RFC 1950 zlib header, Adler-32 checksum, and all five RFC 2083 scanline filters (`None`, `Sub`, `Up`, `Average`, `Paeth`).
