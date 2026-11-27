@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 /// `machine::POLLS` as well (#215).
 pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "RegisterClassA", 1, register_class),
+    stdcall("USER32", "RegisterClassExA", 1, register_class_ex),
     stdcall("USER32", "CreateWindowExA", 12, create_window),
     stdcall("USER32", "DestroyWindow", 1, destroy_window),
     stdcall("USER32", "ShowWindow", 2, succeed),
@@ -21,7 +22,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "UpdateWindow", 1, update_window),
     stdcall("USER32", "InvalidateRect", 3, invalidate_rect),
     stdcall("USER32", "GetUpdateRect", 3, get_update_rect),
-    stdcall("USER32", "FillRect", 3, fill_rect),
+    stdcall("USER32", "FillRect", 3, super::gdi32::fill_rect),
     stdcall("USER32", "BeginPaint", 2, begin_paint),
     stdcall("USER32", "EndPaint", 2, succeed),
     stdcall("USER32", "SetFocus", 1, succeed),
@@ -80,6 +81,11 @@ pub const SHIMS: &[Shim] = &[
     stdcall("USER32", "ReleaseDC", 2, succeed),
     stdcall("USER32", "GetCursorPos", 1, cursor_pos),
     stdcall("USER32", "GetAsyncKeyState", 1, async_key_state),
+    stdcall("USER32", "GetKeyState", 1, key_state),
+    stdcall("USER32", "OffsetRect", 3, offset_rect),
+    stdcall("USER32", "IntersectRect", 3, intersect_rect),
+    stdcall("USER32", "PtInRect", 3, pt_in_rect),
+    stdcall("USER32", "DrawTextA", 5, super::gdi32::draw_text),
     stdcall("USER32", "SetCursorPos", 2, set_cursor_pos),
     stdcall("USER32", "ClipCursor", 1, clip_cursor),
     stdcall("USER32", "GetClipCursor", 1, get_clip_cursor),
@@ -280,6 +286,15 @@ fn register_class(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         .line(&format!("window class {name} procedure {procedure:#010x}"));
     // A class atom: distinct, and not an address.
     Ok(0xc000)
+}
+
+fn register_class_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // WNDCLASSEXA prefixes WNDCLASSA with a 4-byte `cbSize` (48 bytes total).
+    if args[0] == 0 || ctx.mem.read_u32(args[0]).map_err(Stop::Fault)? != 48 {
+        ctx.state.last_error = 87; // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    register_class(ctx, &[args[0].wrapping_add(4)])
 }
 
 fn create_window(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -679,11 +694,6 @@ fn get_update_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(u32::from(dirty))
 }
 
-fn fill_rect(_ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    // FillRect(hDC, lprc, hbr): GDI does not draw over DirectDraw surfaces here.
-    Ok(u32::from(args[1] != 0 && args[2] != 0))
-}
-
 /// Where the mouse's own data format keeps what moved: the two axes, and the
 /// first button. `c_dfDIMouse`, which is the format a title asks for by name.
 const DIMOUSE_X: u32 = 0;
@@ -857,10 +867,84 @@ fn async_key_state(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(key_state_now(ctx.state, args[0]))
 }
 
-fn key_state_now(state: &mut super::State, key: u32) -> u32 {
-    let down = state.keys_down.iter().any(|c| virtual_key(*c) == Some(key))
+fn key_down(state: &super::State, key: u32) -> bool {
+    state.keys_down.iter().any(|c| virtual_key(*c) == Some(key))
         || (state.mouse_down && key == button_key(crate::host::Button::Left))
-        || (state.right_down && key == button_key(crate::host::Button::Right));
+        || (state.right_down && key == button_key(crate::host::Button::Right))
+}
+
+/// GetKeyState(nVirtKey): high bit (`0x8000`) set when the virtual key is down;
+/// low bit (`0x0001`) is toggle state (always 0 on the declared machine, where
+/// Caps Lock / Num Lock start off). Unlike `GetAsyncKeyState`, does not clear
+/// the edge-pressed latch.
+fn key_state(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // Return sign-extended SHORT so both 16-bit (`test ax, 0x8000` / `ax < 0`)
+    // and 32-bit checks observe the high bit cleanly.
+    Ok(if key_down(ctx.state, args[0]) {
+        0xffff_8000
+    } else {
+        0
+    })
+}
+
+pub(super) fn read_rect(ctx: &Ctx<'_>, at: u32) -> Result<[i32; 4], Stop> {
+    Ok([
+        ctx.mem.read_u32(at).map_err(Stop::Fault)? as i32,
+        ctx.mem.read_u32(at + 4).map_err(Stop::Fault)? as i32,
+        ctx.mem.read_u32(at + 8).map_err(Stop::Fault)? as i32,
+        ctx.mem.read_u32(at + 12).map_err(Stop::Fault)? as i32,
+    ])
+}
+
+fn offset_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // OffsetRect(lprc, dx, dy).
+    let (at, dx, dy) = (args[0], args[1] as i32, args[2] as i32);
+    if at == 0 {
+        return Ok(0);
+    }
+    let [l, t, r, b] = read_rect(ctx, at)?;
+    write_rect(
+        ctx,
+        at,
+        [
+            l.wrapping_add(dx),
+            t.wrapping_add(dy),
+            r.wrapping_add(dx),
+            b.wrapping_add(dy),
+        ],
+    )?;
+    Ok(1)
+}
+
+fn intersect_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // IntersectRect(lprcDst, lprcSrc1, lprcSrc2).
+    let (dst, s1, s2) = (args[0], args[1], args[2]);
+    if dst == 0 || s1 == 0 || s2 == 0 {
+        return Ok(0);
+    }
+    let [l1, t1, r1, b1] = read_rect(ctx, s1)?;
+    let [l2, t2, r2, b2] = read_rect(ctx, s2)?;
+    let (l, t, r, b) = (l1.max(l2), t1.max(t2), r1.min(r2), b1.min(b2));
+    if l >= r || t >= b {
+        write_rect(ctx, dst, [0, 0, 0, 0])?;
+        return Ok(0);
+    }
+    write_rect(ctx, dst, [l, t, r, b])?;
+    Ok(1)
+}
+
+fn pt_in_rect(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // PtInRect(lprc, pt.x, pt.y): POINT is passed by value on x86 stdcall.
+    let (at, x, y) = (args[0], args[1] as i32, args[2] as i32);
+    if at == 0 {
+        return Ok(0);
+    }
+    let [l, t, r, b] = read_rect(ctx, at)?;
+    Ok(u32::from(x >= l && x < r && y >= t && y < b))
+}
+
+fn key_state_now(state: &mut super::State, key: u32) -> u32 {
+    let down = key_down(state, key);
     let pressed = state.keys_pressed.contains(&key);
     state.keys_pressed.retain(|k| *k != key);
     u32::from(down) << 15 | u32::from(pressed)
@@ -1844,10 +1928,19 @@ fn system_metrics(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// wall that names it, rather than a success the title would believe.
 fn system_parameters(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // SystemParametersInfoA(action, uiParam, pvParam, fWinIni).
+    const SPI_GETMOUSE: u32 = 0x0003;
     const SPI_GETSCREENSAVEACTIVE: u32 = 0x0010;
     const SPI_SETMOUSETRAILS: u32 = 0x005d;
     const SPI_SETSCREENSAVERRUNNING: u32 = 0x0061;
     match (args[0], args[1]) {
+        // Mouse threshold/acceleration parameters (`int[3]`): `[0, 0, 0]` means
+        // acceleration disabled so relative mouse deltas stay strictly 1:1
+        // linear across the declared machine (#394).
+        (SPI_GETMOUSE, 0) if args[2] == 0 => Ok(0),
+        (SPI_GETMOUSE, 0) => {
+            ctx.mem.write(args[2], &[0u8; 12]).map_err(Stop::Fault)?;
+            Ok(1)
+        }
         // Mouse trails off, which Windows spells as a trail of 0 or of 1. This
         // machine draws no trail, so there is nothing to turn off. LEGO Island
         // turns them off before it makes its window (#114).
@@ -2931,11 +3024,12 @@ mod tests {
     #[test]
     fn window_focus_display_and_paint_shims_match_win32() {
         use super::{
-            bring_window_to_top, change_display_settings, enum_display_settings, fill_rect,
-            get_update_rect, invalidate_rect, window_thread_process_id, DEVMODEA_MIN_BYTES,
-            DM_BITSPERPEL, DM_PELSHEIGHT, DM_PELSWIDTH, WINDOW,
+            bring_window_to_top, change_display_settings, enum_display_settings, get_update_rect,
+            invalidate_rect, window_thread_process_id, DEVMODEA_MIN_BYTES, DM_BITSPERPEL,
+            DM_PELSHEIGHT, DM_PELSWIDTH, WINDOW,
         };
         use crate::guest::GuestMem;
+        use crate::win32::gdi32::fill_rect;
         use crate::win32::tests::with_test_ctx;
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
@@ -3146,6 +3240,82 @@ mod tests {
                 u32::MAX
             );
             assert_eq!(ctx.state.last_error, 87);
+        });
+    }
+
+    #[test]
+    fn spi_getmouse_register_class_ex_rects_and_key_state_match_win32() {
+        use super::{
+            intersect_rect, key_state, offset_rect, pt_in_rect, register_class_ex,
+            system_parameters,
+        };
+        use crate::guest::GuestMem;
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            // SPI_GETMOUSE writes [0, 0, 0] (zero acceleration) and returns 1.
+            let mouse_params = ctx.state.heap.alloc(12);
+            ctx.mem.write(mouse_params, &[0xff; 12]).unwrap();
+            assert_eq!(system_parameters(ctx, &[0x0003, 0, 0, 0]).unwrap(), 0);
+            assert_eq!(
+                system_parameters(ctx, &[0x0003, 0, mouse_params, 0]).unwrap(),
+                1
+            );
+            assert_eq!(ctx.mem.slice(mouse_params, 12).unwrap(), &[0u8; 12]);
+
+            // RegisterClassExA reads WNDCLASSEXA offsets (+4 style, +8 wndproc, +16 cbWndExtra, +40 className).
+            let wc = ctx.state.heap.alloc(48);
+            ctx.mem.write(wc, &[0u8; 48]).unwrap();
+            let cname = ctx.intern("TestExClass").unwrap();
+            ctx.mem.write_u32(wc, 48).unwrap();
+            ctx.mem.write_u32(wc + 4, 0x0008).unwrap(); // CS_DBLCLKS
+            ctx.mem.write_u32(wc + 8, 0x0045_1234).unwrap();
+            ctx.mem.write_u32(wc + 16, 8).unwrap();
+            ctx.mem.write_u32(wc + 40, cname).unwrap();
+            assert_eq!(register_class_ex(ctx, &[wc]).unwrap(), 0xc000);
+            assert_eq!(ctx.state.window_procedure, 0x0045_1234);
+            assert!(ctx.state.double_clicks);
+            assert_eq!(ctx.state.window_extra.len(), 8);
+
+            // OffsetRect / IntersectRect / PtInRect.
+            let r1 = ctx.state.heap.alloc(16);
+            let r2 = ctx.state.heap.alloc(16);
+            let dst = ctx.state.heap.alloc(16);
+            for (i, v) in [10i32, 20, 50, 60].iter().enumerate() {
+                ctx.mem.write_u32(r1 + (i as u32) * 4, *v as u32).unwrap();
+            }
+            assert_eq!(offset_rect(ctx, &[r1, 5, (-10i32) as u32]).unwrap(), 1);
+            assert_eq!(ctx.mem.read_u32(r1).unwrap() as i32, 15);
+            assert_eq!(ctx.mem.read_u32(r1 + 4).unwrap() as i32, 10);
+            assert_eq!(ctx.mem.read_u32(r1 + 8).unwrap() as i32, 55);
+            assert_eq!(ctx.mem.read_u32(r1 + 12).unwrap() as i32, 50);
+
+            assert_eq!(pt_in_rect(ctx, &[r1, 15, 10]).unwrap(), 1);
+            assert_eq!(pt_in_rect(ctx, &[r1, 55, 10]).unwrap(), 0); // half-open right edge
+            assert_eq!(pt_in_rect(ctx, &[r1, 15, 50]).unwrap(), 0); // half-open bottom edge
+
+            for (i, v) in [40i32, 30, 80, 70].iter().enumerate() {
+                ctx.mem.write_u32(r2 + (i as u32) * 4, *v as u32).unwrap();
+            }
+            assert_eq!(intersect_rect(ctx, &[dst, r1, r2]).unwrap(), 1);
+            assert_eq!(ctx.mem.read_u32(dst).unwrap() as i32, 40);
+            assert_eq!(ctx.mem.read_u32(dst + 4).unwrap() as i32, 30);
+            assert_eq!(ctx.mem.read_u32(dst + 8).unwrap() as i32, 55);
+            assert_eq!(ctx.mem.read_u32(dst + 12).unwrap() as i32, 50);
+
+            // Disjoint intersection zeroes dst and returns 0.
+            for (i, v) in [100i32, 100, 120, 120].iter().enumerate() {
+                ctx.mem.write_u32(r2 + (i as u32) * 4, *v as u32).unwrap();
+            }
+            assert_eq!(intersect_rect(ctx, &[dst, r1, r2]).unwrap(), 0);
+            assert_eq!(ctx.mem.slice(dst, 16).unwrap(), &[0u8; 16]);
+
+            // GetKeyState reports high bit for held keys without clearing keys_pressed.
+            ctx.state.keys_down.push(0x2a); // LeftShift -> VK_SHIFT (0x10)
+            ctx.state.keys_pressed.push(0x10);
+            assert_eq!(key_state(ctx, &[0x10]).unwrap() & 0x8000, 0x8000);
+            assert!(ctx.state.keys_pressed.contains(&0x10));
+            assert_eq!(key_state(ctx, &[0x41]).unwrap(), 0);
         });
     }
 }

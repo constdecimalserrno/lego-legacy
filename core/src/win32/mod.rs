@@ -339,6 +339,8 @@ pub struct State {
     /// The device contexts surfaces have handed out and not yet had back, by
     /// the DC, each with the surface it draws on (#151).
     pub surface_dcs: BTreeMap<u32, u32>,
+    /// GDI objects, registered TrueType fonts, and per-DC drawing attributes (#394).
+    pub gdi: gdi32::GdiState,
     /// The DrawDibs a title has open, by their handles, and the handle the
     /// next one will be given (#151).
     pub drawdibs: std::collections::BTreeSet<u32>,
@@ -552,6 +554,7 @@ impl State {
             clipped: std::collections::BTreeSet::new(),
             clip_lists: BTreeMap::new(),
             surface_dcs: BTreeMap::new(),
+            gdi: gdi32::GdiState::default(),
             drawdibs: std::collections::BTreeSet::new(),
             next_drawdib: 1,
             acm_streams: BTreeMap::new(),
@@ -1101,7 +1104,15 @@ impl State {
 
         self.reclaim_com_faces(identity);
 
-        self.surface_dcs.retain(|_, &mut s| s != identity);
+        let dropped_dcs: Vec<u32> = self
+            .surface_dcs
+            .iter()
+            .filter_map(|(&dc, &s)| (s == identity).then_some(dc))
+            .collect();
+        for dc in dropped_dcs {
+            self.surface_dcs.remove(&dc);
+            self.gdi.dcs.remove(&dc);
+        }
         self.immediate.remove_handle_for(identity);
 
         if pixels != 0
@@ -1500,6 +1511,23 @@ impl Ctx<'_> {
     /// cannot open the host's files, because it is not on the host.
     pub fn open_guest_file(&mut self, path: &str) -> Option<Vec<u8>> {
         self.tree.read(&self.absolute(path))
+    }
+
+    /// Open a guest file via `current_directory`, falling back to `install_dir`
+    /// for bare relative names, and return `(resolved_tree_path, bytes)`.
+    pub(super) fn open_guest_file_or_install(&mut self, name: &str) -> Option<(String, Vec<u8>)> {
+        let abs = self.absolute(name);
+        if let Some(bytes) = self.tree.read(&abs) {
+            return Some((abs, bytes));
+        }
+        if !name.contains(['\\', '/', ':']) {
+            let under = self.title.install_dir.trim_end_matches('\\');
+            let fallback = format!("{under}\\{name}");
+            if let Some(bytes) = self.tree.read(&fallback) {
+                return Some((fallback, bytes));
+            }
+        }
+        None
     }
 
     /// Whether the tree holds a file the guest named, without recording a
@@ -2471,6 +2499,7 @@ impl crate::snap::Snap for State {
             clipped,
             clip_lists,
             surface_dcs,
+            gdi,
             drawdibs,
             next_drawdib,
             acm_streams,
@@ -2624,6 +2653,7 @@ impl crate::snap::Snap for State {
             },
         );
         crate::snap::snap_btree_map(v, surface_dcs, |k, v| v.u32(k), |s, v| v.u32(s));
+        gdi.snap(v);
         crate::snap::snap_btree_set(v, drawdibs, |k, v| v.u32(k));
         v.u32(next_drawdib);
         crate::snap::snap_btree_map_with(

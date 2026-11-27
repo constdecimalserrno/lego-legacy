@@ -664,3 +664,170 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
         "cold restore rehydrates immutable AVI bytes from Tree"
     );
 }
+
+#[test]
+fn gdi_state_and_pcm_acm_stream_round_trip_through_llsnap_v2_and_rehydrate_fonts() {
+    use lego_legacy_core::sound::Format;
+    use lego_legacy_core::ttf::Font;
+    use lego_legacy_core::win32::gdi32::{DcState, GdiObject};
+    use lego_legacy_core::win32::msacm32::Stream;
+
+    // Minimal valid TrueType font bytes with family "SnapFont".
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    let mut hhea = vec![0u8; 36];
+    hhea[4..6].copy_from_slice(&800i16.to_be_bytes());
+    hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes());
+    hhea[34..36].copy_from_slice(&1u16.to_be_bytes());
+    let mut maxp = vec![0u8; 6];
+    maxp[4..6].copy_from_slice(&1u16.to_be_bytes());
+    let fam: Vec<u8> = "SnapFont"
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    let mut name = Vec::new();
+    name.extend_from_slice(&0u16.to_be_bytes());
+    name.extend_from_slice(&1u16.to_be_bytes());
+    name.extend_from_slice(&18u16.to_be_bytes());
+    name.extend_from_slice(&3u16.to_be_bytes());
+    name.extend_from_slice(&1u16.to_be_bytes());
+    name.extend_from_slice(&0x0409u16.to_be_bytes());
+    name.extend_from_slice(&1u16.to_be_bytes());
+    name.extend_from_slice(&(fam.len() as u16).to_be_bytes());
+    name.extend_from_slice(&0u16.to_be_bytes());
+    name.extend_from_slice(&fam);
+    let cmap = vec![0u8; 16];
+    let hmtx = vec![0u8; 4];
+    let loca = vec![0u8; 4];
+    let glyf = vec![0u8; 4];
+    let tables: &[(&[u8; 4], &[u8])] = &[
+        (b"cmap", &cmap),
+        (b"glyf", &glyf),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+        (b"loca", &loca),
+        (b"maxp", &maxp),
+        (b"name", &name),
+    ];
+    let mut ttf_bytes = Vec::new();
+    ttf_bytes.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    ttf_bytes.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    ttf_bytes.extend_from_slice(&[0u8; 6]);
+    let mut off = 12 + tables.len() * 16;
+    for (tag, data) in tables {
+        ttf_bytes.extend_from_slice(*tag);
+        ttf_bytes.extend_from_slice(&0u32.to_be_bytes());
+        ttf_bytes.extend_from_slice(&(off as u32).to_be_bytes());
+        ttf_bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        off += (data.len() + 3) & !3;
+    }
+    for (_, data) in tables {
+        ttf_bytes.extend_from_slice(data);
+        while !ttf_bytes.len().is_multiple_of(4) {
+            ttf_bytes.push(0);
+        }
+    }
+    assert!(Font::parse(ttf_bytes.clone().into()).is_some());
+
+    let (mut m, _host) = machine_at(4);
+    m.tree.declare("C:\\GAME\\SNAP.TTF", ttf_bytes.clone());
+    m.state.gdi.font_files.push("C:\\GAME\\SNAP.TTF".to_owned());
+    m.state.gdi.next_handle = 0x0003_0010;
+    m.state.gdi.objects.insert(
+        0x0200_0000,
+        GdiObject::Font {
+            height: 24,
+            weight: 700,
+            face: "SnapFont".to_owned(),
+        },
+    );
+    m.state.gdi.objects.insert(
+        0x0200_0004,
+        GdiObject::Pen {
+            style: 0,
+            width: 2,
+            color: 0x0011_2233,
+        },
+    );
+    m.state.gdi.dcs.insert(
+        0x0004_0000,
+        DcState {
+            font: 0x0200_0000,
+            pen: 0x0200_0004,
+            brush: 0x01ff_ffff,
+            text_color: 0x00aa_bbcc,
+            bk_color: 0x00ff_ffff,
+            bk_mode: 1,
+            text_align: 6,
+            pos: (12, 34),
+            clip_rect: Some([1, 2, 100, 80]),
+        },
+    );
+    let pcm_src = Format {
+        tag: 1,
+        channels: 1,
+        rate: 22_050,
+        block_align: 1,
+        bits: 8,
+        coefficients: Vec::new(),
+    };
+    let pcm_dst = Format {
+        tag: 1,
+        channels: 2,
+        rate: 44_100,
+        block_align: 4,
+        bits: 16,
+        coefficients: Vec::new(),
+    };
+    m.state
+        .acm_streams
+        .insert(7, Stream::from_formats(pcm_src, pcm_dst));
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    let mut host = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host).expect("machine");
+    restored.load_stub().expect("stub");
+    restored.tree.declare("C:\\GAME\\SNAP.TTF", ttf_bytes);
+    restored.restore_v2(&snap).expect("cold restore v2");
+
+    assert_eq!(restored.state.gdi.font_files, vec!["C:\\GAME\\SNAP.TTF"]);
+    assert_eq!(restored.state.gdi.next_handle, 0x0003_0010);
+    assert_eq!(restored.state.gdi.objects, m.state.gdi.objects);
+    assert_eq!(restored.state.gdi.dcs, m.state.gdi.dcs);
+    assert_eq!(restored.state.gdi.loaded_fonts.len(), 1);
+    assert_eq!(restored.state.gdi.loaded_fonts[0].1.family, "SnapFont");
+    assert!(restored.state.acm_streams.contains_key(&7));
+
+    // Cold restore without the registered TTF in `Tree` must fail as corrupt.
+    let mut host_missing = Headless::new();
+    let mut missing = Machine::new(&STUB, &mut host_missing).expect("machine");
+    missing.load_stub().expect("stub");
+    assert!(missing.restore_v2(&snap).is_err());
+
+    // Corrupt ACM stream (rate == 0) must be rejected on restore.
+    let mut bad_m = m;
+    bad_m.state.acm_streams.insert(
+        9,
+        Stream::from_formats(
+            Format {
+                tag: 1,
+                channels: 1,
+                rate: 0,
+                block_align: 2,
+                bits: 16,
+                coefficients: Vec::new(),
+            },
+            Format {
+                tag: 1,
+                channels: 1,
+                rate: 22_050,
+                block_align: 2,
+                bits: 16,
+                coefficients: Vec::new(),
+            },
+        ),
+    );
+    let bad_snap = bad_m.snapshot_v2().expect("serialize bad acm stream");
+    assert!(restored.restore_v2(&bad_snap).is_err());
+}

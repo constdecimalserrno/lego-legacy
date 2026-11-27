@@ -251,6 +251,28 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(0x8004_0154);
     }
 
+    // DirectMusic (`CLSID_DirectMusic`, `Performance`, `Composer`, `Segment`,
+    // `Loader`): DirectMusic was an optional DirectX 6.1+ component absent on
+    // stock Windows 98 SE; returning `REGDB_E_CLASSNOTREG` with `*ppv = NULL`
+    // lets titles that check `FAILED(hr)` disable interactive music cleanly (#394).
+    if matches!(
+        class.as_str(),
+        "636b9f10-0c7d-11d1-95b2-0020afdc7421"
+            | "d2ac2890-b39b-11d1-8704-00600893b1bd"
+            | "d2ac2881-b39b-11d1-8704-00600893b1bd"
+            | "d2ac2882-b39b-11d1-8704-00600893b1bd"
+            | "d2ac2892-b39b-11d1-8704-00600893b1bd"
+    ) {
+        if args[4] != 0 {
+            ctx.mem.write_u32(args[4], 0).map_err(Stop::Fault)?;
+        }
+        ctx.log.line(&format!(
+            "com: {class} is not registered on the declared machine"
+        ));
+        // REGDB_E_CLASSNOTREG.
+        return Ok(0x8004_0154);
+    }
+
     // A class the title's own disc ships a server for is made by that server,
     // which runs as guest code like everything else the disc carries
     // (ADR-0002, #60). Alpha Team's sound is A3D, and `a3dapi.dll` is in its
@@ -306,5 +328,32 @@ mod tests {
         assert_eq!(cpu.eip, BACK, "the program comes back");
         assert_eq!(cpu.r[EAX], 0x8004_0111, "the server's own answer");
         assert_eq!(cpu.r[ESP], STACK + 4, "and the stack as it was");
+    }
+
+    #[test]
+    fn directmusic_clsids_return_regdb_e_classnotreg_and_zero_out_ptr() {
+        use crate::win32::tests::with_test_ctx;
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            // CLSID_DirectMusicPerformance = {d2ac2890-b39b-11d1-8704-00600893b1bd}
+            let clsid: [u8; 16] = [
+                0x90, 0x28, 0xac, 0xd2, 0x9b, 0xb3, 0xd1, 0x11, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93,
+                0xb1, 0xbd,
+            ];
+            let iid: [u8; 16] = [
+                0xbf, 0x28, 0xac, 0xd2, 0x9b, 0xb3, 0xd1, 0x11, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93,
+                0xb1, 0xbd,
+            ];
+            let p_clsid = ctx.state.heap.alloc(16);
+            let p_iid = ctx.state.heap.alloc(16);
+            let ppv = ctx.state.heap.alloc(4);
+            ctx.mem.write(p_clsid, &clsid).unwrap();
+            ctx.mem.write(p_iid, &iid).unwrap();
+            ctx.mem.write_u32(ppv, 0xdead_beef).unwrap();
+
+            let hr = super::create_instance(ctx, &[p_clsid, 0, 1, p_iid, ppv]).unwrap();
+            assert_eq!(hr, 0x8004_0154);
+            assert_eq!(ctx.mem.read_u32(ppv).unwrap(), 0);
+        });
     }
 }

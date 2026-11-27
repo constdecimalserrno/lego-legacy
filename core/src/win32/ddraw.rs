@@ -849,6 +849,7 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     ctx.state.surface_dcs.remove(&dc);
+    ctx.state.gdi.dcs.remove(&dc);
     if let Some(s) = surface_of(ctx, this).filter(|s| s.primary && s.back == 0) {
         ctx.state.present = Some(super::Present {
             pixels: s.pixels,

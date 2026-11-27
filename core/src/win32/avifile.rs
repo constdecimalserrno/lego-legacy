@@ -23,6 +23,7 @@ pub const SHIMS: &[Shim] = &[
     stdcall("AVIFIL32", "AVIFileInit", 0, init),
     stdcall("AVIFIL32", "AVIFileExit", 0, init),
     stdcall("AVIFIL32", "AVIFileOpenA", 4, open),
+    stdcall("AVIFIL32", "AVIFileRelease", 1, file_release),
     stdcall("AVIFIL32", "AVIFileInfoA", 3, file_info),
     stdcall("AVIFIL32", "AVIFileGetStream", 4, get_stream),
     stdcall("AVIFIL32", "AVIStreamInfoA", 3, stream_info),
@@ -370,6 +371,61 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     Ok(AVIERR_OK)
 }
 
+/// Reclaim an `IAVIFile` once its own refcount and every stream/frame getter
+/// referencing it are released, evicting `movie_bytes` if unused elsewhere.
+fn maybe_reclaim_avi_file(ctx: &mut Ctx<'_>, file_obj: u32) {
+    if ctx.state.com(file_obj).is_some_and(|o| o.refs > 0) {
+        return;
+    }
+    let Some(f) = ctx.state.avi_files.get(&file_obj) else {
+        return;
+    };
+    let streams_live = f
+        .streams
+        .iter()
+        .any(|slot| slot.is_some_and(|s| ctx.state.com(s).is_some_and(|o| o.refs > 0)));
+    let getters_live = ctx.state.frame_getters.values().any(|g| g.file == file_obj);
+    if streams_live || getters_live {
+        return;
+    }
+    if let Some(removed) = ctx.state.avi_files.remove(&file_obj) {
+        let still_used = ctx
+            .state
+            .avi_files
+            .values()
+            .any(|other| other.key == removed.key)
+            || ctx
+                .state
+                .filter_graphs
+                .values()
+                .any(|g| g.movie_key() == Some(removed.key.as_str()));
+        if !still_used {
+            ctx.state.movie_bytes.remove(&removed.key);
+        }
+    }
+}
+
+fn file_release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    // AVIFileRelease(pfile): decrements the file's reference count. When no
+    // reference, live stream, or frame getter remains, drops the file entry
+    // and evicts its cached bytes from `movie_bytes` if unused elsewhere.
+    if args[0] == 0 {
+        return Ok(0);
+    }
+    file(ctx, "AVIFileRelease", args[0])?;
+    let refs = {
+        let Some(obj) = ctx.state.com_mut(args[0]) else {
+            return Ok(0);
+        };
+        obj.refs -= 1;
+        obj.refs
+    };
+    if refs <= 0 {
+        maybe_reclaim_avi_file(ctx, args[0]);
+    }
+    Ok(refs as u32)
+}
+
 /// Name each stream its writer did not as AVIFile names it: the file's name,
 /// its kind and how many of that kind it is, counted from one. The evidence
 /// is what AVIFile itself named streams on its authors' machines, as two of
@@ -645,12 +701,16 @@ fn release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if args[0] == 0 {
         return Ok(0);
     }
-    stream_of(ctx, "AVIStreamRelease", args[0])?;
+    let (owner, _) = stream_of(ctx, "AVIStreamRelease", args[0])?;
     let Some(stream) = ctx.state.com_mut(args[0]) else {
         return Ok(0);
     };
     stream.refs -= 1;
-    Ok(stream.refs as u32)
+    let refs = stream.refs;
+    if refs <= 0 {
+        maybe_reclaim_avi_file(ctx, owner);
+    }
+    Ok(refs as u32)
 }
 
 fn read_format(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -1073,7 +1133,9 @@ fn get_frame_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if let Some(stream) = ctx.state.avi_files[&getter.file].streams[getter.stream] {
         ctx.state.com_ref(stream, -1);
     }
-    Ok(ctx.state.com_ref(args[0], -1))
+    let refs = ctx.state.com_ref(args[0], -1);
+    maybe_reclaim_avi_file(ctx, getter.file);
+    Ok(refs)
 }
 
 /// A picture as the bits of a bottom-up DIB of plain pixels, its rows each
@@ -1283,5 +1345,33 @@ mod tests {
             dib_bits(&picture, 24),
             [0, 0, 179, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 179, 0, 0]
         );
+    }
+
+    #[test]
+    fn avi_file_release_decrements_refs_and_evicts_unused_movie_bytes() {
+        use super::{file_release, File, AVI_FILE};
+        use crate::win32::tests::with_test_ctx;
+        use crate::win32::{ComState, State};
+
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let obj = State::make_com(ctx, &AVI_FILE, ComState::None).unwrap();
+            let key = "D:\\TEST.AVI".to_owned();
+            let bytes: std::rc::Rc<[u8]> = vec![1u8, 2, 3, 4].into();
+            ctx.state.movie_bytes.insert(key.clone(), bytes.clone());
+            ctx.state.avi_files.insert(
+                obj,
+                File {
+                    name: "test.avi".to_owned(),
+                    key: key.clone(),
+                    bytes,
+                    avi: crate::avi::Avi::default(),
+                    streams: Vec::new(),
+                },
+            );
+            assert_eq!(file_release(ctx, &[0]).unwrap(), 0);
+            assert_eq!(file_release(ctx, &[obj]).unwrap(), 0);
+            assert!(!ctx.state.avi_files.contains_key(&obj));
+            assert!(!ctx.state.movie_bytes.contains_key(&key));
+        });
     }
 }

@@ -277,9 +277,34 @@ impl Tree {
     }
 
     /// The form a guest path is looked up by: case does not matter on the
-    /// declared machine, and neither does which way the separators lean.
+    /// declared machine, separators lean the same way, and `.`/`..`/duplicate
+    /// separators collapse as Windows path canonicalization does (#394).
     fn key(path: &str) -> String {
-        path.trim().replace('/', "\\").to_uppercase()
+        let norm = path.trim().replace('/', "\\").to_uppercase();
+        let (prefix, rest) = if norm.as_bytes().get(1) == Some(&b':') {
+            (&norm[..2], norm[2..].trim_start_matches('\\'))
+        } else if !norm.contains('\\') {
+            return norm;
+        } else {
+            ("", norm.as_str())
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        for seg in rest.split('\\') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                s => parts.push(s),
+            }
+        }
+        if prefix.is_empty() {
+            parts.join("\\")
+        } else if parts.is_empty() {
+            format!("{prefix}\\")
+        } else {
+            format!("{prefix}\\{}", parts.join("\\"))
+        }
     }
 
     /// Declare everything the pressing's cabinet holds, under a root.
@@ -650,5 +675,24 @@ impl Tree {
             out.push((name.to_owned(), size));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tree;
+
+    #[test]
+    fn key_canonicalizes_dots_parents_and_separators() {
+        assert_eq!(
+            Tree::key("C:\\Program Files\\LEGOLAND\\.\\strings\\stab.str"),
+            "C:\\PROGRAM FILES\\LEGOLAND\\STRINGS\\STAB.STR"
+        );
+        assert_eq!(
+            Tree::key("C:/Game/sub/../data//file.txt"),
+            "C:\\GAME\\DATA\\FILE.TXT"
+        );
+        assert_eq!(Tree::key("C:\\..\\.."), "C:\\");
+        assert_eq!(Tree::key("*.txt"), "*.TXT");
     }
 }
