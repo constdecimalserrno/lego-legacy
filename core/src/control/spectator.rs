@@ -700,7 +700,7 @@ mod tests {
                 assert!(resp.contains("<canvas"));
                 assert!(resp.contains("/api/stream"));
                 assert!(resp.contains("/api/events"));
-                assert!(resp.contains("pointerBlank"));
+                assert!(resp.contains("cursorVisible"));
             }
 
             // B. GET /api/events streams valid SSE JSON and pushes agent_state updates immediately.
@@ -929,6 +929,10 @@ mod tests {
             pointer_pos: (10 + flip as i32, 20 + flip as i32),
             pointer_shown: flip.is_multiple_of(2),
             cursor_blank: flip == 0,
+            cursor_visible: crate::control::cursor::CursorModel::overlay_visible(
+                flip.is_multiple_of(2),
+                flip == 0,
+            ),
         };
 
         let f0 = mk_snap(0, 16, 12, 0x10, 100.0);
@@ -1572,5 +1576,15 @@ mod tests {
         assert!(WATCH_HTML.contains("function syncTakeoverCursor()"));
         assert!(WATCH_HTML.contains("function enqueueAct(body)"));
         assert!(!WATCH_HTML.contains("relCursor"));
+
+        // Capability-driven /watch & single-source cursor_visible (#409).
+        assert!(WATCH_HTML.contains("mouseMode.click_requires_poll_release"));
+        assert!(WATCH_HTML.contains("mouseMode.is_relative"));
+        assert!(WATCH_HTML.contains("st.cursor_visible"));
+        assert!(!WATCH_HTML.contains("absolute_kept"));
+        assert!(!WATCH_HTML.contains("software_absolute"));
+        assert!(!WATCH_HTML.contains("relative_steered"));
+        assert!(!WATCH_HTML.contains("software_relative"));
+        assert!(!WATCH_HTML.contains("st.pointer_shown && st.cursor_blank"));
     }
 }

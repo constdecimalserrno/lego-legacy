@@ -7,6 +7,7 @@
 //! crop zoom, integer RGB downsampled grids, and stuck-loop warnings.
 
 use super::bus::FrameSnapshot;
+use super::cursor::CursorModel;
 use super::json::{write_json_f64, write_json_str};
 use std::fmt::Write as _;
 
@@ -113,7 +114,7 @@ pub fn render_frame_png(
         return Err("frame buffer truncated".to_owned());
     }
 
-    let draw_cursor = opts.cursor && !(snap.pointer_shown && snap.cursor_blank);
+    let draw_cursor = opts.cursor && snap.cursor_visible;
     if !opts.grid && !draw_cursor && opts.crop.is_none() {
         return Ok(crate::png::encode(
             snap.width,
@@ -416,10 +417,20 @@ pub fn format_frame_json(
         }
         None => out.push_str("null"),
     }
+    let cursor_visible = if pointer_shown == snap.pointer_shown {
+        snap.cursor_visible
+    } else {
+        CursorModel::overlay_visible(pointer_shown, snap.cursor_blank)
+    };
     let _ = write!(
         out,
-        ",\"unchanged_streak\":{},\"pointer_pos\":[{},{}],\"pointer_shown\":{},\"cursor_blank\":{},\"warnings\":[",
-        snap.diff.unchanged_streak, pointer_pos.0, pointer_pos.1, pointer_shown, snap.cursor_blank
+        ",\"unchanged_streak\":{},\"pointer_pos\":[{},{}],\"pointer_shown\":{},\"cursor_blank\":{},\"cursor_visible\":{},\"warnings\":[",
+        snap.diff.unchanged_streak,
+        pointer_pos.0,
+        pointer_pos.1,
+        pointer_shown,
+        snap.cursor_blank,
+        cursor_visible
     );
     for (i, w) in warnings.iter().enumerate() {
         if i > 0 {
@@ -486,6 +497,7 @@ mod tests {
             pointer_pos: (320, 240),
             pointer_shown: true,
             cursor_blank: false,
+            cursor_visible: true,
         }
     }
 
@@ -554,6 +566,17 @@ mod tests {
         assert_eq!(first_rgb[0].as_u64(), Some(60)); // R
         assert_eq!(first_rgb[1].as_u64(), Some(40)); // G
         assert_eq!(first_rgb[2].as_u64(), Some(20)); // B
+        assert_eq!(obj["cursor_visible"].as_bool(), Some(true));
+
+        let mut blank_snap = sample_snapshot(16, 12, 0, false);
+        blank_snap.cursor_blank = true;
+        blank_snap.cursor_visible = false;
+        let overridden = format_frame_json(&blank_snap, 4, 3, (8, 6), false, false, false, false);
+        let parsed_over = crate::control::json::parse_json(&overridden).unwrap();
+        let over_obj = parsed_over.as_object().unwrap();
+        assert_eq!(over_obj["pointer_shown"].as_bool(), Some(false));
+        assert_eq!(over_obj["cursor_blank"].as_bool(), Some(true));
+        assert_eq!(over_obj["cursor_visible"].as_bool(), Some(true));
     }
 
     #[test]

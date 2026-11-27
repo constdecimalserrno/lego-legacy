@@ -452,10 +452,10 @@ details.inspect summary::-webkit-details-marker{display:none}
   let lastFeedSeq = 0;
   let pointerPos = [320, 240];
   let pointerShown = true;
-  let pointerBlank = false;
+  let cursorVisible = true;
   let wsPointerLocked = false;
   let hoveringStage = false;
-  let mouseMode = { kind: 'absolute_kept' };
+  let mouseMode = { is_relative: false, click_requires_poll_release: false };
   let heldKeys = [];
   let localMouseBtn = null;
   let ripples = [];
@@ -593,11 +593,11 @@ details.inspect summary::-webkit-details-marker{display:none}
     viewport.classList.toggle('hide-cursor', takeoverActive && !pointerShown);
   }
 
-  function applyWsPointer(framePtr, framePtrShown, framePtrBlank) {
+  function applyWsPointer(framePtr, framePtrShown, frameCursorVisible) {
     if (!framePtr) return;
     pointerPos = framePtr;
     pointerShown = Boolean(framePtrShown);
-    pointerBlank = Boolean(framePtrBlank);
+    cursorVisible = Boolean(frameCursorVisible);
     wsPointerLocked = true;
     syncTakeoverCursor();
     if (!hoveringStage) {
@@ -637,7 +637,7 @@ details.inspect summary::-webkit-details-marker{display:none}
       const framePtr = hasPtr ? [view.getInt16(9, true), view.getInt16(11, true)] : null;
       const framePtrFlags = hasPtr ? view.getUint8(13) : 0;
       const framePtrShown = hasPtr && (framePtrFlags & 0x01) !== 0;
-      const framePtrBlank = hasPtr && (framePtrFlags & 0x03) === 0x03;
+      const frameCursorVisible = !hasPtr || (framePtrFlags & 0x03) !== 0x03;
       const payload = new Uint8Array(buf, hdrLen);
       if (w === 0 || h === 0) continue;
 
@@ -653,7 +653,7 @@ details.inspect summary::-webkit-details-marker{display:none}
           decoded.close();
           fbImageData = decodeCtx.getImageData(0, 0, w, h);
           stageCtx.putImageData(fbImageData, 0, 0);
-          applyWsPointer(framePtr, framePtrShown, framePtrBlank);
+          applyWsPointer(framePtr, framePtrShown, frameCursorVisible);
         } else if (kind === 1 && fbImageData && w === frameW && h === frameH) {
           const delta = decodePackBits(payload, w * h * 4);
           if (delta && gen === videoGen) {
@@ -665,7 +665,7 @@ details.inspect summary::-webkit-details-marker{display:none}
               dst[i + 3]  = 255;
             }
             stageCtx.putImageData(fbImageData, 0, 0);
-            applyWsPointer(framePtr, framePtrShown, framePtrBlank);
+            applyWsPointer(framePtr, framePtrShown, frameCursorVisible);
           }
         }
       } catch (_) {
@@ -861,7 +861,9 @@ details.inspect summary::-webkit-details-marker{display:none}
       if (typeof st.pointer_shown === 'boolean') {
         pointerShown = st.pointer_shown;
       }
-      pointerBlank = Boolean(st.pointer_shown && st.cursor_blank);
+      if (typeof st.cursor_visible === 'boolean') {
+        cursorVisible = st.cursor_visible;
+      }
       syncTakeoverCursor();
     }
     heldKeys = Array.isArray(st.held_keys) ? st.held_keys : [];
@@ -987,7 +989,7 @@ details.inspect summary::-webkit-details-marker{display:none}
     }
 
     if (showReticle) {
-      if (!pointerBlank) {
+      if (cursorVisible) {
         const [px, py] = pointerPos;
         ovCtx.save();
         ovCtx.strokeStyle = 'rgba(0,0,0,0.85)';
@@ -1056,10 +1058,6 @@ details.inspect summary::-webkit-details-marker{display:none}
     };
   });
 
-  function requiresPollRelease() {
-    return Boolean(mouseMode && mouseMode.kind === 'software_absolute' && mouseMode.requires_poll_release);
-  }
-
   async function loadMeta() {
     try {
       const res = await fetch('/api/meta', { cache: 'no-store' });
@@ -1117,10 +1115,8 @@ details.inspect summary::-webkit-details-marker{display:none}
 
   function sendTakeoverMove(x, y) {
     lastMoveSent = performance.now();
-    const isRel = Boolean(mouseMode && (mouseMode.kind === 'relative_steered' || mouseMode.kind === 'software_relative'));
+    const isRel = Boolean(mouseMode && mouseMode.is_relative);
     if (!wsPointerLocked && !isRel) pointerPos = [x, y];
-    // Core's Timeline translates absolute `(x, y)` into exact relative deltas
-    // from `planned_visual()` on relative mouse modes, avoiding client drift.
     enqueueAct({ action: 'move', x, y, glide_flips: 1, source: 'human', wait: false, auto_step: false });
   }
 
@@ -1180,7 +1176,7 @@ details.inspect summary::-webkit-details-marker{display:none}
         action: 'drag', from_x: start.x, from_y: start.y, to_x: x, to_y: y,
         button: start.button, step_px: 16, source: 'human', wait: false, auto_step: true
       });
-    } else if (requiresPollRelease()) {
+    } else if (mouseMode && mouseMode.click_requires_poll_release) {
       enqueueAct({
         action: 'click_poll', x, y, button: start.button, hold_flips: 2, hold_ms: 150,
         source: 'human', wait: false, auto_step: true

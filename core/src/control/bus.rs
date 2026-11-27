@@ -161,6 +161,8 @@ pub struct FrameSnapshot {
     pub pointer_shown: bool,
     /// Whether the active OS cursor shape is completely transparent (`SetCursor(NULL)`).
     pub cursor_blank: bool,
+    /// Single-source pre-resolved overlay visibility (`CursorModel::is_overlay_visible()`, #409).
+    pub cursor_visible: bool,
 }
 
 /// Lightweight frame metadata returned by [`Command::FrameInfo`].
@@ -233,6 +235,8 @@ pub struct ControlStatus {
     pub pointer_shown: bool,
     /// Whether the active OS cursor shape is completely transparent (`SetCursor(NULL)`).
     pub cursor_blank: bool,
+    /// Single-source pre-resolved overlay visibility (`CursorModel::is_overlay_visible()`, #409).
+    pub cursor_visible: bool,
     pub held_keys: Vec<u32>,
     pub pending_actions: usize,
     pub frame_width: u32,
@@ -842,10 +846,11 @@ impl BusState {
             route_active: self.last_meta.is_some_and(|m| m.route_active),
             route_remaining: self.last_meta.map_or(0, |m| m.route_remaining),
             recording_len: self.recording_len,
-            pointer_pos: self.timeline.visual_cursor_pos(),
-            hw_pointer_pos: self.timeline.last_pointer(),
-            pointer_shown: self.timeline.pointer_shown(),
-            cursor_blank: self.timeline.cursor_blank(),
+            pointer_pos: self.timeline.cursor().visual_cursor_pos(),
+            hw_pointer_pos: self.timeline.cursor().hw_pointer(),
+            pointer_shown: self.timeline.cursor().pointer_shown(),
+            cursor_blank: self.timeline.cursor().cursor_blank(),
+            cursor_visible: self.timeline.cursor().is_overlay_visible(),
             held_keys: self.held_keys.clone(),
             pending_actions: self.timeline.pending_len(),
             frame_width,
@@ -971,7 +976,7 @@ impl ControlBus {
     }
 
     pub(crate) fn set_cursor_blank(&self, blank: bool) {
-        self.lock().timeline.set_cursor_blank(blank);
+        self.lock().timeline.cursor_mut().set_cursor_blank(blank);
     }
 
     pub(crate) fn pace_snapshot(&self) -> PaceSnapshot {
@@ -1058,20 +1063,15 @@ impl ControlBus {
         let wait_completed = {
             let mut state = self.lock();
             state.last_meta = Some(*meta);
-            state.timeline.set_pointer_shown(meta.pointer_shown);
-            let mode = state.timeline.mouse_mode();
-            if !mode.is_relative()
-                && (meta.pointer_shown
-                    || matches!(mode, crate::title::MouseMode::SoftwareAbsolute { .. }))
-            {
-                state
-                    .timeline
-                    .set_pointer(meta.pointer_pos.0, meta.pointer_pos.1);
-            }
+            let frame_size = staged.map(|(_, w, h)| (w, h));
+            state.timeline.cursor_mut().reconcile_flip(
+                meta.pointer_pos,
+                meta.pointer_shown,
+                frame_size,
+            );
             state.audio_underruns = underruns;
 
             let uniform = if let Some((bgra, w, h)) = staged {
-                state.timeline.set_frame_size(w, h);
                 let prev_streak = state
                     .latest_frame
                     .as_ref()
@@ -1083,6 +1083,7 @@ impl ControlBus {
                         .map(|f| (f.bgra.as_slice(), f.width, f.height));
                     analyze_frame(prev, bgra, w, h, prev_streak)
                 };
+                let cursor = state.timeline.cursor();
                 let snapshot = FrameSnapshot {
                     flip: meta.flip,
                     width: w,
@@ -1091,9 +1092,10 @@ impl ControlBus {
                     frame_hash,
                     diff,
                     uniform,
-                    pointer_pos: state.timeline.visual_cursor_pos(),
-                    pointer_shown: state.timeline.pointer_shown(),
-                    cursor_blank: state.timeline.cursor_blank(),
+                    pointer_pos: cursor.visual_cursor_pos(),
+                    pointer_shown: cursor.pointer_shown(),
+                    cursor_blank: cursor.cursor_blank(),
+                    cursor_visible: cursor.is_overlay_visible(),
                 };
                 state.latest_frame = Some(snapshot);
                 uniform
@@ -1195,7 +1197,7 @@ impl ControlBus {
     pub(crate) fn rebaseline_for_rewind(&self, pace_sleep_nanos: u64) -> u64 {
         let mut state = self.lock();
         state.timeline.reset_polled();
-        state.timeline.set_cursor_blank(false);
+        state.timeline.cursor_mut().set_cursor_blank(false);
         state.last_agent_action_flip = None;
         state.agent_timeline_end_flip = None;
         state.telemetry.rebaseline(0, 0, 0, pace_sleep_nanos);
@@ -1209,8 +1211,8 @@ impl ControlBus {
         let mut state = self.lock();
         state.last_meta = Some(sync.meta);
         let restored_visual = sync.restored_frame.as_ref().map(|f| f.pointer_pos);
+        let restored_size = sync.restored_frame.as_ref().map(|f| (f.width, f.height));
         if let Some(f) = sync.restored_frame {
-            state.timeline.set_frame_size(f.width, f.height);
             state.latest_frame = Some(f);
         }
         state.held_keys = sync.held_keys;
@@ -1221,20 +1223,14 @@ impl ControlBus {
         state.timeline.reset_polled();
         state.last_agent_action_flip = None;
         state.agent_timeline_end_flip = None;
-        state.timeline.set_pointer_shown(sync.meta.pointer_shown);
-        state.timeline.set_cursor_blank(sync.cursor_blank);
-        if state.timeline.mouse_mode().is_relative() {
-            state
-                .timeline
-                .set_pointer(sync.hw_pointer.0, sync.hw_pointer.1);
-            if let Some((vx, vy)) = restored_visual {
-                state.timeline.set_visual_cursor(vx, vy);
-            }
-        } else {
-            state
-                .timeline
-                .set_pointer(sync.meta.pointer_pos.0, sync.meta.pointer_pos.1);
-        }
+        state.timeline.cursor_mut().reconcile_restore(
+            sync.meta.pointer_pos,
+            sync.hw_pointer,
+            sync.meta.pointer_shown,
+            sync.cursor_blank,
+            restored_visual,
+            restored_size,
+        );
         state.active_wait = None;
         state.step_budget = 0;
         state.close_pending = false;
