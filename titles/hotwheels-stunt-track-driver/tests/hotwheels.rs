@@ -334,31 +334,28 @@ fn neon_green_pixels(frame: &lego_legacy_core::host::headless::Presented) -> usi
         .count()
 }
 
-/// Replay `routes/secret-track.route` from a fresh `--data-root` once into
-/// `slot`, reading back the save files the title persisted before cleaning up
-/// the scratch root.
-fn secret_track(
+/// Replay a Championship + `WIRE` route from a fresh `--data-root` once into
+/// `slot`, reading back the persisted save files before removing the scratch root.
+fn run_wire_route(
     slot: &'static std::sync::OnceLock<Option<SecretTrackRun>>,
+    route_rel: &str,
+    kept: &[u64],
     tag: &str,
 ) -> Option<&'static SecretTrackRun> {
     slot.get_or_init(|| {
         if !scratch() {
             return None;
         }
-        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-            "hotwheels-secret-track-{tag}-{}",
-            std::process::id()
-        ));
+        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("hotwheels-wire-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cli = Cli {
-            route: Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routes/secret-track.route"),
-            ),
+            route: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(route_rel)),
             data_root: Some(root.clone()),
             ..Cli::default()
         };
         let ran = testkit::run_on(
-            lego_legacy_core::host::headless::Headless::new().keeping(&SECRET_TRACK_KEPT),
+            lego_legacy_core::host::headless::Headless::new().keeping(kept),
             &HOT_WHEELS,
             &cli,
             SECRET_TRACK_BUDGET,
@@ -381,23 +378,13 @@ fn secret_track(
     .as_ref()
 }
 
-static SECRET_FIRST: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
-static SECRET_SECOND: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
-
-/// `routes/secret-track.route` completes Championship Tracks 1-6 from a clean
-/// profile to write `saves\onoff.dat` (all 6 tracks unlocked), right-clicks the
-/// Mattel "TT" hotspot on Track Select to enter Secret Track 7 (`WIRE.JAM`),
-/// drives and stunts through `WIRE` to its Bronze Medal finish (writing
-/// `saves\times.dat`), and quits cleanly on Escape (#285).
-#[test]
-fn the_secret_track_route_unlocks_and_finishes_wire() {
-    let Some(run) = secret_track(&SECRET_FIRST, "first") else {
-        return;
-    };
+fn assert_wire_run<'a>(
+    run: &'a SecretTrackRun,
+    kept: &[u64],
+    min_stunt_green: usize,
+    escape_flip: u64,
+) -> Vec<&'a lego_legacy_core::host::headless::Presented> {
     let ran = &run.ran;
-
-    // Championship Tracks 1-6 unlock saves\onoff.dat: 6 unlocked track dwords
-    // followed by a trailing zero dword (28 bytes total).
     const ONOFF_LINE: &str =
         r"file written C:\Program Files\Mattel\Stunt Track Driver\saves\onoff.dat, 28 bytes";
     const TIMES_LINE: &str =
@@ -408,20 +395,15 @@ fn the_secret_track_route_unlocks_and_finishes_wire() {
         2,
         "saves\\onoff.dat is written after Track 3 and Track 6"
     );
-    let mut expected_onoff = Vec::with_capacity(28);
-    for _ in 0..6 {
-        expected_onoff.extend_from_slice(&1u32.to_le_bytes());
-    }
-    expected_onoff.extend_from_slice(&0u32.to_le_bytes());
     assert_eq!(
-        run.onoff_dat, expected_onoff,
+        run.onoff_dat.as_slice(),
+        [1u32, 1, 1, 1, 1, 1, 0]
+            .map(u32::to_le_bytes)
+            .as_flattened(),
         "all 6 Championship tracks unlocked in saves\\onoff.dat"
     );
     assert_eq!(run.times_dat.len(), 480, "saves\\times.dat is 480 bytes");
     assert_eq!(run.wheel_dat.len(), 240, "saves\\wheel.dat is 240 bytes");
-
-    // 7 race finishes total: Championship Tracks 1-6 plus Secret Track 7 (WIRE)
-    // after the right-click on Track Select at flip 17,889.
     assert_eq!(
         ran.log.lines().filter(|l| l.contains(TIMES_LINE)).count(),
         7,
@@ -436,9 +418,7 @@ fn the_secret_track_route_unlocks_and_finishes_wire() {
         "WIRE finishes and writes saves\\times.dat after the right-click unlock"
     );
 
-    // Every kept landmark frame is 640x480, non-uniform, and pairwise distinct
-    // — proving live moving gameplay through WIRE to its results screen.
-    let frames: Vec<_> = SECRET_TRACK_KEPT
+    let frames: Vec<_> = kept
         .iter()
         .map(|&flip| {
             let frame = ran
@@ -460,8 +440,6 @@ fn the_secret_track_route_unlocks_and_finishes_wire() {
         }
     }
 
-    // Track Select has none of WIRE's neon-green wireframe terrain; the WIRE
-    // starting grid (2,937 px) and mid-air barrel roll (30,907 px) carry it.
     assert_eq!(
         neon_green_pixels(frames[0]),
         0,
@@ -473,31 +451,35 @@ fn the_secret_track_route_unlocks_and_finishes_wire() {
         neon_green_pixels(frames[1])
     );
     assert!(
-        neon_green_pixels(frames[2]) > 20_000,
-        "WIRE stunt frame shows neon-green wireframe valley: {} px",
+        neon_green_pixels(frames[2]) > min_stunt_green,
+        "WIRE stunt frame shows neon-green wireframe terrain: {} px",
         neon_green_pixels(frames[2])
     );
 
-    // Clean Escape quit three flips after flip 20,977, matching first-race.route.
-    ran.assert_exited(1).assert_flips(SECRET_ESCAPE + 3);
+    ran.assert_exited(1).assert_flips(escape_flip + 3);
+    frames
 }
 
-/// `routes/secret-track.route` replays bit-for-bit across two independent
-/// clean data roots (#285).
-#[test]
-fn the_secret_track_route_replays_to_the_same_machine_every_time() {
+fn assert_wire_replays_identical(
+    route_rel: &str,
+    kept: &[u64],
+    first_slot: &'static std::sync::OnceLock<Option<SecretTrackRun>>,
+    second_slot: &'static std::sync::OnceLock<Option<SecretTrackRun>>,
+    first_tag: &str,
+    second_tag: &str,
+) {
     let (first, second) = std::thread::scope(|scope| {
-        let second = scope.spawn(|| secret_track(&SECRET_SECOND, "second"));
+        let second = scope.spawn(|| run_wire_route(second_slot, route_rel, kept, second_tag));
         (
-            secret_track(&SECRET_FIRST, "first"),
-            second.join().expect("the second secret-track replay ran"),
+            run_wire_route(first_slot, route_rel, kept, first_tag),
+            second.join().expect("the second WIRE replay ran"),
         )
     });
     let (Some(first), Some(second)) = (first, second) else {
         return;
     };
     first.ran.assert_same_machine(&second.ran);
-    for flip in SECRET_TRACK_KEPT {
+    for &flip in kept {
         assert_eq!(
             first.ran.host.frame(flip).map(|f| &f.pixels),
             second.ran.host.frame(flip).map(|f| &f.pixels),
@@ -519,5 +501,107 @@ fn the_secret_track_route_replays_to_the_same_machine_every_time() {
     assert_eq!(
         first.wheel_dat, second.wheel_dat,
         "identical saves\\wheel.dat"
+    );
+}
+
+static SECRET_FIRST: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+static SECRET_SECOND: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+
+#[test]
+fn the_secret_track_route_unlocks_and_finishes_wire() {
+    let Some(run) = run_wire_route(
+        &SECRET_FIRST,
+        "routes/secret-track.route",
+        &SECRET_TRACK_KEPT,
+        "first",
+    ) else {
+        return;
+    };
+    assert_wire_run(run, &SECRET_TRACK_KEPT, 20_000, SECRET_ESCAPE);
+}
+
+#[test]
+fn the_secret_track_route_replays_to_the_same_machine_every_time() {
+    assert_wire_replays_identical(
+        "routes/secret-track.route",
+        &SECRET_TRACK_KEPT,
+        &SECRET_FIRST,
+        &SECRET_SECOND,
+        "first",
+        "second",
+    );
+}
+
+const WIRE_GOLD_STUNT: u64 = 18_960;
+const WIRE_GOLD_RESULTS: u64 = 20_875;
+const WIRE_GOLD_ESCAPE: u64 = 20_876;
+
+const WIRE_GOLD_KEPT: [u64; 5] = [
+    SECRET_TRACK_SELECT,
+    WIRE_GRID,
+    WIRE_GOLD_STUNT,
+    WIRE_TUNNEL,
+    WIRE_GOLD_RESULTS,
+];
+
+/// Byte offset of Track 7 (`WIRE`) records in `saves\times.dat` (12 tracks x 5
+/// `(seconds: u32, car_index: u32)` entries = 480 bytes).
+const WIRE_TIMES_OFFSET: usize = 280;
+
+/// Stock Track 7 (`WIRE`) Gold Medal time (`1:11`, 71 s), displaced to Silver
+/// (`entry[1]`) when beaten strictly (`<= 1:10`).
+const WIRE_STOCK_GOLD_SECS: u32 = 71;
+
+static WIRE_GOLD_FIRST: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+static WIRE_GOLD_SECOND: std::sync::OnceLock<Option<SecretTrackRun>> = std::sync::OnceLock::new();
+
+#[test]
+fn the_wire_gold_medal_route_unlocks_and_earns_gold_on_wire() {
+    let Some(run) = run_wire_route(
+        &WIRE_GOLD_FIRST,
+        "routes/wire-gold-medal.route",
+        &WIRE_GOLD_KEPT,
+        "gold-first",
+    ) else {
+        return;
+    };
+    let frames = assert_wire_run(run, &WIRE_GOLD_KEPT, 10_000, WIRE_GOLD_ESCAPE);
+
+    // Track 7 entry[0] = (68 s / 1:08, car10 index 9), shifting stock 71 s Gold to entry[1].
+    assert_eq!(
+        &run.times_dat[WIRE_TIMES_OFFSET..WIRE_TIMES_OFFSET + 12],
+        [68u32, 9, WIRE_STOCK_GOLD_SECS]
+            .map(u32::to_le_bytes)
+            .as_flattened(),
+        "WIRE Gold Medal persists 1:08 (68 s, car10) at entry[0] and displaces stock 1:11 to entry[1]"
+    );
+
+    // BGRA red channel (`pixels[i + 2]`) across the Results screen crash-icon row
+    // (`x = 195..540, y = 310..360`): empty orange-yellow sunburst holds <100 dark px (0 crashes).
+    let results = frames[4];
+    let w = results.width as usize;
+    let mut crash_dark = 0usize;
+    for y in 310..360 {
+        for x in 195..540 {
+            if results.pixels[(y * w + x) * 4 + 2] < 180 {
+                crash_dark += 1;
+            }
+        }
+    }
+    assert!(
+        crash_dark < 100,
+        "WIRE Gold Medal results screen crash row must be empty (0 crashes): {crash_dark} dark px"
+    );
+}
+
+#[test]
+fn the_wire_gold_medal_route_replays_to_the_same_machine_every_time() {
+    assert_wire_replays_identical(
+        "routes/wire-gold-medal.route",
+        &WIRE_GOLD_KEPT,
+        &WIRE_GOLD_FIRST,
+        &WIRE_GOLD_SECOND,
+        "gold-first",
+        "gold-second",
     );
 }
