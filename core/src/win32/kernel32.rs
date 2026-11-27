@@ -1622,16 +1622,26 @@ fn create_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }))
 }
 
-fn set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
-    let Some(Object::Named { signalled, .. }) = ctx.state.object_mut(args[0]) else {
-        ctx.state.last_error = 6;
-        return Ok(0);
+/// Signal a Win32 event handle and wake any guest thread waiting on it.
+pub(crate) fn signal_event(state: &mut State, handle: u32) -> bool {
+    let Some(Object::Named {
+        kind: "event",
+        signalled,
+        ..
+    }) = state.object_mut(handle)
+    else {
+        return false;
     };
     *signalled = true;
-    // Whoever is parked on it may run now rather than when its timeout runs
-    // out: an event nobody remembers having set is an event nobody can be
-    // woken by, which is what kept A3D's threads spinning (#60).
-    wake_waiters(ctx.state, args[0]);
+    wake_waiters(state, handle);
+    true
+}
+
+fn set_event(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
+    if !signal_event(ctx.state, args[0]) {
+        ctx.state.last_error = 6;
+        return Ok(0);
+    }
     Ok(1)
 }
 

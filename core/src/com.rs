@@ -518,6 +518,38 @@ const OWN: &[(&str, [u8; 16])] = &[
         parse_iid("279afa84-4981-11ce-a521-0020af0be560"),
     ),
     (
+        "IDirectMusic",
+        parse_iid("6536115a-7b2d-11d2-ba18-0000f875ac12"),
+    ),
+    (
+        "IDirectMusicPort",
+        parse_iid("08f2d8c9-37c2-11d2-b9f9-0000f875ac12"),
+    ),
+    (
+        "IDirectMusicPerformance",
+        parse_iid("07d43d03-6523-11d2-871d-00600893b1bd"),
+    ),
+    (
+        "IDirectMusicLoader",
+        parse_iid("2ffaaca2-5dca-11d2-afa6-00aa0024d8b6"),
+    ),
+    (
+        "IDirectMusicSegment",
+        parse_iid("f96029a2-4282-11d2-8717-00600893b1bd"),
+    ),
+    (
+        "IDirectMusicStyle",
+        parse_iid("d2ac28bd-b39b-11d1-8704-00600893b1bd"),
+    ),
+    (
+        "IDirectMusicComposer",
+        parse_iid("d2ac28bf-b39b-11d1-8704-00600893b1bd"),
+    ),
+    (
+        "IDirectMusicBand",
+        parse_iid("d2ac28c0-b39b-11d1-8704-00600893b1bd"),
+    ),
+    (
         "IMediaStream",
         parse_iid("b502d1bd-9a57-11d0-8fde-00c04fd9189d"),
     ),
