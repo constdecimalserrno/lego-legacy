@@ -1,0 +1,110 @@
+#lego-legacy-route 1
+# LEGO Alpha Team — Adventure Mode Mission 1 ("Mission One", M1010) Complete (#299, #300).
+#
+# Starts from a fresh --data-root, creates Adventure Slot 1, skips the Training
+# Area (M0010) to enter Mission One (M1010), skips Ogel's intro cutscene, cycles
+# to Cam 2, opens Direction Tile Actor19387's Unit Menu and rotates it 90 deg CW
+# (East toward the bridge), triggers live execution (GO) so Dash runs across the
+# bridge to trigger Plunger Lock OG0019B and open Skull Door OG0019A, reaches
+# Mission Victory ("We did it!"), persists adventure progress (HighSpace M1010,
+# P0Space M1020 in Game.txt), returns to HQ, and exits cleanly via Exit Game ->
+# Yes (PostMessageA(WM_DESTROY) -> PostQuitMessage(0) -> Exited(0)).
+#
+# Pointer arithmetic matches menu.route / select-adventure.route: DDMouse
+# recenters Win32 cursor to (320, 240) each flip and steers 1/1280 of the screen
+# per raw pixel (0.5 px/raw_x, 0.375 px/raw_y) from bottom-left (0, 480).
+#
+# Flip landmarks (640x480x16, 30 Hz):
+#   flip 1792       Attract screen -> Space to load Main Menu (MM.PUZ at 1865)
+#   flip 2252       Main Menu -> Adventure -> Select Adventure
+#   flip 2352       Select Adventure -> Slot 1 (New) -> Adventure Briefing
+#   flip 2452       Adventure Briefing X -> load M0010 Training Area (2539)
+#   flip 2760       Dismiss M0010 destination modal -> Menu (2842) -> Skip Training (2942)
+#   flip 2942       Game.txt written (109 B: P0Space M1010); M1010.PUZ loads (3029)
+#   flip 3545       Dismiss "Destination: Mission One" modal -> Ogel intro cutscene
+#   flip 3588       Escape skips Ogel intro cutscene; camera pans into M1010
+#   flip 3711,3744  Tab x2 cycles Cam 0 -> Cam 1 (overview) -> Cam 2 (centered tile)
+#   flip 3781       Click Direction Tile Actor19387 at (320, 125) -> Unit Menu opens
+#   flip 3813       Click RotateCW in Unit Menu -> tile rotated 90 deg CW (East)
+#   flip 3831       Space closes Unit Menu
+#   flip 3860       Space (GO) launches live execution (Dash runs across bridge)
+#   flip 4079       Dash hits Plunger Lock OG0019B; Game.txt updated (127 B: HighSpace M1010, P0Space M1020)
+#   flip 4081       T0011_VICTORY.dds plays; Skull Door OG0019A opens (4130)
+#   flip 4351       Reward_EN.dds ("We did it!") Mission Victory screen appears
+#   flip 4488       Click Return to HQ -> Main Menu reloads (MM.PUZ at 4575)
+#   flip 4710       Click Exit Game -> "Really Exit Game?" confirmation dialog
+#   flip 4770       Click Yes -> PostMessageA(WM_DESTROY) -> NetImmerse shutdown -> Exited(0) at flip 4847
+#
+# Active 3D gameplay window for --fps-report: [3591..4480] (889 flips, 29.63s declared).
+
+# Boot -> Attract screen -> Main Menu -> Adventure Slot 1 -> Skip Training -> M1010
+flip 1792 key Space down
+flip 1794 key Space up
+flip 2232 move 480 9
+flip 2234 move 480 9
+flip 2236 move 480 9
+flip 2238 move 480 9
+flip 2252 down
+flip 2254 up
+flip 2332 move 46 219
+flip 2352 down
+flip 2354 up
+flip 2432 move 523 433
+flip 2434 move 523 433
+flip 2436 move 523 433
+flip 2452 down
+flip 2454 up
+flip 2760 down
+flip 2762 up
+flip 2800 move 36 320
+flip 2802 move 36 320
+flip 2804 move 36 320
+flip 2842 down
+flip 2844 up
+flip 2920 move 492 20
+flip 2922 move 492 20
+flip 2924 move 492 20
+flip 2942 down
+flip 2944 up
+
+# Dismiss "Destination: Mission One" modal and skip Ogel's intro cutscene.
+flip 3545 down
+flip 3547 up
+flip 3588 key Escape down
+flip 3590 key Escape up
+
+# Cycle camera twice (Cam 0 -> Cam 1 -> Cam 2) so Direction Tile Actor19387 sits at (320, 125).
+flip 3711 key Tab down
+flip 3713 key Tab up
+flip 3744 key Tab down
+flip 3746 key Tab up
+
+# Steer up onto Direction Tile Actor19387 and open its Unit Menu.
+flip 3777 move 320 93
+flip 3781 down
+flip 3783 up
+
+# Steer to RotateCW in the Unit Menu and rotate Actor19387 90 deg CW (East toward bridge).
+flip 3809 move 280 80
+flip 3813 down
+flip 3815 up
+
+# Close Unit Menu, then press Space (GO) so Dash crosses the bridge to Plunger Lock OG0019B.
+flip 3831 key Space down
+flip 3833 key Space up
+flip 3860 key Space down
+flip 3862 key Space up
+
+# On "We did it!" Mission Victory screen, steer to Return to HQ and return to Main Menu.
+flip 4480 move 360 470
+flip 4482 move 320 470
+flip 4484 move 320 280
+flip 4488 down
+flip 4490 up
+
+# On Main Menu (cursor sits on Exit Game), click Exit Game, wait for confirm dialog, and click Yes.
+flip 4710 down
+flip 4712 up
+flip 4760 move 192 219
+flip 4770 down
+flip 4772 up

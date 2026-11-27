@@ -1006,19 +1006,26 @@ fn post(state: &mut super::State, message: u32, wparam: u32, time: u32) {
 /// pointer as it is posted, and the title's own loop takes it.
 ///
 /// LEGO Island posts itself its pointer's shape this way (#139), and
-/// `WM_CLOSE` when its credits are over (#140). A title's own messages, from
-/// `WM_USER` up, are posted here, and of the system's below it `WM_CLOSE`,
-/// which carries no pointer, so Windows posts it as it posts any other. Which
-/// other system messages carry one, and so cannot be posted, is not written,
-/// and neither is a message to any window but the title's own.
+/// `WM_CLOSE` when its credits are over (#140); LEGO Alpha Team posts
+/// `WM_DESTROY` when the player confirms Exit Game (#299). A title's own
+/// messages, from `WM_USER` up, are posted here, and of the system's below it
+/// `WM_CLOSE` and `WM_DESTROY`, neither of which carries a pointer, so Windows
+/// posts them as it posts any other. Which other system messages carry one,
+/// and so cannot be posted, is not written, and neither is a message to any
+/// window but the title's own.
 fn post_message(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     const WM_USER: u32 = 0x0400;
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
     let (window, message, wparam, lparam) = (args[0], args[1], args[2], args[3]);
-    if window != WINDOW || (message < WM_USER && message != WM_CLOSE) {
+    if window != WINDOW || (message < WM_USER && !matches!(message, WM_CLOSE | WM_DESTROY)) {
         return Err(Stop::NotWritten {
             what: format!("USER32.dll!PostMessageA: message {message:#06x} to window {window:#x}"),
             caller: 0,
         });
+    }
+    if !ctx.state.window_made {
+        ctx.state.last_error = ERROR_INVALID_WINDOW_HANDLE;
+        return Ok(0);
     }
     let posted = super::Message {
         window,

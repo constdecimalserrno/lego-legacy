@@ -105,5 +105,5 @@ Isometric 3D puzzle-action game (`LEGOATeam.exe`, NetImmerse / Direct3D 7). Plac
 ## Reference Files
 
 - Title declaration & `GUIDE`: [`src/lib.rs`](src/lib.rs)
-- Verified headless routes: [`routes/menu.route`](routes/menu.route), [`routes/first-mission.route`](routes/first-mission.route), [`routes/select-adventure.route`](routes/select-adventure.route)
+- Verified headless routes: [`routes/menu.route`](routes/menu.route), [`routes/first-mission.route`](routes/first-mission.route), [`routes/select-adventure.route`](routes/select-adventure.route), [`routes/adventure-mission-1.route`](routes/adventure-mission-1.route)
 - Integration tests & frame constants: [`tests/alpha_team.rs`](tests/alpha_team.rs), [`tests/cursor_alignment.rs`](tests/cursor_alignment.rs)
