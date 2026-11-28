@@ -279,7 +279,7 @@ impl Tree {
     /// The form a guest path is looked up by: case does not matter on the
     /// declared machine, separators lean the same way, and `.`/`..`/duplicate
     /// separators collapse as Windows path canonicalization does (#394).
-    fn key(path: &str) -> String {
+    pub(crate) fn key(path: &str) -> String {
         let norm = path.trim().replace('/', "\\").to_uppercase();
         let (prefix, rest) = if norm.as_bytes().get(1) == Some(&b':') {
             (&norm[..2], norm[2..].trim_start_matches('\\'))

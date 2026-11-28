@@ -3282,8 +3282,10 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // A path is one the installer would have written; only the file at the end
     // of it is the title's own. A name with no extension is looked for with
     // ".DLL" added, as Microsoft documents.
-    let mut file = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_owned();
-    if !file.contains('.') {
+    let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
+    let has_ext = base.is_empty() || base.contains('.');
+    let mut file = base.to_owned();
+    if !has_ext {
         file.push_str(".DLL");
     }
     if let Some(module) = ctx.modules.base_of_name(&file) {
@@ -3305,11 +3307,26 @@ fn load_library(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         })),
         None => {
             let declared = &ctx.title.declared;
-            let Some((_, why)) = declared
+            let why = declared
                 .absent_libraries
                 .iter()
                 .find(|(absent, _)| absent.eq_ignore_ascii_case(&file))
-            else {
+                .map(|(_, why)| (*why).to_owned())
+                .or_else(|| {
+                    if !name.contains(['\\', '/']) {
+                        return None;
+                    }
+                    let probe = if has_ext {
+                        name.clone()
+                    } else {
+                        format!("{name}.DLL")
+                    };
+                    let resolved = crate::install::Tree::key(&ctx.absolute(&probe));
+                    let in_windows = resolved.starts_with("C:\\WINDOWS\\");
+                    (!in_windows && !ctx.tree.readable(&resolved))
+                        .then(|| format!("absent explicit path {resolved}"))
+                });
+            let Some(why) = why else {
                 return Err(Stop::NotWritten {
                     what: format!(
                         "KERNEL32.dll!LoadLibraryA: {file} is neither the title's own, \

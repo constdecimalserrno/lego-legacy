@@ -1,0 +1,3333 @@
+#lego-legacy-route 1
+# LEGOLAND Campaign Level 1 (San Francisco, ObjList6.txt, map "GLONE") completion + save + clean exit (#396).
+# Unflagged boot from a fresh --data-root under FlipCost::Refresh(36), 100% legitimate inputs (zero cheats/patches):
+#   flips     4..39   : Skip D:\lmi.avi (LeftControl+Q) and D:\Intro.avi (Space)
+#   flips    55..93   : Player Details -> create profile "ada" (writes profiles\Profile1.txt)
+#   flips   112..890  : Tutorial 1 (ObjList1.txt): Space Tower, Path + Map, link & erase LEGO Toy Shop -> Finish
+#   flips   891..2160 : Tutorial 2 (ObjList2.txt): Free trapped gardeners, 5 flowers + 10 pine trees, Fountain -> Finish
+#   flips  2161..5660 : Tutorial 3 (ObjList3.txt): 6 gardeners, PATHSCENERY 25, Space Tower, Power, 2 shops,
+#                       Spider.avi FMV (Space), Spider Ride, 2nd Power Station -> Finish
+#   flips  5661..7450 : Tutorial 4 (ObjList4.txt): Query -> LEGOLAND -> Copters -> 5 Mechanics -> 100% repair -> Finish
+#   flips  7451..10046: Tutorial 5 (ObjList5.txt): 15 hedged flowers, return Gardener, Power, 4 Mechanics, link & loop
+#                       Boating School (5 water pieces), Western.avi FMV (Space), 3 Western rides -> Progress Map unlocked
+#   flips 10047..16828: Level 1 San Francisco (ObjList6.txt): LEGOLAND + Wild West zones, Space Tower, Spider Ride,
+#                       Driving School + full road loop w/ Pumps & Zebra Crossing, Fort, Saloon, 3 Small Power Stations,
+#                       all 6 food types (Drink Cart, Chuck Wagon, Octopus Cafe, Food Cart, Restaurant, Shark Cafe),
+#                       all 9 scenery types (50+ pieces including Barrel), 100% ride access, 5 Gardeners + 3 Mechanics
+#   flips 17800..17870: Options -> Save -> Slot 1 -> type "sf" -> Accept (writes profiles\1save1.sav, 177 KB)
+#   flips 31565..31710: Mr. Bimble 10-min Appraisal passes 8/8 100% green -> Finish door -> Congrats ("Woah! The Park
+#                       Inspector was really impressed!") -> Progress Map (Paris Level 2 unlocked) -> Back -> Exit -> Yes -> 0
+flip 4 key LeftControl down
+flip 5 key Q down
+flip 7 key Q up
+flip 8 key LeftControl up
+flip 37 key Space down
+flip 39 key Space up
+flip 55 move 261 187
+flip 56 move 260 187
+flip 58 down
+flip 60 up
+flip 65 key A down
+flip 66 key A up
+flip 67 key D down
+flip 68 key D up
+flip 69 key A down
+flip 70 key A up
+flip 75 key Return down
+flip 77 key Return up
+flip 88 move 561 402
+flip 89 move 562 402
+flip 91 down
+flip 93 up
+flip 112 move 276 385
+flip 113 move 275 385
+flip 115 down
+flip 117 up
+flip 136 move 576 419
+flip 137 move 577 419
+flip 139 down
+flip 141 up
+flip 182 move 578 419
+flip 183 move 577 419
+flip 185 down
+flip 187 up
+flip 218 move 558 246
+flip 219 move 558 245
+flip 221 down
+flip 223 up
+flip 234 move 53 395
+flip 235 move 52 395
+flip 237 down
+flip 239 up
+flip 255 move 557 245
+flip 256 move 558 245
+flip 258 down
+flip 260 up
+flip 271 move 61 155
+flip 272 move 60 155
+flip 274 down
+flip 276 up
+flip 282 move 320 140
+flip 288 key Up down
+flip 303 key Up up
+flip 309 move 400 180
+flip 315 move 401 180
+flip 316 move 400 180
+flip 318 down
+flip 320 up
+flip 361 move 321 200
+flip 362 move 320 200
+flip 364 down right
+flip 366 up right
+flip 457 move 576 419
+flip 458 move 577 419
+flip 460 down
+flip 462 up
+flip 478 move 40 445
+flip 479 move 39 445
+flip 481 down
+flip 483 up
+flip 496 move 278 445
+flip 497 move 279 445
+flip 499 down
+flip 501 up
+flip 517 move 360 291
+flip 518 move 360 290
+flip 520 down
+flip 522 up
+flip 523 move 361 290
+flip 524 move 360 290
+flip 525 down
+flip 527 up
+flip 540 move 40 445
+flip 541 move 39 445
+flip 543 down
+flip 545 up
+flip 554 move 585 165
+flip 554 down
+flip 555 move 578 169
+flip 556 move 571 174
+flip 557 move 564 178
+flip 558 move 556 182
+flip 559 move 549 186
+flip 560 move 542 191
+flip 561 move 535 195
+flip 562 up
+flip 578 move 200 445
+flip 579 move 199 445
+flip 581 down
+flip 583 up
+flip 592 move 459 210
+flip 593 move 460 210
+flip 595 down
+flip 597 up
+flip 688 move 577 418
+flip 689 move 577 419
+flip 691 down
+flip 693 up
+flip 714 move 360 445
+flip 715 move 359 445
+flip 717 down
+flip 719 up
+flip 735 move 557 261
+flip 736 move 558 261
+flip 738 down
+flip 740 up
+flip 756 move 221 165
+flip 757 move 220 165
+flip 759 down
+flip 761 up
+flip 766 key P down
+flip 767 key P up
+flip 768 key A down
+flip 769 key A up
+flip 770 key R down
+flip 771 key R up
+flip 772 key K down
+flip 773 key K up
+flip 778 key Return down
+flip 780 key Return up
+flip 796 move 549 400
+flip 797 move 550 400
+flip 799 down
+flip 801 up
+flip 822 move 576 419
+flip 823 move 577 419
+flip 825 down
+flip 827 up
+flip 863 move 578 419
+flip 864 move 577 419
+flip 866 down
+flip 868 up
+flip 891 move 578 419
+flip 892 move 577 419
+flip 894 down
+flip 896 up
+flip 932 move 578 419
+flip 933 move 577 419
+flip 935 down
+flip 937 up
+flip 968 move 558 246
+flip 969 move 558 245
+flip 971 down
+flip 973 up
+flip 982 move 53 395
+flip 983 move 52 395
+flip 985 down
+flip 987 up
+flip 996 move 557 245
+flip 997 move 558 245
+flip 999 down
+flip 1001 up
+flip 1010 move 200 445
+flip 1011 move 199 445
+flip 1013 down
+flip 1015 up
+flip 1016 move 405 181
+flip 1017 move 405 180
+flip 1019 down
+flip 1021 up
+flip 1022 move 386 190
+flip 1023 move 385 190
+flip 1025 down
+flip 1027 up
+flip 1028 move 405 224
+flip 1029 move 405 225
+flip 1031 down
+flip 1033 up
+flip 1044 move 61 90
+flip 1045 move 60 90
+flip 1047 down
+flip 1049 up
+flip 1050 move 319 150
+flip 1051 move 320 150
+flip 1052 down
+flip 1054 up
+flip 1055 move 339 170
+flip 1056 move 340 170
+flip 1057 down
+flip 1059 up
+flip 1060 move 359 190
+flip 1061 move 360 190
+flip 1062 down
+flip 1064 up
+flip 1065 move 321 200
+flip 1066 move 320 200
+flip 1067 down
+flip 1069 up
+flip 1070 move 349 220
+flip 1071 move 350 220
+flip 1072 down
+flip 1074 up
+flip 1195 move 320 121
+flip 1196 move 320 120
+flip 1198 down right
+flip 1200 up right
+flip 1201 move 417 192
+flip 1202 move 418 192
+flip 1204 down
+flip 1206 up
+flip 1207 move 336 165
+flip 1208 move 335 165
+flip 1210 down
+flip 1212 up
+flip 1213 move 437 182
+flip 1214 move 438 182
+flip 1216 down
+flip 1218 up
+flip 1219 move 336 185
+flip 1220 move 335 185
+flip 1222 down
+flip 1224 up
+flip 1225 move 61 90
+flip 1226 move 60 90
+flip 1228 down
+flip 1230 up
+flip 1231 move 299 160
+flip 1232 move 300 160
+flip 1233 down
+flip 1235 up
+flip 1396 move 557 245
+flip 1397 move 558 245
+flip 1399 down
+flip 1401 up
+flip 1402 move 61 220
+flip 1403 move 60 220
+flip 1405 down
+flip 1407 up
+flip 1408 move 189 90
+flip 1409 move 190 90
+flip 1410 down
+flip 1412 up
+flip 1413 move 224 90
+flip 1414 move 225 90
+flip 1415 down
+flip 1417 up
+flip 1418 move 259 90
+flip 1419 move 260 90
+flip 1420 down
+flip 1422 up
+flip 1423 move 294 90
+flip 1424 move 295 90
+flip 1425 down
+flip 1427 up
+flip 1428 move 329 90
+flip 1429 move 330 90
+flip 1430 down
+flip 1432 up
+flip 1433 move 191 125
+flip 1434 move 190 125
+flip 1435 down
+flip 1437 up
+flip 1438 move 224 125
+flip 1439 move 225 125
+flip 1440 down
+flip 1442 up
+flip 1443 move 259 125
+flip 1444 move 260 125
+flip 1445 down
+flip 1447 up
+flip 1448 move 294 125
+flip 1449 move 295 125
+flip 1450 down
+flip 1452 up
+flip 1453 move 329 125
+flip 1454 move 330 125
+flip 1455 down
+flip 1457 up
+flip 1458 move 191 160
+flip 1459 move 190 160
+flip 1460 down
+flip 1462 up
+flip 1463 move 224 160
+flip 1464 move 225 160
+flip 1465 down
+flip 1467 up
+flip 1928 move 576 419
+flip 1929 move 577 419
+flip 1931 down
+flip 1933 up
+flip 1954 move 200 445
+flip 1955 move 199 445
+flip 1957 down
+flip 1959 up
+flip 1960 move 455 166
+flip 1961 move 455 165
+flip 1963 down
+flip 1965 up
+flip 1966 move 306 250
+flip 1967 move 305 250
+flip 1969 down
+flip 1971 up
+flip 1987 move 557 245
+flip 1988 move 558 245
+flip 1990 down
+flip 1992 up
+flip 2001 move 61 285
+flip 2002 move 60 285
+flip 2004 down
+flip 2006 up
+flip 2007 move 309 265
+flip 2008 move 310 265
+flip 2010 down
+flip 2012 up
+flip 2033 move 576 419
+flip 2034 move 577 419
+flip 2036 down
+flip 2038 up
+flip 2069 move 578 419
+flip 2070 move 577 419
+flip 2072 down
+flip 2074 up
+flip 2100 move 578 419
+flip 2101 move 577 419
+flip 2103 down
+flip 2105 up
+flip 2141 move 578 419
+flip 2142 move 577 419
+flip 2144 down
+flip 2146 up
+flip 2177 move 578 419
+flip 2178 move 577 419
+flip 2180 down
+flip 2182 up
+flip 2213 move 465 201
+flip 2214 move 465 200
+flip 2216 down
+flip 2218 up
+flip 2231 move 466 200
+flip 2232 move 465 200
+flip 2233 down
+flip 2235 up
+flip 2248 move 466 200
+flip 2249 move 465 200
+flip 2250 down
+flip 2252 up
+flip 2265 move 466 200
+flip 2266 move 465 200
+flip 2267 down
+flip 2269 up
+flip 2282 move 466 200
+flip 2283 move 465 200
+flip 2284 down
+flip 2286 up
+flip 2299 move 466 200
+flip 2300 move 465 200
+flip 2301 down
+flip 2303 up
+flip 2319 move 53 395
+flip 2320 move 52 395
+flip 2322 down
+flip 2324 up
+flip 2343 move 60 221
+flip 2344 move 60 220
+flip 2346 down
+flip 2348 up
+flip 2349 move 189 190
+flip 2350 move 190 190
+flip 2351 down
+flip 2353 up
+flip 2354 move 61 155
+flip 2355 move 60 155
+flip 2357 down
+flip 2359 up
+flip 2360 move 155 269
+flip 2361 move 155 270
+flip 2362 down
+flip 2364 up
+flip 2365 move 174 280
+flip 2366 move 175 280
+flip 2367 down
+flip 2369 up
+flip 2370 move 194 290
+flip 2371 move 195 290
+flip 2372 down
+flip 2374 up
+flip 2375 move 214 300
+flip 2376 move 215 300
+flip 2377 down
+flip 2379 up
+flip 2380 move 234 310
+flip 2381 move 235 310
+flip 2382 down
+flip 2384 up
+flip 2385 move 254 320
+flip 2386 move 255 320
+flip 2387 down
+flip 2389 up
+flip 2390 move 274 330
+flip 2391 move 275 330
+flip 2392 down
+flip 2394 up
+flip 2395 move 294 340
+flip 2396 move 295 340
+flip 2397 down
+flip 2399 up
+flip 2400 move 314 350
+flip 2401 move 315 350
+flip 2402 down
+flip 2404 up
+flip 2405 move 60 91
+flip 2406 move 60 90
+flip 2408 down
+flip 2410 up
+flip 2411 move 140 314
+flip 2412 move 140 315
+flip 2413 down
+flip 2415 up
+flip 2416 move 159 325
+flip 2417 move 160 325
+flip 2418 down
+flip 2420 up
+flip 2421 move 179 335
+flip 2422 move 180 335
+flip 2423 down
+flip 2425 up
+flip 2426 move 199 345
+flip 2427 move 200 345
+flip 2428 down
+flip 2430 up
+flip 2431 move 219 355
+flip 2432 move 220 355
+flip 2433 down
+flip 2435 up
+flip 2436 move 239 365
+flip 2437 move 240 365
+flip 2438 down
+flip 2440 up
+flip 2441 move 259 375
+flip 2442 move 260 375
+flip 2443 down
+flip 2445 up
+flip 2446 move 285 261
+flip 2447 move 285 260
+flip 2448 down
+flip 2450 up
+flip 2451 move 304 270
+flip 2452 move 305 270
+flip 2453 down
+flip 2455 up
+flip 2456 move 324 280
+flip 2457 move 325 280
+flip 2458 down
+flip 2460 up
+flip 2681 move 61 155
+flip 2682 move 60 155
+flip 2684 down
+flip 2686 up
+flip 2687 move 259 130
+flip 2688 move 260 130
+flip 2689 down
+flip 2691 up
+flip 2692 move 289 150
+flip 2693 move 290 150
+flip 2694 down
+flip 2696 up
+flip 2697 move 250 284
+flip 2698 move 250 285
+flip 2699 down
+flip 2701 up
+flip 2842 move 60 91
+flip 2843 move 60 90
+flip 2844 down
+flip 2845 up
+flip 2850 move 195 269
+flip 2851 move 195 270
+flip 2852 down
+flip 2853 up
+flip 2856 move 219 295
+flip 2857 move 220 295
+flip 2858 down
+flip 2859 up
+flip 2862 move 244 315
+flip 2863 move 245 315
+flip 2864 down
+flip 2865 up
+flip 2868 move 274 335
+flip 2869 move 275 335
+flip 2870 down
+flip 2871 up
+flip 2874 move 304 355
+flip 2875 move 305 355
+flip 2876 down
+flip 2877 up
+flip 2880 move 334 370
+flip 2881 move 335 370
+flip 2882 down
+flip 2883 up
+flip 2886 move 176 290
+flip 2887 move 175 290
+flip 2888 down
+flip 2889 up
+flip 2892 move 204 315
+flip 2893 move 205 315
+flip 2894 down
+flip 2895 up
+flip 2898 move 234 340
+flip 2899 move 235 340
+flip 2900 down
+flip 2901 up
+flip 2904 move 264 360
+flip 2905 move 265 360
+flip 2906 down
+flip 2907 up
+flip 2910 move 156 275
+flip 2911 move 155 275
+flip 2912 down
+flip 2913 up
+flip 2916 move 244 250
+flip 2917 move 245 250
+flip 2918 down
+flip 2919 up
+flip 2922 move 269 235
+flip 2923 move 270 235
+flip 2924 down
+flip 2925 up
+flip 2928 move 294 215
+flip 2929 move 295 215
+flip 2930 down
+flip 2931 up
+flip 2934 move 166 255
+flip 2935 move 165 255
+flip 2936 down
+flip 2937 up
+flip 2940 move 136 280
+flip 2941 move 135 280
+flip 2942 down
+flip 2943 up
+flip 2946 move 159 305
+flip 2947 move 160 305
+flip 2948 down
+flip 2949 up
+flip 2952 move 189 330
+flip 2953 move 190 330
+flip 2954 down
+flip 2955 up
+flip 2958 move 219 355
+flip 2959 move 220 355
+flip 2960 down
+flip 2961 up
+flip 2964 move 249 375
+flip 2965 move 250 375
+flip 2966 down
+flip 2967 up
+flip 2970 move 294 365
+flip 2971 move 295 365
+flip 2972 down
+flip 2973 up
+flip 2976 move 324 385
+flip 2977 move 325 385
+flip 2978 down
+flip 2979 up
+flip 3202 move 279 444
+flip 3203 move 279 445
+flip 3204 down
+flip 3205 up
+flip 3212 move 350 226
+flip 3213 move 350 225
+flip 3214 down
+flip 3215 up
+flip 3220 move 279 444
+flip 3221 move 279 445
+flip 3222 down
+flip 3223 up
+flip 3230 move 60 91
+flip 3231 move 60 90
+flip 3232 down
+flip 3233 up
+flip 3238 move 479 65
+flip 3239 move 480 65
+flip 3240 down
+flip 3241 up
+flip 3244 move 441 85
+flip 3245 move 440 85
+flip 3246 down
+flip 3247 up
+flip 3250 move 401 105
+flip 3251 move 400 105
+flip 3252 down
+flip 3253 up
+flip 3256 move 361 125
+flip 3257 move 360 125
+flip 3258 down
+flip 3259 up
+flip 3262 move 321 145
+flip 3263 move 320 145
+flip 3264 down
+flip 3265 up
+flip 3268 move 281 165
+flip 3269 move 280 165
+flip 3270 down
+flip 3271 up
+flip 3274 move 241 185
+flip 3275 move 240 185
+flip 3276 down
+flip 3277 up
+flip 3280 move 201 205
+flip 3281 move 200 205
+flip 3282 down
+flip 3283 up
+flip 3286 move 166 225
+flip 3287 move 165 225
+flip 3288 down
+flip 3289 up
+flip 3292 move 519 90
+flip 3293 move 520 90
+flip 3294 down
+flip 3295 up
+flip 3298 move 481 110
+flip 3299 move 480 110
+flip 3300 down
+flip 3301 up
+flip 3304 move 441 130
+flip 3305 move 440 130
+flip 3306 down
+flip 3307 up
+flip 3310 move 371 165
+flip 3311 move 370 165
+flip 3312 down
+flip 3313 up
+flip 3316 move 331 185
+flip 3317 move 330 185
+flip 3318 down
+flip 3319 up
+flip 3322 move 291 205
+flip 3323 move 290 205
+flip 3324 down
+flip 3325 up
+flip 3328 move 251 225
+flip 3329 move 250 225
+flip 3330 down
+flip 3331 up
+flip 3334 move 211 245
+flip 3335 move 210 245
+flip 3336 down
+flip 3337 up
+flip 3340 move 444 160
+flip 3341 move 445 160
+flip 3342 down
+flip 3343 up
+flip 3346 move 484 180
+flip 3347 move 485 180
+flip 3348 down
+flip 3349 up
+flip 3352 move 524 200
+flip 3353 move 525 200
+flip 3354 down
+flip 3355 up
+flip 3358 move 411 175
+flip 3359 move 410 175
+flip 3360 down
+flip 3361 up
+flip 3364 move 449 195
+flip 3365 move 450 195
+flip 3366 down
+flip 3367 up
+flip 3370 move 489 215
+flip 3371 move 490 215
+flip 3372 down
+flip 3373 up
+flip 3376 move 201 295
+flip 3377 move 200 295
+flip 3378 down
+flip 3379 up
+flip 3382 move 239 315
+flip 3383 move 240 315
+flip 3384 down
+flip 3385 up
+flip 3388 move 279 335
+flip 3389 move 280 335
+flip 3390 down
+flip 3391 up
+flip 3394 move 319 355
+flip 3395 move 320 355
+flip 3396 down
+flip 3397 up
+flip 3400 move 241 275
+flip 3401 move 240 275
+flip 3402 down
+flip 3403 up
+flip 3406 move 279 295
+flip 3407 move 280 295
+flip 3408 down
+flip 3409 up
+flip 3412 move 319 315
+flip 3413 move 320 315
+flip 3414 down
+flip 3415 up
+flip 3418 move 359 335
+flip 3419 move 360 335
+flip 3420 down
+flip 3421 up
+flip 3654 move 61 355
+flip 3655 move 60 355
+flip 3656 down
+flip 3657 up
+flip 3664 move 60 91
+flip 3665 move 60 90
+flip 3666 down
+flip 3667 up
+flip 3672 move 419 120
+flip 3673 move 420 120
+flip 3674 down
+flip 3675 up
+flip 3678 move 391 135
+flip 3679 move 390 135
+flip 3680 down
+flip 3681 up
+flip 3684 move 361 150
+flip 3685 move 360 150
+flip 3686 down
+flip 3687 up
+flip 3690 move 331 165
+flip 3691 move 330 165
+flip 3692 down
+flip 3693 up
+flip 3696 move 301 180
+flip 3697 move 300 180
+flip 3698 down
+flip 3699 up
+flip 3702 move 271 195
+flip 3703 move 270 195
+flip 3704 down
+flip 3705 up
+flip 3708 move 241 210
+flip 3709 move 240 210
+flip 3710 down
+flip 3711 up
+flip 3714 move 211 225
+flip 3715 move 210 225
+flip 3716 down
+flip 3717 up
+flip 3720 move 181 240
+flip 3721 move 180 240
+flip 3722 down
+flip 3723 up
+flip 3726 move 200 264
+flip 3727 move 200 265
+flip 3728 down
+flip 3729 up
+flip 3732 move 229 280
+flip 3733 move 230 280
+flip 3734 down
+flip 3735 up
+flip 3738 move 259 295
+flip 3739 move 260 295
+flip 3740 down
+flip 3741 up
+flip 3744 move 289 310
+flip 3745 move 290 310
+flip 3746 down
+flip 3747 up
+flip 3750 move 319 325
+flip 3751 move 320 325
+flip 3752 down
+flip 3753 up
+flip 3756 move 349 340
+flip 3757 move 350 340
+flip 3758 down
+flip 3759 up
+flip 3762 move 379 355
+flip 3763 move 380 355
+flip 3764 down
+flip 3765 up
+flip 3768 move 176 290
+flip 3769 move 175 290
+flip 3770 down
+flip 3771 up
+flip 3774 move 204 305
+flip 3775 move 205 305
+flip 3776 down
+flip 3777 up
+flip 3780 move 234 320
+flip 3781 move 235 320
+flip 3782 down
+flip 3783 up
+flip 3786 move 264 335
+flip 3787 move 265 335
+flip 3788 down
+flip 3789 up
+flip 3792 move 294 350
+flip 3793 move 295 350
+flip 3794 down
+flip 3795 up
+flip 3798 move 324 365
+flip 3799 move 325 365
+flip 3800 down
+flip 3801 up
+flip 3804 move 435 141
+flip 3805 move 435 140
+flip 3806 down
+flip 3807 up
+flip 3810 move 464 155
+flip 3811 move 465 155
+flip 3812 down
+flip 3813 up
+flip 3816 move 494 170
+flip 3817 move 495 170
+flip 3818 down
+flip 3819 up
+flip 3822 move 524 185
+flip 3823 move 525 185
+flip 3824 down
+flip 3825 up
+flip 3828 move 554 200
+flip 3829 move 555 200
+flip 3830 down
+flip 3831 up
+flip 3834 move 584 215
+flip 3835 move 585 215
+flip 3836 down
+flip 3837 up
+flip 3840 move 416 165
+flip 3841 move 415 165
+flip 3842 down
+flip 3843 up
+flip 3846 move 444 180
+flip 3847 move 445 180
+flip 3848 down
+flip 3849 up
+flip 3852 move 474 195
+flip 3853 move 475 195
+flip 3854 down
+flip 3855 up
+flip 3858 move 504 210
+flip 3859 move 505 210
+flip 3860 down
+flip 3861 up
+flip 3864 move 534 225
+flip 3865 move 535 225
+flip 3866 down
+flip 3867 up
+flip 3870 move 564 240
+flip 3871 move 565 240
+flip 3872 down
+flip 3873 up
+flip 3876 move 594 255
+flip 3877 move 595 255
+flip 3878 down
+flip 3879 up
+flip 4142 move 61 355
+flip 4143 move 60 355
+flip 4144 down
+flip 4145 up
+flip 4152 move 61 355
+flip 4153 move 60 355
+flip 4154 down
+flip 4155 up
+flip 4162 move 60 156
+flip 4163 move 60 155
+flip 4164 down
+flip 4165 up
+flip 4170 move 329 140
+flip 4171 move 330 140
+flip 4172 down
+flip 4173 up
+flip 4176 move 271 170
+flip 4177 move 270 170
+flip 4178 down
+flip 4179 up
+flip 4182 move 211 200
+flip 4183 move 210 200
+flip 4184 down
+flip 4185 up
+flip 4188 move 161 225
+flip 4189 move 160 225
+flip 4190 down
+flip 4191 up
+flip 4194 move 389 110
+flip 4195 move 390 110
+flip 4196 down
+flip 4197 up
+flip 4200 move 449 80
+flip 4201 move 450 80
+flip 4202 down
+flip 4203 up
+flip 4206 move 509 50
+flip 4207 move 510 50
+flip 4208 down
+flip 4209 up
+flip 4212 move 569 90
+flip 4213 move 570 90
+flip 4214 down
+flip 4215 up
+flip 4218 move 511 120
+flip 4219 move 510 120
+flip 4220 down
+flip 4221 up
+flip 4224 move 451 150
+flip 4225 move 450 150
+flip 4226 down
+flip 4227 up
+flip 4230 move 361 190
+flip 4231 move 360 190
+flip 4232 down
+flip 4233 up
+flip 4236 move 301 220
+flip 4237 move 300 220
+flip 4238 down
+flip 4239 up
+flip 4242 move 241 250
+flip 4243 move 240 250
+flip 4244 down
+flip 4245 up
+flip 4248 move 230 314
+flip 4249 move 230 315
+flip 4250 down
+flip 4251 up
+flip 4254 move 289 345
+flip 4255 move 290 345
+flip 4256 down
+flip 4257 up
+flip 4260 move 181 290
+flip 4261 move 180 290
+flip 4262 down
+flip 4263 up
+flip 4266 move 279 290
+flip 4267 move 280 290
+flip 4268 down
+flip 4269 up
+flip 4272 move 339 320
+flip 4273 move 340 320
+flip 4274 down
+flip 4275 up
+flip 4278 move 399 350
+flip 4279 move 400 350
+flip 4280 down
+flip 4281 up
+flip 4284 move 480 206
+flip 4285 move 480 205
+flip 4286 down
+flip 4287 up
+flip 4290 move 539 235
+flip 4291 move 540 235
+flip 4292 down
+flip 4293 up
+flip 4296 move 461 160
+flip 4297 move 460 160
+flip 4298 down
+flip 4299 up
+flip 4302 move 519 190
+flip 4303 move 520 190
+flip 4304 down
+flip 4305 up
+flip 4308 move 579 220
+flip 4309 move 580 220
+flip 4310 down
+flip 4311 up
+flip 4494 move 61 285
+flip 4495 move 60 285
+flip 4496 down
+flip 4497 up
+flip 4504 move 220 121
+flip 4505 move 220 120
+flip 4506 down
+flip 4507 up
+flip 4558 move 52 394
+flip 4559 move 52 395
+flip 4560 down
+flip 4561 up
+flip 4572 move 60 356
+flip 4573 move 60 355
+flip 4574 down
+flip 4575 up
+flip 4582 move 61 355
+flip 4583 move 60 355
+flip 4584 down
+flip 4585 up
+flip 4592 move 52 394
+flip 4593 move 52 395
+flip 4594 down
+flip 4595 up
+flip 4606 move 60 356
+flip 4607 move 60 355
+flip 4608 down
+flip 4609 up
+flip 4624 move 60 221
+flip 4625 move 60 220
+flip 4626 down
+flip 4627 up
+flip 4683 move 379 260
+flip 4684 move 380 260
+flip 4685 down
+flip 4686 up
+flip 4782 move 61 355
+flip 4783 move 60 355
+flip 4784 down
+flip 4785 up
+flip 4792 move 61 355
+flip 4793 move 60 355
+flip 4794 down
+flip 4795 up
+flip 4802 move 557 245
+flip 4803 move 558 245
+flip 4804 down
+flip 4805 up
+flip 4814 move 61 155
+flip 4815 move 60 155
+flip 4816 down
+flip 4817 up
+flip 4824 move 519 130
+flip 4825 move 520 130
+flip 4826 down
+flip 4827 up
+flip 4836 move 61 220
+flip 4837 move 60 220
+flip 4838 down
+flip 4839 up
+flip 4846 move 179 340
+flip 4847 move 180 340
+flip 4848 down
+flip 4849 up
+flip 4870 move 279 444
+flip 4871 move 279 445
+flip 4872 down
+flip 4873 up
+flip 4880 move 220 201
+flip 4881 move 220 200
+flip 4882 down
+flip 4883 up
+flip 4888 move 279 444
+flip 4889 move 279 445
+flip 4890 down
+flip 4891 up
+flip 4898 move 60 156
+flip 4899 move 60 155
+flip 4900 down
+flip 4901 up
+flip 4908 move 299 180
+flip 4909 move 300 180
+flip 4910 down
+flip 4911 up
+flip 4920 move 61 220
+flip 4921 move 60 220
+flip 4922 down
+flip 4923 up
+flip 4930 move 449 260
+flip 4931 move 450 260
+flip 4932 down
+flip 4933 up
+flip 4959 move 251 310
+flip 4960 move 250 310
+flip 4961 down
+flip 4962 up
+flip 5043 key Space down
+flip 5044 key Space up
+flip 5060 move 557 245
+flip 5061 move 558 245
+flip 5062 down
+flip 5063 up
+flip 5072 move 280 445
+flip 5073 move 279 445
+flip 5074 down
+flip 5075 up
+flip 5082 move 160 221
+flip 5083 move 160 220
+flip 5084 down
+flip 5085 up
+flip 5090 move 279 444
+flip 5091 move 279 445
+flip 5092 down
+flip 5093 up
+flip 5100 move 61 355
+flip 5101 move 60 355
+flip 5102 down
+flip 5103 up
+flip 5108 move 61 355
+flip 5109 move 60 355
+flip 5110 down
+flip 5111 up
+flip 5116 move 60 286
+flip 5117 move 60 285
+flip 5118 down
+flip 5119 up
+flip 5126 move 299 180
+flip 5127 move 300 180
+flip 5128 down
+flip 5129 up
+flip 5142 move 61 155
+flip 5143 move 60 155
+flip 5144 down
+flip 5145 up
+flip 5152 move 479 280
+flip 5153 move 480 280
+flip 5154 down
+flip 5155 up
+flip 5206 move 61 285
+flip 5207 move 60 285
+flip 5208 down
+flip 5209 up
+flip 5216 move 289 150
+flip 5217 move 290 150
+flip 5218 down
+flip 5219 up
+flip 5230 move 61 155
+flip 5231 move 60 155
+flip 5232 down
+flip 5233 up
+flip 5240 move 569 210
+flip 5241 move 570 210
+flip 5242 down
+flip 5243 up
+flip 5304 move 201 120
+flip 5305 move 200 120
+flip 5306 down
+flip 5307 up
+flip 5318 move 60 299
+flip 5319 move 60 300
+flip 5320 down
+flip 5321 up
+flip 5328 move 299 175
+flip 5329 move 300 175
+flip 5330 down
+flip 5331 up
+flip 5392 move 279 444
+flip 5393 move 279 445
+flip 5394 down
+flip 5395 up
+flip 5402 move 280 141
+flip 5403 move 280 140
+flip 5404 down
+flip 5405 up
+flip 5410 move 279 444
+flip 5411 move 279 445
+flip 5412 down
+flip 5413 up
+flip 5420 move 61 300
+flip 5421 move 60 300
+flip 5422 down
+flip 5423 up
+flip 5430 move 359 200
+flip 5431 move 360 200
+flip 5432 down
+flip 5433 up
+flip 5584 move 577 418
+flip 5585 move 577 419
+flip 5586 down
+flip 5587 up
+flip 5608 move 578 419
+flip 5609 move 577 419
+flip 5610 down
+flip 5611 up
+flip 5632 move 578 419
+flip 5633 move 577 419
+flip 5634 down
+flip 5635 up
+flip 5656 move 578 419
+flip 5657 move 577 419
+flip 5658 down
+flip 5659 up
+flip 5685 move 120 445
+flip 5686 move 119 445
+flip 5687 down
+flip 5688 up
+flip 5695 move 53 395
+flip 5696 move 52 395
+flip 5697 down
+flip 5698 up
+flip 5714 move 557 245
+flip 5715 move 558 245
+flip 5716 down
+flip 5717 up
+flip 5726 move 61 355
+flip 5727 move 60 355
+flip 5728 down
+flip 5729 up
+flip 5736 move 61 355
+flip 5737 move 60 355
+flip 5738 down
+flip 5739 up
+flip 5746 move 278 445
+flip 5747 move 279 445
+flip 5748 down
+flip 5749 up
+flip 5756 move 260 201
+flip 5757 move 260 200
+flip 5758 down
+flip 5759 up
+flip 5764 move 279 444
+flip 5765 move 279 445
+flip 5766 down
+flip 5767 up
+flip 5774 move 61 235
+flip 5775 move 60 235
+flip 5776 down
+flip 5777 up
+flip 5784 move 319 180
+flip 5785 move 320 180
+flip 5786 down
+flip 5787 up
+flip 5898 move 53 395
+flip 5899 move 52 395
+flip 5900 down
+flip 5901 up
+flip 5908 move 379 180
+flip 5909 move 380 180
+flip 5910 down
+flip 5911 up
+flip 5920 move 381 180
+flip 5921 move 380 180
+flip 5922 down
+flip 5923 up
+flip 5932 move 381 180
+flip 5933 move 380 180
+flip 5934 down
+flip 5935 up
+flip 5944 move 381 180
+flip 5945 move 380 180
+flip 5946 down
+flip 5947 up
+flip 5956 move 381 180
+flip 5957 move 380 180
+flip 5958 down
+flip 5959 up
+flip 6268 move 119 444
+flip 6269 move 119 445
+flip 6270 down
+flip 6271 up
+flip 6278 move 399 195
+flip 6279 move 400 195
+flip 6280 down
+flip 6281 up
+flip 6290 move 401 195
+flip 6291 move 400 195
+flip 6292 down
+flip 6293 up
+flip 6302 move 401 195
+flip 6303 move 400 195
+flip 6304 down
+flip 6305 up
+flip 6314 move 401 195
+flip 6315 move 400 195
+flip 6316 down
+flip 6317 up
+flip 6326 move 401 195
+flip 6327 move 400 195
+flip 6328 down
+flip 6329 up
+flip 7388 move 577 418
+flip 7389 move 577 419
+flip 7390 down
+flip 7391 up
+flip 7412 move 578 419
+flip 7413 move 577 419
+flip 7414 down
+flip 7415 up
+flip 7436 move 578 419
+flip 7437 move 577 419
+flip 7438 down
+flip 7439 up
+flip 7460 move 578 419
+flip 7461 move 577 419
+flip 7462 down
+flip 7463 up
+flip 7489 move 558 246
+flip 7490 move 558 245
+flip 7491 down
+flip 7492 up
+flip 7501 move 280 445
+flip 7502 move 279 445
+flip 7503 down
+flip 7504 up
+flip 7511 move 510 211
+flip 7512 move 510 210
+flip 7513 down
+flip 7514 up
+flip 7519 move 279 444
+flip 7520 move 279 445
+flip 7521 down
+flip 7522 up
+flip 7529 move 350 76
+flip 7530 move 350 75
+flip 7531 down
+flip 7532 up
+flip 7541 move 52 394
+flip 7542 move 52 395
+flip 7543 down
+flip 7544 up
+flip 7578 move 60 106
+flip 7579 move 60 105
+flip 7580 down
+flip 7581 up
+flip 7588 move 135 291
+flip 7589 move 135 292
+flip 7590 down
+flip 7591 up
+flip 7594 move 147 286
+flip 7595 move 148 286
+flip 7596 down
+flip 7597 up
+flip 7600 move 160 279
+flip 7601 move 161 279
+flip 7602 down
+flip 7603 up
+flip 7606 move 173 273
+flip 7607 move 174 273
+flip 7608 down
+flip 7609 up
+flip 7612 move 186 266
+flip 7613 move 187 266
+flip 7614 down
+flip 7615 up
+flip 7618 move 199 260
+flip 7619 move 200 260
+flip 7620 down
+flip 7621 up
+flip 7624 move 212 253
+flip 7625 move 213 253
+flip 7626 down
+flip 7627 up
+flip 7630 move 225 247
+flip 7631 move 226 247
+flip 7632 down
+flip 7633 up
+flip 7636 move 149 302
+flip 7637 move 148 302
+flip 7638 down
+flip 7639 up
+flip 7642 move 160 296
+flip 7643 move 161 296
+flip 7644 down
+flip 7645 up
+flip 7648 move 173 289
+flip 7649 move 174 289
+flip 7650 down
+flip 7651 up
+flip 7654 move 186 283
+flip 7655 move 187 283
+flip 7656 down
+flip 7657 up
+flip 7660 move 199 276
+flip 7661 move 200 276
+flip 7662 down
+flip 7663 up
+flip 7666 move 212 270
+flip 7667 move 213 270
+flip 7668 down
+flip 7669 up
+flip 7672 move 225 263
+flip 7673 move 226 263
+flip 7674 down
+flip 7675 up
+flip 7678 move 238 257
+flip 7679 move 239 257
+flip 7680 down
+flip 7681 up
+flip 7684 move 162 310
+flip 7685 move 161 310
+flip 7686 down
+flip 7687 up
+flip 7690 move 173 304
+flip 7691 move 174 304
+flip 7692 down
+flip 7693 up
+flip 7696 move 186 297
+flip 7697 move 187 297
+flip 7698 down
+flip 7699 up
+flip 7702 move 199 291
+flip 7703 move 200 291
+flip 7704 down
+flip 7705 up
+flip 7708 move 212 284
+flip 7709 move 213 284
+flip 7710 down
+flip 7711 up
+flip 7714 move 225 278
+flip 7715 move 226 278
+flip 7716 down
+flip 7717 up
+flip 7720 move 238 271
+flip 7721 move 239 271
+flip 7722 down
+flip 7723 up
+flip 7726 move 251 265
+flip 7727 move 252 265
+flip 7728 down
+flip 7729 up
+flip 7732 move 399 250
+flip 7733 move 400 250
+flip 7734 down right
+flip 7735 up right
+flip 8060 move 279 444
+flip 8061 move 279 445
+flip 8062 down
+flip 8063 up
+flip 8070 move 480 216
+flip 8071 move 480 215
+flip 8072 down
+flip 8073 up
+flip 8078 move 279 444
+flip 8079 move 279 445
+flip 8080 down
+flip 8081 up
+flip 8088 move 60 106
+flip 8089 move 60 105
+flip 8090 down
+flip 8091 up
+flip 8098 move 314 292
+flip 8099 move 315 292
+flip 8100 down
+flip 8101 up
+flip 8104 move 327 286
+flip 8105 move 328 286
+flip 8106 down
+flip 8107 up
+flip 8110 move 340 280
+flip 8111 move 341 280
+flip 8112 down
+flip 8113 up
+flip 8116 move 353 274
+flip 8117 move 354 274
+flip 8118 down
+flip 8119 up
+flip 8122 move 366 268
+flip 8123 move 367 268
+flip 8124 down
+flip 8125 up
+flip 8128 move 379 262
+flip 8129 move 380 262
+flip 8130 down
+flip 8131 up
+flip 8134 move 392 256
+flip 8135 move 393 256
+flip 8136 down
+flip 8137 up
+flip 8140 move 405 250
+flip 8141 move 406 250
+flip 8142 down
+flip 8143 up
+flip 8146 move 418 244
+flip 8147 move 419 244
+flip 8148 down
+flip 8149 up
+flip 8152 move 431 238
+flip 8153 move 432 238
+flip 8154 down
+flip 8155 up
+flip 8158 move 329 302
+flip 8159 move 328 302
+flip 8160 down
+flip 8161 up
+flip 8164 move 340 296
+flip 8165 move 341 296
+flip 8166 down
+flip 8167 up
+flip 8170 move 353 290
+flip 8171 move 354 290
+flip 8172 down
+flip 8173 up
+flip 8176 move 366 284
+flip 8177 move 367 284
+flip 8178 down
+flip 8179 up
+flip 8182 move 379 278
+flip 8183 move 380 278
+flip 8184 down
+flip 8185 up
+flip 8188 move 392 272
+flip 8189 move 393 272
+flip 8190 down
+flip 8191 up
+flip 8194 move 405 266
+flip 8195 move 406 266
+flip 8196 down
+flip 8197 up
+flip 8200 move 418 260
+flip 8201 move 419 260
+flip 8202 down
+flip 8203 up
+flip 8206 move 431 254
+flip 8207 move 432 254
+flip 8208 down
+flip 8209 up
+flip 8212 move 444 248
+flip 8213 move 445 248
+flip 8214 down
+flip 8215 up
+flip 8218 move 342 310
+flip 8219 move 341 310
+flip 8220 down
+flip 8221 up
+flip 8224 move 353 304
+flip 8225 move 354 304
+flip 8226 down
+flip 8227 up
+flip 8230 move 366 298
+flip 8231 move 367 298
+flip 8232 down
+flip 8233 up
+flip 8236 move 379 292
+flip 8237 move 380 292
+flip 8238 down
+flip 8239 up
+flip 8242 move 392 286
+flip 8243 move 393 286
+flip 8244 down
+flip 8245 up
+flip 8248 move 405 280
+flip 8249 move 406 280
+flip 8250 down
+flip 8251 up
+flip 8254 move 418 274
+flip 8255 move 419 274
+flip 8256 down
+flip 8257 up
+flip 8260 move 400 201
+flip 8261 move 400 200
+flip 8262 down right
+flip 8263 up right
+flip 8528 move 61 235
+flip 8529 move 60 235
+flip 8530 down
+flip 8531 up
+flip 8538 move 429 140
+flip 8539 move 430 140
+flip 8540 down
+flip 8541 up
+flip 8550 move 400 199
+flip 8551 move 400 200
+flip 8552 down right
+flip 8553 up right
+flip 8558 move 53 395
+flip 8559 move 52 395
+flip 8560 down
+flip 8561 up
+flip 8572 move 278 445
+flip 8573 move 279 445
+flip 8574 down
+flip 8575 up
+flip 8582 move 510 201
+flip 8583 move 510 200
+flip 8584 down
+flip 8585 up
+flip 8590 move 279 444
+flip 8591 move 279 445
+flip 8592 down
+flip 8593 up
+flip 8600 move 280 445
+flip 8601 move 279 445
+flip 8602 down
+flip 8603 up
+flip 8610 move 430 236
+flip 8611 move 430 235
+flip 8612 down
+flip 8613 up
+flip 8618 move 279 444
+flip 8619 move 279 445
+flip 8620 down
+flip 8621 up
+flip 8628 move 280 445
+flip 8629 move 279 445
+flip 8630 down
+flip 8631 up
+flip 8638 move 510 201
+flip 8639 move 510 200
+flip 8640 down
+flip 8641 up
+flip 8646 move 279 444
+flip 8647 move 279 445
+flip 8648 down
+flip 8649 up
+flip 8656 move 53 395
+flip 8657 move 52 395
+flip 8658 down
+flip 8659 up
+flip 8682 move 60 106
+flip 8683 move 60 105
+flip 8684 down
+flip 8685 up
+flip 8692 move 379 220
+flip 8693 move 380 220
+flip 8694 down
+flip 8695 up
+flip 8702 move 381 220
+flip 8703 move 380 220
+flip 8704 down right
+flip 8705 up right
+flip 8710 move 53 395
+flip 8711 move 52 395
+flip 8712 down
+flip 8713 up
+flip 8814 move 53 395
+flip 8815 move 52 395
+flip 8816 down
+flip 8817 up
+flip 8848 move 60 106
+flip 8849 move 60 105
+flip 8850 down
+flip 8851 up
+flip 8858 move 329 220
+flip 8859 move 330 220
+flip 8860 down
+flip 8861 up
+flip 8868 move 331 220
+flip 8869 move 330 220
+flip 8870 down right
+flip 8871 up right
+flip 8966 move 330 201
+flip 8967 move 330 200
+flip 8968 down
+flip 8969 up
+flip 8976 move 340 81
+flip 8977 move 340 80
+flip 8978 down
+flip 8979 up
+flip 8992 move 519 120
+flip 8993 move 520 120
+flip 8994 down
+flip 8995 up
+flip 9004 move 521 120
+flip 9005 move 520 120
+flip 9006 down
+flip 9007 up
+flip 9016 move 521 120
+flip 9017 move 520 120
+flip 9018 down
+flip 9019 up
+flip 9028 move 521 120
+flip 9029 move 520 120
+flip 9030 down
+flip 9031 up
+flip 9120 move 500 174
+flip 9121 move 500 175
+flip 9122 down
+flip 9123 up
+flip 9134 move 501 175
+flip 9135 move 500 175
+flip 9136 down
+flip 9137 up
+flip 9148 move 501 175
+flip 9149 move 500 175
+flip 9150 down
+flip 9151 up
+flip 9162 move 501 175
+flip 9163 move 500 175
+flip 9164 down
+flip 9165 up
+flip 9396 move 279 444
+flip 9397 move 279 445
+flip 9398 down
+flip 9399 up
+flip 9406 move 400 266
+flip 9407 move 400 265
+flip 9408 down
+flip 9409 up
+flip 9414 move 279 444
+flip 9415 move 279 445
+flip 9416 down
+flip 9417 up
+flip 9424 move 40 445
+flip 9425 move 39 445
+flip 9426 down
+flip 9427 up
+flip 9434 move 359 265
+flip 9435 move 360 265
+flip 9436 down
+flip 9437 up
+flip 9440 move 374 272
+flip 9441 move 375 272
+flip 9442 down
+flip 9443 up
+flip 9446 move 389 280
+flip 9447 move 390 280
+flip 9448 down
+flip 9449 up
+flip 9452 move 404 288
+flip 9453 move 405 288
+flip 9454 down
+flip 9455 up
+flip 9458 move 425 251
+flip 9459 move 425 250
+flip 9460 down
+flip 9461 up
+flip 9464 move 439 258
+flip 9465 move 440 258
+flip 9466 down
+flip 9467 up
+flip 9470 move 454 266
+flip 9471 move 455 266
+flip 9472 down
+flip 9473 up
+flip 9511 move 557 245
+flip 9512 move 558 245
+flip 9513 down
+flip 9514 up
+flip 9523 move 559 245
+flip 9524 move 558 245
+flip 9525 down
+flip 9526 up
+flip 9535 move 280 445
+flip 9536 move 279 445
+flip 9537 down
+flip 9538 up
+flip 9545 move 270 266
+flip 9546 move 270 265
+flip 9547 down
+flip 9548 up
+flip 9553 move 279 444
+flip 9554 move 279 445
+flip 9555 down
+flip 9556 up
+flip 9563 move 61 328
+flip 9564 move 60 328
+flip 9565 down
+flip 9566 up
+flip 9577 move 60 354
+flip 9578 move 60 355
+flip 9579 down
+flip 9580 up
+flip 9587 move 61 355
+flip 9588 move 60 355
+flip 9589 down
+flip 9590 up
+flip 9597 move 60 249
+flip 9598 move 60 248
+flip 9599 down
+flip 9600 up
+flip 9607 move 384 115
+flip 9608 move 385 115
+flip 9609 down
+flip 9610 up
+flip 9615 move 336 160
+flip 9616 move 335 160
+flip 9617 down
+flip 9618 up
+flip 9623 move 286 205
+flip 9624 move 285 205
+flip 9625 down
+flip 9626 up
+flip 9631 move 250 249
+flip 9632 move 250 250
+flip 9633 down
+flip 9634 up
+flip 9650 move 404 110
+flip 9651 move 405 110
+flip 9652 down
+flip 9653 up
+flip 9660 move 326 150
+flip 9661 move 325 150
+flip 9662 down
+flip 9663 up
+flip 9670 move 404 190
+flip 9671 move 405 190
+flip 9672 down
+flip 9673 up
+flip 9680 move 326 230
+flip 9681 move 325 230
+flip 9682 down
+flip 9683 up
+flip 9690 move 404 270
+flip 9691 move 405 270
+flip 9692 down
+flip 9693 up
+flip 9724 key Space down
+flip 9725 key Space up
+flip 9746 move 576 419
+flip 9747 move 577 419
+flip 9748 down
+flip 9749 up
+flip 9765 move 151 395
+flip 9766 move 150 395
+flip 9767 down
+flip 9768 up
+flip 9794 move 557 245
+flip 9795 move 558 245
+flip 9796 down
+flip 9797 up
+flip 9806 move 280 445
+flip 9807 move 279 445
+flip 9808 down
+flip 9809 up
+flip 9816 move 320 121
+flip 9817 move 320 120
+flip 9818 down
+flip 9819 up
+flip 9824 move 279 444
+flip 9825 move 279 445
+flip 9826 down
+flip 9827 up
+flip 9834 move 61 355
+flip 9835 move 60 355
+flip 9836 down
+flip 9837 up
+flip 9842 move 61 355
+flip 9843 move 60 355
+flip 9844 down
+flip 9845 up
+flip 9850 move 60 171
+flip 9851 move 60 170
+flip 9852 down
+flip 9853 up
+flip 9860 move 239 170
+flip 9861 move 240 170
+flip 9862 down
+flip 9863 up
+flip 9872 move 61 235
+flip 9873 move 60 235
+flip 9874 down
+flip 9875 up
+flip 9882 move 359 110
+flip 9883 move 360 110
+flip 9884 down
+flip 9885 up
+flip 9894 move 61 300
+flip 9895 move 60 300
+flip 9896 down
+flip 9897 up
+flip 9904 move 459 210
+flip 9905 move 460 210
+flip 9906 down
+flip 9907 up
+flip 9988 move 577 418
+flip 9989 move 577 419
+flip 9990 down
+flip 9991 up
+flip 10017 move 578 419
+flip 10018 move 577 419
+flip 10019 down
+flip 10020 up
+flip 10046 move 578 419
+flip 10047 move 577 419
+flip 10048 down
+flip 10049 up
+flip 10075 move 578 419
+flip 10076 move 577 419
+flip 10077 down
+flip 10078 up
+flip 10109 move 558 246
+flip 10110 move 558 245
+flip 10111 down
+flip 10112 up
+flip 10121 move 280 445
+flip 10122 move 279 445
+flip 10123 down
+flip 10124 up
+flip 10131 move 470 211
+flip 10132 move 470 210
+flip 10133 down
+flip 10134 up
+flip 10139 move 279 444
+flip 10140 move 279 445
+flip 10141 down
+flip 10142 up
+flip 10149 move 53 395
+flip 10150 move 52 395
+flip 10151 down
+flip 10152 up
+flip 10181 move 349 215
+flip 10182 move 350 215
+flip 10183 down
+flip 10184 up
+flip 10193 move 509 140
+flip 10194 move 510 140
+flip 10195 down
+flip 10196 up
+flip 10205 move 511 140
+flip 10206 move 510 140
+flip 10207 down
+flip 10208 up
+flip 10217 move 61 105
+flip 10218 move 60 105
+flip 10219 down
+flip 10220 up
+flip 10225 move 249 180
+flip 10226 move 250 180
+flip 10227 down
+flip 10228 up
+flip 10233 move 61 170
+flip 10234 move 60 170
+flip 10235 down
+flip 10236 up
+flip 10241 move 209 155
+flip 10242 move 210 155
+flip 10243 down
+flip 10244 up
+flip 10249 move 61 235
+flip 10250 move 60 235
+flip 10251 down
+flip 10252 up
+flip 10257 move 289 120
+flip 10258 move 290 120
+flip 10259 down
+flip 10260 up
+flip 10265 move 61 48
+flip 10266 move 60 48
+flip 10267 down
+flip 10268 up
+flip 10273 move 60 104
+flip 10274 move 60 105
+flip 10275 down
+flip 10276 up
+flip 10281 move 224 215
+flip 10282 move 225 215
+flip 10283 down
+flip 10284 up
+flip 10289 move 201 230
+flip 10290 move 200 230
+flip 10291 down
+flip 10292 up
+flip 10297 move 176 245
+flip 10298 move 175 245
+flip 10299 down
+flip 10300 up
+flip 10305 move 151 260
+flip 10306 move 150 260
+flip 10307 down
+flip 10308 up
+flip 10313 move 60 354
+flip 10314 move 60 355
+flip 10315 down
+flip 10316 up
+flip 10321 move 61 355
+flip 10322 move 60 355
+flip 10323 down
+flip 10324 up
+flip 10329 move 61 355
+flip 10330 move 60 355
+flip 10331 down
+flip 10332 up
+flip 10337 move 61 355
+flip 10338 move 60 355
+flip 10339 down
+flip 10340 up
+flip 10345 move 61 355
+flip 10346 move 60 355
+flip 10347 down
+flip 10348 up
+flip 10353 move 60 301
+flip 10354 move 60 300
+flip 10355 down
+flip 10356 up
+flip 10361 move 200 86
+flip 10362 move 200 85
+flip 10363 down
+flip 10364 up
+flip 10371 move 61 48
+flip 10372 move 60 48
+flip 10373 down
+flip 10374 up
+flip 10379 move 60 104
+flip 10380 move 60 105
+flip 10381 down
+flip 10382 up
+flip 10387 move 384 110
+flip 10388 move 385 110
+flip 10389 down
+flip 10390 up
+flip 10397 move 61 355
+flip 10398 move 60 355
+flip 10399 down
+flip 10400 up
+flip 10405 move 61 355
+flip 10406 move 60 355
+flip 10407 down
+flip 10408 up
+flip 10413 move 61 355
+flip 10414 move 60 355
+flip 10415 down
+flip 10416 up
+flip 10421 move 61 355
+flip 10422 move 60 355
+flip 10423 down
+flip 10424 up
+flip 10429 move 61 355
+flip 10430 move 60 355
+flip 10431 down
+flip 10432 up
+flip 10437 move 278 445
+flip 10438 move 279 445
+flip 10439 down
+flip 10440 up
+flip 10447 move 390 241
+flip 10448 move 390 240
+flip 10449 down
+flip 10450 up
+flip 10455 move 279 444
+flip 10456 move 279 445
+flip 10457 down
+flip 10458 up
+flip 10465 move 60 161
+flip 10466 move 60 160
+flip 10467 down
+flip 10468 up
+flip 10475 move 479 185
+flip 10476 move 480 185
+flip 10477 down
+flip 10478 up
+flip 10487 move 61 305
+flip 10488 move 60 305
+flip 10489 down
+flip 10490 up
+flip 10497 move 304 150
+flip 10498 move 305 150
+flip 10499 down
+flip 10500 up
+flip 10509 move 61 225
+flip 10510 move 60 225
+flip 10511 down
+flip 10512 up
+flip 10519 move 299 300
+flip 10520 move 300 300
+flip 10521 down
+flip 10522 up
+flip 10531 move 61 260
+flip 10532 move 60 260
+flip 10533 down
+flip 10534 up
+flip 10543 move 60 216
+flip 10544 move 60 215
+flip 10545 down
+flip 10546 up
+flip 10551 move 309 245
+flip 10552 move 310 245
+flip 10553 down
+flip 10554 up
+flip 10563 move 61 355
+flip 10564 move 60 355
+flip 10565 down
+flip 10566 up
+flip 10571 move 61 355
+flip 10572 move 60 355
+flip 10573 down
+flip 10574 up
+flip 10579 move 278 445
+flip 10580 move 279 445
+flip 10581 down
+flip 10582 up
+flip 10589 move 340 226
+flip 10590 move 340 225
+flip 10591 down
+flip 10592 up
+flip 10597 move 279 444
+flip 10598 move 279 445
+flip 10599 down
+flip 10600 up
+flip 10607 move 60 96
+flip 10608 move 60 95
+flip 10609 down
+flip 10610 up
+flip 10615 move 439 245
+flip 10616 move 440 245
+flip 10617 down
+flip 10618 up
+flip 10629 move 361 275
+flip 10630 move 360 275
+flip 10631 down
+flip 10632 up
+flip 10645 move 281 225
+flip 10646 move 280 225
+flip 10647 down
+flip 10648 up
+flip 10653 move 329 190
+flip 10654 move 330 190
+flip 10655 down
+flip 10656 up
+flip 10661 move 414 195
+flip 10662 move 415 195
+flip 10663 down
+flip 10664 up
+flip 10669 move 217 193
+flip 10670 move 216 193
+flip 10671 down
+flip 10672 up
+flip 10677 move 279 161
+flip 10678 move 280 161
+flip 10679 down
+flip 10680 up
+flip 10685 move 343 129
+flip 10686 move 344 129
+flip 10687 down
+flip 10688 up
+flip 10693 move 407 161
+flip 10694 move 408 161
+flip 10695 down
+flip 10696 up
+flip 10701 move 211 220
+flip 10702 move 210 220
+flip 10703 down
+flip 10704 up
+flip 10709 move 299 175
+flip 10710 move 300 175
+flip 10711 down
+flip 10712 up
+flip 10717 move 444 195
+flip 10718 move 445 195
+flip 10719 down
+flip 10720 up
+flip 10725 move 465 254
+flip 10726 move 465 255
+flip 10727 down
+flip 10728 up
+flip 10733 move 500 206
+flip 10734 move 500 205
+flip 10735 down
+flip 10736 up
+flip 10741 move 534 235
+flip 10742 move 535 235
+flip 10743 down
+flip 10744 up
+flip 10749 move 431 165
+flip 10750 move 430 165
+flip 10751 down
+flip 10752 up
+flip 10757 move 336 150
+flip 10758 move 335 150
+flip 10759 down
+flip 10760 up
+flip 10765 move 251 185
+flip 10766 move 250 185
+flip 10767 down
+flip 10768 up
+flip 10773 move 186 245
+flip 10774 move 185 245
+flip 10775 down
+flip 10776 up
+flip 10781 move 274 330
+flip 10782 move 275 330
+flip 10783 down
+flip 10784 up
+flip 10789 move 440 173
+flip 10790 move 441 173
+flip 10791 down
+flip 10792 up
+flip 10797 move 378 141
+flip 10798 move 377 141
+flip 10799 down
+flip 10800 up
+flip 10805 move 568 173
+flip 10806 move 569 173
+flip 10807 down
+flip 10808 up
+flip 10813 move 61 235
+flip 10814 move 60 235
+flip 10815 down
+flip 10816 up
+flip 10821 move 440 109
+flip 10822 move 441 109
+flip 10823 down
+flip 10824 up
+flip 10829 move 61 175
+flip 10830 move 60 175
+flip 10831 down
+flip 10832 up
+flip 10837 move 504 141
+flip 10838 move 505 141
+flip 10839 down
+flip 10840 up
+flip 10845 move 40 445
+flip 10846 move 39 445
+flip 10847 down
+flip 10848 up
+flip 10853 move 564 255
+flip 10854 move 565 255
+flip 10855 down
+flip 10856 up
+flip 10861 move 551 265
+flip 10862 move 550 265
+flip 10863 down
+flip 10864 up
+flip 10869 move 536 272
+flip 10870 move 535 272
+flip 10871 down
+flip 10872 up
+flip 10892 move 61 295
+flip 10893 move 60 295
+flip 10894 down
+flip 10895 up
+flip 10900 move 504 141
+flip 10901 move 505 141
+flip 10902 down
+flip 10903 up
+flip 10908 move 442 109
+flip 10909 move 441 109
+flip 10910 down
+flip 10911 up
+flip 10916 move 378 141
+flip 10917 move 377 141
+flip 10918 down
+flip 10919 up
+flip 10924 move 314 173
+flip 10925 move 313 173
+flip 10926 down
+flip 10927 up
+flip 10932 move 250 205
+flip 10933 move 249 205
+flip 10934 down
+flip 10935 up
+flip 10940 move 61 175
+flip 10941 move 60 175
+flip 10942 down
+flip 10943 up
+flip 10948 move 504 141
+flip 10949 move 505 141
+flip 10950 down
+flip 10951 up
+flip 10956 move 61 235
+flip 10957 move 60 235
+flip 10958 down
+flip 10959 up
+flip 10964 move 376 141
+flip 10965 move 377 141
+flip 10966 down
+flip 10967 up
+flip 10972 move 279 444
+flip 10973 move 279 445
+flip 10974 down
+flip 10975 up
+flip 10982 move 315 246
+flip 10983 move 315 245
+flip 10984 down
+flip 10985 up
+flip 10990 move 279 444
+flip 10991 move 279 445
+flip 10992 down
+flip 10993 up
+flip 11000 move 61 295
+flip 11001 move 60 295
+flip 11002 down
+flip 11003 up
+flip 11008 move 315 137
+flip 11009 move 316 137
+flip 11010 down
+flip 11011 up
+flip 11016 move 253 169
+flip 11017 move 252 169
+flip 11018 down
+flip 11019 up
+flip 11024 move 189 201
+flip 11025 move 188 201
+flip 11026 down
+flip 11027 up
+flip 11032 move 251 233
+flip 11033 move 252 233
+flip 11034 down
+flip 11035 up
+flip 11040 move 315 265
+flip 11041 move 316 265
+flip 11042 down
+flip 11043 up
+flip 11048 move 379 297
+flip 11049 move 380 297
+flip 11050 down
+flip 11051 up
+flip 11056 move 61 175
+flip 11057 move 60 175
+flip 11058 down
+flip 11059 up
+flip 11064 move 251 233
+flip 11065 move 252 233
+flip 11066 down
+flip 11067 up
+flip 11072 move 315 265
+flip 11073 move 316 265
+flip 11074 down
+flip 11075 up
+flip 11080 move 316 138
+flip 11081 move 316 137
+flip 11082 down
+flip 11083 up
+flip 11103 move 61 355
+flip 11104 move 60 355
+flip 11105 down
+flip 11106 up
+flip 11111 move 278 445
+flip 11112 move 279 445
+flip 11113 down
+flip 11114 up
+flip 11121 move 370 186
+flip 11122 move 370 185
+flip 11123 down
+flip 11124 up
+flip 11129 move 279 444
+flip 11130 move 279 445
+flip 11131 down
+flip 11132 up
+flip 11139 move 61 300
+flip 11140 move 60 300
+flip 11141 down
+flip 11142 up
+flip 11147 move 439 155
+flip 11148 move 440 155
+flip 11149 down
+flip 11150 up
+flip 11161 move 61 82
+flip 11162 move 60 82
+flip 11163 down
+flip 11164 up
+flip 11171 move 60 49
+flip 11172 move 60 48
+flip 11173 down
+flip 11174 up
+flip 11179 move 61 48
+flip 11180 move 60 48
+flip 11181 down
+flip 11182 up
+flip 11187 move 61 48
+flip 11188 move 60 48
+flip 11189 down
+flip 11190 up
+flip 11195 move 61 48
+flip 11196 move 60 48
+flip 11197 down
+flip 11198 up
+flip 11203 move 61 48
+flip 11204 move 60 48
+flip 11205 down
+flip 11206 up
+flip 11211 move 60 104
+flip 11212 move 60 105
+flip 11213 down
+flip 11214 up
+flip 11219 move 459 190
+flip 11220 move 460 190
+flip 11221 down
+flip 11222 up
+flip 11229 move 61 355
+flip 11230 move 60 355
+flip 11231 down
+flip 11232 up
+flip 11237 move 61 355
+flip 11238 move 60 355
+flip 11239 down
+flip 11240 up
+flip 11245 move 61 355
+flip 11246 move 60 355
+flip 11247 down
+flip 11248 up
+flip 11253 move 61 355
+flip 11254 move 60 355
+flip 11255 down
+flip 11256 up
+flip 11261 move 278 445
+flip 11262 move 279 445
+flip 11263 down
+flip 11264 up
+flip 11271 move 380 136
+flip 11272 move 380 135
+flip 11273 down
+flip 11274 up
+flip 11279 move 279 444
+flip 11280 move 279 445
+flip 11281 down
+flip 11282 up
+flip 11289 move 61 300
+flip 11290 move 60 300
+flip 11291 down
+flip 11292 up
+flip 11297 move 379 160
+flip 11298 move 380 160
+flip 11299 down
+flip 11300 up
+flip 11311 move 61 105
+flip 11312 move 60 105
+flip 11313 down
+flip 11314 up
+flip 11319 move 569 110
+flip 11320 move 570 110
+flip 11321 down
+flip 11322 up
+flip 11331 move 151 395
+flip 11332 move 150 395
+flip 11333 down
+flip 11334 up
+flip 11345 move 278 445
+flip 11346 move 279 445
+flip 11347 down
+flip 11348 up
+flip 11355 move 210 221
+flip 11356 move 210 220
+flip 11357 down
+flip 11358 up
+flip 11363 move 279 444
+flip 11364 move 279 445
+flip 11365 down
+flip 11366 up
+flip 11373 move 61 235
+flip 11374 move 60 235
+flip 11375 down
+flip 11376 up
+flip 11381 move 319 190
+flip 11382 move 320 190
+flip 11383 down
+flip 11384 up
+flip 11393 move 61 170
+flip 11394 move 60 170
+flip 11395 down
+flip 11396 up
+flip 11401 move 484 245
+flip 11402 move 485 245
+flip 11403 down
+flip 11404 up
+flip 11413 move 61 105
+flip 11414 move 60 105
+flip 11415 down
+flip 11416 up
+flip 11421 move 189 180
+flip 11422 move 190 180
+flip 11423 down
+flip 11424 up
+flip 11429 move 190 214
+flip 11430 move 190 215
+flip 11431 down
+flip 11432 up
+flip 11487 move 61 170
+flip 11488 move 60 170
+flip 11489 down
+flip 11490 up
+flip 11495 move 489 315
+flip 11496 move 490 315
+flip 11497 down
+flip 11498 up
+flip 11507 move 61 105
+flip 11508 move 60 105
+flip 11509 down
+flip 11510 up
+flip 11515 move 200 309
+flip 11516 move 200 310
+flip 11517 down
+flip 11518 up
+flip 11523 move 229 330
+flip 11524 move 230 330
+flip 11525 down
+flip 11526 up
+flip 11581 move 279 444
+flip 11582 move 279 445
+flip 11583 down
+flip 11584 up
+flip 11591 move 175 251
+flip 11592 move 175 250
+flip 11593 down
+flip 11594 up
+flip 11599 move 279 444
+flip 11600 move 279 445
+flip 11601 down
+flip 11602 up
+flip 11609 move 60 171
+flip 11610 move 60 170
+flip 11611 down
+flip 11612 up
+flip 11617 move 329 220
+flip 11618 move 330 220
+flip 11619 down
+flip 11620 up
+flip 11629 move 279 444
+flip 11630 move 279 445
+flip 11631 down
+flip 11632 up
+flip 11639 move 395 206
+flip 11640 move 395 205
+flip 11641 down
+flip 11642 up
+flip 11647 move 279 444
+flip 11648 move 279 445
+flip 11649 down
+flip 11650 up
+flip 11657 move 40 445
+flip 11658 move 39 445
+flip 11659 down
+flip 11660 up
+flip 11667 move 319 345
+flip 11668 move 320 345
+flip 11669 down
+flip 11670 up
+flip 11673 move 334 338
+flip 11674 move 335 338
+flip 11675 down
+flip 11676 up
+flip 11679 move 349 330
+flip 11680 move 350 330
+flip 11681 down
+flip 11682 up
+flip 11685 move 364 322
+flip 11686 move 365 322
+flip 11687 down
+flip 11688 up
+flip 11691 move 379 315
+flip 11692 move 380 315
+flip 11693 down
+flip 11694 up
+flip 11697 move 210 76
+flip 11698 move 210 75
+flip 11699 down
+flip 11700 up
+flip 11703 move 229 85
+flip 11704 move 230 85
+flip 11705 down
+flip 11706 up
+flip 11709 move 249 95
+flip 11710 move 250 95
+flip 11711 down
+flip 11712 up
+flip 11715 move 269 105
+flip 11716 move 270 105
+flip 11717 down
+flip 11718 up
+flip 11721 move 289 115
+flip 11722 move 290 115
+flip 11723 down
+flip 11724 up
+flip 11727 move 309 125
+flip 11728 move 310 125
+flip 11729 down
+flip 11730 up
+flip 11733 move 329 135
+flip 11734 move 330 135
+flip 11735 down
+flip 11736 up
+flip 11739 move 419 140
+flip 11740 move 420 140
+flip 11741 down
+flip 11742 up
+flip 11745 move 439 150
+flip 11746 move 440 150
+flip 11747 down
+flip 11748 up
+flip 11751 move 459 160
+flip 11752 move 460 160
+flip 11753 down
+flip 11754 up
+flip 11757 move 479 170
+flip 11758 move 480 170
+flip 11759 down
+flip 11760 up
+flip 11763 move 499 180
+flip 11764 move 500 180
+flip 11765 down
+flip 11766 up
+flip 11769 move 519 190
+flip 11770 move 520 190
+flip 11771 down
+flip 11772 up
+flip 11775 move 539 200
+flip 11776 move 540 200
+flip 11777 down
+flip 11778 up
+flip 11861 move 558 244
+flip 11862 move 558 245
+flip 11863 down
+flip 11864 up
+flip 12373 move 559 245
+flip 12374 move 558 245
+flip 12375 down
+flip 12376 up
+flip 12385 move 61 170
+flip 12386 move 60 170
+flip 12387 down
+flip 12388 up
+flip 12393 move 329 165
+flip 12394 move 330 165
+flip 12395 down
+flip 12396 up
+flip 13605 move 557 245
+flip 13606 move 558 245
+flip 13607 down
+flip 13608 up
+flip 14717 move 61 105
+flip 14718 move 60 105
+flip 14719 down
+flip 14720 up
+flip 14725 move 209 130
+flip 14726 move 210 130
+flip 14727 down
+flip 14728 up
+flip 14733 move 61 170
+flip 14734 move 60 170
+flip 14735 down
+flip 14736 up
+flip 14741 move 239 130
+flip 14742 move 240 130
+flip 14743 down
+flip 14744 up
+flip 14749 move 61 235
+flip 14750 move 60 235
+flip 14751 down
+flip 14752 up
+flip 14757 move 269 130
+flip 14758 move 270 130
+flip 14759 down
+flip 14760 up
+flip 15145 move 250 96
+flip 15146 move 250 95
+flip 15147 down
+flip 15148 up
+flip 15155 move 191 100
+flip 15156 move 190 100
+flip 15157 down
+flip 15158 up
+flip 15590 move 576 419
+flip 15591 move 577 419
+flip 15592 down
+flip 15593 up
+flip 15609 move 558 246
+flip 15610 move 558 245
+flip 15611 down
+flip 15612 up
+flip 15621 move 53 395
+flip 15622 move 52 395
+flip 15623 down
+flip 15624 up
+flip 15635 move 60 49
+flip 15636 move 60 48
+flip 15637 down
+flip 15638 up
+flip 15643 move 61 48
+flip 15644 move 60 48
+flip 15645 down
+flip 15646 up
+flip 15651 move 61 48
+flip 15652 move 60 48
+flip 15653 down
+flip 15654 up
+flip 15659 move 61 48
+flip 15660 move 60 48
+flip 15661 down
+flip 15662 up
+flip 15667 move 61 48
+flip 15668 move 60 48
+flip 15669 down
+flip 15670 up
+flip 15675 move 61 48
+flip 15676 move 60 48
+flip 15677 down
+flip 15678 up
+flip 15683 move 279 444
+flip 15684 move 279 445
+flip 15685 down
+flip 15686 up
+flip 15693 move 510 156
+flip 15694 move 510 155
+flip 15695 down
+flip 15696 up
+flip 15701 move 279 444
+flip 15702 move 279 445
+flip 15703 down
+flip 15704 up
+flip 15711 move 61 235
+flip 15712 move 60 235
+flip 15713 down
+flip 15714 up
+flip 15719 move 349 250
+flip 15720 move 350 250
+flip 15721 down
+flip 15722 up
+flip 15743 move 557 245
+flip 15744 move 558 245
+flip 15745 down
+flip 15746 up
+flip 15830 move 559 245
+flip 15831 move 558 245
+flip 15832 down
+flip 15833 up
+flip 15842 move 61 235
+flip 15843 move 60 235
+flip 15844 down
+flip 15845 up
+flip 15850 move 244 180
+flip 15851 move 245 180
+flip 15852 down
+flip 15853 up
+flip 15860 move 61 355
+flip 15861 move 60 355
+flip 15862 down
+flip 15863 up
+flip 15868 move 61 355
+flip 15869 move 60 355
+flip 15870 down
+flip 15871 up
+flip 15876 move 61 355
+flip 15877 move 60 355
+flip 15878 down
+flip 15879 up
+flip 15884 move 60 171
+flip 15885 move 60 170
+flip 15886 down
+flip 15887 up
+flip 15892 move 484 130
+flip 15893 move 485 130
+flip 15894 down
+flip 15895 up
+flip 15904 move 61 355
+flip 15905 move 60 355
+flip 15906 down
+flip 15907 up
+flip 15912 move 61 355
+flip 15913 move 60 355
+flip 15914 down
+flip 15915 up
+flip 15920 move 61 355
+flip 15921 move 60 355
+flip 15922 down
+flip 15923 up
+flip 15928 move 60 301
+flip 15929 move 60 300
+flip 15930 down
+flip 15931 up
+flip 15936 move 539 210
+flip 15937 move 540 210
+flip 15938 down
+flip 15939 up
+flip 15948 move 61 235
+flip 15949 move 60 235
+flip 15950 down
+flip 15951 up
+flip 15956 move 239 85
+flip 15957 move 240 85
+flip 15958 down
+flip 15959 up
+flip 15968 move 61 48
+flip 15969 move 60 48
+flip 15970 down
+flip 15971 up
+flip 15976 move 61 48
+flip 15977 move 60 48
+flip 15978 down
+flip 15979 up
+flip 15984 move 61 48
+flip 15985 move 60 48
+flip 15986 down
+flip 15987 up
+flip 15992 move 279 444
+flip 15993 move 279 445
+flip 15994 down
+flip 15995 up
+flip 16002 move 574 165
+flip 16003 move 575 165
+flip 16004 down
+flip 16005 up
+flip 16010 move 280 445
+flip 16011 move 279 445
+flip 16012 down
+flip 16013 up
+flip 16020 move 60 171
+flip 16021 move 60 170
+flip 16022 down
+flip 16023 up
+flip 16028 move 379 155
+flip 16029 move 380 155
+flip 16030 down
+flip 16031 up
+flip 16040 move 61 355
+flip 16041 move 60 355
+flip 16042 down
+flip 16043 up
+flip 16048 move 61 355
+flip 16049 move 60 355
+flip 16050 down
+flip 16051 up
+flip 16056 move 61 355
+flip 16057 move 60 355
+flip 16058 down
+flip 16059 up
+flip 16064 move 60 301
+flip 16065 move 60 300
+flip 16066 down
+flip 16067 up
+flip 16072 move 279 270
+flip 16073 move 280 270
+flip 16074 down
+flip 16075 up
+flip 16086 move 379 220
+flip 16087 move 380 220
+flip 16088 down
+flip 16089 up
+flip 16098 move 61 48
+flip 16099 move 60 48
+flip 16100 down
+flip 16101 up
+flip 16106 move 61 48
+flip 16107 move 60 48
+flip 16108 down
+flip 16109 up
+flip 16114 move 61 48
+flip 16115 move 60 48
+flip 16116 down
+flip 16117 up
+flip 16122 move 60 169
+flip 16123 move 60 170
+flip 16124 down
+flip 16125 up
+flip 16130 move 259 105
+flip 16131 move 260 105
+flip 16132 down
+flip 16133 up
+flip 16142 move 519 295
+flip 16143 move 520 295
+flip 16144 down
+flip 16145 up
+flip 16204 move 280 445
+flip 16205 move 279 445
+flip 16206 down
+flip 16207 up
+flip 16214 move 490 116
+flip 16215 move 490 115
+flip 16216 down
+flip 16217 up
+flip 16222 move 279 444
+flip 16223 move 279 445
+flip 16224 down
+flip 16225 up
+flip 16232 move 320 186
+flip 16233 move 320 185
+flip 16234 down
+flip 16235 up
+flip 16246 move 61 48
+flip 16247 move 60 48
+flip 16248 down
+flip 16249 up
+flip 16254 move 61 48
+flip 16255 move 60 48
+flip 16256 down
+flip 16257 up
+flip 16262 move 61 48
+flip 16263 move 60 48
+flip 16264 down
+flip 16265 up
+flip 16270 move 61 48
+flip 16271 move 60 48
+flip 16272 down
+flip 16273 up
+flip 16278 move 61 48
+flip 16279 move 60 48
+flip 16280 down
+flip 16281 up
+flip 16286 move 61 48
+flip 16287 move 60 48
+flip 16288 down
+flip 16289 up
+flip 16294 move 529 338
+flip 16295 move 530 338
+flip 16296 down
+flip 16297 up
+flip 16304 move 61 105
+flip 16305 move 60 105
+flip 16306 down
+flip 16307 up
+flip 16312 move 199 110
+flip 16313 move 200 110
+flip 16314 down
+flip 16315 up
+flip 16319 move 200 144
+flip 16320 move 200 145
+flip 16321 down
+flip 16322 up
+flip 16326 move 61 170
+flip 16327 move 60 170
+flip 16328 down
+flip 16329 up
+flip 16334 move 244 110
+flip 16335 move 245 110
+flip 16336 down
+flip 16337 up
+flip 16341 move 245 144
+flip 16342 move 245 145
+flip 16343 down
+flip 16344 up
+flip 16348 move 61 48
+flip 16349 move 60 48
+flip 16350 down
+flip 16351 up
+flip 16356 move 61 48
+flip 16357 move 60 48
+flip 16358 down
+flip 16359 up
+flip 16364 move 60 169
+flip 16365 move 60 170
+flip 16366 down
+flip 16367 up
+flip 16372 move 159 110
+flip 16373 move 160 110
+flip 16374 down
+flip 16375 up
+flip 16379 move 160 144
+flip 16380 move 160 145
+flip 16381 down
+flip 16382 up
+flip 16386 move 61 105
+flip 16387 move 60 105
+flip 16388 down
+flip 16389 up
+flip 16394 move 144 85
+flip 16395 move 145 85
+flip 16396 down
+flip 16397 up
+flip 16399 move 174 85
+flip 16400 move 175 85
+flip 16401 down
+flip 16402 up
+flip 16404 move 204 85
+flip 16405 move 205 85
+flip 16406 down
+flip 16407 up
+flip 16409 move 234 85
+flip 16410 move 235 85
+flip 16411 down
+flip 16412 up
+flip 16414 move 264 85
+flip 16415 move 265 85
+flip 16416 down
+flip 16417 up
+flip 16419 move 294 85
+flip 16420 move 295 85
+flip 16421 down
+flip 16422 up
+flip 16424 move 324 85
+flip 16425 move 325 85
+flip 16426 down
+flip 16427 up
+flip 16429 move 146 110
+flip 16430 move 145 110
+flip 16431 down
+flip 16432 up
+flip 16434 move 174 110
+flip 16435 move 175 110
+flip 16436 down
+flip 16437 up
+flip 16439 move 204 110
+flip 16440 move 205 110
+flip 16441 down
+flip 16442 up
+flip 16444 move 234 110
+flip 16445 move 235 110
+flip 16446 down
+flip 16447 up
+flip 16449 move 264 110
+flip 16450 move 265 110
+flip 16451 down
+flip 16452 up
+flip 16454 move 294 110
+flip 16455 move 295 110
+flip 16456 down
+flip 16457 up
+flip 16459 move 324 110
+flip 16460 move 325 110
+flip 16461 down
+flip 16462 up
+flip 16464 move 146 135
+flip 16465 move 145 135
+flip 16466 down
+flip 16467 up
+flip 16469 move 174 135
+flip 16470 move 175 135
+flip 16471 down
+flip 16472 up
+flip 16474 move 204 135
+flip 16475 move 205 135
+flip 16476 down
+flip 16477 up
+flip 16479 move 234 135
+flip 16480 move 235 135
+flip 16481 down
+flip 16482 up
+flip 16484 move 264 135
+flip 16485 move 265 135
+flip 16486 down
+flip 16487 up
+flip 16489 move 294 135
+flip 16490 move 295 135
+flip 16491 down
+flip 16492 up
+flip 16494 move 324 135
+flip 16495 move 325 135
+flip 16496 down
+flip 16497 up
+flip 16499 move 146 160
+flip 16500 move 145 160
+flip 16501 down
+flip 16502 up
+flip 16504 move 174 160
+flip 16505 move 175 160
+flip 16506 down
+flip 16507 up
+flip 16509 move 204 160
+flip 16510 move 205 160
+flip 16511 down
+flip 16512 up
+flip 16514 move 234 160
+flip 16515 move 235 160
+flip 16516 down
+flip 16517 up
+flip 16519 move 264 160
+flip 16520 move 265 160
+flip 16521 down
+flip 16522 up
+flip 16524 move 294 160
+flip 16525 move 295 160
+flip 16526 down
+flip 16527 up
+flip 16529 move 324 160
+flip 16530 move 325 160
+flip 16531 down
+flip 16532 up
+flip 16534 move 146 185
+flip 16535 move 145 185
+flip 16536 down
+flip 16537 up
+flip 16539 move 174 185
+flip 16540 move 175 185
+flip 16541 down
+flip 16542 up
+flip 16544 move 204 185
+flip 16545 move 205 185
+flip 16546 down
+flip 16547 up
+flip 16549 move 234 185
+flip 16550 move 235 185
+flip 16551 down
+flip 16552 up
+flip 16554 move 264 185
+flip 16555 move 265 185
+flip 16556 down
+flip 16557 up
+flip 16559 move 294 185
+flip 16560 move 295 185
+flip 16561 down
+flip 16562 up
+flip 16564 move 324 185
+flip 16565 move 325 185
+flip 16566 down
+flip 16567 up
+flip 16569 move 146 210
+flip 16570 move 145 210
+flip 16571 down
+flip 16572 up
+flip 16574 move 174 210
+flip 16575 move 175 210
+flip 16576 down
+flip 16577 up
+flip 16579 move 204 210
+flip 16580 move 205 210
+flip 16581 down
+flip 16582 up
+flip 16584 move 234 210
+flip 16585 move 235 210
+flip 16586 down
+flip 16587 up
+flip 16589 move 264 210
+flip 16590 move 265 210
+flip 16591 down
+flip 16592 up
+flip 16594 move 294 210
+flip 16595 move 295 210
+flip 16596 down
+flip 16597 up
+flip 16599 move 324 210
+flip 16600 move 325 210
+flip 16601 down
+flip 16602 up
+flip 16604 move 146 285
+flip 16605 move 145 285
+flip 16606 down
+flip 16607 up
+flip 16609 move 174 285
+flip 16610 move 175 285
+flip 16611 down
+flip 16612 up
+flip 16614 move 204 285
+flip 16615 move 205 285
+flip 16616 down
+flip 16617 up
+flip 16619 move 234 285
+flip 16620 move 235 285
+flip 16621 down
+flip 16622 up
+flip 16624 move 264 285
+flip 16625 move 265 285
+flip 16626 down
+flip 16627 up
+flip 16629 move 294 285
+flip 16630 move 295 285
+flip 16631 down
+flip 16632 up
+flip 16634 move 324 285
+flip 16635 move 325 285
+flip 16636 down
+flip 16637 up
+flip 16639 move 146 315
+flip 16640 move 145 315
+flip 16641 down
+flip 16642 up
+flip 16644 move 174 315
+flip 16645 move 175 315
+flip 16646 down
+flip 16647 up
+flip 16649 move 204 315
+flip 16650 move 205 315
+flip 16651 down
+flip 16652 up
+flip 16654 move 234 315
+flip 16655 move 235 315
+flip 16656 down
+flip 16657 up
+flip 16659 move 264 315
+flip 16660 move 265 315
+flip 16661 down
+flip 16662 up
+flip 16664 move 294 315
+flip 16665 move 295 315
+flip 16666 down
+flip 16667 up
+flip 16669 move 324 315
+flip 16670 move 325 315
+flip 16671 down
+flip 16672 up
+flip 16674 move 61 355
+flip 16675 move 60 355
+flip 16676 down
+flip 16677 up
+flip 16682 move 61 355
+flip 16683 move 60 355
+flip 16684 down
+flip 16685 up
+flip 16690 move 61 355
+flip 16691 move 60 355
+flip 16692 down
+flip 16693 up
+flip 16698 move 61 355
+flip 16699 move 60 355
+flip 16700 down
+flip 16701 up
+flip 16706 move 61 355
+flip 16707 move 60 355
+flip 16708 down
+flip 16709 up
+flip 16714 move 61 355
+flip 16715 move 60 355
+flip 16716 down
+flip 16717 up
+flip 16722 move 61 355
+flip 16723 move 60 355
+flip 16724 down
+flip 16725 up
+flip 16730 move 60 236
+flip 16731 move 60 235
+flip 16732 down
+flip 16733 up
+flip 16738 move 484 230
+flip 16739 move 485 230
+flip 16740 down
+flip 16741 up
+flip 16777 move 279 444
+flip 16778 move 279 445
+flip 16779 down
+flip 16780 up
+flip 16787 move 260 151
+flip 16788 move 260 150
+flip 16789 down
+flip 16790 up
+flip 16795 move 279 444
+flip 16796 move 279 445
+flip 16797 down
+flip 16798 up
+flip 16805 move 61 235
+flip 16806 move 60 235
+flip 16807 down
+flip 16808 up
+flip 16813 move 349 200
+flip 16814 move 350 200
+flip 16815 down
+flip 16816 up
+flip 16937 move 557 245
+flip 16938 move 558 245
+flip 16939 down
+flip 16940 up
+flip 16949 move 151 395
+flip 16950 move 150 395
+flip 16951 down
+flip 16952 up
+flip 16963 move 60 106
+flip 16964 move 60 105
+flip 16965 down
+flip 16966 up
+flip 16971 move 449 130
+flip 16972 move 450 130
+flip 16973 down
+flip 16974 up
+flip 16979 move 474 145
+flip 16980 move 475 145
+flip 16981 down
+flip 16982 up
+flip 16987 move 499 160
+flip 16988 move 500 160
+flip 16989 down
+flip 16990 up
+flip 16995 move 53 395
+flip 16996 move 52 395
+flip 16997 down
+flip 16998 up
+flip 17005 move 60 356
+flip 17006 move 60 355
+flip 17007 down
+flip 17008 up
+flip 17013 move 61 355
+flip 17014 move 60 355
+flip 17015 down
+flip 17016 up
+flip 17021 move 61 355
+flip 17022 move 60 355
+flip 17023 down
+flip 17024 up
+flip 17029 move 60 301
+flip 17030 move 60 300
+flip 17031 down
+flip 17032 up
+flip 17037 move 534 120
+flip 17038 move 535 120
+flip 17039 down
+flip 17040 up
+flip 17049 move 279 444
+flip 17050 move 279 445
+flip 17051 down
+flip 17052 up
+flip 17059 move 165 241
+flip 17060 move 165 240
+flip 17061 down
+flip 17062 up
+flip 17067 move 279 444
+flip 17068 move 279 445
+flip 17069 down
+flip 17070 up
+flip 17077 move 280 445
+flip 17078 move 279 445
+flip 17079 down
+flip 17080 up
+flip 17087 move 470 211
+flip 17088 move 470 210
+flip 17089 down
+flip 17090 up
+flip 17095 move 279 444
+flip 17096 move 279 445
+flip 17097 down
+flip 17098 up
+flip 17105 move 53 395
+flip 17106 move 52 395
+flip 17107 down
+flip 17108 up
+flip 17119 move 349 215
+flip 17120 move 350 215
+flip 17121 down right
+flip 17122 up right
+flip 17127 move 509 140
+flip 17128 move 510 140
+flip 17129 down
+flip 17130 up
+flip 17139 move 511 140
+flip 17140 move 510 140
+flip 17141 down
+flip 17142 up
+flip 17151 move 511 140
+flip 17152 move 510 140
+flip 17153 down
+flip 17154 up
+flip 17163 move 351 215
+flip 17164 move 350 215
+flip 17165 down
+flip 17166 up
+flip 17175 move 351 215
+flip 17176 move 350 215
+flip 17177 down
+flip 17178 up
+flip 17800 move 360 445
+flip 17801 move 359 445
+flip 17803 down
+flip 17805 up
+flip 17817 move 559 261
+flip 17818 move 558 261
+flip 17820 down
+flip 17822 up
+flip 17838 move 221 165
+flip 17839 move 220 165
+flip 17841 down
+flip 17843 up
+flip 17848 key S down
+flip 17850 key S up
+flip 17853 key F down
+flip 17855 key F up
+flip 17862 move 551 400
+flip 17863 move 550 400
+flip 17865 down
+flip 17867 up
+flip 31565 move 578 419
+flip 31566 move 577 419
+flip 31568 down
+flip 31570 up
+flip 31600 move 578 419
+flip 31601 move 577 419
+flip 31603 down
+flip 31605 up
+flip 31632 move 578 419
+flip 31633 move 577 419
+flip 31635 down
+flip 31637 up
+flip 31662 move 577 67
+flip 31663 move 576 67
+flip 31665 down
+flip 31667 up
+flip 31687 move 558 93
+flip 31688 move 557 93
+flip 31690 down
+flip 31692 up
+flip 31707 move 396 173
+flip 31708 move 395 173
+flip 31710 down
+flip 31712 up
