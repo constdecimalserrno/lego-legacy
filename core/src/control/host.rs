@@ -92,12 +92,6 @@ impl<H> ControlHost<H> {
         self.bus.clone()
     }
 
-    /// Static per-title [`crate::title::TitleGuide`] configured on this host (#311).
-    #[must_use]
-    pub fn guide(&self) -> &'static crate::title::TitleGuide {
-        self.bus.guide()
-    }
-
     #[must_use]
     pub fn inner(&self) -> &H {
         &self.inner
@@ -1000,28 +994,31 @@ mod tests {
     fn control_host_applies_relative_steered_scaling_hint_and_escape_guard() {
         use crate::title::{MouseMode, TitleGuide};
 
-        const STEERED_GUIDE: TitleGuide = TitleGuide {
-            display_name: "Steered Test",
-            resolution: (640, 480),
-            mouse_mode: MouseMode::RelativeSteered {
-                virtual_span: (1280, 1280),
-                recenter: (320, 240),
-                start_corner: (0, 480),
+        const STEERED_TITLE: Title = Title {
+            name: "Steered Test",
+            guide: TitleGuide {
+                resolution: (640, 480),
+                mouse_mode: MouseMode::RelativeSteered {
+                    virtual_span: (1280, 1280),
+                    recenter: (320, 240),
+                    start_corner: (0, 480),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
 
         let mut host = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &STEERED_TITLE,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
-                guide: &STEERED_GUIDE,
                 ..ControlConfig::default()
             },
         );
         let bus = host.bus();
-        assert_eq!(host.guide().display_name, "Steered Test");
+        assert_eq!(bus.title().name, "Steered Test");
         assert_eq!(bus.status().pointer_pos, (0, 479));
         assert_eq!(bus.status().hw_pointer_pos, (320, 240));
         assert!(!bus.status().pointer_shown);
@@ -1227,12 +1224,16 @@ mod tests {
     fn live_pace_sleep_does_not_inflate_over_budget_flips() {
         const MS: u64 = 1_000_000;
 
+        const TITLE_20HZ: Title = Title {
+            flip_cost: crate::clock::FlipCost::Refresh(20),
+            ..Title::STUB
+        };
         let mut host = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &TITLE_20HZ,
                 mode: ExecMode::Live,
                 pace: 0.5,
-                flip_cost: crate::clock::FlipCost::Refresh(20),
                 ..ControlConfig::default()
             },
         );
@@ -1332,22 +1333,25 @@ mod tests {
 
         // 2. RelativeSteered starts visual cursor at clamped start_corner (0, 479),
         //    integrates emitted deltas / scale, and is NOT pinned by per-flip put_pointer(320, 240).
-        const STEERED: TitleGuide = TitleGuide {
-            display_name: "Steered Contract",
-            resolution: (640, 480),
-            mouse_mode: MouseMode::RelativeSteered {
-                virtual_span: (1280, 1280),
-                recenter: (320, 240),
-                start_corner: (0, 480),
+        const STEERED_TITLE: Title = Title {
+            name: "Steered Contract",
+            guide: TitleGuide {
+                resolution: (640, 480),
+                mouse_mode: MouseMode::RelativeSteered {
+                    virtual_span: (1280, 1280),
+                    recenter: (320, 240),
+                    start_corner: (0, 480),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
         let mut rel = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &STEERED_TITLE,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
-                guide: &STEERED,
                 ..ControlConfig::default()
             },
         );
@@ -1384,19 +1388,22 @@ mod tests {
         const H: u32 = 480;
 
         // --- Contract 1: SoftwareAbsolute (e.g. poll-release UI title) ---
-        const SOFT_ABS: TitleGuide = TitleGuide {
-            display_name: "SoftwareAbsolute Stub",
-            resolution: (W, H),
-            mouse_mode: MouseMode::SoftwareAbsolute {
-                requires_poll_release: true,
+        const SOFT_ABS_TITLE: Title = Title {
+            name: "SoftwareAbsolute Stub",
+            guide: TitleGuide {
+                resolution: (W, H),
+                mouse_mode: MouseMode::SoftwareAbsolute {
+                    requires_poll_release: true,
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
         let mut sa = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &SOFT_ABS_TITLE,
                 mode: ExecMode::Live,
-                guide: &SOFT_ABS,
                 ..ControlConfig::default()
             },
         );
@@ -1437,20 +1444,23 @@ mod tests {
         assert_eq!(sa.bus().status().pointer_pos, (420, 310));
 
         // --- Contract 2: SoftwareRelative (transition SetCursorPos(320,240) must NOT desync) ---
-        const SOFT_REL: TitleGuide = TitleGuide {
-            display_name: "SoftwareRelative Stub",
-            resolution: (W, H),
-            mouse_mode: MouseMode::SoftwareRelative {
-                virtual_span: (W, H),
-                start_pos: (320, 240),
+        const SOFT_REL_TITLE: Title = Title {
+            name: "SoftwareRelative Stub",
+            guide: TitleGuide {
+                resolution: (W, H),
+                mouse_mode: MouseMode::SoftwareRelative {
+                    virtual_span: (W, H),
+                    start_pos: (320, 240),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
         let mut sr = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &SOFT_REL_TITLE,
                 mode: ExecMode::Live,
-                guide: &SOFT_REL,
                 ..ControlConfig::default()
             },
         );
@@ -1547,21 +1557,24 @@ mod tests {
         assert_eq!(cross, (270, 100));
 
         // --- Contract 3: RelativeSteered (per-flip recenter + owed-delta chunking + Move/Click/Drag) ---
-        const REL_STEER: TitleGuide = TitleGuide {
-            display_name: "RelativeSteered Stub",
-            resolution: (W, H),
-            mouse_mode: MouseMode::RelativeSteered {
-                virtual_span: (1280, 1280),
-                recenter: (320, 240),
-                start_corner: (0, 480),
+        const REL_STEER_TITLE: Title = Title {
+            name: "RelativeSteered Stub",
+            guide: TitleGuide {
+                resolution: (W, H),
+                mouse_mode: MouseMode::RelativeSteered {
+                    virtual_span: (1280, 1280),
+                    recenter: (320, 240),
+                    start_corner: (0, 480),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
         let mut rs = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &REL_STEER_TITLE,
                 mode: ExecMode::Live,
-                guide: &REL_STEER,
                 ..ControlConfig::default()
             },
         );
@@ -1808,19 +1821,21 @@ mod tests {
         use crate::control::observe::{render_frame_png, ObserveOptions};
         use crate::title::{MouseMode, TitleGuide};
 
-        const ABS: TitleGuide = TitleGuide {
-            display_name: "Blank Cursor Abs",
-            resolution: (64, 48),
-            mouse_mode: MouseMode::AbsoluteKept,
-            ..TitleGuide::EMPTY
+        const ABS_TITLE: Title = Title {
+            name: "Blank Cursor Abs",
+            guide: TitleGuide {
+                resolution: (64, 48),
+                mouse_mode: MouseMode::AbsoluteKept,
+                ..TitleGuide::EMPTY
+            },
+            ..Title::STUB
         };
         let mut host = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
+                title: &ABS_TITLE,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
-                guide: &ABS,
                 ..ControlConfig::default()
             },
         );

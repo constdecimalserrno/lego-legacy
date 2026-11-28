@@ -1,25 +1,19 @@
-//! The old file API LEGO Island reads its scripts and world through (#116):
-//! `OpenFile`, `_hread`, `_hwrite`, `_llseek` and `_lclose`, with
-//! `GetFileSize` and `SetEndOfFile`, over the handles `CreateFileA` makes; and
-//! `MoveFileA`, which moves its saves from slot to slot (#125); and the CD
-//! read through its Joliet tree, with the walls it stops at (#144).
+//! The 16-bit-era Win32 file API (#116): `OpenFile`, `_hread`, `_hwrite`,
+//! `_llseek`, and `_lclose`, with `GetFileSize` and `SetEndOfFile`, over the
+//! handles `CreateFileA` makes, plus `MoveFileA` (#125).
 //!
-//! Each is called across the boundary by a guest of the test's own making, as
-//! LEGO1's `MxIOInfo` calls them, so what is held is what a title would be
-//! answered: its arguments taken off the stack as Windows takes them, and
-//! every answer and `GetLastError` after it read back out of guest memory.
+//! Each is called across the boundary by a synthetic guest, so what is held is
+//! what a title would be answered: its arguments taken off the stack as Windows
+//! takes them, and every answer and `GetLastError` after it read back out of
+//! guest memory.
 
 use lego_legacy_core::cli::Trace;
 use lego_legacy_core::cpu::ESP;
-use lego_legacy_core::disc;
 use lego_legacy_core::guest::GuestMem;
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::{Machine, Outcome, STACK_TOP};
-use lego_legacy_core::roster::{LEGO_CHESS, LEGO_ISLAND};
 use lego_legacy_core::runlog::RunLog;
-use lego_legacy_core::title::EntryImage;
-use lego_legacy_core::win32::{Contents, Object};
-use lego_legacy_core::{testkit, Title};
+use lego_legacy_core::Title;
 use std::path::PathBuf;
 
 const TITLE: Title = Title::STUB;
@@ -490,81 +484,6 @@ fn a_style_that_asks_for_more_than_opening_a_file_is_a_wall() {
     }
 }
 
-/// On LEGO Island's own disc, the probe LEGO1 makes for its world (RVA
-/// `0x66b40`) finds it where `DATA\disk` was installed and not on the CD,
-/// which is what faulted the old tree a billion instructions later; and
-/// `Isle\ISLE.SI`, 157 MB, is read where it lies rather than held whole.
-#[test]
-fn island_s_world_is_found_and_its_biggest_script_is_read_where_it_lies() {
-    let island = &LEGO_ISLAND.image;
-    if !testkit::rips(island) {
-        return;
-    }
-    let mut iso = disc::open_pressing(island.disc_dir, island.pressing).expect("the pressing");
-    let script = "LEGO/SCRIPTS/ISLE/ISLE.SI";
-    let (start, len) = iso.lies(script).expect("the script is on the disc");
-    assert!(len > 150_000_000, "{len} bytes");
-    let head = iso.read_range(script, 0, 16).expect("it reads");
-    let tail = iso.read_range(script, len - 4, 4).expect("it reads");
-
-    let mut g = Guest::new();
-    g.machine
-        .tree
-        .set_copied(&mut iso, "DATA/disk", TITLE.install_dir)
-        .expect("DATA/disk is copied");
-    g.machine.tree.set_disc(iso);
-    let (installed, on_cd, isle) = (
-        g.text("C:\\STUB\\lego\\data\\world.wdb"),
-        g.text("D:\\lego\\data\\world.wdb"),
-        g.text("D:\\lego\\scripts\\isle\\isle.si"),
-    );
-    let (installed_record, cd_record, isle_record, buf) =
-        (g.buffer(136), g.buffer(136), g.buffer(136), g.buffer(32));
-    let world = g.call(
-        "OpenFile",
-        &[Value(installed), Value(installed_record), Value(OF_EXIST)],
-    );
-    let cd = g.call(
-        "OpenFile",
-        &[Value(on_cd), Value(cd_record), Value(OF_EXIST)],
-    );
-    let file = g.call(
-        "OpenFile",
-        &[Value(isle), Value(isle_record), Value(OF_READ)],
-    );
-    let size = g.call("GetFileSize", &[Answer(file), Value(0)]);
-    let first = g.call("_hread", &[Answer(file), Value(buf), Value(16)]);
-    let end = g.call(
-        "_llseek",
-        &[Answer(file), Value(-4i32 as u32), Value(FILE_END)],
-    );
-    let last = g.call("_hread", &[Answer(file), Value(buf + 16), Value(16)]);
-    assert_eq!(g.run(), Outcome::Exited { code: 0 });
-
-    assert_eq!(g.answer(world), 1, "the world is where it was installed");
-    assert_eq!(g.ofstruct(installed_record).1, 1, "on a fixed disk");
-    assert_eq!(g.answer(cd), HFILE_ERROR, "and the CD has none");
-    assert_ne!(g.ofstruct(cd_record).2, 0);
-    assert_ne!(g.answer(file), HFILE_ERROR);
-    assert_eq!(
-        g.ofstruct(isle_record),
-        (136, 0, 0, "D:\\lego\\scripts\\isle\\isle.si".to_owned())
-    );
-    assert_eq!(g.answer(size), len);
-    assert_eq!((g.answer(first), g.bytes(buf, 16)), (16, head));
-    assert_eq!(g.answer(end), len - 4);
-    assert_eq!(
-        (g.answer(last), g.bytes(buf + 16, 4)),
-        (4, tail),
-        "short at the end"
-    );
-    // What the open handle holds is where the script lies, not its bytes.
-    let Some(Object::File { contents, .. }) = g.machine.state.object(g.answer(file)) else {
-        panic!("the handle is a file");
-    };
-    assert_eq!(*contents, Contents::Lies { start, len });
-}
-
 /// A search of the CD is a wall, for every title, until a title asks for one:
 /// none does yet, and what Windows answers for a disc read through its Joliet
 /// tree is not known (#144). A pattern relative to a directory on the CD is a
@@ -591,78 +510,4 @@ fn a_search_of_the_cd_is_a_wall() {
     let search = g.call("FindFirstFileA", &[Value(named), Value(found)]);
     assert_eq!(g.run(), Outcome::Exited { code: 0 });
     assert_eq!(g.failed(search), (u32::MAX, ERROR_FILE_NOT_FOUND));
-}
-
-/// After its intro LEGO Chess opens `D:\intro\Chess Bumper01.bmp`, a name only
-/// its disc's Joliet tree has: the primary tree calls the same file
-/// `INTRO/CHESSB~1.BMP` (#144). On the title's own rip, read through its
-/// Joliet tree, the long name opens as the title opens it, and the 8.3 name
-/// stops the run at a wall naming it.
-#[test]
-fn lego_chess_s_bumper_opens_by_its_long_name_on_its_own_disc() {
-    // The pressing #142 takes, read here for its Joliet tree alone.
-    const CHESS: EntryImage = LEGO_CHESS.image;
-    if !testkit::rips(&CHESS) {
-        return;
-    }
-    let pressing = || disc::open_pressing(CHESS.disc_dir, CHESS.pressing).expect("the pressing");
-    let (bumper, short) = ("intro/Chess Bumper01.bmp", "INTRO/CHESSB~1.BMP");
-    let mut iso = pressing();
-    assert_eq!(
-        iso.has(bumper).ok(),
-        Some(false),
-        "the primary tree has only its 8.3 name"
-    );
-    let at = iso.lies(short).expect("the 8.3 name is the primary tree's");
-    assert_eq!(iso.read_joliet().ok(), Some(true));
-    assert_eq!(
-        iso.lies(bumper).ok(),
-        Some(at),
-        "the long name is the same file"
-    );
-    assert_eq!(at.1, 196_664);
-    assert_eq!(
-        iso.read_range(bumper, 0, 2).ok().as_deref(),
-        Some(&b"BM"[..])
-    );
-    assert!(iso
-        .list("intro")
-        .expect("the directory lists")
-        .iter()
-        .any(|e| e.name == "Chess Bumper01.bmp"));
-
-    for (path, opens) in [
-        ("D:\\intro\\Chess Bumper01.bmp", true),
-        ("D:\\INTRO\\CHESSB~1.BMP", false),
-    ] {
-        let mut iso = pressing();
-        iso.read_joliet().expect("the descriptors read");
-        let mut g = Guest::new();
-        g.machine.tree.set_disc(iso);
-        let named = g.text(path);
-        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
-        let file = g.call(
-            "CreateFileA",
-            &[
-                Value(named),
-                Value(0x8000_0000),
-                Value(1),
-                Value(0),
-                Value(3),
-                Value(0),
-                Value(0),
-            ],
-        );
-        let size = g.call("GetFileSize", &[Answer(file), Value(0)]);
-        let outcome = g.run();
-        if opens {
-            assert_eq!(outcome, Outcome::Exited { code: 0 });
-            assert_eq!(g.answer(size), 196_664);
-        } else {
-            assert!(
-                matches!(&outcome, Outcome::Wall { what } if what.contains(short) && what.contains("q2")),
-                "{outcome}"
-            );
-        }
-    }
 }

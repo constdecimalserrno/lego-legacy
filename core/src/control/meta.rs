@@ -1,9 +1,9 @@
 //! Zero-crate JSON serialization of per-title [`TitleGuide`] metadata for
 //! `GET /api/meta`, `GET /api/controls`, and `GET /api/goals` (#311).
 //!
-//! Strictly Golden-Rule-4 compliant: zero title names live in this module; all
-//! title-specific knowledge is declared statically in each title crate and
-//! threaded in as `&'static TitleGuide`.
+//! Strictly Golden-Rule-4 compliant: zero title names live in `core/src/`; all
+//! title-specific knowledge is declared statically in each title crate on its
+//! [`Title`] and threaded in as `&'static Title`.
 
 use super::json::{write_json_f64, write_json_str};
 use crate::clock::FlipCost;
@@ -151,10 +151,12 @@ fn write_relative_scale(out: &mut String, guide: &TitleGuide) {
     }
 }
 
-/// Serialize a [`TitleGuide`] as a complete RFC 8259 JSON object.
-pub fn write_title_guide(out: &mut String, guide: &TitleGuide) {
+/// Serialize a title's [`TitleGuide`] as a complete RFC 8259 JSON object,
+/// using [`Title::name`] as the single source for `display_name`.
+pub fn write_title_guide(out: &mut String, title: &Title) {
+    let guide = &title.guide;
     out.push_str("{\"display_name\":");
-    write_json_str(out, guide.display_name);
+    write_json_str(out, title.name);
     out.push_str(",\"summary\":");
     write_json_str(out, guide.summary);
     let _ = write!(
@@ -184,10 +186,9 @@ pub fn write_title_guide(out: &mut String, guide: &TitleGuide) {
     out.push('}');
 }
 
-/// Format `GET /api/meta` JSON response combining declared [`Title`] machine
-/// facts with its static [`TitleGuide`].
+/// Format `GET /api/meta` JSON response from a declared [`Title`].
 #[must_use]
-pub fn format_meta_json(title: &Title, guide: &TitleGuide) -> String {
+pub fn format_meta_json(title: &Title) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str("{\"ok\":true,\"title\":");
     write_json_str(&mut out, title.key);
@@ -220,20 +221,21 @@ pub fn format_meta_json(title: &Title, guide: &TitleGuide) -> String {
         }
     }
     out.push_str(",\"guide\":");
-    write_title_guide(&mut out, guide);
+    write_title_guide(&mut out, title);
     out.push('}');
     out
 }
 
 /// Format `GET /api/controls` JSON response with mouse regime, safety guards,
-/// cadence, keybindings, and hazards from [`TitleGuide`].
+/// cadence, keybindings, and hazards from [`Title`].
 #[must_use]
-pub fn format_controls_json(title: &Title, guide: &TitleGuide) -> String {
+pub fn format_controls_json(title: &Title) -> String {
+    let guide = &title.guide;
     let mut out = String::with_capacity(1024);
     out.push_str("{\"ok\":true,\"title\":");
     write_json_str(&mut out, title.key);
     out.push_str(",\"display_name\":");
-    write_json_str(&mut out, guide.display_name);
+    write_json_str(&mut out, title.name);
     out.push_str(",\"pointer_speed\":[");
     write_json_f64(&mut out, title.pointer_speed.0);
     out.push(',');
@@ -268,14 +270,15 @@ pub fn format_controls_json(title: &Title, guide: &TitleGuide) -> String {
 }
 
 /// Format `GET /api/goals` JSON response with progression milestones, concrete
-/// goals, and profile save paths from [`TitleGuide`].
+/// goals, and profile save paths from [`Title`].
 #[must_use]
-pub fn format_goals_json(title: &Title, guide: &TitleGuide) -> String {
+pub fn format_goals_json(title: &Title) -> String {
+    let guide = &title.guide;
     let mut out = String::with_capacity(768);
     out.push_str("{\"ok\":true,\"title\":");
     write_json_str(&mut out, title.key);
     out.push_str(",\"display_name\":");
-    write_json_str(&mut out, guide.display_name);
+    write_json_str(&mut out, title.name);
     out.push_str(",\"summary\":");
     write_json_str(&mut out, guide.summary);
     out.push_str(
@@ -296,49 +299,52 @@ mod tests {
     use crate::control::json::parse_json;
     use crate::title::Milestone;
 
-    const SAMPLE_GUIDE: TitleGuide = TitleGuide {
-        display_name: "Sample Fixture",
-        summary: "Tests every TitleGuide JSON field.",
-        resolution: (640, 480),
-        bpp: 16,
-        refresh_hz: 30,
-        mouse_mode: MouseMode::RelativeSteered {
-            virtual_span: (1280, 1280),
-            recenter: (320, 240),
-            start_corner: (0, 480),
-        },
-        escape_quits: true,
-        skip_keys: &["Space", "Escape"],
-        cadence: AgentCadence::PauseToThink {
-            settle_ms: 1000,
-            settle_flips: 30,
-        },
-        controls: &[ControlHint {
-            input: "Tab",
-            action: "Next camera",
-            notes: "Cycles views; handles \"quotes\" and C:\\path\\ok.",
-        }],
-        hazards: &["Avoid \"Escape\" without force=true."],
-        goals: &[
-            Goal {
-                id: "goal-1",
-                name: "First Objective",
-                milestone: Milestone::Playable,
-                description: "Finish the opening stage.",
+    const SAMPLE_TITLE: Title = Title {
+        name: "Sample Fixture",
+        guide: TitleGuide {
+            summary: "Tests every TitleGuide JSON field.",
+            resolution: (640, 480),
+            bpp: 16,
+            refresh_hz: 30,
+            mouse_mode: MouseMode::RelativeSteered {
+                virtual_span: (1280, 1280),
+                recenter: (320, 240),
+                start_corner: (0, 480),
             },
-            Goal {
-                id: "goal-2",
-                name: "Full Clear",
-                milestone: Milestone::Complete,
-                description: "Complete every stage.",
+            escape_quits: true,
+            skip_keys: &["Space", "Escape"],
+            cadence: AgentCadence::PauseToThink {
+                settle_ms: 1000,
+                settle_flips: 30,
             },
-        ],
-        save_files: &["saves\\slot0.dat"],
+            controls: &[ControlHint {
+                input: "Tab",
+                action: "Next camera",
+                notes: "Cycles views; handles \"quotes\" and C:\\path\\ok.",
+            }],
+            hazards: &["Avoid \"Escape\" without force=true."],
+            goals: &[
+                Goal {
+                    id: "goal-1",
+                    name: "First Objective",
+                    milestone: Milestone::Playable,
+                    description: "Finish the opening stage.",
+                },
+                Goal {
+                    id: "goal-2",
+                    name: "Full Clear",
+                    milestone: Milestone::Complete,
+                    description: "Complete every stage.",
+                },
+            ],
+            save_files: &["saves\\slot0.dat"],
+        },
+        ..Title::STUB
     };
 
     #[test]
     fn meta_controls_and_goals_serialize_to_valid_json_across_all_variants() {
-        let meta_txt = format_meta_json(&Title::STUB, &SAMPLE_GUIDE);
+        let meta_txt = format_meta_json(&SAMPLE_TITLE);
         let meta = parse_json(&meta_txt).expect("valid meta JSON");
         let meta_obj = meta.as_object().unwrap();
         assert_eq!(meta_obj["ok"].as_bool(), Some(true));
@@ -364,7 +370,7 @@ mod tests {
         assert!((scale[0].as_f64().unwrap() - 2.0).abs() < 1e-9);
         assert!((scale[1].as_f64().unwrap() - (1280.0 / 480.0)).abs() < 1e-9);
 
-        let controls_txt = format_controls_json(&Title::STUB, &SAMPLE_GUIDE);
+        let controls_txt = format_controls_json(&SAMPLE_TITLE);
         let controls = parse_json(&controls_txt).expect("valid controls JSON");
         let ctrl_obj = controls.as_object().unwrap();
         assert_eq!(ctrl_obj["escape_quits"].as_bool(), Some(true));
@@ -378,7 +384,7 @@ mod tests {
             .unwrap()
             .contains("C:\\path\\ok"));
 
-        let goals_txt = format_goals_json(&Title::STUB, &SAMPLE_GUIDE);
+        let goals_txt = format_goals_json(&SAMPLE_TITLE);
         let goals = parse_json(&goals_txt).expect("valid goals JSON");
         let goals_obj = goals.as_object().unwrap();
         assert_eq!(goals_obj["goals"].as_array().unwrap().len(), 2);
@@ -445,8 +451,8 @@ mod tests {
         assert_eq!(v.as_object().unwrap()["kind"].as_str(), Some("micro_step"));
         assert_eq!(v.as_object().unwrap()["flips_per_step"].as_u64(), Some(8));
 
-        // TitleGuide::EMPTY produces valid JSON with null relative_steered_scale.
-        let empty = parse_json(&format_meta_json(&Title::STUB, &TitleGuide::EMPTY)).unwrap();
+        // Title::STUB (TitleGuide::EMPTY) produces valid JSON with null relative_steered_scale.
+        let empty = parse_json(&format_meta_json(&Title::STUB)).unwrap();
         assert_eq!(
             empty.as_object().unwrap()["guide"].as_object().unwrap()["relative_steered_scale"],
             crate::control::json::JsonValue::Null
@@ -513,10 +519,63 @@ mod tests {
         }
     }
 
+    /// Yields `(1-based line_no, line)` for every production line in a Rust
+    /// source file, skipping only `#[cfg(test)]`-annotated items, blocks, and
+    /// struct fields without truncating production code that follows them.
+    fn production_lines(src: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+        let mut skipping = false;
+        let mut saw_brace = false;
+        let mut depth: i32 = 0;
+        for (idx, line) in src.lines().enumerate() {
+            let trimmed = line.trim();
+            if !skipping {
+                if trimmed.starts_with("#[cfg(test)]") {
+                    skipping = true;
+                    saw_brace = false;
+                    depth = 0;
+                    continue;
+                }
+                out.push((idx + 1, line));
+                continue;
+            }
+            // Skip sibling attributes stacked between `#[cfg(test)]` and the item.
+            if !saw_brace && (trimmed.is_empty() || trimmed.starts_with('#')) {
+                continue;
+            }
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    depth += 1;
+                    saw_brace = true;
+                } else if ch == '}' {
+                    depth -= 1;
+                }
+            }
+            let item_ended = if saw_brace {
+                depth <= 0
+            } else {
+                trimmed.ends_with(';') || trimmed.ends_with(',')
+            };
+            if item_ended {
+                skipping = false;
+            }
+        }
+        out
+    }
+
     #[test]
-    fn golden_rule_4_zero_hardcoded_title_keys_in_meta_and_control_code() {
-        // Golden Rule 4: core is keyed to no title; TitleGuide metadata lives in
-        // each title crate, never hardcoded in core's control plane or TitleGuide.
+    fn golden_rule_4_zero_hardcoded_title_keys_in_all_core_src() {
+        // Confirm production lines after inline `#[cfg(test)]` fields, functions,
+        // and modules are still scanned (not truncated).
+        let sample = "struct S {\n#[cfg(test)]\nfield: u8,\nprod_after_field: u8,\n}\n#[cfg(test)]\nfn t() {\nlet _ = \"legoland\";\n}\nfn prod_after_fn() { let _ = \"legoland\"; }\n";
+        let kept: Vec<&str> = production_lines(sample)
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect();
+        assert!(kept.iter().any(|l| l.contains("prod_after_field")));
+        assert!(kept.iter().any(|l| l.contains("prod_after_fn")));
+        assert!(!kept.iter().any(|l| l.contains("fn t()")));
+
         let forbidden_keys = [
             "lego-rock-raiders",
             "lego-alpha-team",
@@ -526,44 +585,57 @@ mod tests {
             "lego-racers",
             "legoland",
         ];
-        let meta_src = include_str!("meta.rs");
-        // Strip everything from `#[cfg(test)]` onward so this test's own list is
-        // not flagged while every production line of `meta.rs` is checked.
-        let meta_prod = meta_src
-            .split("#[cfg(test)]")
-            .next()
-            .expect("meta.rs prod section");
-        for key in forbidden_keys {
-            assert!(
-                !meta_prod.contains(key),
-                "Golden Rule 4 violation: `{key}` hardcoded in control/meta.rs"
-            );
-        }
 
-        // Also verify non-comment production lines of control/{bus,host,http}.rs
-        // and title.rs contain zero hardcoded title roster keys.
-        let checked_files: &[(&str, &str)] = &[
-            ("control/bus.rs", include_str!("bus.rs")),
-            ("control/cursor.rs", include_str!("cursor.rs")),
-            ("control/host.rs", include_str!("host.rs")),
-            ("control/http.rs", include_str!("http.rs")),
-            ("title.rs", include_str!("../title.rs")),
-        ];
-        for (name, src) in checked_files {
-            let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
-            for (idx, line) in prod.lines().enumerate() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("//") {
+        fn scan_dir(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            keys: &[&str],
+            count: &mut usize,
+        ) {
+            for entry in
+                std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+            {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    scan_dir(root, &path, keys, count);
                     continue;
                 }
-                for key in forbidden_keys {
-                    assert!(
-                        !line.contains(key),
-                        "Golden Rule 4 violation: `{key}` hardcoded in {name}:{}",
-                        idx + 1
-                    );
+                let ext = path.extension().and_then(|s| s.to_str());
+                if !matches!(ext, Some("rs" | "html")) {
+                    continue;
+                }
+                *count += 1;
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let src = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                let lines: Vec<(usize, &str)> = if ext == Some("rs") {
+                    production_lines(&src)
+                } else {
+                    src.lines().enumerate().map(|(i, l)| (i + 1, l)).collect()
+                };
+                for (line_no, line) in lines {
+                    let lower = line.to_ascii_lowercase();
+                    for key in keys {
+                        assert!(
+                            !lower.contains(key),
+                            "Golden Rule 4 violation: `{key}` hardcoded in core/src/{rel}:{line_no}"
+                        );
+                    }
                 }
             }
         }
+
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        scan_dir(&src_root, &src_root, &forbidden_keys, &mut scanned);
+        assert!(
+            scanned >= 30,
+            "expected >= 30 source/asset files under {}, scanned {scanned}",
+            src_root.display()
+        );
     }
 }

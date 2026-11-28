@@ -10,7 +10,7 @@
 //! cursor matches `status.pointer_pos`, `--cursor` crosshair PNG, and live
 //! `/api/stream` WebSocket v2 frame-locked pointer coordinates within `<= 2 px`.
 
-use lego_alpha_team::{GUIDE, LEGO_ALPHA_TEAM as ALPHA_TEAM};
+use lego_alpha_team::LEGO_ALPHA_TEAM as ALPHA_TEAM;
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::control::observe::{render_frame_png, ObserveOptions};
 use lego_legacy_core::control::{Action, Command, ControlBus};
@@ -138,7 +138,7 @@ fn real_disc_relative_steered_cursor_aligns_headlessly_and_over_ws() {
         return;
     }
 
-    let rig = ControlRig::in_process(&ALPHA_TEAM, &GUIDE, Cli::default(), u64::MAX)
+    let rig = ControlRig::in_process(&ALPHA_TEAM, Cli::default(), u64::MAX)
         .expect("start Alpha Team control rig");
     let bus = rig.bus().expect("in-process ControlBus");
     let http = rig.http().with_timeout(SYNC_TIMEOUT);

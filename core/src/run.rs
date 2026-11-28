@@ -12,7 +12,6 @@ use crate::control::{
 use crate::host::{headless::Headless, telemetry::TelemetryHost, Host};
 use crate::machine::{Finish, Machine, Outcome};
 use crate::runlog::RunLog;
-use crate::title::TitleGuide;
 use crate::Title;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -38,21 +37,7 @@ pub fn run(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog), Box<dyn std::error::Error>> {
-    run_with_guide(title, &TitleGuide::EMPTY, cli, host, budget)
-}
-
-/// Run one title with its static [`TitleGuide`] metadata on one host (#311).
-///
-/// # Errors
-/// As [`run`].
-pub fn run_with_guide(
-    title: &'static Title,
-    guide: &'static TitleGuide,
-    cli: &Cli,
-    host: &mut dyn Host,
-    budget: u64,
-) -> Result<(Finish, RunLog), Box<dyn std::error::Error>> {
-    run_digested_with_guide(title, guide, cli, host, budget).map(|(finish, log, _)| (finish, log))
+    run_digested(title, cli, host, budget).map(|(finish, log, _)| (finish, log))
 }
 
 /// The run seam, with the digest a determinism gate compares.
@@ -65,24 +50,9 @@ pub fn run_digested(
     host: &mut dyn Host,
     budget: u64,
 ) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
-    run_digested_with_guide(title, &TitleGuide::EMPTY, cli, host, budget)
-}
-
-/// The digested run seam with static [`TitleGuide`] metadata threaded into the
-/// control plane (`ControlConfig` / `ControlHost` / `HttpContext`, #311).
-///
-/// # Errors
-/// As [`run`].
-pub fn run_digested_with_guide(
-    title: &'static Title,
-    guide: &'static TitleGuide,
-    cli: &Cli,
-    host: &mut dyn Host,
-    budget: u64,
-) -> Result<(Finish, RunLog, String), Box<dyn std::error::Error>> {
     if cli.control_enabled() {
         let config = ControlConfig {
-            title: title.key,
+            title,
             mode: cli.control_mode.unwrap_or(ExecMode::Step),
             owner: if cli.has_control_transport() {
                 InputOwner::Agent
@@ -92,9 +62,6 @@ pub fn run_digested_with_guide(
             start_paused: cli.paused,
             step_uncapped: true,
             pace: 1.0,
-            pointer_speed: title.pointer_speed,
-            flip_cost: title.flip_cost,
-            guide,
         };
         let mut control = ControlHost::new(host, config).with_deferred_pause(true);
         let bus = control.bus();
@@ -105,7 +72,7 @@ pub fn run_digested_with_guide(
                 .ok()
                 .filter(|s| !s.is_empty())
         });
-        let http_ctx = Arc::new(HttpContext::new(bus.clone(), title, token).with_guide(guide));
+        let http_ctx = Arc::new(HttpContext::new(bus.clone(), token));
 
         let mut http_server = if let Some(bind) = &cli.control_http {
             let server = HttpServer::start(bind, Arc::clone(&http_ctx))?;
@@ -287,14 +254,9 @@ pub(crate) fn setup(
         log.line(&format!("bound {} names", machine.bound_names));
         // The bank its MIDI out plays, a declared input like the image: with
         // it the machine has the GS Wavetable synth, and without it no MIDI
-        // out at all (ADR-0008, #156). Kept on the roster rather than `Title`
-        // so adding it does not break every title crate (ADR-0007).
-        let places = crate::roster::ROSTER
-            .iter()
-            .find(|e| e.key == title.key)
-            .map_or(&[][..], |e| e.bank);
-        if !places.is_empty() {
-            log.line(&open_bank(places, &mut machine.state.mixer)?);
+        // out at all (ADR-0008, #156).
+        if !title.bank.is_empty() {
+            log.line(&open_bank(title.bank, &mut machine.state.mixer)?);
         }
     }
     // A route is the run's only recorded input (ADR-0003).
@@ -435,13 +397,6 @@ pub(crate) fn wrap_up(
 /// status is the guest's own when it ended the run itself.
 #[must_use]
 pub fn main(title: &'static Title) -> ExitCode {
-    main_with_guide(title, &TitleGuide::EMPTY)
-}
-
-/// What a title binary's `main` calls when supplying static [`TitleGuide`]
-/// metadata (#311).
-#[must_use]
-pub fn main_with_guide(title: &'static Title, guide: &'static TitleGuide) -> ExitCode {
     let cli = match Cli::parse(std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(CliError::Help) => {
@@ -462,10 +417,10 @@ pub fn main_with_guide(title: &'static Title, guide: &'static TitleGuide) -> Exi
     // line and digest, headless or not (#107, #110).
     crate::host::listen();
     if !cli.headless {
-        return windowed(title, guide, &cli);
+        return windowed(title, &cli);
     }
     let mut host = Headless::new();
-    match run_with_guide(title, guide, &cli, &mut host, u64::MAX) {
+    match run(title, &cli, &mut host, u64::MAX) {
         Ok((finish, log)) => {
             report(title, &cli, &finish, &log);
             status(&finish)
@@ -514,7 +469,7 @@ fn status(finish: &Finish) -> ExitCode {
 /// The window stays open after the guest has finished, because a frame that
 /// flashes past is not something a person can look at.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-fn windowed(title: &'static Title, guide: &'static TitleGuide, cli: &Cli) -> ExitCode {
+fn windowed(title: &'static Title, cli: &Cli) -> ExitCode {
     // One window backend per operating system (ADR-0001), each opened, fed
     // and closed the same way.
     #[cfg(target_os = "linux")]
@@ -541,7 +496,7 @@ fn windowed(title: &'static Title, guide: &'static TitleGuide, cli: &Cli) -> Exi
             eprintln!("lego-legacy: --audio: running silent, no audio device: {e}");
         }
     }
-    let ran = run_with_guide(title, guide, cli, &mut host, u64::MAX);
+    let ran = run(title, cli, &mut host, u64::MAX);
     host.close_audio();
     match ran {
         Ok((finish, log)) => {
@@ -567,7 +522,7 @@ fn windowed(title: &'static Title, guide: &'static TitleGuide, cli: &Cli) -> Exi
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn windowed(_title: &'static Title, _guide: &'static TitleGuide, _cli: &Cli) -> ExitCode {
+fn windowed(_title: &'static Title, _cli: &Cli) -> ExitCode {
     eprintln!("lego-legacy: this operating system has no window backend yet; run with --headless");
     ExitCode::FAILURE
 }
@@ -610,15 +565,18 @@ fn open_bank(
 #[cfg(test)]
 mod tests {
     use super::open_bank;
-    use crate::roster::GM16;
     use crate::sound::Mixer;
-    use crate::title::EntryImage;
+    use crate::title::{EntryImage, Kept};
 
     #[test]
     fn a_missing_bank_leaves_the_machine_with_no_midi_out() {
         let absent = EntryImage {
+            disc_dir: "synthetic",
             pressing: "no-such-pressing",
-            ..GM16[0]
+            path: "SYNTH/BANK.DLS",
+            kept: Kept::Loose,
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            why: "synthetic test fixture",
         };
         let mut mixer = Mixer::default();
         let line = open_bank(&[absent], &mut mixer).expect("missing bank is not fatal");

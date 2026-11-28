@@ -655,19 +655,23 @@ mod tests {
 
     #[test]
     fn overlay_visibility_parity_across_cursor_model_observe_and_ws() {
-        const GUIDE: TitleGuide = TitleGuide {
-            display_name: "Visibility Parity",
-            resolution: (64, 48),
-            mouse_mode: MouseMode::AbsoluteKept,
-            ..TitleGuide::EMPTY
+        use crate::Title;
+        const PARITY_TITLE: Title = Title {
+            key: "parity",
+            name: "Visibility Parity",
+            guide: TitleGuide {
+                resolution: (64, 48),
+                mouse_mode: MouseMode::AbsoluteKept,
+                ..TitleGuide::EMPTY
+            },
+            ..Title::STUB
         };
         let mut host = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: "parity",
+                title: &PARITY_TITLE,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
-                guide: &GUIDE,
                 ..ControlConfig::default()
             },
         );

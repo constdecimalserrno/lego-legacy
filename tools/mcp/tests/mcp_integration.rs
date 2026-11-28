@@ -244,13 +244,23 @@ fn tool_schema_json_is_valid_and_contains_all_nine_tools() {
         .as_str()
         .unwrap();
     assert!(
-        launch_desc.contains("lego-racers"),
-        "game_launch title examples must include lego-racers: {launch_desc}"
+        !launch_desc.is_empty() && launch_desc.contains("lego-legacy"),
+        "game_launch title schema should point callers at lego-legacy discovery: {launch_desc}"
     );
-    assert!(
-        launch_desc.contains("legoland"),
-        "game_launch title examples must include legoland: {launch_desc}"
-    );
+    for hardcoded in [
+        "lego-rock-raiders",
+        "hotwheels-stunt-track-driver",
+        "lego-alpha-team",
+        "lego-island",
+        "lego-chess",
+        "lego-racers",
+        "legoland",
+    ] {
+        assert!(
+            !launch_desc.contains(hardcoded),
+            "game_launch title schema must not hardcode title key `{hardcoded}` (#407): {launch_desc}"
+        );
+    }
 }
 
 #[test]

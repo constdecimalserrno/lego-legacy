@@ -21,7 +21,6 @@ use crate::control::{
 use crate::host::headless::Headless;
 use crate::host::Button;
 use crate::png::decode_to_bgra;
-use crate::title::TitleGuide;
 use crate::Title;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -89,12 +88,7 @@ impl ControlRig {
     /// # Errors
     /// Returns an error if the scratch directory or loopback HTTP server cannot
     /// be initialized.
-    pub fn in_process(
-        title: &'static Title,
-        guide: &'static TitleGuide,
-        mut cli: Cli,
-        budget: u64,
-    ) -> Result<Self, String> {
+    pub fn in_process(title: &'static Title, mut cli: Cli, budget: u64) -> Result<Self, String> {
         let owned_scratch = if cli.data_root.is_none() {
             let dir = create_rig_scratch("spectator-rig")?;
             cli.data_root = Some(dir.join("data-root"));
@@ -105,15 +99,12 @@ impl ControlRig {
         let data_root = cli.data_root.clone();
 
         let config = ControlConfig {
-            title: title.key,
+            title,
             mode: cli.control_mode.unwrap_or(ExecMode::Step),
             owner: InputOwner::Agent,
             start_paused: cli.paused,
             step_uncapped: true,
             pace: 1.0,
-            pointer_speed: title.pointer_speed,
-            flip_cost: title.flip_cost,
-            guide,
         };
 
         cli.headless = true;
@@ -122,37 +113,27 @@ impl ControlRig {
         cli.control_unix = None;
         cli.control_stdio = false;
 
-        Self::in_process_with_runner(
-            title,
-            guide,
-            config,
-            data_root,
-            owned_scratch,
-            move |control| {
-                let mut control = control.with_deferred_pause(true);
-                let obs_bus = control.bus();
-                obs_bus.set_machine_attached(true);
-                let (mut machine, mut log) = match crate::run::setup(title, &cli, &mut control) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        eprintln!("ControlRig::in_process setup failed for {}: {e}", title.key);
-                        return;
-                    }
-                };
-                machine.set_flip_observer(Box::new(move |m, h| {
-                    service_flip_boundary(&obs_bus, m, h);
-                }));
-                let finish = machine.run(&mut control, &mut log, budget);
-                let digest =
-                    crate::run::wrap_up(title, &mut machine, &mut control, &mut log, &finish);
-                control.mark_finished(&finish, &digest);
-            },
-        )
+        Self::in_process_with_runner(config, data_root, owned_scratch, move |control| {
+            let mut control = control.with_deferred_pause(true);
+            let obs_bus = control.bus();
+            obs_bus.set_machine_attached(true);
+            let (mut machine, mut log) = match crate::run::setup(title, &cli, &mut control) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("ControlRig::in_process setup failed for {}: {e}", title.key);
+                    return;
+                }
+            };
+            machine.set_flip_observer(Box::new(move |m, h| {
+                service_flip_boundary(&obs_bus, m, h);
+            }));
+            let finish = machine.run(&mut control, &mut log, budget);
+            let digest = crate::run::wrap_up(title, &mut machine, &mut control, &mut log, &finish);
+            control.mark_finished(&finish, &digest);
+        })
     }
 
     fn in_process_with_runner<F>(
-        title: &'static Title,
-        guide: &'static TitleGuide,
         config: ControlConfig,
         data_root: Option<PathBuf>,
         scratch: Option<PathBuf>,
@@ -163,7 +144,7 @@ impl ControlRig {
     {
         let control = ControlHost::new(Headless::new(), config);
         let bus = control.bus();
-        let ctx = Arc::new(HttpContext::new(bus.clone(), title, None).with_guide(guide));
+        let ctx = Arc::new(HttpContext::new(bus.clone(), None));
         let server = HttpServer::start("127.0.0.1:0", ctx).map_err(|e| {
             if let Some(dir) = &scratch {
                 let _ = std::fs::remove_dir_all(dir);
@@ -1467,35 +1448,27 @@ mod tests {
     fn stub_rig(flips: u32, scratch: PathBuf) -> ControlRig {
         let prog = multi_flip_stub(flips);
         let config = ControlConfig {
-            title: Title::STUB.key,
             mode: ExecMode::Step,
             owner: InputOwner::Agent,
             step_uncapped: true,
             ..ControlConfig::default()
         };
         let data_root = Some(scratch.join("data-root"));
-        ControlRig::in_process_with_runner(
-            &Title::STUB,
-            &TitleGuide::EMPTY,
-            config,
-            data_root,
-            Some(scratch),
-            move |control| {
-                let mut control = control.with_deferred_pause(true);
-                let obs_bus = control.bus();
-                obs_bus.set_machine_attached(true);
-                let mut machine = Machine::new(&Title::STUB, &mut control).expect("machine");
-                machine.load_stub().expect("load stub");
-                machine.arena.write(stub::ENTRY, &prog).expect("write stub");
-                let mut log = RunLog::create("spectator-stub-test", Trace::Off).expect("runlog");
-                machine.set_flip_observer(Box::new(move |m, h| {
-                    service_flip_boundary(&obs_bus, m, h);
-                }));
-                let finish = machine.run(&mut control, &mut log, 200_000);
-                let digest = machine.state_digest();
-                control.mark_finished(&finish, &digest);
-            },
-        )
+        ControlRig::in_process_with_runner(config, data_root, Some(scratch), move |control| {
+            let mut control = control.with_deferred_pause(true);
+            let obs_bus = control.bus();
+            obs_bus.set_machine_attached(true);
+            let mut machine = Machine::new(&Title::STUB, &mut control).expect("machine");
+            machine.load_stub().expect("load stub");
+            machine.arena.write(stub::ENTRY, &prog).expect("write stub");
+            let mut log = RunLog::create("spectator-stub-test", Trace::Off).expect("runlog");
+            machine.set_flip_observer(Box::new(move |m, h| {
+                service_flip_boundary(&obs_bus, m, h);
+            }));
+            let finish = machine.run(&mut control, &mut log, 200_000);
+            let digest = machine.state_digest();
+            control.mark_finished(&finish, &digest);
+        })
         .expect("start stub rig")
     }
 
@@ -1641,8 +1614,7 @@ mod tests {
             stub: true,
             ..Cli::default()
         };
-        let rig = ControlRig::in_process(&Title::STUB, &TitleGuide::EMPTY, cli, 100_000)
-            .expect("in_process stub");
+        let rig = ControlRig::in_process(&Title::STUB, cli, 100_000).expect("in_process stub");
         assert!(rig.data_root().is_some());
         let bus = rig.bus().expect("bus");
         let paused = bus.wait_until_paused(Some(Duration::from_secs(5)));

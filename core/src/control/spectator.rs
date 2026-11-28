@@ -665,7 +665,6 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
                 mode: ExecMode::Step,
                 owner: InputOwner::Agent,
                 ..ControlConfig::default()
@@ -674,7 +673,7 @@ mod tests {
         .with_deferred_pause(true);
         let bus = control.bus();
         bus.set_machine_attached(true);
-        let ctx = Arc::new(HttpContext::new(bus.clone(), &Title::STUB, None));
+        let ctx = Arc::new(HttpContext::new(bus.clone(), None));
         let mut server = HttpServer::start("127.0.0.1:0", ctx).expect("http start");
         let addr = server.addr();
 
@@ -985,7 +984,7 @@ mod tests {
     #[test]
     fn head_watch_routes_return_200_with_content_length_and_empty_body() {
         let bus = ControlBus::new(ControlConfig::default());
-        let ctx = Arc::new(HttpContext::new(bus, &Title::STUB, None));
+        let ctx = Arc::new(HttpContext::new(bus, None));
         let mut server = HttpServer::start("127.0.0.1:0", ctx).expect("http start");
         let addr = server.addr();
         let expected_cl = format!("Content-Length: {}\r\n", WATCH_HTML.len());
@@ -1039,7 +1038,7 @@ mod tests {
             },
         );
         let bus = host.bus();
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+        let ctx = HttpContext::new(bus.clone(), None);
 
         let mut pixels = vec![0u8; 64];
         pixels[0] = 0x55;
@@ -1173,47 +1172,52 @@ mod tests {
             bgra
         }
 
-        const SOFT_REL: TitleGuide = TitleGuide {
-            display_name: "WS SoftwareRelative",
-            resolution: (W, H),
-            mouse_mode: MouseMode::SoftwareRelative {
-                virtual_span: (W, H),
-                start_pos: (160, 120),
+        const SOFT_REL: Title = Title {
+            name: "WS SoftwareRelative",
+            guide: TitleGuide {
+                resolution: (W, H),
+                mouse_mode: MouseMode::SoftwareRelative {
+                    virtual_span: (W, H),
+                    start_pos: (160, 120),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
-        const REL_STEER: TitleGuide = TitleGuide {
-            display_name: "WS RelativeSteered",
-            resolution: (W, H),
-            mouse_mode: MouseMode::RelativeSteered {
-                virtual_span: (640, 640),
-                recenter: (160, 120),
-                start_corner: (0, 240),
+        const REL_STEER: Title = Title {
+            name: "WS RelativeSteered",
+            guide: TitleGuide {
+                resolution: (W, H),
+                mouse_mode: MouseMode::RelativeSteered {
+                    virtual_span: (640, 640),
+                    recenter: (160, 120),
+                    start_corner: (0, 240),
+                },
+                ..TitleGuide::EMPTY
             },
-            ..TitleGuide::EMPTY
+            ..Title::STUB
         };
 
-        for (guide, recenter_every_flip, scale) in [
+        for (title, recenter_every_flip, scale) in [
             (&SOFT_REL, false, (1.0f64, 1.0f64)),
             (&REL_STEER, true, (2.0f64, 640.0 / 240.0)),
         ] {
             let mut host = ControlHost::new(
                 Headless::new(),
                 ControlConfig {
-                    title: Title::STUB.key,
+                    title,
                     mode: ExecMode::Live,
                     owner: InputOwner::Agent,
-                    guide,
                     ..ControlConfig::default()
                 },
             );
             let bus = host.bus();
-            let ctx = Arc::new(HttpContext::new(bus.clone(), &Title::STUB, None));
+            let ctx = Arc::new(HttpContext::new(bus.clone(), None));
             let mut server = HttpServer::start("127.0.0.1:0", ctx).expect("http start");
             let addr = server.addr();
 
             let mut hw = (160i32, 120i32);
-            let mut cur = match guide.mouse_mode {
+            let mut cur = match title.guide.mouse_mode {
                 MouseMode::RelativeSteered { start_corner, .. } => (
                     f64::from(start_corner.0),
                     f64::from((start_corner.1).min(H as i32 - 1)),
@@ -1367,14 +1371,14 @@ mod tests {
                     (bus.status().pointer_pos.0 - target.0).abs() <= 1
                         && (bus.status().pointer_pos.1 - target.1).abs() <= 1,
                     "guide={} target={target:?} got={:?}",
-                    guide.display_name,
+                    title.name,
                     bus.status().pointer_pos
                 );
             }
             assert!(
                 saw_delta,
                 "expected at least one XOR+RLE delta frame for {}",
-                guide.display_name
+                title.name
             );
 
             let ws_inner = ws_reader.get_mut();
@@ -1400,7 +1404,7 @@ mod tests {
             },
         );
         let bus = host.bus();
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+        let ctx = HttpContext::new(bus.clone(), None);
 
         let present_only = |h: &mut ControlHost<Headless>, flip: u64, tag: u8| {
             let mut pixels = vec![0u8; 64];

@@ -35,13 +35,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lego-legacy-catalog"
+version = "0.1.0"
+dependencies = [
+ "hotwheels-stunt-track-driver",
+ "lego-alpha-team",
+ "lego-chess",
+ "lego-island",
+ "lego-legacy-core",
+ "lego-racers",
+ "lego-rock-raiders",
+ "legoland",
+]
+
+[[package]]
 name = "lego-legacy-core"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "lego-legacy-launcher"
 version = "1.2.0"
 dependencies = [
+ "lego-legacy-catalog",
  "lego-legacy-core",
 ]
 

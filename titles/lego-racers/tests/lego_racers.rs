@@ -11,7 +11,7 @@
 use lego_legacy_core::cli::{Cli, Trace};
 use lego_legacy_core::host::headless::Headless;
 use lego_legacy_core::machine::Machine;
-use lego_legacy_core::roster::{self, Entry, Found};
+use lego_legacy_core::roster::{self, Found};
 use lego_legacy_core::route::Route;
 use lego_legacy_core::runlog::RunLog;
 use lego_legacy_core::title::EntryImage;
@@ -66,7 +66,10 @@ fn first_light() -> Option<&'static testkit::Ran> {
 /// executable is wrapped in SafeDisc v1 (ADR-0006), still declaring the bytes
 /// of the Masterpiece's (#369).
 const RACERS_WRAPPED: Title = Title {
-    image: testkit::LEGO_RACERS_WRAPPED,
+    image: EntryImage {
+        pressing: "racers",
+        ..RACERS.image
+    },
     ..RACERS
 };
 
@@ -83,16 +86,11 @@ fn runs() {
 
 #[test]
 fn the_launcher_finds_the_rip_ready_to_start() {
-    // It lists the title sixth, after the five earlier crates on the roster.
-    assert_eq!(
-        roster::ROSTER.iter().position(|e| e.key == RACERS.key),
-        Some(5)
-    );
     if !scratch() {
         return;
     }
     assert_eq!(
-        roster::look_for(&roster::LEGO_RACERS),
+        roster::look_for(&RACERS),
         Found::Runnable {
             pressing: "masterpiece-racers".to_owned()
         }
@@ -128,12 +126,8 @@ fn a_wrapped_image_is_named_and_never_run() {
     if !testkit::rips(&RACERS_WRAPPED.image) {
         return;
     }
-    let wrapped_entry = Entry {
-        image: testkit::LEGO_RACERS_WRAPPED,
-        ..roster::LEGO_RACERS
-    };
     assert_eq!(
-        roster::look_for(&wrapped_entry),
+        roster::look_for(&RACERS_WRAPPED),
         Found::Wrapped {
             pressing: "racers".to_owned(),
             scheme: "SafeDisc".to_owned(),

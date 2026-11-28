@@ -17,7 +17,10 @@ use lego_rock_raiders::ROCK_RAIDERS;
 /// declaring the bytes of the one that is not: what a person who ripped the
 /// original pressing where the Masterpiece belongs is running (#100).
 const ROCK_RAIDERS_WRAPPED: Title = Title {
-    image: testkit::ROCK_RAIDERS_WRAPPED,
+    image: EntryImage {
+        pressing: "rock-raiders",
+        ..ROCK_RAIDERS.image
+    },
     ..ROCK_RAIDERS
 };
 

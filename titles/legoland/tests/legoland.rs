@@ -178,16 +178,11 @@ fn runs() {
 
 #[test]
 fn the_launcher_finds_the_rip_ready_to_start() {
-    // It lists the title seventh, after the six earlier crates on the roster.
-    assert_eq!(
-        roster::ROSTER.iter().position(|e| e.key == LEGOLAND.key),
-        Some(6)
-    );
     if !scratch() {
         return;
     }
     assert_eq!(
-        roster::look_for(&roster::LEGOLAND),
+        roster::look_for(&LEGOLAND),
         Found::Runnable {
             pressing: "masterpiece-legoland".to_owned()
         }
@@ -341,7 +336,7 @@ fn first_light_plays_intros_with_audio_creates_ada_reaches_title_and_exits_clean
         .assert_logged("MS ADPCM at 22050 Hz in 1 channels to 16-bit PCM")
         .assert_logged("movie AD_Blink.avi opened through AVIFile: 1 streams");
 
-    if roster::find_bank(roster::LEGOLAND.bank).is_ok() {
+    if roster::find_bank(LEGOLAND.bank).is_ok() {
         ran.assert_logged("dmusic: performance initialized")
             .assert_logged("dmusic: created software synthesizer port")
             .assert_logged("dmusic: ScanDirectory d2ac288a-b39b-11d1-8704-00600893b1bd *.sty")
@@ -636,7 +631,7 @@ fn first_light_without_gm16_bank_disables_directmusic_cleanly() {
 }
 
 fn open_gm16_if_present(machine: &mut Machine) {
-    if let Ok((_, bytes)) = roster::find_bank(roster::LEGOLAND.bank) {
+    if let Ok((_, bytes)) = roster::find_bank(LEGOLAND.bank) {
         let bank = Bank::parse(&bytes).expect("parse GM16.DLS");
         machine.state.mixer.open_synth(Synth::new(bank));
     }

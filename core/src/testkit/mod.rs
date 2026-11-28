@@ -295,24 +295,6 @@ pub fn red_book_rips(disc_dir: &str, pressing: &str) -> bool {
     ripped(&image.with_extension("cue")) && ripped(&image.with_extension("bin"))
 }
 
-/// Rock Raiders pointed at its original pressing, whose executable is wrapped
-/// in SafeDisc (ADR-0006), still declaring the bytes of the Masterpiece's:
-/// what a person who ripped the original where the Masterpiece belongs is
-/// running, and what a test points the title at to see the wrapper named and
-/// refused before anything is hashed (#100).
-pub const ROCK_RAIDERS_WRAPPED: EntryImage = EntryImage {
-    pressing: "rock-raiders",
-    ..crate::roster::ROCK_RAIDERS.image
-};
-
-/// LEGO Racers pointed at its original 1999 pressing, whose cabinet-packed
-/// executable is wrapped in SafeDisc v1 (ADR-0006), still declaring the bytes
-/// of the Masterpiece's (#369).
-pub const LEGO_RACERS_WRAPPED: EntryImage = EntryImage {
-    pressing: "racers",
-    ..crate::roster::LEGO_RACERS.image
-};
-
 fn point_at_rips() {
     if std::env::var_os("LEGO_LEGACY_GAME_DATA").is_none() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../game-data");

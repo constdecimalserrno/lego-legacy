@@ -12,11 +12,10 @@ use super::snapshot::{
     execute_snapshot_op, SnapshotOp, SnapshotReply, SnapshotSlot, SnapshotSummary,
 };
 use super::timeline::{parse_pipe_route, resolve_key, Action, Timeline};
-use crate::clock::FlipCost;
 use crate::host::telemetry::{FpsReport, Telemetry};
 use crate::host::{Button, FlipMeta, Host, Input};
 use crate::machine::{Finish, Machine};
-use crate::title::TitleGuide;
+use crate::title::{Title, TitleGuide};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -99,8 +98,9 @@ impl InputOwner {
 /// Initial configuration for [`ControlBus`] and [`super::host::ControlHost`].
 #[derive(Clone, Copy, Debug)]
 pub struct ControlConfig {
-    /// Title roster key reported in `/api/status` (e.g. `"stub"`).
-    pub title: &'static str,
+    /// Declared [`Title`] driving this session (`key`, `name`, `pointer_speed`,
+    /// `flip_cost`, and `guide` all come from this single source).
+    pub title: &'static Title,
     pub mode: ExecMode,
     pub owner: InputOwner,
     /// Start paused even in [`ExecMode::Live`].
@@ -109,27 +109,17 @@ pub struct ControlConfig {
     pub step_uncapped: bool,
     /// Live-mode pace multiplier (`0.25..=4.0`, default `1.0`).
     pub pace: f64,
-    /// Title's declared pointer speed for `Mouse::Steered` `mouse_delta` scaling.
-    pub pointer_speed: (f64, f64),
-    /// Title's declared flip cost for embedded `#296` [`Telemetry`].
-    pub flip_cost: FlipCost,
-    /// Static per-title playability metadata (#311), used for safety guards
-    /// (`escape_quits`), relative-steering scaling hints, and `/api/meta`.
-    pub guide: &'static TitleGuide,
 }
 
 impl Default for ControlConfig {
     fn default() -> Self {
         Self {
-            title: "",
+            title: &Title::STUB,
             mode: ExecMode::Step,
             owner: InputOwner::Agent,
             start_paused: false,
             step_uncapped: true,
             pace: 1.0,
-            pointer_speed: (1.0, 1.0),
-            flip_cost: FlipCost::Refresh(60),
-            guide: &TitleGuide::EMPTY,
         }
     }
 }
@@ -484,8 +474,7 @@ enum WaitCondition {
 }
 
 struct BusState {
-    title: String,
-    guide: &'static TitleGuide,
+    title: &'static Title,
     mode: ExecMode,
     owner: InputOwner,
     pause_requested: bool,
@@ -533,21 +522,20 @@ struct BusState {
 
 impl BusState {
     fn new(config: ControlConfig) -> Self {
-        let guide = config.guide;
+        let guide = &config.title.guide;
+        let pointer_speed = config.title.pointer_speed;
         let effective_speed = match guide.relative_steered_scale() {
             Some(scale)
-                if (config.pointer_speed.0 - 1.0).abs() < 1e-9
-                    && (config.pointer_speed.1 - 1.0).abs() < 1e-9 =>
+                if (pointer_speed.0 - 1.0).abs() < 1e-9 && (pointer_speed.1 - 1.0).abs() < 1e-9 =>
             {
                 scale
             }
-            _ => config.pointer_speed,
+            _ => pointer_speed,
         };
         let mut timeline = Timeline::new(effective_speed);
         timeline.configure_mode(guide.mouse_mode, guide.resolution);
         Self {
-            title: config.title.to_owned(),
-            guide,
+            title: config.title,
             mode: config.mode,
             owner: config.owner,
             pause_requested: config.start_paused,
@@ -574,7 +562,7 @@ impl BusState {
             held_buttons: Vec::new(),
             pending_releases: Vec::new(),
             latest_frame: None,
-            telemetry: Telemetry::new(config.flip_cost),
+            telemetry: Telemetry::new(config.title.flip_cost),
             audio_underruns: None,
             timeline,
             last_agent_action_flip: None,
@@ -830,7 +818,7 @@ impl BusState {
             None => (0, 0, None, FrameDiff::default()),
         };
         ControlStatus {
-            title: self.title.clone(),
+            title: self.title.key.to_owned(),
             flip: self.last_meta.map(|m| m.flip),
             cursor: self.last_meta.map_or(0, |m| m.cursor),
             declared_ms: self.current_declared_ms(),
@@ -932,10 +920,10 @@ impl ControlBus {
         (state.runtime_reset_epoch, state.reset_clock_nanos)
     }
 
-    /// Static per-title [`TitleGuide`] configured on this control plane (#311).
+    /// Static declared [`Title`] configured on this control plane.
     #[must_use]
-    pub fn guide(&self) -> &'static TitleGuide {
-        self.lock().guide
+    pub fn title(&self) -> &'static Title {
+        self.lock().title
     }
 
     /// Latest presented BGRA frame snapshot, if any flip has occurred.
@@ -1675,8 +1663,8 @@ impl ControlBus {
         state.timeline.reset_polled();
         state.last_agent_action_flip = None;
         state.agent_timeline_end_flip = None;
-        let mode = state.guide.mouse_mode;
-        let res = state.guide.resolution;
+        let mode = state.title.guide.mouse_mode;
+        let res = state.title.guide.resolution;
         state.timeline.configure_mode(mode, res);
         state.recording_len = 0;
         state.reset_clock_nanos = 0;
@@ -2131,10 +2119,10 @@ fn apply_command(
             (ok_response(state, ResponseData::None), flips > 0)
         }
         Command::Act { action, auto_step } => {
-            if state.guide.escape_quits && !force && action_presses_escape(&action) {
+            if state.title.guide.escape_quits && !force && action_presses_escape(&action) {
                 return (err_response(state, ESCAPE_QUITS_ERROR), false);
             }
-            let effective = apply_guide_action_hints(state.guide, &action);
+            let effective = apply_guide_action_hints(&state.title.guide, &action);
             let flip = state.current_flip();
             let ms = state.current_declared_ms();
             let summary = effective.summary();
@@ -2176,7 +2164,8 @@ fn apply_command(
             }
         }
         Command::Batch { actions, auto_step } => {
-            if state.guide.escape_quits && !force && actions.iter().any(action_presses_escape) {
+            if state.title.guide.escape_quits && !force && actions.iter().any(action_presses_escape)
+            {
                 return (err_response(state, ESCAPE_QUITS_ERROR), false);
             }
             let flip = state.current_flip();
@@ -2192,7 +2181,7 @@ fn apply_command(
             let mut max_end = flip;
             let mut max_req = 0u64;
             for action in &actions {
-                let effective = apply_guide_action_hints(state.guide, action);
+                let effective = apply_guide_action_hints(&state.title.guide, action);
                 let summary = effective.summary();
                 match staged.schedule(&effective, flip, ms) {
                     Ok(report) => {
@@ -2239,7 +2228,7 @@ fn apply_command(
             relative,
             auto_step,
         } => {
-            if state.guide.escape_quits && !force && route_presses_escape(&route_text) {
+            if state.title.guide.escape_quits && !force && route_presses_escape(&route_text) {
                 return (err_response(state, ESCAPE_QUITS_ERROR), false);
             }
             let flip = state.current_flip();
@@ -2664,13 +2653,16 @@ mod tests {
 
     #[test]
     fn escape_quits_guard_blocks_escape_without_force_and_allows_with_force() {
-        const GUARDED: TitleGuide = TitleGuide {
-            display_name: "Escape Guard Fixture",
-            escape_quits: true,
-            ..TitleGuide::EMPTY
+        const GUARDED_TITLE: Title = Title {
+            name: "Escape Guard Fixture",
+            guide: TitleGuide {
+                escape_quits: true,
+                ..TitleGuide::EMPTY
+            },
+            ..Title::STUB
         };
         let bus = ControlBus::new(ControlConfig {
-            guide: &GUARDED,
+            title: &GUARDED_TITLE,
             ..ControlConfig::default()
         });
 

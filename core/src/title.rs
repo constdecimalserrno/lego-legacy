@@ -7,6 +7,7 @@ use crate::clock::FlipCost;
 /// A title has one or two pressings and they are not interchangeable
 /// (ADR-0006): one may wrap its executable in copy protection while the other
 /// ships it plain, and only one may carry the soundtrack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntryImage {
     /// The directory under `game-data/` holding this title's pressings. It is
     /// the rip layout's own name, which is not always the roster key: the
@@ -63,11 +64,11 @@ impl EntryImage {
 pub enum Kept {
     /// On the disc as a file of its own.
     Loose,
-    /// In the pressing's cabinet, by the name its header gives it. Alpha Team
-    /// ships nothing of itself loose (#53).
+    /// In the pressing's InstallShield 5/6 cabinet, by the name its header
+    /// gives it (#53).
     Cabinet,
     /// Imploded in the InstallShield 3 archive on the disc named here, by its
-    /// path in it. LEGO Chess ships nothing of itself loose either (#143).
+    /// path in it (#143).
     Imploded(&'static str),
 }
 
@@ -77,6 +78,7 @@ pub enum Kept {
 /// reason for that value, and never measured from the host. A run that read
 /// the host's own processor or memory would replay differently on another
 /// machine.
+#[derive(Debug)]
 pub struct Declared {
     /// Which Windows the machine runs, as its version calls answer.
     pub windows: Windows,
@@ -119,6 +121,7 @@ pub struct Declared {
 /// where NT puts the build, Microsoft documents as reserved. `GetVersionExA`
 /// carries the build in the low word of `dwBuildNumber`, with the major and
 /// minor versions in its high word.
+#[derive(Debug)]
 pub struct Windows {
     /// What `GetVersion` answers.
     pub version: u32,
@@ -181,9 +184,13 @@ pub enum Installed {
 /// The roster key is the name of the title's binary, and the image is which
 /// bytes it runs. Everything else on this struct is a declared value: a chosen
 /// input the guest reads as fact, never measured from the host.
+#[derive(Debug)]
 pub struct Title {
-    /// Roster key, e.g. `lego-rock-raiders`.
+    /// Roster key, which is also the name of the title's binary.
     pub key: &'static str,
+    /// What a person calls it (single source for launcher, `/api/meta`,
+    /// `/api/controls`, and `/api/goals`).
+    pub name: &'static str,
     /// The version of the crate that declares this title, which is
     /// `env!("CARGO_PKG_VERSION")` written there. A run's log names it beside
     /// core's, so a run directory says what produced it (ADR-0007).
@@ -194,6 +201,9 @@ pub struct Title {
     pub image: EntryImage,
     /// The pressing whose audio tracks this title plays, when it has any.
     pub red_book: Option<&'static str>,
+    /// Where the General MIDI bank its music is played with may be, the
+    /// first found played; empty for a title that plays no MIDI (ADR-0008).
+    pub bank: &'static [EntryImage],
     /// The machine this title is told it is running on.
     pub declared: Declared,
     /// How this title's own files got onto that machine's disc.
@@ -219,8 +229,7 @@ pub struct Title {
     /// never ends the movie itself — what the title does with the key is
     /// still the title's own rule, including refusing it.
     ///
-    /// `None` for a title that takes the click itself, which Rock Raiders
-    /// does (#67).
+    /// `None` for a title that takes the click itself (#67).
     pub click_in_a_movie: Option<u32>,
     /// How far this machine's pointer goes for how far the mouse went, across
     /// and down. One for one is the pointer a person's own hand is used to.
@@ -238,6 +247,9 @@ pub struct Title {
     /// where the pointer is the person's own, its place is its own and there
     /// is nothing to scale.
     pub pointer_speed: (f64, f64),
+    /// Static playability metadata served by the control plane (`/api/meta`,
+    /// `/api/controls`, `/api/goals`). Strictly outside guest state.
+    pub guide: TitleGuide,
 }
 
 impl Title {
@@ -250,6 +262,7 @@ impl Title {
     /// a game.
     pub const STUB: Self = Self {
         key: "stub",
+        name: "Stub",
         // The stub guest is core's own, so its version is core's.
         version: env!("CARGO_PKG_VERSION"),
         flip_cost: FlipCost::Free,
@@ -262,6 +275,7 @@ impl Title {
             why: "the stub guest is assembled by hand in this crate and comes off no disc",
         },
         red_book: None,
+        bank: &[],
         declared: Declared {
             windows: WINDOWS_98_SE,
             hz: crate::clock::DECLARED_HZ,
@@ -286,6 +300,7 @@ impl Title {
         click_in_a_movie: None,
         // The stub guest has no pointer of its own to draw.
         pointer_speed: (1.0, 1.0),
+        guide: TitleGuide::EMPTY,
     };
 }
 
@@ -411,8 +426,6 @@ pub struct Goal {
 /// controls, goals, and save files with zero title names in core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleGuide {
-    /// Human-readable display name of the title (empty in [`Self::EMPTY`]).
-    pub display_name: &'static str,
     /// One-line gameplay summary.
     pub summary: &'static str,
     /// Native gameplay framebuffer dimensions `(width, height)`.
@@ -442,10 +455,8 @@ pub struct TitleGuide {
 }
 
 impl TitleGuide {
-    /// Empty fallback guide for tests or callers that invoke
-    /// [`crate::run::main`] without supplying a [`TitleGuide`].
+    /// Empty fallback guide for [`Title::STUB`] and synthetic test fixtures.
     pub const EMPTY: Self = Self {
-        display_name: "",
         summary: "",
         resolution: (640, 480),
         bpp: 16,
@@ -463,10 +474,10 @@ impl TitleGuide {
         save_files: &[],
     };
 
-    /// Whether this guide carries no populated metadata (`display_name` empty).
+    /// Whether this guide carries no populated metadata.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.display_name.is_empty()
+        self.summary.is_empty() && self.controls.is_empty() && self.goals.is_empty()
     }
 
     /// Relative pointer scaling hint `(scale_x, scale_y)` derived from
@@ -507,7 +518,6 @@ mod tests {
         assert_eq!(Milestone::Credits.as_str(), "credits");
 
         const STEERED: TitleGuide = TitleGuide {
-            display_name: "Steered Fixture",
             summary: "Fixture",
             resolution: (640, 480),
             bpp: 16,
@@ -536,7 +546,6 @@ mod tests {
         assert!(STEERED.mouse_mode.recenters_every_flip());
 
         const SOFT_REL: TitleGuide = TitleGuide {
-            display_name: "Software Relative Fixture",
             resolution: (640, 480),
             mouse_mode: MouseMode::SoftwareRelative {
                 virtual_span: (640, 480),

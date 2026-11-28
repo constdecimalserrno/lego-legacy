@@ -17,3 +17,4 @@ Initial zero-crate `lego-mcp` stdio JSON-RPC 2.0 MCP server (#312):
 - Exposes raw `mouse_down` / `mouse_up` in the `game_act` tool schema (#352).
 - Adds `lego-racers` to `game_launch`'s `title` schema examples (#369).
 - Adds `legoland` to `game_launch`'s `title` schema examples (#393).
+- Decouples `game_launch`'s `title` schema description from hardcoded title lists, pointing callers at `lego-legacy --help` while keeping zero `core`/`catalog` dependencies (#407).

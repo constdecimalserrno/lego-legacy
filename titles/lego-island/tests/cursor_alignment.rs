@@ -17,7 +17,7 @@
 //!    across headless status, Win32 state, WS v2 frame-locked pointer (including
 //!    live XOR+RLE deltas), and `--cursor` crosshair while hitting each target.
 
-use lego_island::{GUIDE, LEGO_ISLAND as ISLAND};
+use lego_island::LEGO_ISLAND as ISLAND;
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::control::json::JsonValue;
 use lego_legacy_core::control::observe::ObserveOptions;
@@ -134,7 +134,7 @@ fn lego_island_pointer_aligns_headlessly_and_over_watch_websocket() {
         return;
     }
 
-    let rig = ControlRig::in_process(&ISLAND, &GUIDE, Cli::default(), RUN_BUDGET)
+    let rig = ControlRig::in_process(&ISLAND, Cli::default(), RUN_BUDGET)
         .expect("start LEGO Island control rig");
     let data_root = rig.data_root().expect("rig data_root").to_path_buf();
     let bus = rig.bus().expect("in-process ControlBus");
