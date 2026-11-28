@@ -2,17 +2,17 @@
 //! movie directly into the window via `IGraphBuilder`, `IMediaControl`,
 //! `IMediaEvent`, `IVideoWindow`, and `IMediaPosition`.
 //!
-//! Files are parsed by [`crate::avi`], video frames decoded by [`crate::iv50`]
-//! and presented through `State::present` on the declared clock, and PCM audio
-//! decoded and mixed through [`crate::sound`].
+//! Playback, Indeo 5 decoding, declared-clock timing, and `Mixer` PCM sync
+//! live in [`crate::movie::MoviePlayer`]; this module is the COM adapter and
+//! `IVideoWindow` / `IMediaEvent` state machine.
 
 use super::{ComState, Ctx, Object, Present, State};
 use crate::clock::FlipCost;
 use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use crate::movie::{MoviePlayer, OpenError, StartOutcome, StepError};
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 const E_POINTER: u32 = 0x8000_4003;
 const E_ABORT: u32 = 0x8000_4004;
@@ -46,25 +46,7 @@ pub struct FilterGraph {
     /// Guest-heap RGB565 frame buffer owned by this graph (`width * height * 2` bytes).
     pub frame_buffer: u32,
     /// Opened AVI media, once `IGraphBuilder::RenderFile` succeeds.
-    pub movie: Option<GraphMovie>,
-}
-
-/// One AVI rendered into a [`FilterGraph`].
-pub struct GraphMovie {
-    pub name: String,
-    /// Upper-case absolute guest path keying `State::movie_bytes` for snapshot rehydration.
-    pub(crate) key: String,
-    bytes: Rc<[u8]>,
-    pub avi: crate::avi::Avi,
-    pub video: usize,
-    pub decoder: crate::iv50::Decoder,
-    pub picture: crate::iv50::Picture,
-    /// Next video frame index to decode and present.
-    pub next: usize,
-    /// Declared millisecond when playback started (or resumed), while running.
-    pub running_since: Option<u64>,
-    /// Whether `EC_COMPLETE` has already been emitted for the current playthrough.
-    pub completed: bool,
+    pub movie: Option<MoviePlayer>,
 }
 
 impl Default for FilterGraph {
@@ -89,128 +71,7 @@ impl FilterGraph {
     /// Whether this filter graph is actively playing a movie.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.movie
-            .as_ref()
-            .is_some_and(|m| m.running_since.is_some() && !m.completed)
-    }
-
-    pub(crate) fn movie_key(&self) -> Option<&str> {
-        self.movie
-            .as_ref()
-            .filter(|m| !m.key.is_empty())
-            .map(|m| m.key.as_str())
-    }
-
-    pub(crate) fn movie_key_needing_bytes(&self) -> Option<&str> {
-        self.movie
-            .as_ref()
-            .filter(|m| m.bytes.is_empty() && !m.key.is_empty())
-            .map(|m| m.key.as_str())
-    }
-
-    pub(crate) fn set_bytes(&mut self, bytes: Rc<[u8]>) {
-        if let Some(movie) = &mut self.movie {
-            movie.bytes = bytes;
-        }
-    }
-}
-
-impl GraphMovie {
-    /// Construct a movie state from parsed AVI metadata and backing bytes.
-    #[must_use]
-    pub fn new(
-        name: String,
-        key: String,
-        bytes: Rc<[u8]>,
-        avi: crate::avi::Avi,
-        video: usize,
-    ) -> Self {
-        Self {
-            name,
-            key,
-            bytes,
-            avi,
-            video,
-            decoder: crate::iv50::Decoder::new(),
-            picture: crate::iv50::Picture::default(),
-            next: 0,
-            running_since: None,
-            completed: false,
-        }
-    }
-
-    pub(crate) fn empty_for_snap() -> Self {
-        Self::new(
-            String::new(),
-            String::new(),
-            Rc::from([]),
-            crate::avi::Avi::default(),
-            0,
-        )
-    }
-
-    /// When frame `n` is due, in declared milliseconds from stream start.
-    fn due(&self, n: usize) -> u64 {
-        self.avi.streams[self.video].due_millis(n)
-    }
-
-    fn frames(&self) -> usize {
-        self.avi.streams[self.video].chunks.len()
-    }
-
-    fn duration_secs(&self) -> f64 {
-        let stream = &self.avi.streams[self.video];
-        (self.frames() as f64 * f64::from(stream.scale)) / f64::from(stream.rate.max(1))
-    }
-
-    fn position_secs(&self, now: u64) -> f64 {
-        let duration = self.duration_secs();
-        let secs = match self.running_since {
-            Some(since) => now.saturating_sub(since) as f64 / 1000.0,
-            None => self.due(self.next) as f64 / 1000.0,
-        };
-        secs.min(duration)
-    }
-
-    /// Decode the movie's audio stream for `Mixer`, if present.
-    fn sound(&self) -> Result<Option<Vec<i16>>, Stop> {
-        self.avi
-            .decode_audio(&self.bytes)
-            .map_err(|e| Stop::NotWritten {
-                what: format!("IMediaControl::Run: {}: {e}", self.name),
-                caller: 0,
-            })
-    }
-}
-
-impl crate::snap::Snap for GraphMovie {
-    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
-        // `bytes` is an immutable `Rc<[u8]>` rehydrated via `key` from
-        // `State::movie_bytes` / `Tree` on restore.
-        let Self {
-            name,
-            key,
-            bytes: _,
-            avi,
-            video,
-            decoder,
-            picture,
-            next,
-            running_since,
-            completed,
-        } = self;
-        v.string(name);
-        v.string(key);
-        avi.snap(v);
-        v.usize(video);
-        decoder.snap(v);
-        picture.snap(v);
-        v.usize(next);
-        crate::snap::snap_option(v, running_since, |r, v| v.u64(r));
-        v.bool(completed);
-        if v.is_reading() && !avi.streams.is_empty() && *video >= avi.streams.len() {
-            v.mark_corrupt("dshow::GraphMovie video stream index");
-        }
+        self.movie.as_ref().is_some_and(MoviePlayer::is_running)
     }
 }
 
@@ -245,7 +106,7 @@ impl crate::snap::Snap for FilterGraph {
             v.i32(coord);
         }
         v.u32(frame_buffer);
-        crate::snap::snap_option_with(v, movie, GraphMovie::empty_for_snap, |m, v| m.snap(v));
+        crate::snap::snap_option_with(v, movie, MoviePlayer::empty_for_snap, |m, v| m.snap(v));
     }
 }
 
@@ -453,7 +314,9 @@ fn release_graph(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Sto
                 ctx.state.heap.free(graph.frame_buffer);
             }
             if let Some(movie) = graph.movie {
-                ctx.log.line(&format!("dshow {} released", movie.name));
+                ctx.log.line(&format!("dshow {} released", movie.name()));
+                drop(movie);
+                ctx.state.movies.evict_unused();
             }
         }
     }
@@ -494,42 +357,39 @@ fn render_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     if ctx.refuse_on_empty_floppy(&name)? {
         return Ok(HRESULT_ERROR_NOT_READY);
     }
-    let key = ctx.absolute(&name).to_uppercase();
-    let bytes: Rc<[u8]> = if let Some(cached) = ctx.state.movie_bytes.get(&key) {
-        cached.clone()
-    } else {
-        let Some(loaded) = ctx.open_guest_file(&name) else {
+    let abs = ctx.absolute(&name);
+    let movie = match MoviePlayer::open(name.clone(), &abs, &mut ctx.state.movies, ctx.tree) {
+        Ok(movie) => movie,
+        Err(OpenError::Missing) => {
             ctx.log.line(&format!("dshow {name} missing"));
             return Ok(VFW_E_NOT_FOUND);
-        };
-        let rc: Rc<[u8]> = loaded.into();
-        ctx.state.movie_bytes.insert(key.clone(), rc.clone());
-        rc
+        }
+        Err(OpenError::Parse(e)) => {
+            return Err(Stop::NotWritten {
+                what: format!("IGraphBuilder::RenderFile: {name}: {e}"),
+                caller: 0,
+            });
+        }
+        Err(OpenError::NoVideo) => {
+            return Err(Stop::NotWritten {
+                what: format!("IGraphBuilder::RenderFile: {name} has no video stream"),
+                caller: 0,
+            });
+        }
+        Err(OpenError::UnsupportedCodec(codec)) => {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "IGraphBuilder::RenderFile: {name} uses {}, which nothing here decodes",
+                    String::from_utf8_lossy(&codec)
+                ),
+                caller: 0,
+            });
+        }
     };
-    let avi = crate::avi::parse(&bytes).map_err(|e| Stop::NotWritten {
-        what: format!("IGraphBuilder::RenderFile: {name}: {e}"),
-        caller: 0,
-    })?;
-    let video = avi
-        .streams
-        .iter()
-        .position(crate::avi::Stream::is_video)
-        .ok_or_else(|| Stop::NotWritten {
-            what: format!("IGraphBuilder::RenderFile: {name} has no video stream"),
-            caller: 0,
-        })?;
-    let codec = avi.streams[video].compression();
-    if !codec.eq_ignore_ascii_case(b"IV50") {
-        return Err(Stop::NotWritten {
-            what: format!(
-                "IGraphBuilder::RenderFile: {name} uses {}, which nothing here decodes",
-                String::from_utf8_lossy(&codec)
-            ),
-            caller: 0,
-        });
-    }
-    let (width, height) = avi.streams[video].picture_size();
+    let (width, height) = movie.picture_size();
     if width == 0 || height == 0 {
+        drop(movie);
+        ctx.state.movies.evict_unused();
         return Err(Stop::NotWritten {
             what: format!("IGraphBuilder::RenderFile: {name} has empty size {width}x{height}"),
             caller: 0,
@@ -538,7 +398,6 @@ fn render_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     let identity = ctx.state.identity(this);
     let now = ctx.declared_millis();
     ctx.state.mixer.stop(identity, now * 1_000_000);
-    let movie = GraphMovie::new(name.clone(), key, bytes, avi, video);
     ctx.log.line(&format!(
         "dshow {name} rendered: {width}x{height} IV50, {} frames",
         movie.frames()
@@ -553,8 +412,10 @@ fn render_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
         graph.movie = Some(movie);
         graph.event_handle
     } else {
+        drop(movie);
         0
     };
+    ctx.state.movies.evict_unused();
     set_event_signalled(ctx.state, event_handle, false);
     Ok(S_OK)
 }
@@ -602,8 +463,8 @@ fn decode_and_stage_frame(ctx: &mut Ctx<'_>, identity: u32) -> Result<(), Stop> 
         .filter_graphs
         .get(&identity)
         .and_then(|g| g.movie.as_ref())
-        .filter(|m| m.next < m.frames())
-        .map(|m| m.avi.streams[m.video].picture_size())
+        .filter(|m| m.has_next())
+        .map(MoviePlayer::picture_size)
     else {
         return Ok(());
     };
@@ -615,19 +476,15 @@ fn decode_and_stage_frame(ctx: &mut Ctx<'_>, identity: u32) -> Result<(), Stop> 
         let Some(movie) = graph.movie.as_mut() else {
             return Ok(());
         };
-        let index = movie.next;
-        let (at, len) = movie.avi.streams[movie.video].chunks[index];
-        movie.next += 1;
-        if len > 0 {
-            movie
-                .decoder
-                .decode(&movie.bytes[at..at + len], &mut movie.picture)
-                .map_err(|e| Stop::NotWritten {
-                    what: format!("dshow {} frame {index}: {e}", movie.name),
+        movie
+            .step_rgb565(ctx.mem, buf, width, height, width * 2)
+            .map_err(|e| match e {
+                StepError::Decode { index, error } => Stop::NotWritten {
+                    what: format!("dshow {} frame {index}: {error}", movie.name()),
                     caller: 0,
-                })?;
-        }
-        super::amstream::write_rgb565(ctx.mem, &movie.picture, buf, width, height, width * 2)?;
+                },
+                StepError::Fault(fault) => Stop::Fault(fault),
+            })?;
         graph.visible
     };
     if visible {
@@ -645,45 +502,36 @@ fn decode_and_stage_frame(ctx: &mut Ctx<'_>, identity: u32) -> Result<(), Stop> 
 fn run(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let now = ctx.declared_millis();
-    let (starting_audio, finished, stage_first, log_name) = {
-        let Some(graph) = ctx.state.filter_graphs.get_mut(&identity) else {
+    let (outcome, name) = {
+        let state = &mut *ctx.state;
+        let Some(movie) = state
+            .filter_graphs
+            .get_mut(&identity)
+            .and_then(|g| g.movie.as_mut())
+        else {
             return Ok(S_OK);
         };
-        let Some(movie) = graph.movie.as_mut() else {
-            return Ok(S_OK);
-        };
-        if movie.frames() == 0 || movie.next >= movie.frames() {
-            let emit = !movie.completed;
-            movie.completed = true;
-            movie.running_since = Some(now.saturating_sub(movie.due(movie.next)));
-            (None, emit, false, Some(movie.name.clone()))
-        } else if movie.running_since.is_some() {
-            (None, false, false, None)
-        } else {
-            let since = now.saturating_sub(movie.due(movie.next));
-            movie.running_since = Some(since);
-            movie.completed = false;
-            let samples = movie.sound()?;
-            (
-                samples.map(|s| (s, since)),
-                false,
-                true,
-                Some(movie.name.clone()),
-            )
-        }
+        let outcome =
+            movie
+                .start(identity, now, &mut state.mixer)
+                .map_err(|e| Stop::NotWritten {
+                    what: format!("IMediaControl::Run: {}: {e}", movie.name()),
+                    caller: 0,
+                })?;
+        (outcome, movie.name().to_owned())
     };
-    if let Some(name) = log_name {
-        ctx.log.line(&format!("dshow {name} running"));
-    }
-    if finished {
-        push_event(ctx.state, identity, EC_COMPLETE, 0, 0);
-        return Ok(S_OK);
-    }
-    if let Some((samples, since)) = starting_audio {
-        ctx.state.mixer.play(identity, samples, since * 1_000_000);
-    }
-    if stage_first {
-        decode_and_stage_frame(ctx, identity)?;
+    match outcome {
+        StartOutcome::AlreadyRunning => return Ok(S_OK),
+        StartOutcome::AtEnd { first_eos } => {
+            ctx.log.line(&format!("dshow {name} running"));
+            if first_eos {
+                push_event(ctx.state, identity, EC_COMPLETE, 0, 0);
+            }
+        }
+        StartOutcome::Started => {
+            ctx.log.line(&format!("dshow {name} running"));
+            decode_and_stage_frame(ctx, identity)?;
+        }
     }
     Ok(S_OK)
 }
@@ -691,16 +539,20 @@ fn run(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 fn stop(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
     let identity = ctx.state.identity(this);
     let now = ctx.declared_millis();
-    ctx.state.mixer.stop(identity, now * 1_000_000);
-    let stopped_name = ctx
-        .state
-        .filter_graphs
-        .get_mut(&identity)
-        .and_then(|g| g.movie.as_mut())
-        .map(|m| {
-            m.running_since = None;
-            m.name.clone()
-        });
+    let stopped_name = {
+        let state = &mut *ctx.state;
+        if let Some(movie) = state
+            .filter_graphs
+            .get_mut(&identity)
+            .and_then(|g| g.movie.as_mut())
+        {
+            movie.stop(identity, now, &mut state.mixer);
+            Some(movie.name().to_owned())
+        } else {
+            state.mixer.stop(identity, now * 1_000_000);
+            None
+        }
+    };
     if let Some(name) = stopped_name {
         ctx.log.line(&format!("dshow {name} stopped"));
     }
@@ -788,7 +640,7 @@ fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
         .filter_graphs
         .get(&identity)
         .and_then(|g| g.movie.as_ref())
-        .map_or(0.0, GraphMovie::duration_secs);
+        .map_or(0.0, MoviePlayer::duration_secs);
     ctx.mem
         .write_u64(args[0], secs.to_bits())
         .map_err(Stop::Fault)?;
@@ -819,51 +671,34 @@ fn put_current_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
     let secs = f64::from_bits(bits).max(0.0);
     let identity = ctx.state.identity(this);
     let now = ctx.declared_millis();
-    let (restart_audio, event_handle, stage_frame) = {
-        let Some(graph) = ctx.state.filter_graphs.get_mut(&identity) else {
+    let (event_handle, stage_frame) = {
+        let state = &mut *ctx.state;
+        let Some(graph) = state.filter_graphs.get_mut(&identity) else {
             return Ok(S_OK);
         };
         let handle = graph.event_handle;
         let Some(movie) = graph.movie.as_mut() else {
             return Ok(S_OK);
         };
-        let stream = &movie.avi.streams[movie.video];
-        let frames = movie.frames();
-        let target = if stream.scale == 0 {
-            0
-        } else {
-            ((secs * f64::from(stream.rate.max(1))) / f64::from(stream.scale))
-                .floor()
-                .clamp(0.0, frames as f64) as usize
-        };
-        if target > 0 {
+        if movie.frame_for_secs(secs) > 0 {
             return Err(Stop::NotWritten {
                 what: format!("IMediaPosition::put_CurrentPosition({secs:.3}s) non-zero seek"),
                 caller: 0,
             });
         }
-        movie.decoder = crate::iv50::Decoder::new();
-        movie.next = 0;
-        movie.completed = false;
+        let stage =
+            movie
+                .rewind(identity, now, &mut state.mixer)
+                .map_err(|e| Stop::NotWritten {
+                    what: format!("IMediaControl::Run: {}: {e}", movie.name()),
+                    caller: 0,
+                })?;
         graph.events.retain(|&(code, _, _)| code != EC_COMPLETE);
         let clear_event = graph.events.is_empty();
-        let restart = if movie.running_since.is_some() {
-            movie.running_since = Some(now);
-            Some((movie.sound()?, now))
-        } else {
-            None
-        };
-        let stage = movie.running_since.is_some() && frames > 0;
-        (restart, clear_event.then_some(handle), stage)
+        (clear_event.then_some(handle), stage)
     };
     if let Some(handle) = event_handle {
         set_event_signalled(ctx.state, handle, false);
-    }
-    if let Some((samples, since)) = restart_audio {
-        ctx.state.mixer.stop(identity, now * 1_000_000);
-        if let Some(samples) = samples {
-            ctx.state.mixer.play(identity, samples, since * 1_000_000);
-        }
     }
     if stage_frame {
         decode_and_stage_frame(ctx, identity)?;
@@ -977,36 +812,24 @@ pub(super) fn advance_for_wait(
     };
 
     let now = ctx.declared_millis();
-    let (has_next, visible, due_next, due_end) = {
+    let (has_next, target) = {
         let Some(graph) = ctx.state.filter_graphs.get(&identity) else {
             return Ok(None);
         };
         let Some(movie) = graph.movie.as_ref() else {
             return Ok(None);
         };
-        let Some(since) = movie.running_since else {
-            return Ok(None);
-        };
-        let frames = movie.frames();
-        (
-            movie.next < frames,
-            graph.visible,
-            since + movie.due(movie.next),
-            since + movie.due(frames),
-        )
-    };
-
-    // When visible, compensate for `Clock::present(FlipCost::Refresh(hz))`
-    // snapping up to one refresh interval on flip so video stays locked to PCM
-    // audio with zero drift.
-    let target = if has_next {
+        // When visible, compensate for `Clock::present(FlipCost::Refresh(hz))`
+        // snapping up to one refresh interval on flip so video stays locked to
+        // PCM audio with zero drift.
         let refresh_ms = match ctx.title.flip_cost {
-            FlipCost::Refresh(hz) if visible && hz > 0 => 1000 / hz,
+            FlipCost::Refresh(hz) if graph.visible && hz > 0 => 1000 / hz,
             _ => 0,
         };
-        due_next.saturating_sub(refresh_ms)
-    } else {
-        due_end
+        let Some(deadline) = movie.next_deadline_millis(refresh_ms) else {
+            return Ok(None);
+        };
+        (movie.has_next(), deadline)
     };
     let wait_ms = target.saturating_sub(now);
     if timeout_ms != INFINITE && u64::from(timeout_ms) < wait_ms {
@@ -1025,7 +848,7 @@ pub(super) fn advance_for_wait(
         .get_mut(&identity)
         .and_then(|g| g.movie.as_mut())
     {
-        movie.completed = true;
+        movie.mark_completed();
     }
     push_event(ctx.state, identity, EC_COMPLETE, 0, 0);
     Ok(Some(WaitStep::Completed(idx)))

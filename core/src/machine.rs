@@ -2170,32 +2170,9 @@ impl Machine {
             }
         }
 
-        // Rehydrate AVIFile and DirectShow `Rc<[u8]>` movie buffers from
-        // `state.movie_bytes` or `tree` without duplicating bytes.
-        let mut load_movie =
-            |key: &str, err: &'static str| -> Result<std::rc::Rc<[u8]>, SnapError> {
-                if let Some(cached) = self.state.movie_bytes.get(key) {
-                    return Ok(cached.clone());
-                }
-                let Some(loaded) = self.tree.read(key) else {
-                    return Err(SnapError::Corrupt(err));
-                };
-                let rc: std::rc::Rc<[u8]> = loaded.into();
-                self.state.movie_bytes.insert(key.to_owned(), rc.clone());
-                Ok(rc)
-            };
-        for file in self.state.avi_files.values_mut() {
-            if file.needs_bytes() {
-                let bytes = load_movie(&file.key, "avi movie missing from tree")?;
-                file.set_bytes(bytes);
-            }
-        }
-        for graph in self.state.filter_graphs.values_mut() {
-            if let Some(key) = graph.movie_key_needing_bytes() {
-                let bytes = load_movie(key, "dshow movie missing from tree")?;
-                graph.set_bytes(bytes);
-            }
-        }
+        // Rehydrate AVIFile, DirectShow, and AMMultiMediaStream `Rc<[u8]>`
+        // movie buffers through `MovieStore` without duplicating bytes.
+        self.state.rehydrate_movies(&mut self.tree)?;
         // Rehydrate registered GDI TrueType fonts lazily from `tree`.
         self.state
             .gdi
