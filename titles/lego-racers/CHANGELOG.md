@@ -5,6 +5,8 @@ One heading per version, newest first. What each part of a title's version means
 
 ## 0.1.0 — 2026-11-26
 
+Takes `lego-legacy-core` `=2.0.0` (#407): folds `name`, `bank`, `image`, `red_book`, and `guide` inline onto `LEGO_RACERS`, drops the standalone `GUIDE` constant and `core::roster` import, moves the wrapped-disc pressing fixture into `tests/lego_racers.rs`, and calls `run::main(&LEGO_RACERS)` / `ControlRig::in_process(&LEGO_RACERS, ...)`. Strictly outside guest state; no route moved.
+
 Migrates `tests/cursor_alignment.rs` onto `lego_legacy_core::testkit::spectator` (`ControlRig::in_process`, draining `SpectatorClient`, `crosshair_center`, `count_diff_pixels`), deleting duplicated PNG decoding, crosshair detection, HTTP/1.1, RFC 6455 WS v2 / XOR-RLE, and RAII rig boilerplate while preserving every `/api/{meta,controls,goals}`, Main Menu, `/watch` Human Take Over Circuit Select/Build Menu, and post-race reset alignment assertion (#411). Strictly outside guest state; no route moved.
 
 Bounded guest heap across multi-hour racing runs (#385): adds real-disc regression test `imperial_grand_prix_keeps_live_heap_bounded_across_sustained_racing` in `titles/lego-racers/tests/lego_racers.rs` verifying guest heap extent and live bytes stay bounded (`<= 256 KiB` over 3,000 active racing flips `2500 -> 5500` with verified non-silent PCM audio, plateauing at `+0 B` steady-state growth across `4500 -> 6500` vs. `+2,045,592 B` / `+61.4 KB/s` before `core`'s `IDirectSoundBuffer` reclamation; `first-race.route` live heap drops from `19,276,608 B` to `13,772,840 B` with identical instruction cursors).

@@ -27,7 +27,7 @@ use lego_legacy_core::control::observe::{render_frame_png, ObserveOptions};
 use lego_legacy_core::control::{Action, Command, ControlBus};
 use lego_legacy_core::testkit;
 use lego_legacy_core::testkit::spectator::{count_diff_pixels, crosshair_center, ControlRig};
-use lego_racers::{GUIDE, LEGO_RACERS as RACERS};
+use lego_racers::LEGO_RACERS as RACERS;
 use std::time::Duration;
 
 const W: u32 = 640;
@@ -145,7 +145,7 @@ fn real_disc_software_relative_cursor_aligns_headlessly_and_over_ws_across_menus
         return;
     }
 
-    let rig = ControlRig::in_process(&RACERS, &GUIDE, Cli::default(), RUN_BUDGET)
+    let rig = ControlRig::in_process(&RACERS, Cli::default(), RUN_BUDGET)
         .expect("start LEGO Racers control rig");
     let bus = rig.bus().expect("in-process ControlBus");
     let http = rig.http();

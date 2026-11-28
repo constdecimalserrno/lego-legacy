@@ -1,12 +1,14 @@
 //! `lego-legacy`: the one front door.
 //!
-//! Lists the playable titles on `core::roster::ROSTER`, shows which discs and
-//! audio pressings are ready, resolves full or unique short title names, and
-//! forwards flags unchanged to the chosen title's binary.
+//! Lists the playable titles in `lego_legacy_catalog::TITLES`, shows which
+//! discs and audio pressings are ready, resolves full or unique short title
+//! names, and forwards flags unchanged to the chosen title's binary.
 
 mod term;
 
-use lego_legacy_core::roster::{self, Entry, Found};
+use lego_legacy_catalog::TITLES;
+use lego_legacy_core::roster::{self, Found};
+use lego_legacy_core::Title;
 use std::fmt::Write as _;
 use std::io::{BufRead, Write};
 use std::process::{Command, ExitCode};
@@ -56,7 +58,7 @@ struct AudioNote {
 }
 
 struct TitleStatus {
-    entry: &'static Entry,
+    title: &'static Title,
     found: Found,
     notes: Vec<AudioNote>,
 }
@@ -100,8 +102,8 @@ fn print_help() {
     println!("to the chosen title's own binary, unchanged.");
     println!();
     println!("titles (full key or unique short name, e.g. `racers`, `chess`, `hotwheels`):");
-    for entry in roster::ROSTER {
-        println!("  {:<32} {}", entry.key, entry.name);
+    for title in TITLES {
+        println!("  {:<32} {}", title.key, title.name);
     }
 }
 
@@ -178,39 +180,39 @@ fn parse_args(args: &[String]) -> Action {
     }
 }
 
-/// Resolve a full `ROSTER` key or a unique short/suffix name:
+/// Resolve a full catalog key or a unique short/suffix name:
 /// exact key -> exact `lego-`-stripped suffix -> hyphen-boundary prefix or suffix.
-fn resolve_title(query: &str) -> Result<&'static Entry, TitleError> {
+fn resolve_title(query: &str) -> Result<&'static Title, TitleError> {
     let q = query.to_ascii_lowercase();
     if q.is_empty() {
         return Err(TitleError::Unknown(query.to_owned()));
     }
 
-    if let Some(entry) = roster::ROSTER
+    if let Some(title) = TITLES
         .iter()
         .copied()
-        .find(|e| e.key.eq_ignore_ascii_case(&q))
+        .find(|t| t.key.eq_ignore_ascii_case(&q))
     {
-        return Ok(entry);
+        return Ok(title);
     }
 
-    if let Some(entry) = roster::ROSTER
+    if let Some(title) = TITLES
         .iter()
         .copied()
-        .find(|e| e.key.strip_prefix("lego-") == Some(q.as_str()))
+        .find(|t| t.key.strip_prefix("lego-") == Some(q.as_str()))
     {
-        return Ok(entry);
+        return Ok(title);
     }
 
     let prefix_pat = format!("{q}-");
     let tail_pat = format!("-{q}");
-    let boundary_matches: Vec<&'static Entry> = roster::ROSTER
+    let boundary_matches: Vec<&'static Title> = TITLES
         .iter()
         .copied()
-        .filter(|e| {
-            let short = e.key.strip_prefix("lego-").unwrap_or(e.key);
-            e.key.starts_with(&prefix_pat)
-                || e.key.ends_with(&tail_pat)
+        .filter(|t| {
+            let short = t.key.strip_prefix("lego-").unwrap_or(t.key);
+            t.key.starts_with(&prefix_pat)
+                || t.key.ends_with(&tail_pat)
                 || short.starts_with(&prefix_pat)
         })
         .collect();
@@ -219,33 +221,33 @@ fn resolve_title(query: &str) -> Result<&'static Entry, TitleError> {
         [] => Err(TitleError::Unknown(query.to_owned())),
         many => Err(TitleError::Ambiguous {
             query: query.to_owned(),
-            matches: many.iter().map(|e| e.key).collect(),
+            matches: many.iter().map(|t| t.key).collect(),
         }),
     }
 }
 
 fn probe_roster() -> Vec<TitleStatus> {
-    roster::ROSTER
+    TITLES
         .iter()
         .copied()
-        .map(|entry| {
-            let found = roster::look_for(entry);
+        .map(|title| {
+            let found = roster::look_for(title);
             let mut notes = Vec::new();
-            if let Some(pressing) = entry.red_book {
-                match lego_legacy_core::disc::open_red_book(entry.image.disc_dir, pressing) {
+            if let Some(pressing) = title.red_book {
+                match lego_legacy_core::disc::open_red_book(title.image.disc_dir, pressing) {
                     Err(e) => notes.push(AudioNote {
                         text: format!("music: {pressing} Red Book missing ({e})"),
                         missing: true,
                     }),
-                    Ok(_) if pressing != entry.image.pressing => notes.push(AudioNote {
+                    Ok(_) if pressing != title.image.pressing => notes.push(AudioNote {
                         text: format!("music: {pressing} (Red Book)"),
                         missing: false,
                     }),
                     Ok(_) => {}
                 }
             }
-            if let Some(first) = entry.bank.first() {
-                match roster::find_bank(entry.bank) {
+            if let Some(first) = title.bank.first() {
+                match roster::find_bank(title.bank) {
                     Ok((place, _)) => {
                         let file = place.path.rsplit('/').next().unwrap_or(place.path);
                         notes.push(AudioNote {
@@ -263,7 +265,7 @@ fn probe_roster() -> Vec<TitleStatus> {
                 }
             }
             TitleStatus {
-                entry,
+                title,
                 found,
                 notes,
             }
@@ -336,7 +338,7 @@ fn format_found(found: &Found, color: bool) -> String {
 fn render_menu(statuses: &[TitleStatus], selected: Option<usize>, color: bool) -> String {
     let column = statuses
         .iter()
-        .map(|s| s.entry.name.len())
+        .map(|s| s.title.name.len())
         .max()
         .unwrap_or(0);
     let (yellow_b, white_b, yellow, dim, rst) = (
@@ -354,7 +356,7 @@ fn render_menu(statuses: &[TitleStatus], selected: Option<usize>, color: bool) -
                 out,
                 "  {yellow_b}>{rst} {white_b}{}. {:<column$}{rst}  {badge}",
                 i + 1,
-                status.entry.name
+                status.title.name
             );
         } else {
             let prefix = if selected.is_some() { "    " } else { "  " };
@@ -362,7 +364,7 @@ fn render_menu(statuses: &[TitleStatus], selected: Option<usize>, color: bool) -
                 out,
                 "{prefix}{}. {:<column$}  {badge}",
                 i + 1,
-                status.entry.name
+                status.title.name
             );
         }
         let note_indent = if selected.is_some() {
@@ -488,7 +490,7 @@ fn run_interactive(
     );
 
     enum Outcome {
-        Launch(&'static Entry),
+        Launch(&'static Title),
         Quit,
         Interrupt,
     }
@@ -533,11 +535,11 @@ fn run_interactive(
                     cursor = idx;
                 }
                 match &statuses[cursor].found {
-                    Found::Runnable { .. } => break Outcome::Launch(statuses[cursor].entry),
+                    Found::Runnable { .. } => break Outcome::Launch(statuses[cursor].title),
                     other => {
                         notice = Some(format!(
                             "{} cannot be started: {other}",
-                            statuses[cursor].entry.name
+                            statuses[cursor].title.name
                         ));
                     }
                 }
@@ -587,11 +589,11 @@ fn run_line_mode(statuses: &[TitleStatus], flags: &[String], color: bool) -> Exi
     };
     let chosen = &statuses[choice];
     match &chosen.found {
-        Found::Runnable { .. } => start(chosen.entry.key, flags),
+        Found::Runnable { .. } => start(chosen.title.key, flags),
         other => {
             eprintln!(
                 "lego-legacy: {} cannot be started: {other}",
-                chosen.entry.name
+                chosen.title.name
             );
             ExitCode::FAILURE
         }
@@ -811,7 +813,7 @@ mod tests {
     fn menu_renders_roster_badges_selection_and_notes() {
         let statuses = vec![
             TitleStatus {
-                entry: &roster::ROCK_RAIDERS,
+                title: &lego_legacy_catalog::ROCK_RAIDERS,
                 found: Found::Runnable {
                     pressing: "masterpiece-rock-raiders".to_owned(),
                 },
@@ -821,7 +823,7 @@ mod tests {
                 }],
             },
             TitleStatus {
-                entry: &roster::LEGO_CHESS,
+                title: &lego_legacy_catalog::LEGO_CHESS,
                 found: Found::Absent {
                     looked_at: "game-data/chess/masterpiece-chess/masterpiece-chess.iso".to_owned(),
                 },

@@ -23,7 +23,6 @@ use super::observe::{
     format_frame_json, parse_crop, parse_grid_dims, render_frame_png, ObserveOptions,
 };
 use super::stdio::parse_command_line;
-use crate::title::TitleGuide;
 use crate::Title;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -255,28 +254,20 @@ pub trait ExtraRoutes: Send + Sync {
 pub struct HttpContext {
     pub bus: ControlBus,
     pub title: &'static Title,
-    pub guide: &'static TitleGuide,
     pub token: Option<String>,
     pub extra: Option<Arc<dyn ExtraRoutes>>,
 }
 
 impl HttpContext {
     #[must_use]
-    pub fn new(bus: ControlBus, title: &'static Title, token: Option<String>) -> Self {
-        let guide = bus.guide();
+    pub fn new(bus: ControlBus, token: Option<String>) -> Self {
+        let title = bus.title();
         Self {
             bus,
             title,
-            guide,
             token: token.filter(|t| !t.is_empty()),
             extra: Some(Arc::new(super::spectator::SpectatorRoutes)),
         }
-    }
-
-    #[must_use]
-    pub fn with_guide(mut self, guide: &'static TitleGuide) -> Self {
-        self.guide = guide;
-        self
     }
 
     #[must_use]
@@ -756,11 +747,9 @@ pub fn dispatch_http(req: &HttpRequest, ctx: &HttpContext) -> HttpResponse {
         ("POST", "/api/agent-state") => handle_set_agent_state(req, ctx),
 
         // --- First-Class Per-Title Metadata (#311) ---
-        ("GET", "/api/meta") => HttpResponse::json(200, format_meta_json(ctx.title, ctx.guide)),
-        ("GET", "/api/controls") => {
-            HttpResponse::json(200, format_controls_json(ctx.title, ctx.guide))
-        }
-        ("GET", "/api/goals") => HttpResponse::json(200, format_goals_json(ctx.title, ctx.guide)),
+        ("GET", "/api/meta") => HttpResponse::json(200, format_meta_json(ctx.title)),
+        ("GET", "/api/controls") => HttpResponse::json(200, format_controls_json(ctx.title)),
+        ("GET", "/api/goals") => HttpResponse::json(200, format_goals_json(ctx.title)),
 
         // --- Control, Piping & Tier-1 Checkpoints ---
         ("POST", "/api/act") => handle_act(req, ctx),
@@ -1731,7 +1720,6 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
                 mode: ExecMode::Step,
                 owner: InputOwner::Agent,
                 ..ControlConfig::default()
@@ -1742,11 +1730,7 @@ mod tests {
         bus.set_machine_attached(true);
 
         let token = "test-secret-309";
-        let ctx = Arc::new(HttpContext::new(
-            bus.clone(),
-            &Title::STUB,
-            Some(token.to_owned()),
-        ));
+        let ctx = Arc::new(HttpContext::new(bus.clone(), Some(token.to_owned())));
         let mut server = HttpServer::start("127.0.0.1:0", Arc::clone(&ctx)).expect("http start");
         let addr = server.addr();
 
@@ -2076,7 +2060,6 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
                 mode: ExecMode::Step,
                 owner: InputOwner::Agent,
                 ..ControlConfig::default()
@@ -2085,7 +2068,7 @@ mod tests {
         .with_deferred_pause(true);
         let bus = control.bus();
         bus.set_machine_attached(true);
-        let ctx = Arc::new(HttpContext::new(bus.clone(), &Title::STUB, None));
+        let ctx = Arc::new(HttpContext::new(bus.clone(), None));
         let mut server = HttpServer::start("127.0.0.1:0", ctx).unwrap();
         let addr = server.addr();
 
@@ -2147,11 +2130,8 @@ mod tests {
                 .as_nanos()
         ));
 
-        let bus = ControlBus::new(ControlConfig {
-            title: Title::STUB.key,
-            ..ControlConfig::default()
-        });
-        let ctx = Arc::new(HttpContext::new(bus, &Title::STUB, None));
+        let bus = ControlBus::new(ControlConfig::default());
+        let ctx = Arc::new(HttpContext::new(bus, None));
         {
             let _server = UnixServer::start(sock_path.clone(), ctx).expect("unix server");
             let stream = UnixStream::connect(&sock_path).expect("connect unix");
@@ -2200,11 +2180,10 @@ mod tests {
         }
 
         let bus = ControlBus::new(ControlConfig {
-            title: Title::STUB.key,
             mode: ExecMode::Live,
             ..ControlConfig::default()
         });
-        let ctx = HttpContext::new(bus, &Title::STUB, None).with_extra(Arc::new(StubExtra));
+        let ctx = HttpContext::new(bus, None).with_extra(Arc::new(StubExtra));
 
         // 1. ExtraRoutes handles `/watch` via handle_connection without TCP.
         struct MemStream {
@@ -2255,40 +2234,42 @@ mod tests {
 
     #[test]
     fn http_serves_title_guide_and_enforces_escape_quits_guard() {
-        use crate::title::{AgentCadence, ControlHint, Goal, Milestone, MouseMode};
+        use crate::title::{AgentCadence, ControlHint, Goal, Milestone, MouseMode, TitleGuide};
 
-        const GUARDED_GUIDE: TitleGuide = TitleGuide {
-            display_name: "Guarded Title",
-            summary: "Escape immediately quits.",
-            resolution: (640, 480),
-            bpp: 8,
-            refresh_hz: 60,
-            mouse_mode: MouseMode::AbsoluteKept,
-            escape_quits: true,
-            skip_keys: &["Space"],
-            cadence: AgentCadence::MicroStep { flips_per_step: 8 },
-            controls: &[ControlHint {
-                input: "Up",
-                action: "Throttle",
-                notes: "Hold on green.",
-            }],
-            hazards: &["Escape quits immediately."],
-            goals: &[Goal {
-                id: "first-run",
-                name: "First Run",
-                milestone: Milestone::Playable,
-                description: "Finish the first course.",
-            }],
-            save_files: &["saves\\times.dat"],
+        const GUARDED_TITLE: Title = Title {
+            name: "Guarded Title",
+            guide: TitleGuide {
+                summary: "Escape immediately quits.",
+                resolution: (640, 480),
+                bpp: 8,
+                refresh_hz: 60,
+                mouse_mode: MouseMode::AbsoluteKept,
+                escape_quits: true,
+                skip_keys: &["Space"],
+                cadence: AgentCadence::MicroStep { flips_per_step: 8 },
+                controls: &[ControlHint {
+                    input: "Up",
+                    action: "Throttle",
+                    notes: "Hold on green.",
+                }],
+                hazards: &["Escape quits immediately."],
+                goals: &[Goal {
+                    id: "first-run",
+                    name: "First Run",
+                    milestone: Milestone::Playable,
+                    description: "Finish the first course.",
+                }],
+                save_files: &["saves\\times.dat"],
+            },
+            ..Title::STUB
         };
 
         let bus = ControlBus::new(ControlConfig {
-            title: Title::STUB.key,
+            title: &GUARDED_TITLE,
             mode: ExecMode::Live,
-            guide: &GUARDED_GUIDE,
             ..ControlConfig::default()
         });
-        let ctx = HttpContext::new(bus, &Title::STUB, None);
+        let ctx = HttpContext::new(bus, None);
 
         // GET /api/meta, /api/controls, /api/goals serve the populated TitleGuide.
         let meta_resp = dispatch_http(
@@ -2426,7 +2407,7 @@ mod tests {
             },
         );
         let bus = host.bus();
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+        let ctx = HttpContext::new(bus.clone(), None);
 
         // 1. Static menu idle (unchanged_streak >= 180, no actions) -> /api/frame.json emits NO stuck_loop.
         let mut pixels = vec![0u8; 64];
@@ -2580,7 +2561,6 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
                 ..ControlConfig::default()
@@ -2599,7 +2579,7 @@ mod tests {
             route_remaining: 0,
         });
 
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, Some("tok-346".to_owned()));
+        let ctx = HttpContext::new(bus.clone(), Some("tok-346".to_owned()));
         let auth = BTreeMap::from([("authorization".to_owned(), "Bearer tok-346".to_owned())]);
 
         // 1. Default POST /api/pipe treats bare `flip N` as absolute (30690, NOT 61368).
@@ -2743,7 +2723,6 @@ mod tests {
     #[test]
     fn post_agent_state_returns_compact_ack_while_get_returns_full_feed() {
         let bus = ControlBus::new(ControlConfig {
-            title: Title::STUB.key,
             mode: ExecMode::Live,
             owner: InputOwner::Shared,
             ..ControlConfig::default()
@@ -2753,7 +2732,7 @@ mod tests {
         }
         assert!(bus.agent_state().action_feed.len() >= 60);
 
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+        let ctx = HttpContext::new(bus.clone(), None);
 
         let post_resp = dispatch_http(
             &HttpRequest {
@@ -2853,7 +2832,6 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
-                title: Title::STUB.key,
                 mode: ExecMode::Live,
                 owner: InputOwner::Agent,
                 ..ControlConfig::default()
@@ -2871,7 +2849,7 @@ mod tests {
             route_remaining: 0,
         });
 
-        let ctx = HttpContext::new(bus.clone(), &Title::STUB, None);
+        let ctx = HttpContext::new(bus.clone(), None);
 
         // 1. Raw mouse_down with coordinates and default left button.
         let down_resp = dispatch_http(

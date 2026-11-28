@@ -81,7 +81,7 @@ fn the_launcher_finds_the_rip_ready_to_start() {
         return;
     }
     assert_eq!(
-        roster::look_for(&roster::LEGO_ISLAND),
+        roster::look_for(&ISLAND),
         Found::Runnable {
             pressing: "lego-island".to_owned()
         }

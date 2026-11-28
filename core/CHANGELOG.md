@@ -3,6 +3,14 @@
 One heading per version, newest first. What each part of core's version means is in
 [ADR-0007](../docs/adr/0007-every-crate-carries-its-own-version.md).
 
+## 2.0.0 — 2026-11-28
+
+Single-source `Title` declaration, Golden Rule 4 purge of all concrete titles from `core/`, and consumer-only `crates/catalog` (`core/src/{title,roster,run,control/*,testkit/*}.rs`, `core/tests/{roster,cabinet,old_file_api,shims}.rs`, #407), untagged per ADR-0007:
+
+- **Single-source `Title` (`core/src/title.rs`):** Folds `pub name: &'static str`, `pub bank: &'static [EntryImage]`, and `pub guide: TitleGuide` directly onto `Title`; removes `TitleGuide.display_name` duplication (using `Title::name` as the single display name across launcher and `/api/{meta,controls,goals}` JSON); derives `Clone, Copy, Debug, PartialEq, Eq` on `EntryImage` and `Debug` on `Title`/`Declared`/`Windows`.
+- **Collapsed `core::run` & control-plane config (`core/src/run.rs`, `core/src/control/{bus,host,http,meta}.rs`, `core/src/testkit/spectator.rs`):** Reduces `run`'s 6 doubled entrypoints (`*_with_guide`) to 3 (`run`, `run_digested`, `main`) taking `&'static Title`; reads `title.bank` directly instead of scanning `ROSTER` at runtime; simplifies `ControlConfig` to hold `pub title: &'static Title`, `HttpContext::new(bus, token)` to read `bus.title()`, `format_{meta,controls,goals}_json` / `write_title_guide` to take `&Title`, and `ControlRig::in_process` to take `(&'static Title, Cli, u64)`.
+- **Purged concrete titles from `core/` (Golden Rule 4):** Removes `Entry`, `GM16`, `ROCK_RAIDERS..LEGOLAND`, and `ROSTER` from `core/src/roster.rs` (retaining generic `Found`, `judge`, `look_for(&Title)`, `find_bank(&[EntryImage])`); removes `ROCK_RAIDERS_WRAPPED` and `LEGO_RACERS_WRAPPED` from `core/src/testkit/mod.rs`; expands `core/src/control/meta.rs`'s Golden Rule 4 test to walk **every** `.rs` file under `core/src/` with zero exemptions; converts `core/tests/` to synthetic title-agnostic fixtures, migrating cross-title real-disc tests into `crates/catalog/tests/`.
+
 ## 1.2.0 — 2026-10-21
 
 Absent non-Windows explicit `LoadLibrary` paths and covering-rect `IDirectDrawSurface::SetClipper` (`core/src/install.rs`, `core/src/win32/{kernel32,ddraw}.rs`, `core/tests/shims.rs`, #396), strictly generic and true to Windows with zero new `State` fields and zero title keying:

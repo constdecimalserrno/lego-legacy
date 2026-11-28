@@ -6,7 +6,7 @@
 //! against the player's retail disc. Skips cleanly when the disc is absent
 //! unless `LEGO_LEGACY_REQUIRE_DISC=1`.
 
-use lego_chess::{GUIDE, LEGO_CHESS as CHESS};
+use lego_chess::LEGO_CHESS as CHESS;
 use lego_legacy_core::cli::Cli;
 use lego_legacy_core::control::observe::{render_frame_png, ObserveOptions};
 use lego_legacy_core::control::{Action, Command, ControlBus, FrameSnapshot};
@@ -222,8 +222,7 @@ fn lego_chess_rendered_cursor_matches_pointer_and_ws_v2_across_screens() {
         route: Some(boot_route),
         ..Cli::default()
     };
-    let rig =
-        ControlRig::in_process(&CHESS, &GUIDE, cli, BUDGET).expect("start LEGO Chess control rig");
+    let rig = ControlRig::in_process(&CHESS, cli, BUDGET).expect("start LEGO Chess control rig");
     let bus = rig.bus().expect("in-process ControlBus");
     let http = rig.http();
 

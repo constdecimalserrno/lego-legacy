@@ -33,17 +33,12 @@ fn runs() {
 
 #[test]
 fn the_launcher_finds_the_rip_ready_to_start() {
-    // It lists the title fifth, after the four released ones.
-    assert_eq!(
-        roster::ROSTER.iter().position(|e| e.key == CHESS.key),
-        Some(4)
-    );
     if !scratch() {
         return;
     }
     // Which means it read the game out of MAIN.Z and found its bytes.
     assert_eq!(
-        roster::look_for(&roster::LEGO_CHESS),
+        roster::look_for(&CHESS),
         Found::Runnable {
             pressing: "masterpiece-chess".to_owned()
         }
@@ -941,7 +936,7 @@ fn throne_room(
         slot,
         // With its music's bank too, on any of the four pressings that carry
         // it; the run takes the first present (#156).
-        || scratch() && (title.key != CHESS.key || testkit::any_rip(&roster::GM16).is_some()),
+        || scratch() && (title.bank.is_empty() || testkit::any_rip(title.bank).is_some()),
         title,
         &cli,
         &THRONE_ROOM_KEPT,
@@ -951,11 +946,11 @@ fn throne_room(
 
 static THRONE: std::sync::OnceLock<Option<testkit::Ran>> = std::sync::OnceLock::new();
 
-/// LEGO Chess as a title the roster does not list, so with no bank to look
-/// for: the machine of a player whose discs hold none, with no MIDI out
-/// (#156).
+/// LEGO Chess with no bank declared: the machine of a player whose discs hold
+/// none, with no MIDI out (#156).
 const WITHOUT_A_BANK: Title = Title {
     key: "lego-chess-with-no-bank",
+    bank: &[],
     ..CHESS
 };
 
@@ -1265,7 +1260,7 @@ fn checkmate(
     };
     testkit::replay(
         slot,
-        || scratch() && testkit::any_rip(&roster::GM16).is_some(),
+        || scratch() && testkit::any_rip(CHESS.bank).is_some(),
         &CHESS,
         &cli,
         &CHECKMATE_KEPT,
@@ -1555,7 +1550,7 @@ fn save_and_load(
     shots: bool,
 ) -> Option<&'static SaveLoadRuns> {
     slot.get_or_init(|| {
-        if !(scratch() && testkit::any_rip(&roster::GM16).is_some()) {
+        if !(scratch() && testkit::any_rip(CHESS.bank).is_some()) {
             return None;
         }
         let tag = if shots { "main" } else { "again" };
@@ -1956,7 +1951,7 @@ fn pirates_vs_ai(
     };
     testkit::replay(
         slot,
-        || scratch() && testkit::any_rip(&roster::GM16).is_some(),
+        || scratch() && testkit::any_rip(CHESS.bank).is_some(),
         &CHESS,
         &cli,
         &PIRATES_AI_KEPT,

@@ -1,64 +1,110 @@
-//! What the launcher finds when it goes looking.
+//! Generic `core::roster` lookup, image judging, and MIDI bank discovery tests.
+//!
+//! Strictly title-agnostic (Golden Rule 4): every test uses synthetic [`Title`]
+//! and [`EntryImage`] fixtures with zero concrete game titles or disc rips.
+//! Cross-title real-disc roster/cabinet invariants live in `crates/catalog/tests/`.
 
-use lego_legacy_core::roster::{self, Entry, Found};
-use lego_legacy_core::testkit;
-use lego_legacy_core::title::EntryImage;
+use lego_legacy_core::hash;
+use lego_legacy_core::roster::{self, Found};
+use lego_legacy_core::title::{EntryImage, Kept};
+use lego_legacy_core::Title;
 
-fn scratch() -> bool {
-    testkit::rips(&roster::ROCK_RAIDERS.image)
+const SYNTHETIC_IMAGE: EntryImage = EntryImage {
+    disc_dir: "synthetic-disc",
+    pressing: "synthetic-pressing",
+    path: "GAME.EXE",
+    kept: Kept::Loose,
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    why: "synthetic test fixture",
+};
+
+const SYNTHETIC_TITLE: Title = Title {
+    key: "synthetic-title",
+    name: "Synthetic Title",
+    image: SYNTHETIC_IMAGE,
+    ..Title::STUB
+};
+
+/// Build a minimal valid 32-bit x86 PE image with the given section names.
+fn synthetic_pe(section_names: &[&[u8; 8]]) -> Vec<u8> {
+    let pe_off: usize = 0x80;
+    let opt_size: usize = 0x60;
+    let table_off = pe_off + 24 + opt_size;
+    let total = table_off + section_names.len() * 40;
+    let mut bytes = vec![0u8; total];
+    bytes[0..2].copy_from_slice(b"MZ");
+    bytes[0x3c..0x40].copy_from_slice(&(pe_off as u32).to_le_bytes());
+    bytes[pe_off..pe_off + 4].copy_from_slice(b"PE\0\0");
+    // Machine = IMAGE_FILE_MACHINE_I386 (0x014c)
+    bytes[pe_off + 4..pe_off + 6].copy_from_slice(&0x014cu16.to_le_bytes());
+    // NumberOfSections
+    bytes[pe_off + 6..pe_off + 8].copy_from_slice(&(section_names.len() as u16).to_le_bytes());
+    // SizeOfOptionalHeader
+    bytes[pe_off + 20..pe_off + 22].copy_from_slice(&(opt_size as u16).to_le_bytes());
+    // Optional header magic = PE32 (0x010b)
+    bytes[pe_off + 24..pe_off + 26].copy_from_slice(&0x010bu16.to_le_bytes());
+    for (i, name) in section_names.iter().enumerate() {
+        let at = table_off + i * 40;
+        bytes[at..at + 8].copy_from_slice(*name);
+    }
+    bytes
 }
 
 #[test]
-fn a_pressing_that_is_there_and_right_is_ready_to_start() {
-    if !scratch() {
-        return;
-    }
-    let found = roster::look_for(&roster::ROCK_RAIDERS);
-    assert_eq!(
-        found,
-        Found::Runnable {
-            pressing: "masterpiece-rock-raiders".to_owned()
-        },
-        "the Masterpiece pressing holds the unwrapped game"
-    );
-    assert!(found.to_string().contains("ready"));
-}
-
-#[test]
-fn a_wrapped_pressing_is_named_rather_than_offered() {
-    if !testkit::rips(&testkit::ROCK_RAIDERS_WRAPPED) {
-        return;
-    }
-    // The same title pointed at the pressing whose executable is wrapped.
-    let wrapped = Entry {
-        key: "lego-rock-raiders",
-        name: "LEGO Rock Raiders",
-        image: testkit::ROCK_RAIDERS_WRAPPED,
-        red_book: None,
-        bank: &[],
+fn judge_classifies_runnable_wrong_bytes_and_wrapped_images() {
+    let payload = b"synthetic unwrapped executable bytes";
+    let digest = Box::leak(hash::sha256_hex(payload).into_boxed_str());
+    let matching = EntryImage {
+        sha256: digest,
+        ..SYNTHETIC_IMAGE
     };
-    let found = roster::look_for(&wrapped);
-    match &found {
-        Found::Wrapped { scheme, pressing } => {
-            assert_eq!(scheme, "SafeDisc");
-            assert_eq!(pressing, "rock-raiders");
+
+    let ok = roster::judge(&matching, payload);
+    assert_eq!(
+        ok,
+        Found::Runnable {
+            pressing: "synthetic-pressing".to_owned()
         }
-        other => panic!("found {other} instead of naming the wrapper"),
+    );
+    assert!(ok.to_string().contains("ready"));
+
+    let wrong = roster::judge(&matching, b"different bytes");
+    match &wrong {
+        Found::WrongBytes { pressing, found } => {
+            assert_eq!(pressing, "synthetic-pressing");
+            assert_eq!(found, &hash::sha256_hex(b"different bytes"));
+        }
+        other => panic!("expected WrongBytes, got {other}"),
     }
-    assert!(found.to_string().contains("will not be run"));
+    assert!(wrong.to_string().contains("holds different bytes"));
+
+    // A SafeDisc-wrapped PE (`.txt` + `.txt2`) is named as Wrapped BEFORE hashing,
+    // even if its SHA-256 matches nothing (or matches the declared hash).
+    let wrapped_pe = synthetic_pe(&[b".txt\0\0\0\0", b".txt2\0\0\0"]);
+    let wrapped_digest = Box::leak(hash::sha256_hex(&wrapped_pe).into_boxed_str());
+    let wrapped_img = EntryImage {
+        sha256: wrapped_digest,
+        ..SYNTHETIC_IMAGE
+    };
+    let wrapped = roster::judge(&wrapped_img, &wrapped_pe);
+    assert_eq!(
+        wrapped,
+        Found::Wrapped {
+            pressing: "synthetic-pressing".to_owned(),
+            scheme: "SafeDisc".to_owned(),
+        }
+    );
+    assert!(wrapped.to_string().contains("will not be run"));
 }
 
 #[test]
 fn a_pressing_that_is_not_there_says_where_it_looked() {
-    let absent = Entry {
-        key: "lego-rock-raiders",
-        name: "LEGO Rock Raiders",
+    let absent = Title {
         image: EntryImage {
             pressing: "no-such-pressing",
-            ..roster::ROCK_RAIDERS.image
+            ..SYNTHETIC_IMAGE
         },
-        red_book: None,
-        bank: &[],
+        ..SYNTHETIC_TITLE
     };
     match roster::look_for(&absent) {
         Found::Absent { looked_at } => {
@@ -68,126 +114,6 @@ fn a_pressing_that_is_not_there_says_where_it_looked() {
             );
         }
         other => panic!("found {other} instead of saying where it looked"),
-    }
-}
-
-#[test]
-fn a_pressing_holding_different_bytes_is_refused_by_its_digest() {
-    if !scratch() {
-        return;
-    }
-    let patched = Entry {
-        key: "lego-rock-raiders",
-        name: "LEGO Rock Raiders",
-        image: EntryImage {
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-            ..roster::ROCK_RAIDERS.image
-        },
-        red_book: None,
-        bank: &[],
-    };
-    match roster::look_for(&patched) {
-        Found::WrongBytes { found, .. } => {
-            assert!(
-                found.starts_with("62b67f5b"),
-                "it says what it found: {found}"
-            );
-        }
-        other => panic!("found {other} instead of refusing the bytes"),
-    }
-}
-
-#[test]
-fn every_title_on_the_roster_can_be_looked_for() {
-    // A title joins the roster when its own crate does, so the launcher never
-    // offers something that cannot be started.
-    assert!(!roster::ROSTER.is_empty());
-    for entry in roster::ROSTER {
-        assert!(!entry.key.is_empty() && !entry.name.is_empty());
-        assert_eq!(
-            entry.image.sha256.len(),
-            64,
-            "{} names its image by bytes",
-            entry.key
-        );
-        assert!(
-            !entry.image.why.is_empty(),
-            "{} says why that pressing",
-            entry.key
-        );
-        for place in entry.bank {
-            assert_eq!(
-                place.sha256.len(),
-                64,
-                "{} bank on {} names its bytes",
-                entry.key,
-                place.pressing
-            );
-            assert!(
-                !place.why.is_empty(),
-                "{} bank on {} says why",
-                entry.key,
-                place.pressing
-            );
-        }
-    }
-}
-
-/// Alpha Team's image is inside its pressing's cabinet rather than on the
-/// disc, and the launcher has to read it from there to know the bytes (#53).
-#[test]
-fn an_image_inside_the_cabinet_is_found_and_hashed_like_any_other() {
-    if !testkit::rips(&roster::ALPHA_TEAM.image) {
-        return;
-    }
-    assert_eq!(
-        roster::look_for(&roster::ALPHA_TEAM),
-        Found::Runnable {
-            pressing: "alpha-team".to_owned()
-        }
-    );
-}
-
-/// The same title pointed at an image the cabinet does not hold says what it
-/// looked for rather than starting something else (#53).
-#[test]
-fn an_image_the_cabinet_does_not_hold_is_named() {
-    if !testkit::rips(&roster::ALPHA_TEAM.image) {
-        return;
-    }
-    let absent = Entry {
-        key: "lego-alpha-team",
-        name: "LEGO Alpha Team",
-        image: EntryImage {
-            path: "NoSuchThing.exe",
-            ..roster::ALPHA_TEAM.image
-        },
-        red_book: None,
-        bank: &[],
-    };
-    match roster::look_for(&absent) {
-        Found::Unreadable { why } => assert!(why.contains("NoSuchThing.exe"), "{why}"),
-        other => panic!("found {other} instead of naming what it looked for"),
-    }
-}
-
-/// LEGO Chess pointed at an image its `MAIN.Z` does not hold says what it
-/// looked for, as the cabinet's refusal does (#143).
-#[test]
-fn an_image_the_archive_does_not_hold_is_named() {
-    if !testkit::rips(&roster::LEGO_CHESS.image) {
-        return;
-    }
-    let absent = Entry {
-        image: EntryImage {
-            path: "NoSuchThing.exe",
-            ..roster::LEGO_CHESS.image
-        },
-        ..roster::LEGO_CHESS
-    };
-    match roster::look_for(&absent) {
-        Found::Unreadable { why } => assert!(why.contains("NoSuchThing.exe"), "{why}"),
-        other => panic!("found {other} instead of naming what it looked for"),
     }
 }
 
@@ -232,15 +158,14 @@ fn a_damaged_rip_is_listed_as_damaged() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("listed-damaged");
     std::fs::create_dir_all(dir.join("x")).expect("the directory is made");
     damaged_rip("listed-damaged/x/x.iso", 2048, &[20]);
-    let damaged = Entry {
-        red_book: None,
+    let damaged = Title {
         image: EntryImage {
             // An absolute directory, which the game-data root joins as itself.
             disc_dir: Box::leak(dir.display().to_string().into_boxed_str()),
             pressing: "x",
-            ..roster::ROCK_RAIDERS.image
+            ..SYNTHETIC_IMAGE
         },
-        ..roster::ROCK_RAIDERS
+        ..SYNTHETIC_TITLE
     };
     match roster::look_for(&damaged) {
         Found::Unreadable { why } => assert!(why.contains("ripped again"), "{why}"),
@@ -248,35 +173,31 @@ fn a_damaged_rip_is_listed_as_damaged() {
     }
 }
 
-fn bank_err(places: &[EntryImage]) -> String {
-    match roster::find_bank(places) {
-        Ok((place, _)) => panic!("expected no bank, found {}", place.pressing),
-        Err(why) => why,
-    }
-}
-
 /// Without any game disc, `find_bank` reports empty declarations, missing
 /// pressings (singular and plural), and damaged or non-ISO rips joined in
-/// order, and the roster names a bank only for LEGO Chess (#156).
+/// order.
 #[test]
 fn find_bank_reports_missing_and_damaged_rips_without_a_disc() {
-    assert_eq!(bank_err(&[]), "no bank pressings declared");
+    assert_eq!(
+        roster::find_bank(&[]).unwrap_err(),
+        "no bank pressings declared"
+    );
     let missing = [
         EntryImage {
             pressing: "no-such-pressing-a",
-            ..roster::GM16[0]
+            ..SYNTHETIC_IMAGE
         },
         EntryImage {
             pressing: "no-such-pressing-b",
-            ..roster::GM16[0]
+            ..SYNTHETIC_IMAGE
         },
     ];
     assert_eq!(
-        bank_err(&missing[..1]),
+        roster::find_bank(&missing[..1]).unwrap_err(),
         "no rip of the no-such-pressing-a pressing"
     );
     assert_eq!(
-        bank_err(&missing),
+        roster::find_bank(&missing).unwrap_err(),
         "no rip of the no-such-pressing-a, no-such-pressing-b pressings"
     );
     // One non-ISO file (fails to open) and one damaged ISO (fails to read).
@@ -288,92 +209,22 @@ fn find_bank_reports_missing_and_damaged_rips_without_a_disc() {
     let disc_dir: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
     let absent = EntryImage {
         pressing: "no-such-pressing-a",
-        ..roster::GM16[0]
+        ..SYNTHETIC_IMAGE
     };
     let bad_open = EntryImage {
         disc_dir,
         pressing: "bad-iso",
-        ..roster::GM16[0]
+        ..SYNTHETIC_IMAGE
     };
     let bad_read = EntryImage {
         disc_dir,
         pressing: "bad-dir",
-        ..roster::GM16[0]
+        ..SYNTHETIC_IMAGE
     };
-    let err = bank_err(&[absent, bad_open, bad_read]);
+    let err = roster::find_bank(&[absent, bad_open, bad_read]).unwrap_err();
     assert!(
         err.contains("the bad-iso rip will not open:")
             && err.contains("; the bad-dir rip will not give it up:"),
         "both present-rip failures reported in order: {err}"
     );
-    // The roster names the General MIDI bank for LEGO Chess and LEGOLAND, and no other title.
-    assert_eq!(roster::LEGO_CHESS.bank.len(), 4);
-    assert_eq!(roster::LEGOLAND.bank.len(), 4);
-    for entry in roster::ROSTER
-        .iter()
-        .filter(|e| e.key != roster::LEGO_CHESS.key && e.key != roster::LEGOLAND.key)
-    {
-        assert!(entry.bank.is_empty(), "{} has no MIDI bank", entry.key);
-    }
-}
-
-/// Roland's bank is found where it lies loose on the player's own disc and
-/// checked by its SHA-256: a rip that is not there, and a place whose file
-/// does not hash to the sha256 it declares, are passed over for the next
-/// place, and said when none holds it (#156).
-#[test]
-fn the_bank_is_found_on_the_first_rip_that_holds_it() {
-    let Some(rip) = testkit::any_rip(&roster::GM16) else {
-        return;
-    };
-    let absent = EntryImage {
-        pressing: "no-such-pressing",
-        ..roster::GM16[0]
-    };
-    let wrong = EntryImage {
-        disc_dir: rip.disc_dir,
-        pressing: rip.pressing,
-        path: rip.path,
-        sha256: "not the bank's",
-        ..roster::GM16[0]
-    };
-    let present = EntryImage {
-        disc_dir: rip.disc_dir,
-        pressing: rip.pressing,
-        path: rip.path,
-        ..roster::GM16[0]
-    };
-    let places = [absent, wrong, present];
-    let (place, bytes) = roster::find_bank(&places).expect("on the present rip");
-    assert_eq!((place.pressing, bytes.len()), (rip.pressing, 3_440_660));
-    let err = bank_err(&places[..2]);
-    assert_eq!(
-        err,
-        format!(
-            "the {} rip holds other bytes at {} (3229b09b9d7d9f3f…)",
-            rip.pressing, rip.path
-        )
-    );
-}
-
-/// A SafeDisc-wrapped executable packed inside an InstallShield cabinet is
-/// named and refused before its bytes are hashed (ADR-0006, #369).
-#[test]
-fn a_cabinet_wrapped_pressing_is_named_rather_than_offered() {
-    if !testkit::rips(&testkit::LEGO_RACERS_WRAPPED) {
-        return;
-    }
-    let wrapped = Entry {
-        image: testkit::LEGO_RACERS_WRAPPED,
-        ..roster::LEGO_RACERS
-    };
-    let found = roster::look_for(&wrapped);
-    match &found {
-        Found::Wrapped { scheme, pressing } => {
-            assert_eq!(scheme, "SafeDisc");
-            assert_eq!(pressing, "racers");
-        }
-        other => panic!("found {other} instead of naming the wrapper"),
-    }
-    assert!(found.to_string().contains("will not be run"));
 }

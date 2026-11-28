@@ -25,7 +25,7 @@ use lego_legacy_core::testkit;
 use lego_legacy_core::testkit::spectator::{
     crosshair_center, fraction_diff, ControlRig, SpectatorClient,
 };
-use lego_rock_raiders::{GUIDE, ROCK_RAIDERS};
+use lego_rock_raiders::ROCK_RAIDERS;
 use std::time::Duration;
 
 const W: u32 = 640;
@@ -249,7 +249,7 @@ fn real_disc_software_absolute_cursor_aligns_headlessly_and_over_ws() {
         return;
     }
 
-    let rig = ControlRig::in_process(&ROCK_RAIDERS, &GUIDE, Cli::default(), 12_000_000_000)
+    let rig = ControlRig::in_process(&ROCK_RAIDERS, Cli::default(), 12_000_000_000)
         .expect("start Rock Raiders control rig");
     let bus = rig.bus().expect("in-process ControlBus");
     let http = rig.http();

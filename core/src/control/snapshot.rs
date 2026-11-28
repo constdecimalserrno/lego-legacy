@@ -733,9 +733,9 @@ mod tests {
         let mut control = ControlHost::new(
             Headless::new(),
             ControlConfig {
+                title: &TIMED_STUB,
                 mode: ExecMode::Live,
                 pace: 1.0,
-                flip_cost: FlipCost::Refresh(60),
                 ..ControlConfig::default()
             },
         )
@@ -863,9 +863,9 @@ mod tests {
                 seen_nanos: Vec::new(),
             },
             ControlConfig {
+                title: &TIMED_STUB,
                 mode: ExecMode::Live,
                 pace: 1.0,
-                flip_cost: FlipCost::Refresh(60),
                 ..ControlConfig::default()
             },
         )
