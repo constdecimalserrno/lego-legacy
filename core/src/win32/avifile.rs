@@ -14,8 +14,8 @@
 //! point is an import nobody has written, and calling one is a wall that
 //! names it.
 
-use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{wall, Interface};
+use super::{stdcall, ComState, Ctx, Shim};
+use crate::com::{self, wall, Interface};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -303,7 +303,7 @@ fn file<'a>(ctx: &'a Ctx<'_>, call: &str, at: u32) -> Result<&'a File, Stop> {
 /// Which movie, by its file object, and which of its streams a stream
 /// object is.
 fn stream_of(ctx: &Ctx<'_>, call: &str, at: u32) -> Result<(u32, usize), Stop> {
-    match ctx.state.com(at).map(|o| &o.state) {
+    match ctx.state.com.get(at).map(|o| &o.state) {
         Some(&ComState::AviStream { file, stream }) if ctx.state.avi_files.contains_key(&file) => {
             Ok((file, stream))
         }
@@ -377,7 +377,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     avi.streams.truncate(counted);
     name_streams(&mut avi, &name);
-    let object = State::make_com(ctx, &AVI_FILE, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &AVI_FILE, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "movie {name} opened through AVIFile: {} streams",
@@ -400,7 +400,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 /// Reclaim an `IAVIFile` once its own refcount and every stream/frame getter
 /// referencing it are released, evicting `State::movies` if unused elsewhere.
 fn maybe_reclaim_avi_file(ctx: &mut Ctx<'_>, file_obj: u32) {
-    if ctx.state.com(file_obj).is_some_and(|o| o.refs > 0) {
+    if ctx.state.com.get(file_obj).is_some_and(|o| o.refs > 0) {
         return;
     }
     let Some(f) = ctx.state.avi_files.get(&file_obj) else {
@@ -409,7 +409,7 @@ fn maybe_reclaim_avi_file(ctx: &mut Ctx<'_>, file_obj: u32) {
     let streams_live = f
         .streams
         .iter()
-        .any(|slot| slot.is_some_and(|s| ctx.state.com(s).is_some_and(|o| o.refs > 0)));
+        .any(|slot| slot.is_some_and(|s| ctx.state.com.get(s).is_some_and(|o| o.refs > 0)));
     let getters_live = ctx.state.frame_getters.values().any(|g| g.file == file_obj);
     if streams_live || getters_live {
         return;
@@ -428,7 +428,7 @@ fn file_release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     }
     file(ctx, "AVIFileRelease", args[0])?;
     let refs = {
-        let Some(obj) = ctx.state.com_mut(args[0]) else {
+        let Some(obj) = ctx.state.com.get_mut(args[0]) else {
             return Ok(0);
         };
         obj.refs -= 1;
@@ -624,11 +624,11 @@ fn get_stream(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     let object = match found {
         None => 0,
         Some((_, Some(object))) => {
-            ctx.state.com_ref(object, 1);
+            ctx.state.com.add_ref(object);
             object
         }
         Some((index, None)) => {
-            let object = State::make_com(
+            let object = com::create(
                 ctx,
                 &AVI_STREAM,
                 ComState::AviStream {
@@ -704,7 +704,7 @@ fn add_ref(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(0);
     }
     stream_of(ctx, "AVIStreamAddRef", args[0])?;
-    Ok(ctx.state.com_ref(args[0], 1))
+    Ok(ctx.state.com.add_ref(args[0]))
 }
 
 fn release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
@@ -716,7 +716,7 @@ fn release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Ok(0);
     }
     let (owner, _) = stream_of(ctx, "AVIStreamRelease", args[0])?;
-    let Some(stream) = ctx.state.com_mut(args[0]) else {
+    let Some(stream) = ctx.state.com.get_mut(args[0]) else {
         return Ok(0);
     };
     stream.refs -= 1;
@@ -1025,10 +1025,10 @@ fn get_frame_open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         return Err(too_big());
     }
     ctx.mem.write(dib, &header).map_err(Stop::Fault)?;
-    let object = State::make_com(ctx, &GET_FRAME, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &GET_FRAME, ComState::None).map_err(Stop::Fault)?;
     // The getter holds its stream, as Wine's `getframe.c` holds it, until it
     // is let go of.
-    ctx.state.com_ref(at, 1);
+    ctx.state.com.add_ref(at);
     ctx.state.frame_getters.insert(
         object,
         Getter {
@@ -1156,9 +1156,9 @@ fn get_frame_close(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     };
     ctx.state.heap.free(getter.dib);
     if let Some(stream) = ctx.state.avi_files[&getter.file].streams[getter.stream] {
-        ctx.state.com_ref(stream, -1);
+        com::release_ref(ctx, stream);
     }
-    let refs = ctx.state.com_ref(args[0], -1);
+    let refs = com::release_ref(ctx, args[0]);
     maybe_reclaim_avi_file(ctx, getter.file);
     Ok(refs)
 }
@@ -1281,7 +1281,7 @@ fn draw_dib_draw(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         pitch,
         format,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = ctx.state.com.get(surface).map(|o| o.state.clone())
     else {
         return Err(wall(format!("{dc:#x}, which is no surface's DC")));
     };
@@ -1375,11 +1375,12 @@ mod tests {
     #[test]
     fn avi_file_release_decrements_refs_and_evicts_unused_movie_bytes() {
         use super::{file_release, File, AVI_FILE};
+        use crate::com;
         use crate::win32::tests::with_test_ctx;
-        use crate::win32::{ComState, State};
+        use crate::win32::ComState;
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let obj = State::make_com(ctx, &AVI_FILE, ComState::None).unwrap();
+            let obj = com::create(ctx, &AVI_FILE, ComState::None).unwrap();
             ctx.tree.declare("D:\\TEST.AVI", vec![1u8, 2, 3, 4]);
             let (key, bytes) = ctx
                 .state

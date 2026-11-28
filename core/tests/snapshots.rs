@@ -1011,6 +1011,34 @@ fn synthetic_iv50_avi_with_payload(frames: usize, junk_bytes: usize) -> Vec<u8> 
     chunk(b"RIFF", &riff)
 }
 
+fn with_machine_ctx<R>(
+    m: &mut Machine,
+    tag: &str,
+    f: impl FnOnce(&mut lego_legacy_core::win32::Ctx<'_>) -> R,
+) -> R {
+    let mut log = lego_legacy_core::runlog::RunLog::create(tag, lego_legacy_core::cli::Trace::Off)
+        .expect("log");
+    let dir = log.dir().to_path_buf();
+    let mut ctx = lego_legacy_core::win32::Ctx {
+        cpu: &mut m.cpu,
+        mem: &mut m.arena,
+        state: &mut m.state,
+        title: &STUB,
+        log: &mut log,
+        tree: &mut m.tree,
+        modules: &mut m.modules,
+        clock_millis: m.clock.millis(),
+        boundary: &mut m.boundary,
+        call_guest: None,
+        float_answer: None,
+        answer_is_the_call_s: false,
+    };
+    let res = f(&mut ctx);
+    drop(log);
+    let _ = std::fs::remove_dir_all(dir);
+    res
+}
+
 #[test]
 fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
     use lego_legacy_core::com::S_OK;
@@ -1018,39 +1046,12 @@ fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
     use lego_legacy_core::win32::amstream::{
         self, DIRECT_DRAW_MEDIA_STREAM, DIRECT_DRAW_STREAM_SAMPLE, MULTI_MEDIA_STREAM,
     };
-    use lego_legacy_core::win32::Ctx;
 
     let avi_bytes = synthetic_iv50_avi_with_payload(4, 262_144);
     let (mut m, _host) = machine_at(4);
     m.state.current_directory = "C:\\Game".to_owned();
     m.tree.declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
 
-    let with_ctx = |m: &mut Machine, f: &dyn Fn(&mut Ctx<'_>) -> u32| -> u32 {
-        let mut log = lego_legacy_core::runlog::RunLog::create(
-            "amstream-snap",
-            lego_legacy_core::cli::Trace::Off,
-        )
-        .expect("log");
-        let dir = log.dir().to_path_buf();
-        let mut ctx = Ctx {
-            cpu: &mut m.cpu,
-            mem: &mut m.arena,
-            state: &mut m.state,
-            title: &STUB,
-            log: &mut log,
-            tree: &mut m.tree,
-            modules: &mut m.modules,
-            clock_millis: m.clock.millis(),
-            boundary: &mut m.boundary,
-            call_guest: None,
-            float_answer: None,
-            answer_is_the_call_s: false,
-        };
-        let res = f(&mut ctx);
-        drop(log);
-        let _ = std::fs::remove_dir_all(dir);
-        res
-    };
     let call_com = |m: &mut Machine,
                     iface: &'static lego_legacy_core::com::Interface,
                     slot: usize,
@@ -1058,9 +1059,13 @@ fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
                     args: &[u32]|
      -> u32 {
         let f = iface.method(slot).expect("method").run;
-        with_ctx(m, &|ctx| f(ctx, this, args).expect("com call"))
+        with_machine_ctx(m, "amstream-snap", |ctx| {
+            f(ctx, this, args).expect("com call")
+        })
     };
-    let player = with_ctx(&mut m, &|ctx| amstream::create(ctx).expect("create player"));
+    let player = with_machine_ctx(&mut m, "amstream-snap", |ctx| {
+        amstream::create(ctx).expect("create player")
+    });
 
     // Write MSPID_PrimaryVideo GUID (a35ff56a-9fda-11d0-8fdf-00c04fd9189d) and wide path.
     let guid_at = m.state.heap.alloc(16);
@@ -1152,7 +1157,9 @@ fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
     // Live restore sweeps movies opened after the snapshot while keeping cached pre-snapshot ones.
     let extra_avi = synthetic_iv50_avi_with_payload(2, 4096);
     m.tree.declare("C:\\GAME\\EXTRA.AVI", extra_avi);
-    let extra_player = with_ctx(&mut m, &|ctx| amstream::create(ctx).expect("extra player"));
+    let extra_player = with_machine_ctx(&mut m, "amstream-snap", |ctx| {
+        amstream::create(ctx).expect("extra player")
+    });
     let extra_name_at = m.state.heap.alloc(64);
     let extra_wide: Vec<u8> = "extra.avi\0"
         .encode_utf16()
@@ -1180,4 +1187,187 @@ fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
     let mut missing = Machine::new(&STUB, &mut host_missing).expect("missing machine");
     missing.load_stub().expect("stub");
     assert!(missing.restore_v2(&snap).is_err());
+}
+
+#[test]
+fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data() {
+    use lego_legacy_core::com::{self, ComState, ComTable, RELEASE};
+    use lego_legacy_core::guest::heap::SlabPool;
+    use lego_legacy_core::snap::{Reader, Snap, Visitor, Writer};
+
+    let (mut m, _host) = machine_at(4);
+
+    // Populate live multi-face COM objects, reclaimed COM slots, and both SlabPools.
+    let (dd, dd4, graph, mc) = with_machine_ctx(&mut m, "com-snap", |ctx| {
+        let dd = com::create(
+            ctx,
+            &lego_legacy_core::win32::ddraw::DIRECT_DRAW,
+            ComState::None,
+        )
+        .unwrap();
+        let dd4 = com::face(ctx, dd, &lego_legacy_core::win32::ddraw::DIRECT_DRAW4).unwrap();
+        let graph = lego_legacy_core::win32::dshow::create(
+            ctx,
+            &lego_legacy_core::win32::dshow::GRAPH_BUILDER,
+        )
+        .unwrap();
+        let mc = com::face(ctx, graph, &lego_legacy_core::win32::dshow::MEDIA_CONTROL).unwrap();
+        // Release FilterGraph so its 2 faces land in `ComTable::free_slots`.
+        assert_eq!((RELEASE.run)(ctx, mc, &[]).unwrap(), 0);
+        assert_eq!((RELEASE.run)(ctx, graph, &[]).unwrap(), 0);
+        (dd, dd4, graph, mc)
+    });
+
+    // Populate `surface_pool` (exact) and `sound_pool` (best-fit 2x) in explicit FIFO order.
+    let (surf_a, _) = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
+    let (surf_b, _) = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
+    m.state.surface_pool.free(&m.state.heap, surf_b);
+    m.state.surface_pool.free(&m.state.heap, surf_a);
+
+    let (snd_a, _) = m.state.sound_pool.alloc(&mut m.state.heap, 2048);
+    let (snd_b, _) = m.state.sound_pool.alloc(&mut m.state.heap, 2048);
+    m.state.sound_pool.free(&m.state.heap, snd_a);
+    m.state.sound_pool.free(&m.state.heap, snd_b);
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    let digest = m.state_digest();
+
+    // 1. Cold restore into a fresh machine.
+    let mut host2 = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host2).expect("restored machine");
+    restored.load_stub().expect("stub");
+    restored.restore_v2(&snap).expect("cold restore");
+    assert_eq!(restored.state_digest(), digest);
+    assert_eq!(restored.state.com.interface_of(dd), Some("IDirectDraw"));
+    assert_eq!(restored.state.com.interface_of(dd4), Some("IDirectDraw4"));
+    assert_eq!(restored.state.com.identity(dd4), dd);
+    assert_eq!(
+        restored.state.com.vtable("IDirectDraw"),
+        m.state.com.vtable("IDirectDraw")
+    );
+
+    // Exact FIFO reuse order in both SlabPools and ComTable::free_slots must match bit-for-bit.
+    assert_eq!(
+        restored
+            .state
+            .surface_pool
+            .alloc(&mut restored.state.heap, 4096),
+        (surf_b, true)
+    );
+    assert_eq!(
+        restored
+            .state
+            .surface_pool
+            .alloc(&mut restored.state.heap, 4096),
+        (surf_a, true)
+    );
+    assert_eq!(
+        restored
+            .state
+            .sound_pool
+            .alloc(&mut restored.state.heap, 1500),
+        (snd_a, true)
+    );
+    assert_eq!(
+        restored
+            .state
+            .sound_pool
+            .alloc(&mut restored.state.heap, 1500),
+        (snd_b, true)
+    );
+    let next_restored = with_machine_ctx(&mut restored, "com-snap", |ctx| {
+        com::create(
+            ctx,
+            &lego_legacy_core::win32::ddraw::DIRECT_DRAW,
+            ComState::None,
+        )
+        .unwrap()
+    });
+    assert!([graph, mc].contains(&next_restored));
+
+    // 2. Live restore over mutated ComTable + drained SlabPools restores exact pre-snapshot state.
+    let extra = with_machine_ctx(&mut m, "com-snap", |ctx| {
+        com::create(
+            ctx,
+            &lego_legacy_core::win32::ddraw::DIRECT_DRAW,
+            ComState::None,
+        )
+        .unwrap()
+    });
+    assert_eq!(extra, next_restored);
+    let _ = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
+    let _ = m.state.sound_pool.alloc(&mut m.state.heap, 1500);
+    m.restore_v2_live(&snap).expect("live restore");
+    assert_eq!(m.state_digest(), digest);
+    assert_eq!(
+        m.state.surface_pool.alloc(&mut m.state.heap, 4096),
+        (surf_b, true)
+    );
+    assert_eq!(
+        m.state.sound_pool.alloc(&mut m.state.heap, 1500),
+        (snd_a, true)
+    );
+
+    // 3. Corrupt SlabPools (`max_factor == 0`, empty bucket, zero addr) are rejected cleanly.
+    let mut w = Writer::new();
+    let mut zero = 0u32;
+    w.u32(&mut zero); // max_factor = 0
+    w.u32(&mut zero); // 0 buckets
+    let mut bad_pool = SlabPool::exact();
+    let mut r = Reader::new(&w.out);
+    bad_pool.snap(&mut r);
+    assert!(r.failed(), "SlabPool with max_factor == 0 must be rejected");
+
+    let mut w_empty_bucket = Writer::new();
+    let (mut one, mut sz) = (1u32, 64u32);
+    w_empty_bucket.u32(&mut one); // max_factor = 1
+    w_empty_bucket.u32(&mut one); // 1 bucket
+    w_empty_bucket.u32(&mut sz); // bucket size 64
+    w_empty_bucket.u32(&mut zero); // 0 addrs (invalid empty bucket)
+    let mut r = Reader::new(&w_empty_bucket.out);
+    bad_pool.snap(&mut r);
+    assert!(r.failed(), "SlabPool with empty bucket must be rejected");
+
+    let mut w_zero_addr = Writer::new();
+    w_zero_addr.u32(&mut one); // max_factor = 1
+    w_zero_addr.u32(&mut one); // 1 bucket
+    w_zero_addr.u32(&mut sz); // bucket size 64
+    w_zero_addr.u32(&mut one); // 1 addr
+    w_zero_addr.u32(&mut zero); // addr == 0 (invalid)
+    let mut r = Reader::new(&w_zero_addr.out);
+    bad_pool.snap(&mut r);
+    assert!(r.failed(), "SlabPool with addr == 0 must be rejected");
+
+    // 4. Corrupt ComTable (desynced objects/faces and zero/overlapping free_slots) is rejected.
+    let mut w_desync = Writer::new();
+    let (mut addr, mut refs, mut app) = (0x2000_0100u32, 1i32, 0u32);
+    let mut iface = "IDirectDraw".to_owned();
+    let mut tag_none = 0u8;
+    w_desync.u32(&mut one); // 1 object
+    w_desync.u32(&mut addr);
+    w_desync.string(&mut iface);
+    w_desync.i32(&mut refs);
+    w_desync.u32(&mut addr); // identity = addr
+    w_desync.u32(&mut app);
+    w_desync.u8(&mut tag_none); // ComState::None
+    w_desync.u32(&mut zero); // 0 faces (desynced!)
+    w_desync.u32(&mut zero); // 0 free_slots
+    w_desync.u32(&mut zero); // 0 vtables
+    let mut bad_com = ComTable::default();
+    let mut r = Reader::new(&w_desync.out);
+    bad_com.snap(&mut r);
+    assert!(
+        r.failed(),
+        "ComTable with desynced objects/faces must be rejected"
+    );
+
+    let mut w_bad_free = Writer::new();
+    w_bad_free.u32(&mut zero); // 0 objects
+    w_bad_free.u32(&mut zero); // 0 faces
+    w_bad_free.u32(&mut one); // 1 free_slot
+    w_bad_free.u32(&mut zero); // slot == 0 (invalid)
+    w_bad_free.u32(&mut zero); // 0 vtables
+    let mut r = Reader::new(&w_bad_free.out);
+    bad_com.snap(&mut r);
+    assert!(r.failed(), "ComTable with zero free_slot must be rejected");
 }

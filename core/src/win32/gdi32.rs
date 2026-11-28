@@ -562,7 +562,7 @@ fn surface_target(ctx: &Ctx<'_>, dc: u32, call: &str) -> Result<Option<SurfaceTa
         pitch,
         format,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = ctx.state.com.get(surface).map(|o| o.state.clone())
     else {
         return Ok(None);
     };
@@ -1144,7 +1144,7 @@ mod tests {
     fn draw_text_text_out_fill_rect_and_line_to_render_onto_rgb565_surface_dc() {
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x20_0000, |ctx| {
             let pixels = ctx.state.heap.alloc(64 * 32 * 2);
-            let surface = crate::win32::State::make_com(
+            let surface = crate::com::create(
                 ctx,
                 &crate::win32::ddraw::DIRECT_DRAW_SURFACE,
                 ComState::Surface {

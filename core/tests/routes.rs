@@ -212,7 +212,7 @@ fn guest(host: &mut dyn Host, nap: u32, reader: Reader) -> Machine {
         Reader::Device => {
             const KEYBOARD: u32 = 0x0050_0000;
             const ROOM: u32 = 0x0050_1000;
-            machine.state.add_com(
+            machine.state.com.insert(
                 KEYBOARD,
                 "IDirectInputDeviceA",
                 lego_legacy_core::win32::ComState::Device {

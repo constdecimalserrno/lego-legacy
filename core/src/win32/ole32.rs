@@ -301,7 +301,7 @@ fn create_instance(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
                 });
             }
             let object =
-                super::State::make_com(ctx, iface, super::ComState::None).map_err(Stop::Fault)?;
+                crate::com::create(ctx, iface, crate::com::ComState::None).map_err(Stop::Fault)?;
             ctx.mem.write_u32(args[4], object).map_err(Stop::Fault)?;
             return Ok(S_OK);
         }

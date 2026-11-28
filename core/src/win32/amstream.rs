@@ -6,9 +6,9 @@
 //! (#9). Playback, Indeo 5 decoding, declared-clock timing, and `Mixer` PCM
 //! sync live in [`crate::movie::MoviePlayer`]; this module is the COM adapter.
 
-use super::{ComState, Ctx, State};
+use super::{ComState, Ctx};
 use crate::com::{
-    iid_text, method, read_iid, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK,
+    self, iid_text, method, read_iid, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK,
 };
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
@@ -62,7 +62,7 @@ pub static MULTI_MEDIA_STREAM: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        method("Release", 0, release_stream),
+        RELEASE,
         wall("GetInformation", 2),
         method("GetMediaStream", 2, get_media_stream),
         wall("EnumMediaStreams", 2),
@@ -146,8 +146,8 @@ pub static INTERFACES: &[&Interface] = &[
 /// # Errors
 /// When guest memory faults.
 pub fn create(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &MULTI_MEDIA_STREAM, ComState::MultiMediaStream)
-        .map_err(Stop::Fault)?;
+    let object =
+        com::create(ctx, &MULTI_MEDIA_STREAM, ComState::MultiMediaStream).map_err(Stop::Fault)?;
     ctx.state.players.insert(object, Player::default());
     Ok(object)
 }
@@ -164,9 +164,9 @@ fn movie_mut(
 }
 
 fn owner_of(ctx: &Ctx<'_>, this: u32) -> u32 {
-    match ctx.state.com(this).map(|o| &o.state) {
+    match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::MediaStream { owner, .. } | ComState::StreamSample { owner, .. }) => *owner,
-        _ => this,
+        _ => ctx.state.com.identity(this),
     }
 }
 
@@ -203,7 +203,7 @@ fn add_media_stream(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     } else {
         &MEDIA_STREAM
     };
-    let object = State::make_com(ctx, interface, ComState::MediaStream { owner: this, video })
+    let object = com::create(ctx, interface, ComState::MediaStream { owner: this, video })
         .map_err(Stop::Fault)?;
     if args[3] != 0 {
         ctx.mem.write_u32(args[3], object).map_err(Stop::Fault)?;
@@ -292,25 +292,21 @@ fn get_media_stream(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     if object == 0 {
         return Ok(MS_E_NOSTREAM);
     }
-    ctx.state.com_ref(object, 1);
+    ctx.state.com.add_ref(object);
     Ok(S_OK)
 }
 
-fn release_stream(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // The last reference let go of ends the movie, played out or not: a title
-    // that skips a movie lets go of it without stopping it first, and what is
-    // left of its sound stops there.
-    let left = ctx.state.com_ref(this, -1);
-    if left == 0 {
-        let now = ctx.declared_millis();
-        ctx.state.mixer.stop(this, now * 1_000_000);
-        if let Some(movie) = ctx.state.players.remove(&this).and_then(|p| p.movie) {
-            ctx.log.line(&format!("movie {} let go of", movie.name()));
-            drop(movie);
-            ctx.state.movies.evict_unused();
-        }
+/// Reclaim an `AMMultiMediaStream` once every COM face sharing `identity`
+/// drops to zero references: stop its mixer voice, drop its player/movie, and
+/// evict unused cached bytes.
+pub(crate) fn reclaim_stream(ctx: &mut Ctx<'_>, identity: u32) {
+    let now = ctx.declared_millis();
+    ctx.state.mixer.stop(identity, now * 1_000_000);
+    if let Some(movie) = ctx.state.players.remove(&identity).and_then(|p| p.movie) {
+        ctx.log.line(&format!("movie {} let go of", movie.name()));
+        drop(movie);
+        ctx.state.movies.evict_unused();
     }
-    Ok(left)
 }
 
 fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -405,14 +401,14 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
         // The stream sample owns this implicitly created surface; `GetSurface`
         // adds an external reference, and releasing the sample reclaims it once
         // external references are gone (#338).
-        if let Some(obj) = ctx.state.com_mut(surface) {
+        if let Some(obj) = ctx.state.com.get_mut(surface) {
             obj.refs = 0;
         }
         surface
     } else {
         args[0]
     };
-    let object = State::make_com(
+    let object = com::create(
         ctx,
         &DIRECT_DRAW_STREAM_SAMPLE,
         ComState::StreamSample { owner, surface },
@@ -430,7 +426,7 @@ fn surface_rgb565_target(ctx: &Ctx<'_>, surface: u32) -> Result<(u32, u32, u32, 
         pitch,
         format,
         ..
-    }) = ctx.state.com(surface).map(|o| o.state.clone())
+    }) = ctx.state.com.get(surface).map(|o| o.state.clone())
     else {
         return Err(Stop::NotWritten {
             what: format!("IDirectDrawStreamSample::Update: {surface:#x} is not a surface"),
@@ -457,7 +453,7 @@ fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         });
     }
     let Some(ComState::StreamSample { owner, surface }) =
-        ctx.state.com(this).map(|o| o.state.clone())
+        ctx.state.com.get(this).map(|o| o.state.clone())
     else {
         return Ok(MS_E_NOSTREAM);
     };
@@ -498,16 +494,17 @@ fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 
 fn get_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetSurface(surface, rect): the surface the sample fills, and all of it.
-    let Some(ComState::StreamSample { surface, .. }) = ctx.state.com(this).map(|o| o.state.clone())
+    let Some(ComState::StreamSample { surface, .. }) =
+        ctx.state.com.get(this).map(|o| o.state.clone())
     else {
         return Ok(MS_E_NOSTREAM);
     };
     if args[0] != 0 {
-        ctx.state.com_ref(surface, 1);
+        ctx.state.com.add_ref(surface);
         ctx.mem.write_u32(args[0], surface).map_err(Stop::Fault)?;
     }
     if args[1] != 0 {
-        let (width, height) = match ctx.state.com(surface).map(|o| &o.state) {
+        let (width, height) = match ctx.state.com.get(surface).map(|o| &o.state) {
             Some(ComState::Surface { width, height, .. }) => (*width, *height),
             _ => (0, 0),
         };

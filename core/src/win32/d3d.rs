@@ -9,7 +9,7 @@
 //! called stops the run by name (#11).
 
 use super::{ComState, Ctx, State};
-use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use crate::com::{self, method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use std::collections::BTreeMap;
@@ -716,7 +716,7 @@ fn create_vertex_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u
     let fvf = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
     let count = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
     let store = ctx.state.heap.alloc(fvf_stride(fvf) * count.max(1));
-    let object = State::make_com(
+    let object = com::create(
         ctx,
         &VERTEX_BUFFER7,
         ComState::VertexBuffer { store, fvf, count },
@@ -732,7 +732,7 @@ fn create_vertex_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u
 
 /// Where a vertex buffer keeps its vertices, and how they are laid out.
 fn buffer_of(ctx: &mut Ctx<'_>, this: u32) -> Option<(u32, u32, u32)> {
-    match ctx.state.com(this).map(|o| &o.state) {
+    match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::VertexBuffer { store, fvf, count }) => Some((*store, *fvf, *count)),
         _ => None,
     }
@@ -1211,7 +1211,7 @@ fn enum_texture_formats7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u
         super::ddraw::write_pixel_format(ctx, at, format)?;
         calls.push(vec![at, args[1]]);
     }
-    let label = if ctx.state.interface_of(this) == Some(DEVICE3.name) {
+    let label = if ctx.state.com.interface_of(this) == Some(DEVICE3.name) {
         "d3d3"
     } else {
         "d3d7"
@@ -1278,8 +1278,7 @@ fn create_device2(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
         )));
     }
     let surface = args[1];
-    let object =
-        State::make_com(ctx, &DEVICE2, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DEVICE2, ComState::Device3D { surface }).map_err(Stop::Fault)?;
     // A DirectX 5 device starts with specular highlights on, as Wine's
     // conformance test `test_lighting_interface_versions` finds Windows
     // starting one (#210).
@@ -1309,8 +1308,7 @@ fn create_device3(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Sto
         )));
     }
     let surface = args[1];
-    let object =
-        State::make_com(ctx, &DEVICE3, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DEVICE3, ComState::Device3D { surface }).map_err(Stop::Fault)?;
     if this != 0 {
         device(ctx, object).direct3d = this;
     }
@@ -1326,8 +1324,7 @@ fn create_device7(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     // CreateDevice(guid, surface, out). The surface is the guest's own, which
     // is what makes what the device draws guest-visible.
     let surface = args[1];
-    let object =
-        State::make_com(ctx, &DEVICE7, ComState::Device3D { surface }).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DEVICE7, ComState::Device3D { surface }).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "d3d7 device at {object:#010x} drawing into surface {surface:#010x}"
@@ -1350,7 +1347,7 @@ fn device_index_by_id(devices: &mut Vec<(u32, Device)>, identity: u32) -> usize 
 }
 
 fn device_index(state: &mut State, this: u32) -> usize {
-    let identity = state.identity(this);
+    let identity = state.com.identity(this);
     device_index_by_id(&mut state.immediate.devices, identity)
 }
 
@@ -1380,7 +1377,7 @@ pub fn set_device_viewport(state: &mut State, device: u32, viewport: u32) {
 fn add_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // A viewport belongs to the device that took it, and draws into that
     // device's surface.
-    match ctx.state.com_mut(args[0]).map(|o| &mut o.state) {
+    match ctx.state.com.get_mut(args[0]).map(|o| &mut o.state) {
         Some(ComState::Viewport { device, .. }) => {
             *device = this;
             Ok(S_OK)
@@ -1397,7 +1394,7 @@ fn set_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
 fn get_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let current = device(ctx, this).current_viewport;
     if current != 0 {
-        ctx.state.com_ref(current, 1);
+        ctx.state.com.add_ref(current);
     }
     ctx.mem.write_u32(args[0], current).map_err(Stop::Fault)?;
     Ok(S_OK)
@@ -1406,15 +1403,15 @@ fn get_current_viewport(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
 fn set_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The surface the device draws into, changed after it was made.
     let old = if let Some(ComState::Device3D { surface }) =
-        ctx.state.com_mut(this).map(|o| &mut o.state)
+        ctx.state.com.get_mut(this).map(|o| &mut o.state)
     {
         std::mem::replace(surface, args[0])
     } else {
         0
     };
     if old != 0 && old != args[0] {
-        let old_id = ctx.state.identity(old);
-        ctx.state.reclaim_surface_if_unreferenced(old_id);
+        let old_id = ctx.state.com.identity(old);
+        com::reclaim_surface_if_unreferenced(ctx, old_id);
     }
     ctx.log
         .line(&format!("d3d render target {:#010x}", args[0]));
@@ -1422,12 +1419,12 @@ fn set_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, 
 }
 
 fn get_render_target(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let surface = match ctx.state.com(this).map(|o| &o.state) {
+    let surface = match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::Device3D { surface }) => *surface,
         _ => 0,
     };
     if surface != 0 {
-        ctx.state.com_ref(surface, 1);
+        ctx.state.com.add_ref(surface);
     }
     ctx.mem.write_u32(args[0], surface).map_err(Stop::Fault)?;
     Ok(S_OK)
@@ -1549,7 +1546,7 @@ fn get_render_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     // DirectX 7 has no `TEXTUREMAPBLEND`: Wine's `d3d_device7_GetRenderState`
     // refuses it as invalid there. So a DirectX 7 device declares no start
     // for it.
-    let dx7 = ctx.state.interface_of(this) == Some(DEVICE7.name);
+    let dx7 = ctx.state.com.interface_of(this) == Some(DEVICE7.name);
     let Some(value) = device(ctx, this).get_render(state, dx7) else {
         ctx.log.line(&format!(
             "d3d render state {state} read before it was set, and what it starts as is not declared"
@@ -1617,7 +1614,7 @@ fn get_transform(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
 fn get_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let texture = device(ctx, this).get_texture(args[0]);
     if texture != 0 {
-        ctx.state.com_ref(texture, 1);
+        ctx.state.com.add_ref(texture);
     }
     ctx.mem.write_u32(args[1], texture).map_err(Stop::Fault)?;
     Ok(S_OK)
@@ -1628,10 +1625,10 @@ fn set_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
     // draws with, and lets go of what it drew with before.
     let previous = device(ctx, this).set_texture(args[0], args[1]);
     if args[1] != 0 {
-        ctx.state.com_ref(args[1], 1);
+        ctx.state.com.add_ref(args[1]);
     }
     if previous != 0 {
-        ctx.state.com_ref(previous, -1);
+        com::release_ref(ctx, previous);
     }
     Ok(S_OK)
 }
@@ -1697,11 +1694,11 @@ fn get_direct3d3(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     // every time it is asked for.
     let existing = device(ctx, this).direct3d;
     let object = if existing == 0 {
-        let made = State::make_com(ctx, &D3D3, ComState::None).map_err(Stop::Fault)?;
+        let made = com::create(ctx, &D3D3, ComState::None).map_err(Stop::Fault)?;
         device(ctx, this).direct3d = made;
         made
     } else {
-        ctx.state.com_ref(existing, 1);
+        ctx.state.com.add_ref(existing);
         existing
     };
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
@@ -1722,7 +1719,7 @@ fn create_material(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, S
     if let Some(refused) = aggregated(args[1]) {
         return Ok(refused);
     }
-    let object = State::make_com(ctx, &MATERIAL3, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &MATERIAL3, ComState::None).map_err(Stop::Fault)?;
     ctx.state.immediate.materials.insert(object, Vec::new());
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
     Ok(S_OK)
@@ -1733,7 +1730,7 @@ fn create_light(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop
     if let Some(refused) = aggregated(args[1]) {
         return Ok(refused);
     }
-    let object = State::make_com(ctx, &LIGHT, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &LIGHT, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[0], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
@@ -1743,7 +1740,7 @@ fn create_viewport(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, S
     if let Some(refused) = aggregated(args[1]) {
         return Ok(refused);
     }
-    let object = State::make_com(
+    let object = com::create(
         ctx,
         &VIEWPORT3,
         ComState::Viewport {
@@ -1770,7 +1767,7 @@ fn set_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
         .map_err(Stop::Fault)?
         .clamp(4, 0x100);
     let bytes = ctx.mem.slice(args[0], size as usize).map_err(Stop::Fault)?;
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let entry = ctx.state.immediate.materials.entry(identity).or_default();
     entry.clear();
     entry.extend_from_slice(bytes);
@@ -1778,7 +1775,7 @@ fn set_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 }
 
 fn get_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let bytes = ctx
         .state
         .immediate
@@ -1796,7 +1793,7 @@ fn get_material(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
 /// `d3d_texture2_GetHandle`, read as documentation, gives a texture its own
 /// (#210).
 fn get_handle(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let immediate = &mut ctx.state.immediate;
     let handle = match immediate.handles.iter().find(|(_, m)| **m == identity) {
         Some((handle, _)) => *handle,
@@ -1826,7 +1823,7 @@ const D3DERR_TEXTURE_LOAD_FAILED: u32 = 0x8876_02d5;
 /// (#210).
 fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     use super::ddraw::ddscaps::{ALLOCONLOAD, MIPMAP};
-    let surface = |ctx: &Ctx<'_>, at: u32| match ctx.state.com(at).map(|o| &o.state) {
+    let surface = |ctx: &Ctx<'_>, at: u32| match ctx.state.com.get(at).map(|o| &o.state) {
         Some(ComState::Surface {
             pixels,
             width,
@@ -1839,7 +1836,7 @@ fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
         }) => Some((*pixels, *width, *height, *pitch, *format, *palette, *caps)),
         _ => None,
     };
-    if ctx.state.identity(args[0]) == ctx.state.identity(this) {
+    if ctx.state.com.identity(args[0]) == ctx.state.com.identity(this) {
         return Ok(S_OK);
     }
     let (Some(to), Some(from)) = (surface(ctx, this), surface(ctx, args[0])) else {
@@ -1876,7 +1873,8 @@ fn load_texture(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     if let Some(key) = ctx.state.color_keys.get(&out_of).copied() {
         ctx.state.color_keys.insert(into, key);
     }
-    if let Some(ComState::Surface { caps, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+    if let Some(ComState::Surface { caps, .. }) = ctx.state.com.get_mut(this).map(|o| &mut o.state)
+    {
         *caps &= !ALLOCONLOAD;
     }
     Ok(S_OK)
@@ -1893,14 +1891,14 @@ fn store_viewport(ctx: &mut Ctx<'_>, this: u32, at: u32) -> Result<u32, Stop> {
         .to_vec();
     let field = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     let (x, y, w, h) = (field(4), field(8), field(12), field(16));
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     ctx.state.immediate.viewports.insert(identity, bytes);
     ctx.log.line(&format!("d3d viewport {w}x{h} at {x},{y}"));
     Ok(S_OK)
 }
 
 fn fetch_viewport(ctx: &mut Ctx<'_>, this: u32, at: u32) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let Some(bytes) = ctx.state.immediate.viewports.get(&identity).cloned() else {
         // D3DERR_VIEWPORTDATANOTSET.
         return Ok(0x8876_0305);
@@ -1948,7 +1946,7 @@ fn get_viewport7(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
 fn set_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetBackground(material handle): the viewport clears to that material's
     // colour.
-    match ctx.state.com_mut(this).map(|o| &mut o.state) {
+    match ctx.state.com.get_mut(this).map(|o| &mut o.state) {
         Some(ComState::Viewport { background, .. }) => {
             *background = args[0];
             Ok(S_OK)
@@ -1959,7 +1957,7 @@ fn set_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Sto
 
 fn get_background(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // GetBackground(handle, valid).
-    let handle = match ctx.state.com(this).map(|o| &o.state) {
+    let handle = match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::Viewport { background, .. }) => *background,
         _ => 0,
     };
@@ -2003,7 +2001,7 @@ fn clear_rects(
     colour: Option<u32>,
     depth_value: Option<f32>,
 ) -> Result<u32, Stop> {
-    let Some(&ComState::Viewport { device, .. }) = ctx.state.com(this).map(|o| &o.state) else {
+    let Some(&ComState::Viewport { device, .. }) = ctx.state.com.get(this).map(|o| &o.state) else {
         return Ok(DDERR_INVALIDPARAMS);
     };
     clear_on(ctx, method, device, count, rects, colour, depth_value)
@@ -2020,7 +2018,7 @@ fn clear_on(
     colour: Option<u32>,
     depth_value: Option<f32>,
 ) -> Result<u32, Stop> {
-    let surface = match ctx.state.com(device).map(|o| &o.state) {
+    let surface = match ctx.state.com.get(device).map(|o| &o.state) {
         Some(ComState::Device3D { surface }) => *surface,
         // D3DERR_VIEWPORTHASNODEVICE: never added to a device.
         _ => return Ok(0x8876_0306),
@@ -2032,7 +2030,7 @@ fn clear_on(
         pitch,
         format,
         ..
-    }) = ctx.state.com(surface).map(|o| &o.state)
+    }) = ctx.state.com.get(surface).map(|o| &o.state)
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
@@ -2092,7 +2090,7 @@ fn clear(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let handle = match ctx.state.com(this).map(|o| &o.state) {
+    let handle = match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::Viewport { background, .. }) => *background,
         _ => 0,
     };
@@ -2417,7 +2415,7 @@ fn draw(
     let Some(size) = pipeline::vertex_size(format) else {
         return Err(unwritten(format!("{method}: vertex format {format:#x}")));
     };
-    let Some(&ComState::Device3D { surface }) = ctx.state.com(this).map(|o| &o.state) else {
+    let Some(&ComState::Device3D { surface }) = ctx.state.com.get(this).map(|o| &o.state) else {
         return Ok(DDERR_INVALIDPARAMS);
     };
     let Some(&ComState::Surface {
@@ -2427,7 +2425,7 @@ fn draw(
         pitch,
         format: pixel_format,
         ..
-    }) = ctx.state.com(surface).map(|o| &o.state)
+    }) = ctx.state.com.get(surface).map(|o| &o.state)
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
@@ -2446,7 +2444,7 @@ fn draw(
     // texture its handle names, and how a texel and the colour make a pixel
     // is one state, `D3DRENDERSTATE_TEXTUREMAPBLEND` (#210). On a later
     // device either is a wall, as it was.
-    let dx5 = ctx.state.interface_of(this) == Some(DEVICE2.name);
+    let dx5 = ctx.state.com.interface_of(this) == Some(DEVICE2.name);
     let dev_idx = device_index(ctx.state, this);
     let by_handle = ctx.state.immediate.devices[dev_idx]
         .1
@@ -2455,7 +2453,7 @@ fn draw(
         _ if !dx5 || by_handle == 0 => 0,
         Some(&t)
             if matches!(
-                ctx.state.com(t).map(|o| &o.state),
+                ctx.state.com.get(t).map(|o| &o.state),
                 Some(ComState::Surface { .. })
             ) =>
         {
@@ -2604,7 +2602,7 @@ fn draw(
         stage(tss::ALPHAARG2),
     );
     let legacy = dx5.then(|| state(rs::TEXTUREMAPBLEND));
-    let texture_alpha = match ctx.state.com(texture).map(|o| &o.state) {
+    let texture_alpha = match ctx.state.com.get(texture).map(|o| &o.state) {
         Some(ComState::Surface { format, .. }) => format.masks[3] != 0,
         _ => true,
     };
@@ -2627,7 +2625,7 @@ fn draw(
     let place = if viewport7[2] != 0 {
         pipeline::Viewport::whole(viewport7[0], viewport7[1], viewport7[2], viewport7[3])
     } else {
-        match ctx.state.com(viewport).map(|o| &o.state) {
+        match ctx.state.com.get(viewport).map(|o| &o.state) {
             Some(&ComState::Viewport {
                 x,
                 y,
@@ -2638,7 +2636,7 @@ fn draw(
                 .state
                 .immediate
                 .viewports
-                .contains_key(&ctx.state.identity(viewport)) =>
+                .contains_key(&ctx.state.com.identity(viewport)) =>
             {
                 pipeline::Viewport::whole(x, y, w, h)
             }
@@ -2649,7 +2647,7 @@ fn draw(
             // `dwWidth`, `dwHeight`) is needed. Projecting untransformed `XYZ`
             // vertices through a title-described viewport still walls below.
             Some(ComState::Viewport { .. }) if format & fvf::POSITION_MASK == fvf::XYZRHW => {
-                let bytes = &ctx.state.immediate.viewports[&ctx.state.identity(viewport)];
+                let bytes = &ctx.state.immediate.viewports[&ctx.state.com.identity(viewport)];
                 let field = |o: usize| {
                     u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
                 };
@@ -2888,7 +2886,7 @@ pub fn rasterise(
     }
 
     // The texture the first stage samples, in its own format.
-    let texture_info = match ctx.state.com(texture).map(|o| &o.state) {
+    let texture_info = match ctx.state.com.get(texture).map(|o| &o.state) {
         Some(&ComState::Surface {
             pixels: at,
             width: tw,
@@ -2898,7 +2896,7 @@ pub fn rasterise(
             palette,
             ..
         }) => {
-            let palette = match ctx.state.com(palette).map(|o| &o.state) {
+            let palette = match ctx.state.com.get(palette).map(|o| &o.state) {
                 Some(ComState::Palette { store }) => {
                     let entries = ctx.mem.slice(*store, 256 * 4).map_err(Stop::Fault)?;
                     let mut out = [[0u8; 4]; 256];
@@ -3748,16 +3746,14 @@ mod tests {
                 Err(Stop::NotWritten { .. })
             ));
             // HAL_DEVICE succeeds, produces IDirect3DDevice3, and records parent IDirect3D3.
-            let d3d3 =
-                crate::win32::State::make_com(ctx, &super::D3D3, crate::win32::ComState::None)
-                    .unwrap();
+            let d3d3 = crate::com::create(ctx, &super::D3D3, crate::win32::ComState::None).unwrap();
             ctx.mem.write(guid_at, &HAL_DEVICE).unwrap();
             assert_eq!(
                 create_device3(ctx, d3d3, &[guid_at, 0x2000, out_at, 0]).unwrap(),
                 S_OK
             );
             let dev = ctx.mem.read_u32(out_at).unwrap();
-            assert_eq!(ctx.state.interface_of(dev), Some(DEVICE3.name));
+            assert_eq!(ctx.state.com.interface_of(dev), Some(DEVICE3.name));
             assert_eq!(super::get_direct3d3(ctx, dev, &[out_at]).unwrap(), S_OK);
             assert_eq!(ctx.mem.read_u32(out_at).unwrap(), d3d3);
 
@@ -3812,7 +3808,7 @@ mod tests {
 
             // DEVICE3 draws XYZRHW triangles through a title-described SetViewport2 viewport.
             let pixels = ctx.state.heap.alloc(16 * 16 * 2);
-            let surface = crate::win32::State::make_com(
+            let surface = crate::com::create(
                 ctx,
                 &crate::win32::ddraw::DIRECT_DRAW_SURFACE4,
                 crate::win32::ComState::Surface {

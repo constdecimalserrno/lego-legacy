@@ -698,7 +698,7 @@ fn inspect_win32(machine: &Machine) -> String {
     );
     let mut surface_count = 0usize;
     let mut palettes = Vec::new();
-    for (addr, obj) in st.com_objects() {
+    for (addr, obj) in st.com.primary_objects() {
         match &obj.state {
             ComState::Surface {
                 pixels,
