@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 /// A handle or state this device was never given.
 const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+const D3DERR_OUTOFMEMORY: u32 = 0x8007_000e;
 /// BeginScene inside a scene, or EndScene outside one.
 const D3DERR_SCENE_IN_SCENE: u32 = 0x8876_02f8;
 const D3DERR_SCENE_NOT_IN_SCENE: u32 = 0x8876_02f9;
@@ -95,18 +96,18 @@ impl Immediate {
         self.handles.retain(|_, id| *id != identity);
     }
 
-    /// Drain all texture pointers bound to `identity` when the device drops to
-    /// zero references so their COM refcounts are released cleanly (#338).
-    pub(crate) fn take_device_textures(&mut self, identity: u32) -> Vec<u32> {
+    /// Remove `identity`'s immediate-mode device state and return all bound
+    /// texture pointers in stage order so their COM refcounts are released (#338, #406).
+    pub(crate) fn reclaim_device(&mut self, identity: u32) -> Vec<u32> {
         let mut out = Vec::new();
-        if let Some((_, dev)) = self.devices.iter_mut().find(|(id, _)| *id == identity) {
-            for slot in &mut dev.textures {
-                let tex = std::mem::take(slot);
+        if let Some(pos) = self.devices.iter().position(|(id, _)| *id == identity) {
+            let (_, dev) = self.devices.remove(pos);
+            for tex in dev.textures {
                 if tex != 0 {
                     out.push(tex);
                 }
             }
-            for (_, tex) in std::mem::take(&mut dev.textures_extra) {
+            for (_, tex) in dev.textures_extra {
                 if tex != 0 {
                     out.push(tex);
                 }
@@ -715,7 +716,18 @@ fn create_vertex_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u
     let at = args[0];
     let fvf = ctx.mem.read_u32(at + 8).map_err(Stop::Fault)?;
     let count = ctx.mem.read_u32(at + 12).map_err(Stop::Fault)?;
-    let store = ctx.state.heap.alloc(fvf_stride(fvf) * count.max(1));
+    let Some(bytes) = fvf_stride(fvf).checked_mul(count.max(1)) else {
+        return Ok(D3DERR_OUTOFMEMORY);
+    };
+    let (store, _) = ctx.state.vb_pool.alloc(&mut ctx.state.heap, bytes);
+    if store == 0 {
+        return Ok(D3DERR_OUTOFMEMORY);
+    }
+    let zero_len = bytes.max(1).next_multiple_of(8) as usize;
+    ctx.mem
+        .slice_mut(store, zero_len)
+        .map_err(Stop::Fault)?
+        .fill(0);
     let object = com::create(
         ctx,
         &VERTEX_BUFFER7,

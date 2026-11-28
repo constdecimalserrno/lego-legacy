@@ -320,8 +320,12 @@ impl crate::snap::Snap for SlabPool {
             |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
         );
         if v.is_reading() && !v.failed() {
+            let mut seen = std::collections::BTreeSet::new();
             let valid = buckets.iter().all(|(&sz, dq)| {
-                sz != 0 && sz % 8 == 0 && !dq.is_empty() && dq.iter().all(|&a| a != 0)
+                sz != 0
+                    && sz % 8 == 0
+                    && !dq.is_empty()
+                    && dq.iter().all(|&a| a != 0 && seen.insert(a))
             });
             if !valid {
                 buckets.clear();

@@ -291,6 +291,31 @@ impl ComTable {
             .values()
             .any(|o| matches!(o.state, ComState::Surface { pixels: p, .. } if p == pixels))
     }
+
+    fn has_live_palette_holder(&self, identity: u32, primary_only: bool) -> bool {
+        self.objects.values().any(|o| {
+            matches!(
+                o.state,
+                ComState::Surface {
+                    primary, palette, ..
+                } if (!primary_only || primary)
+                    && palette != 0
+                    && self.identity(palette) == identity
+            )
+        })
+    }
+
+    fn has_live_device_holder(&self, identity: u32) -> bool {
+        self.objects.iter().any(|(&addr, o)| {
+            matches!(
+                o.state,
+                ComState::Viewport { device, .. }
+                    if device != 0
+                        && self.identity(device) == identity
+                        && self.has_live_refs(addr)
+            )
+        })
+    }
 }
 
 fn resolve_interface_name(s: &str) -> Option<&'static str> {
@@ -397,13 +422,56 @@ pub(crate) fn reclaim_surface_if_unreferenced(ctx: &mut Ctx<'_>, identity: u32) 
     drain_reclaim_worklist(ctx, &mut work);
 }
 
+/// Reclaim a DirectDraw palette's 1 KiB store and COM faces once every face of
+/// `identity` has refcount 0 and no live surface or screen palette still holds it.
+pub(crate) fn reclaim_palette_if_unreferenced(
+    ctx: &mut Ctx<'_>,
+    identity: u32,
+    from_primary: bool,
+) {
+    let Some(&ComState::Palette { store }) = ctx.state.com.get(identity).map(|o| &o.state) else {
+        return;
+    };
+    if from_primary
+        && store != 0
+        && ctx.state.palette == store
+        && !ctx.state.com.has_live_palette_holder(identity, true)
+    {
+        ctx.state.palette = 0;
+    }
+    if ctx.state.com.has_live_refs(identity)
+        || ctx.state.com.has_live_palette_holder(identity, false)
+        || (store != 0 && ctx.state.palette == store)
+    {
+        return;
+    }
+    ctx.state.com.reclaim_faces(identity);
+    if store != 0 {
+        if ctx.state.heap.size_of(store) == Some(256 * 4) {
+            ctx.state.palette_pool.free(&ctx.state.heap, store);
+        } else {
+            ctx.state.heap.free(store);
+        }
+    }
+}
+
 fn enqueue_reclaim_for_identity(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec<ReclaimWork>) {
     if ctx.state.com.has_live_refs(identity) {
         return;
     }
     match ctx.state.com.get(identity).map(|o| &o.state) {
         Some(ComState::Surface { .. }) => work.push(ReclaimWork::ReclaimSurface(identity)),
+        Some(ComState::Palette { .. }) => reclaim_palette_if_unreferenced(ctx, identity, false),
+        Some(&ComState::VertexBuffer { store, .. }) => {
+            if store != 0 {
+                ctx.state.vb_pool.free(&ctx.state.heap, store);
+            }
+            ctx.state.com.reclaim_faces(identity);
+        }
         Some(&ComState::Device3D { surface }) => {
+            if ctx.state.com.has_live_device_holder(identity) {
+                return;
+            }
             if surface != 0 {
                 let target = ctx.state.com.identity(surface);
                 work.push(ReclaimWork::ReclaimSurface(target));
@@ -411,19 +479,66 @@ fn enqueue_reclaim_for_identity(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec
             for tex in ctx
                 .state
                 .immediate
-                .take_device_textures(identity)
+                .reclaim_device(identity)
                 .into_iter()
                 .rev()
             {
                 work.push(ReclaimWork::ReleaseFace(tex));
             }
+            ctx.state.com.reclaim_faces(identity);
         }
-        Some(&ComState::RetainedDevice { surface, .. })
-        | Some(&ComState::StreamSample { surface, .. })
-            if surface != 0 =>
-        {
-            let target = ctx.state.com.identity(surface);
-            work.push(ReclaimWork::ReclaimSurface(target));
+        Some(&ComState::RetainedDevice {
+            surface, immediate, ..
+        }) => {
+            if ctx.state.com.has_live_device_holder(identity) {
+                return;
+            }
+            if surface != 0 {
+                let target = ctx.state.com.identity(surface);
+                work.push(ReclaimWork::ReclaimSurface(target));
+            }
+            if immediate != 0 {
+                work.push(ReclaimWork::ReleaseFace(immediate));
+            }
+            ctx.state.names.remove(&identity);
+            ctx.state.set_values.retain(|&(id, _), _| id != identity);
+            ctx.state.com.reclaim_faces(identity);
+        }
+        Some(&ComState::Viewport { device, .. }) if device != 0 => {
+            let dev_id = ctx.state.com.identity(device);
+            enqueue_reclaim_for_identity(ctx, dev_id, work);
+        }
+        Some(&ComState::StreamSample { surface, .. }) => {
+            if surface != 0 {
+                let target = ctx.state.com.identity(surface);
+                work.push(ReclaimWork::ReclaimSurface(target));
+            }
+            ctx.state.com.reclaim_faces(identity);
+        }
+        Some(ComState::Device { .. }) => {
+            ctx.state.com.reclaim_faces(identity);
+        }
+        Some(ComState::Array { items }) => {
+            work.extend(
+                items
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|&item| item != 0)
+                    .map(ReclaimWork::ReleaseFace),
+            );
+            ctx.state.com.reclaim_faces(identity);
+        }
+        Some(ComState::PickedArray { picks }) => {
+            work.extend(
+                picks
+                    .iter()
+                    .rev()
+                    .map(|&(_, array, _)| array)
+                    .filter(|&array| array != 0)
+                    .map(ReclaimWork::ReleaseFace),
+            );
+            ctx.state.com.reclaim_faces(identity);
         }
         Some(ComState::Sound) => {
             crate::win32::dsound::reclaim_buffer(ctx, identity);
@@ -459,7 +574,9 @@ fn try_reclaim_surface(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec<ReclaimW
     let Some(&ComState::Surface {
         pixels,
         owned_pixels,
+        primary,
         back,
+        palette,
         ..
     }) = ctx.state.com.get(identity).map(|o| &o.state)
     else {
@@ -492,6 +609,11 @@ fn try_reclaim_surface(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec<ReclaimW
 
     if owned_pixels && pixels != 0 {
         ctx.state.surface_pool.free(&ctx.state.heap, pixels);
+    }
+
+    if palette != 0 {
+        let pal_id = ctx.state.com.identity(palette);
+        reclaim_palette_if_unreferenced(ctx, pal_id, primary);
     }
 
     if back != 0 {
@@ -912,10 +1034,11 @@ fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop>
 ///
 /// Reference counting is real. Once every face sharing an object's identity
 /// reaches zero references, [`release_ref`] reclaims DirectDraw surfaces
-/// (#338), DirectSound buffers (#385), DirectShow filter graphs (#372, #405),
-/// and `AMMultiMediaStream` players (along with draining `Device3D`,
-/// `RetainedDevice`, and `StreamSample` surface guards); other COM objects
-/// stay held until the run ends.
+/// (#338), palettes (#406), Direct3D vertex buffers (#406), DirectSound buffers
+/// (#385), DirectShow filter graphs (#372, #405), `AMMultiMediaStream` players,
+/// `Device3D`, `RetainedDevice`, `StreamSample`, DirectInput `Device`, and
+/// D3DRM `Array`/`PickedArray` COM objects; other COM objects stay held until
+/// the run ends.
 pub const QUERY_INTERFACE: Method = method("QueryInterface", 2, query_interface);
 pub const ADD_REF: Method = method("AddRef", 0, add_ref);
 pub const RELEASE: Method = method("Release", 0, release);

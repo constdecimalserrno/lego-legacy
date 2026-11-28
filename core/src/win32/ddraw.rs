@@ -1766,16 +1766,31 @@ fn enumerate_modes(ctx: &mut Ctx<'_>, args: &[u32], size: u32) -> Result<u32, St
     Ok(S_OK)
 }
 
+const DDERR_OUTOFMEMORY: u32 = 0x8007_000e;
+
 fn create_palette(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // CreatePalette(caps, entries, out, outer).
-    let store = ctx.state.heap.alloc(256 * 4);
-    if args[1] != 0 {
-        let entries = ctx
-            .mem
-            .slice(args[1], 256 * 4)
-            .map_err(Stop::Fault)?
-            .to_vec();
+    let entries = if args[1] != 0 {
+        Some(
+            ctx.mem
+                .slice(args[1], 256 * 4)
+                .map_err(Stop::Fault)?
+                .to_vec(),
+        )
+    } else {
+        None
+    };
+    let (store, _) = ctx.state.palette_pool.alloc(&mut ctx.state.heap, 256 * 4);
+    if store == 0 {
+        return Ok(DDERR_OUTOFMEMORY);
+    }
+    if let Some(entries) = entries {
         ctx.mem.write(store, &entries).map_err(Stop::Fault)?;
+    } else {
+        ctx.mem
+            .slice_mut(store, 256 * 4)
+            .map_err(Stop::Fault)?
+            .fill(0);
     }
     let object =
         com::create(ctx, &DIRECT_DRAW_PALETTE, ComState::Palette { store }).map_err(Stop::Fault)?;
@@ -1823,19 +1838,30 @@ fn get_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 
 fn set_palette(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The surface's pixels are looked up in the palette from now on; the
-    // primary's is what the screen shows through.
-    let Some(ComState::Palette { store }) = ctx.state.com.get(args[0]).map(|o| o.state.clone())
+    // primary's is what the screen shows through. Passing 0 detaches.
+    let new_pal = args[0];
+    let new_store = if new_pal == 0 {
+        0
+    } else {
+        let Some(&ComState::Palette { store }) = ctx.state.com.get(new_pal).map(|o| &o.state)
+        else {
+            return Ok(S_OK);
+        };
+        store
+    };
+    let Some(ComState::Surface {
+        palette, primary, ..
+    }) = ctx.state.com.get_mut(this).map(|o| &mut o.state)
     else {
         return Ok(S_OK);
     };
-    if let Some(ComState::Surface {
-        palette, primary, ..
-    }) = ctx.state.com.get_mut(this).map(|o| &mut o.state)
-    {
-        *palette = args[0];
-        if *primary {
-            ctx.state.palette = store;
-        }
+    let (old_pal, was_primary) = (std::mem::replace(palette, new_pal), *primary);
+    if was_primary && new_pal != 0 {
+        ctx.state.palette = new_store;
+    }
+    if old_pal != 0 {
+        let old_id = ctx.state.com.identity(old_pal);
+        com::reclaim_palette_if_unreferenced(ctx, old_id, was_primary);
     }
     Ok(S_OK)
 }

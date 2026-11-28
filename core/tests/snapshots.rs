@@ -1197,7 +1197,7 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
 
     let (mut m, _host) = machine_at(4);
 
-    // Populate live multi-face COM objects, reclaimed COM slots, and both SlabPools.
+    // Populate live multi-face COM objects, reclaimed COM slots, and all four SlabPools.
     let (dd, dd4, graph, mc) = with_machine_ctx(&mut m, "com-snap", |ctx| {
         let dd = com::create(
             ctx,
@@ -1218,7 +1218,8 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
         (dd, dd4, graph, mc)
     });
 
-    // Populate `surface_pool` (exact) and `sound_pool` (best-fit 2x) in explicit FIFO order.
+    // Populate `surface_pool` (exact), `sound_pool` (best-fit 2x), `palette_pool` (exact),
+    // and `vb_pool` (best-fit 2x) in explicit FIFO order.
     let (surf_a, _) = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
     let (surf_b, _) = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
     m.state.surface_pool.free(&m.state.heap, surf_b);
@@ -1228,6 +1229,16 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
     let (snd_b, _) = m.state.sound_pool.alloc(&mut m.state.heap, 2048);
     m.state.sound_pool.free(&m.state.heap, snd_a);
     m.state.sound_pool.free(&m.state.heap, snd_b);
+
+    let (pal_a, _) = m.state.palette_pool.alloc(&mut m.state.heap, 1024);
+    let (pal_b, _) = m.state.palette_pool.alloc(&mut m.state.heap, 1024);
+    m.state.palette_pool.free(&m.state.heap, pal_b);
+    m.state.palette_pool.free(&m.state.heap, pal_a);
+
+    let (vb_a, _) = m.state.vb_pool.alloc(&mut m.state.heap, 4096);
+    let (vb_b, _) = m.state.vb_pool.alloc(&mut m.state.heap, 4096);
+    m.state.vb_pool.free(&m.state.heap, vb_a);
+    m.state.vb_pool.free(&m.state.heap, vb_b);
 
     let snap = m.snapshot_v2().expect("snapshot v2");
     let digest = m.state_digest();
@@ -1246,7 +1257,7 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
         m.state.com.vtable("IDirectDraw")
     );
 
-    // Exact FIFO reuse order in both SlabPools and ComTable::free_slots must match bit-for-bit.
+    // Exact FIFO reuse order in all four SlabPools and ComTable::free_slots must match bit-for-bit.
     assert_eq!(
         restored
             .state
@@ -1275,6 +1286,28 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
             .alloc(&mut restored.state.heap, 1500),
         (snd_b, true)
     );
+    assert_eq!(
+        restored
+            .state
+            .palette_pool
+            .alloc(&mut restored.state.heap, 1024),
+        (pal_b, true)
+    );
+    assert_eq!(
+        restored
+            .state
+            .palette_pool
+            .alloc(&mut restored.state.heap, 1024),
+        (pal_a, true)
+    );
+    assert_eq!(
+        restored.state.vb_pool.alloc(&mut restored.state.heap, 3000),
+        (vb_a, true)
+    );
+    assert_eq!(
+        restored.state.vb_pool.alloc(&mut restored.state.heap, 3000),
+        (vb_b, true)
+    );
     let next_restored = with_machine_ctx(&mut restored, "com-snap", |ctx| {
         com::create(
             ctx,
@@ -1297,6 +1330,8 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
     assert_eq!(extra, next_restored);
     let _ = m.state.surface_pool.alloc(&mut m.state.heap, 4096);
     let _ = m.state.sound_pool.alloc(&mut m.state.heap, 1500);
+    let _ = m.state.palette_pool.alloc(&mut m.state.heap, 1024);
+    let _ = m.state.vb_pool.alloc(&mut m.state.heap, 3000);
     m.restore_v2_live(&snap).expect("live restore");
     assert_eq!(m.state_digest(), digest);
     assert_eq!(
@@ -1307,6 +1342,11 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
         m.state.sound_pool.alloc(&mut m.state.heap, 1500),
         (snd_a, true)
     );
+    assert_eq!(
+        m.state.palette_pool.alloc(&mut m.state.heap, 1024),
+        (pal_b, true)
+    );
+    assert_eq!(m.state.vb_pool.alloc(&mut m.state.heap, 3000), (vb_a, true));
 
     // 3. Corrupt SlabPools (`max_factor == 0`, empty bucket, zero addr) are rejected cleanly.
     let mut w = Writer::new();
@@ -1337,6 +1377,18 @@ fn com_table_and_slab_pool_round_trip_through_llsnap_v2_and_reject_corrupt_data(
     let mut r = Reader::new(&w_zero_addr.out);
     bad_pool.snap(&mut r);
     assert!(r.failed(), "SlabPool with addr == 0 must be rejected");
+
+    let mut w_dup_addr = Writer::new();
+    let (mut two, mut addr_dup) = (2u32, 0x2000_0200u32);
+    w_dup_addr.u32(&mut one); // max_factor = 1
+    w_dup_addr.u32(&mut one); // 1 bucket
+    w_dup_addr.u32(&mut sz); // bucket size 64
+    w_dup_addr.u32(&mut two); // 2 addrs
+    w_dup_addr.u32(&mut addr_dup);
+    w_dup_addr.u32(&mut addr_dup); // duplicate addr (invalid)
+    let mut r = Reader::new(&w_dup_addr.out);
+    bad_pool.snap(&mut r);
+    assert!(r.failed(), "SlabPool with duplicate addr must be rejected");
 
     // 4. Corrupt ComTable (desynced objects/faces and zero/overlapping free_slots) is rejected.
     let mut w_desync = Writer::new();
