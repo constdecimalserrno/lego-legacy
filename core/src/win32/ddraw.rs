@@ -4,8 +4,8 @@
 //! writes and the machine presents (ADR-0002). Nothing is uploaded anywhere,
 //! because the frame the guest made is already the frame to show.
 
-use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use super::{stdcall, ComState, Ctx, Shim};
+use crate::com::{self, method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use crate::raster::PixelFormat;
@@ -19,7 +19,7 @@ pub const SHIMS: &[Shim] = &[
 
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DirectDrawCreate(guid, out, outer).
-    let object = State::make_com(ctx, &DIRECT_DRAW, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_DRAW, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!("ddraw created at {object:#010x}"));
     Ok(S_OK)
@@ -39,7 +39,7 @@ fn create_ex(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
             caller: 0,
         });
     }
-    let object = State::make_com(ctx, &DIRECT_DRAW7, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_DRAW7, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!("ddraw7 created at {object:#010x}"));
     Ok(S_OK)
@@ -601,8 +601,10 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     if back_count > 0 {
         let back_pixels = ctx
             .state
-            .alloc_surface_pixels(pitch * height.max(1) + SURFACE_SLACK);
-        let back = State::make_com(
+            .surface_pool
+            .alloc(&mut ctx.state.heap, pitch * height.max(1) + SURFACE_SLACK)
+            .0;
+        let back = com::create(
             ctx,
             &DIRECT_DRAW_SURFACE,
             ComState::Surface {
@@ -624,10 +626,10 @@ fn create_surface(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
         // An implicitly created backbuffer starts with zero external references
         // and stays alive via its parent primary surface until `GetAttachedSurface`
         // hands a reference out, as Windows DirectDraw does.
-        if let Some(obj) = ctx.state.com_mut(back) {
+        if let Some(obj) = ctx.state.com.get_mut(back) {
             obj.refs = 0;
         }
-        if let Some(object) = ctx.state.com_mut(object) {
+        if let Some(object) = ctx.state.com.get_mut(object) {
             if let ComState::Surface { back: slot, .. } = &mut object.state {
                 *slot = back;
             }
@@ -685,8 +687,10 @@ fn make_surface_as(
     let pitch = pitch_for(width, format.bits);
     let pixels = ctx
         .state
-        .alloc_surface_pixels(pitch * height.max(1) + SURFACE_SLACK);
-    let object = State::make_com(
+        .surface_pool
+        .alloc(&mut ctx.state.heap, pitch * height.max(1) + SURFACE_SLACK)
+        .0;
+    let object = com::create(
         ctx,
         &DIRECT_DRAW_SURFACE,
         ComState::Surface {
@@ -734,7 +738,7 @@ struct SurfaceInfo {
 }
 
 fn surface_of(ctx: &Ctx<'_>, this: u32) -> Option<SurfaceInfo> {
-    match ctx.state.com(this).map(|o| &o.state) {
+    match ctx.state.com.get(this).map(|o| &o.state) {
         Some(ComState::Surface {
             pixels,
             width,
@@ -778,7 +782,7 @@ fn dc_out(ctx: &Ctx<'_>, surface: u32) -> bool {
     if ctx.state.surface_dcs.is_empty() {
         return false;
     }
-    let surface = ctx.state.identity(surface);
+    let surface = ctx.state.com.identity(surface);
     ctx.state.surface_dcs.values().any(|s| *s == surface)
 }
 
@@ -793,7 +797,10 @@ fn busy(ctx: &Ctx<'_>, this: u32, call: &str, surfaces: &[u32]) -> Result<(), St
         Some(s) => Err(Stop::NotWritten {
             what: format!(
                 "{}::{call}: {s:#x} while its DC is out",
-                ctx.state.interface_of(this).unwrap_or("IDirectDrawSurface")
+                ctx.state
+                    .com
+                    .interface_of(this)
+                    .unwrap_or("IDirectDrawSurface")
             ),
             caller: 0,
         }),
@@ -809,7 +816,7 @@ fn get_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     if args[0] == 0 {
         return Ok(DDERR_INVALIDPARAMS);
     }
-    let surface = ctx.state.identity(this);
+    let surface = ctx.state.com.identity(this);
     if dc_out(ctx, this) {
         return Ok(DDERR_DCALREADYCREATED);
     }
@@ -829,7 +836,7 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // A screen with nothing behind it has its frame then, as letting go of a
     // lock of the whole of it does (`unlock`): Wine's ReleaseDC brings the
     // front buffer up to date.
-    let surface = ctx.state.identity(this);
+    let surface = ctx.state.com.identity(this);
     let Some(&dc) = ctx
         .state
         .surface_dcs
@@ -842,7 +849,10 @@ fn release_dc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         return Err(Stop::NotWritten {
             what: format!(
                 "{}::ReleaseDC: {:#x}, where the surface's own DC is {dc:#x}",
-                ctx.state.interface_of(this).unwrap_or("IDirectDrawSurface"),
+                ctx.state
+                    .com
+                    .interface_of(this)
+                    .unwrap_or("IDirectDrawSurface"),
                 args[0]
             ),
             caller: 0,
@@ -956,7 +966,7 @@ fn attached_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
     if back == 0 {
         return Ok(DDERR_NOTFOUND);
     }
-    ctx.state.com_ref(back, 1);
+    ctx.state.com.add_ref(back);
     Ok(S_OK)
 }
 
@@ -1143,7 +1153,7 @@ fn set_clipper(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
         return Ok(S_OK);
     }
     let whole = (0, 0, s.width as i32, s.height as i32);
-    match ctx.state.clip_lists.get(&ctx.state.identity(args[0])) {
+    match ctx.state.clip_lists.get(&ctx.state.com.identity(args[0])) {
         Some(list) if *list == whole => {
             ctx.state.clipped.insert(s.pixels);
             Ok(S_OK)
@@ -1162,7 +1172,7 @@ fn set_clip_list(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     // SetClipList(region, flags): an RGNDATA, a header of four words and a
     // bounding rectangle, then its rectangles. One rectangle is a clip list
     // this machine keeps; more stop here.
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     if args[0] == 0 {
         ctx.state.clip_lists.remove(&identity);
         return Ok(S_OK);
@@ -1189,7 +1199,7 @@ fn set_hwnd(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetHWnd(flags, window): the clipper clips to the part of the screen the
     // window shows, which on this machine is all of it, as `GetClientRect`
     // says (#117). No window, and it clips to nothing it was given.
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     if args[1] == 0 {
         ctx.state.clip_lists.remove(&identity);
         return Ok(S_OK);
@@ -1371,7 +1381,7 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         width: w,
         pitch: p,
         ..
-    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    }) = ctx.state.com.get_mut(this).map(|o| &mut o.state)
     else {
         return Ok(DDERR_INVALIDPARAMS);
     };
@@ -1381,7 +1391,7 @@ fn set_surface_desc(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, S
         (*w, *p) = (width, pitch);
     }
     if free_before && before != 0 {
-        ctx.state.free_surface_pixels(before);
+        ctx.state.surface_pool.free(&ctx.state.heap, before);
     }
     // Its key and its clipper are its own, kept by where its pixels are, and
     // go with them; a key or a clipper kept where they now are was a
@@ -1767,8 +1777,8 @@ fn create_palette(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
             .to_vec();
         ctx.mem.write(store, &entries).map_err(Stop::Fault)?;
     }
-    let object = State::make_com(ctx, &DIRECT_DRAW_PALETTE, ComState::Palette { store })
-        .map_err(Stop::Fault)?;
+    let object =
+        com::create(ctx, &DIRECT_DRAW_PALETTE, ComState::Palette { store }).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
@@ -1782,7 +1792,7 @@ fn entries(args: &[u32]) -> (u32, u32) {
 
 fn set_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // SetEntries(flags, start, count, entries).
-    let Some(ComState::Palette { store }) = ctx.state.com(this).map(|o| o.state.clone()) else {
+    let Some(ComState::Palette { store }) = ctx.state.com.get(this).map(|o| o.state.clone()) else {
         return Ok(S_OK);
     };
     let (start, count) = entries(args);
@@ -1798,7 +1808,7 @@ fn set_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 }
 
 fn get_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let Some(ComState::Palette { store }) = ctx.state.com(this).map(|o| o.state.clone()) else {
+    let Some(ComState::Palette { store }) = ctx.state.com.get(this).map(|o| o.state.clone()) else {
         return Ok(S_OK);
     };
     let (start, count) = entries(args);
@@ -1814,12 +1824,13 @@ fn get_entries(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 fn set_palette(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     // The surface's pixels are looked up in the palette from now on; the
     // primary's is what the screen shows through.
-    let Some(ComState::Palette { store }) = ctx.state.com(args[0]).map(|o| o.state.clone()) else {
+    let Some(ComState::Palette { store }) = ctx.state.com.get(args[0]).map(|o| o.state.clone())
+    else {
         return Ok(S_OK);
     };
     if let Some(ComState::Surface {
         palette, primary, ..
-    }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    }) = ctx.state.com.get_mut(this).map(|o| &mut o.state)
     {
         *palette = args[0];
         if *primary {
@@ -1830,7 +1841,7 @@ fn set_palette(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 }
 
 fn create_clipper(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &DIRECT_DRAW_CLIPPER, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_DRAW_CLIPPER, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[1], object).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
@@ -2404,9 +2415,10 @@ mod tests {
     #[test]
     fn flip_disjoint_zero_alloc_overlap_fallback_and_dc_out() {
         use super::{dc_out, flip, screen_format, DIRECT_DRAW_SURFACE};
+        use crate::com;
         use crate::com::S_OK;
         use crate::win32::tests::with_test_ctx;
-        use crate::win32::{ComState, State};
+        use crate::win32::ComState;
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
             let (width, height, pitch) = (16u32, 8u32, 32u32);
@@ -2414,7 +2426,7 @@ mod tests {
             let format = screen_format(16);
 
             // Disjoint front (0x2000) and back (0x4000) surfaces -> zero-alloc read_and_write path.
-            let back = State::make_com(
+            let back = com::create(
                 ctx,
                 &DIRECT_DRAW_SURFACE,
                 ComState::Surface {
@@ -2431,7 +2443,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let front = State::make_com(
+            let front = com::create(
                 ctx,
                 &DIRECT_DRAW_SURFACE,
                 ComState::Surface {
@@ -2461,7 +2473,7 @@ mod tests {
 
             // Overlapping back (0x2040) and front (0x2000) -> fallback copy preserves exact bytes.
             if let Some(ComState::Surface { pixels, .. }) =
-                ctx.state.com_mut(back).map(|o| &mut o.state)
+                ctx.state.com.get_mut(back).map(|o| &mut o.state)
             {
                 *pixels = 0x2040;
             }
@@ -2496,13 +2508,14 @@ mod tests {
             create_surface, ddscaps, lock, set_color_key, set_surface_desc, surface_of, unlock,
             DIRECT_DRAW, DIRECT_DRAW_SURFACE4,
         };
+        use crate::com;
         use crate::com::{RELEASE, S_OK};
         use crate::win32::d3d::TEXTURE2;
         use crate::win32::tests::with_test_ctx;
-        use crate::win32::{ComState, State};
+        use crate::win32::ComState;
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x20_0000, |ctx| {
-            let dd = State::make_com(ctx, &DIRECT_DRAW, ComState::None).unwrap();
+            let dd = com::create(ctx, &DIRECT_DRAW, ComState::None).unwrap();
             let desc_at = 0x1000u32;
             let lock_desc_at = 0x1100u32;
             let out_at = 0x1200u32;
@@ -2525,15 +2538,15 @@ mod tests {
                     S_OK
                 );
                 let s1 = ctx.mem.read_u32(out_at).unwrap();
-                let s4 = State::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
-                let tex = State::face(ctx, s4, &TEXTURE2).unwrap();
+                let s4 = com::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
+                let tex = com::face(ctx, s4, &TEXTURE2).unwrap();
                 assert_eq!((RELEASE.run)(ctx, s1, &[]).unwrap(), 0);
                 assert_eq!((RELEASE.run)(ctx, s4, &[]).unwrap(), 0);
                 assert_eq!((RELEASE.run)(ctx, tex, &[]).unwrap(), 0);
             }
             let base_live = ctx.state.heap.live_bytes();
             let base_extent = ctx.state.heap.extent();
-            let base_com = ctx.state.com_objects().count();
+            let base_com = ctx.state.com.primary_objects().count();
             let mut long_lived_small = Vec::new();
 
             // 100,000 64x64x16 (8 KiB) + periodic 128x128x16 (32 KiB) surfaces, interleaved
@@ -2565,7 +2578,7 @@ mod tests {
                     ctx.mem.write_u32(desc_at + 4, 0x800).unwrap();
                     ctx.mem.write_u32(desc_at + 0x24, client_buf).unwrap();
                     assert_eq!(set_surface_desc(ctx, surf, &[desc_at, 0]).unwrap(), S_OK);
-                    let tex = State::face(ctx, surf, &TEXTURE2).unwrap();
+                    let tex = com::face(ctx, surf, &TEXTURE2).unwrap();
                     assert_eq!(get_handle(ctx, tex, &[0, handle_at]).unwrap(), S_OK);
                     ctx.mem.write_u32(ck_at, 0xf81f).unwrap();
                     ctx.mem.write_u32(ck_at + 4, 0xf81f).unwrap();
@@ -2608,7 +2621,7 @@ mod tests {
                 ctx.state.heap.extent()
             );
             assert_eq!(
-                ctx.state.com_objects().count(),
+                ctx.state.com.primary_objects().count(),
                 base_com,
                 "COM object table must stay bounded"
             );
@@ -2622,16 +2635,17 @@ mod tests {
             attached_surface, create_surface, ddscaps, flip, set_color_key, set_surface_desc,
             surface_of, DIRECT_DRAW, DIRECT_DRAW_SURFACE4,
         };
+        use crate::com;
         use crate::com::{ADD_REF, RELEASE, S_OK};
         use crate::snap::{Reader, Snap, Visitor, Writer};
         use crate::win32::amstream::DIRECT_DRAW_STREAM_SAMPLE;
         use crate::win32::d3d::{DEVICE2, DEVICE3, DEVICE7, TEXTURE2};
         use crate::win32::d3drm::DEVICE3 as RM_DEVICE3;
         use crate::win32::tests::with_test_ctx;
-        use crate::win32::{ComState, State};
+        use crate::win32::ComState;
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let dd = State::make_com(ctx, &DIRECT_DRAW, ComState::None).unwrap();
+            let dd = com::create(ctx, &DIRECT_DRAW, ComState::None).unwrap();
             let desc_at = 0x1000u32;
             let out_at = 0x1200u32;
             let ck_at = 0x1300u32;
@@ -2674,8 +2688,8 @@ mod tests {
             assert_eq!(set_color_key(ctx, s1, &[0x8, ck_at]).unwrap(), S_OK);
             assert!(ctx.state.color_keys.contains_key(&pixels));
 
-            let s4 = State::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
-            let tex = State::face(ctx, s4, &TEXTURE2).unwrap();
+            let s4 = com::face(ctx, s1, &DIRECT_DRAW_SURFACE4).unwrap();
+            let tex = com::face(ctx, s4, &TEXTURE2).unwrap();
             assert_eq!(get_handle(ctx, tex, &[0, handle_at]).unwrap(), S_OK);
             let h1 = ctx.mem.read_u32(handle_at).unwrap();
             assert_ne!(h1, 0);
@@ -2706,7 +2720,7 @@ mod tests {
                 pixels,
                 "reclaimed pixel buffer must be reused"
             );
-            let tex2 = State::face(ctx, s1_reused, &TEXTURE2).unwrap();
+            let tex2 = com::face(ctx, s1_reused, &TEXTURE2).unwrap();
             assert_eq!(get_handle(ctx, tex2, &[0, handle_at]).unwrap(), S_OK);
             let h2 = ctx.mem.read_u32(handle_at).unwrap();
             assert_ne!(
@@ -2742,13 +2756,13 @@ mod tests {
             // Snapshot round-trip with live client-memory surface (owned_pixels=false) + pooled buffer.
             let mut w = Writer::new();
             ctx.state.snap(&mut w);
-            let mut restored = State::new();
+            let mut restored = crate::win32::State::new();
             let mut r = Reader::new(&w.out);
             restored.snap(&mut r);
             assert!(!r.failed());
             assert_eq!(
-                restored.com(sys).map(|o| &o.state),
-                ctx.state.com(sys).map(|o| &o.state)
+                restored.com.get(sys).map(|o| &o.state),
+                ctx.state.com.get(sys).map(|o| &o.state)
             );
 
             assert_eq!((RELEASE.run)(ctx, sys, &[]).unwrap(), 0);
@@ -2809,7 +2823,7 @@ mod tests {
                 S_OK
             );
             let rt1 = ctx.mem.read_u32(out_at).unwrap();
-            let dev7 = State::make_com(ctx, &DEVICE7, ComState::Device3D { surface: rt1 }).unwrap();
+            let dev7 = com::create(ctx, &DEVICE7, ComState::Device3D { surface: rt1 }).unwrap();
             // GetRenderTarget must AddRef rt1 so releasing the fetched ref leaves creation ref intact.
             assert_eq!(get_rt(ctx, dev7, &[out_at]).unwrap(), S_OK);
             assert_eq!(ctx.mem.read_u32(out_at).unwrap(), rt1);
@@ -2847,7 +2861,7 @@ mod tests {
                 S_OK
             );
             let rm_surf = ctx.mem.read_u32(out_at).unwrap();
-            let rm_dev = State::make_com(
+            let rm_dev = com::create(
                 ctx,
                 &RM_DEVICE3,
                 ComState::RetainedDevice {
@@ -2867,7 +2881,7 @@ mod tests {
                 S_OK
             );
             let ss_surf = ctx.mem.read_u32(out_at).unwrap();
-            let sample = State::make_com(
+            let sample = com::create(
                 ctx,
                 &DIRECT_DRAW_STREAM_SAMPLE,
                 ComState::StreamSample {
@@ -2888,7 +2902,7 @@ mod tests {
                 S_OK
             );
             let bound2 = ctx.mem.read_u32(out_at).unwrap();
-            let dev2 = State::make_com(ctx, &DEVICE2, ComState::Device3D { surface: 0 }).unwrap();
+            let dev2 = com::create(ctx, &DEVICE2, ComState::Device3D { surface: 0 }).unwrap();
             assert_eq!(set_tex(ctx, dev2, &[0, bound2]).unwrap(), S_OK);
             assert_eq!((RELEASE.run)(ctx, bound2, &[]).unwrap(), 1);
             assert_eq!(set_tex(ctx, dev2, &[0, 0]).unwrap(), S_OK);
@@ -2913,7 +2927,7 @@ mod tests {
             let clipper = ctx.mem.read_u32(out).unwrap();
             assert_ne!(clipper, 0);
             assert_eq!(
-                ctx.state.interface_of(clipper),
+                ctx.state.com.interface_of(clipper),
                 Some(DIRECT_DRAW_CLIPPER.name)
             );
         });

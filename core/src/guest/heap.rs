@@ -232,6 +232,105 @@ impl crate::snap::Snap for Heap {
     }
 }
 
+/// Segregated size-bucketed FIFO pool of freed guest-heap slabs.
+///
+/// Pooled slabs stay live in [`Heap`] so small guest `malloc`/`HeapAlloc`
+/// allocations never hijack large media buffers, while callers reuse either
+/// exact-size (`max_factor == 1`) or bounded best-fit (`max_factor >= 2`)
+/// slabs in strict FIFO order.
+#[derive(Debug)]
+pub struct SlabPool {
+    max_factor: u32,
+    buckets: BTreeMap<u32, VecDeque<u32>>,
+}
+
+impl SlabPool {
+    /// Pool that reuses only exact rounded-size slabs.
+    #[must_use]
+    pub fn exact() -> Self {
+        Self::best_fit(1)
+    }
+
+    /// Pool that reuses the smallest slab in `[rounded, rounded * max_factor]`.
+    #[must_use]
+    pub fn best_fit(max_factor: u32) -> Self {
+        Self {
+            max_factor: max_factor.max(1),
+            buckets: BTreeMap::new(),
+        }
+    }
+
+    /// Allocate `size` bytes, reusing a pooled slab in FIFO order before
+    /// bumping `heap`. Returns `(addr, reused)` where `addr == 0` on exhaustion.
+    pub fn alloc(&mut self, heap: &mut Heap, size: u32) -> (u32, bool) {
+        let Some(rounded) = size.max(1).checked_next_multiple_of(8) else {
+            return (0, false);
+        };
+        let max_bucket = rounded.saturating_mul(self.max_factor);
+        let found =
+            self.buckets
+                .range_mut(rounded..=max_bucket)
+                .find_map(|(&bucket_size, addrs)| {
+                    addrs
+                        .pop_front()
+                        .map(|addr| (bucket_size, addr, addrs.is_empty()))
+                });
+        if let Some((bucket_size, addr, emptied)) = found {
+            if emptied {
+                self.buckets.remove(&bucket_size);
+            }
+            return (addr, true);
+        }
+        (heap.alloc(size), false)
+    }
+
+    /// Return a `heap`-owned slab to this pool, keyed by its live heap size.
+    ///
+    /// Pooled slabs remain in `heap`'s live table, so callers must free each
+    /// owned slab at most once.
+    pub fn free(&mut self, heap: &Heap, addr: u32) {
+        if let Some(size) = heap.size_of(addr) {
+            let bucket = self.buckets.entry(size).or_default();
+            debug_assert!(
+                !bucket.contains(&addr),
+                "double-free of pooled slab {addr:#x}"
+            );
+            bucket.push_back(addr);
+        }
+    }
+}
+
+impl crate::snap::Snap for SlabPool {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            max_factor,
+            buckets,
+        } = self;
+        v.u32(max_factor);
+        if v.is_reading() && !v.failed() && *max_factor == 0 {
+            *max_factor = 1;
+            buckets.clear();
+            v.mark_corrupt("SlabPool max_factor");
+            return;
+        }
+        crate::snap::snap_btree_map(
+            v,
+            buckets,
+            |k, v| v.u32(k),
+            |dq, v| crate::snap::snap_vec_deque(v, dq, |addr, v| v.u32(addr)),
+        );
+        if v.is_reading() && !v.failed() {
+            let valid = buckets.iter().all(|(&sz, dq)| {
+                sz != 0 && sz % 8 == 0 && !dq.is_empty() && dq.iter().all(|&a| a != 0)
+            });
+            if !valid {
+                buckets.clear();
+                v.mark_corrupt("SlabPool buckets");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Heap, HEAP_BASE};

@@ -10,8 +10,8 @@
 //! its pan, and where it is from the listener. Where it has got to, and whether
 //! it is still playing, follow from the declared clock (ADR-0003).
 
-use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
+use super::{stdcall, ComState, Ctx, Shim};
+use crate::com::{self, method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::x87::maths;
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
@@ -362,7 +362,7 @@ pub static CLASS_FACTORY: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        crate::com::RELEASE,
+        RELEASE,
         method("CreateInstance", 3, factory_create),
         method("LockServer", 1, lock_server),
     ],
@@ -373,7 +373,7 @@ pub static CLASS_FACTORY: Interface = Interface {
 /// # Errors
 /// When the object will not fit in guest memory.
 pub fn make_factory(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
-    State::make_com(ctx, &CLASS_FACTORY, ComState::None).map_err(Stop::Fault)
+    com::create(ctx, &CLASS_FACTORY, ComState::None).map_err(Stop::Fault)
 }
 
 /// Make a DirectSound object, however it was asked for.
@@ -381,7 +381,7 @@ pub fn make_factory(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
 /// # Errors
 /// When the object will not fit in guest memory.
 pub fn make(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
-    let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
     ctx.log.line(&format!("dsound created at {object:#010x}"));
     Ok(object)
 }
@@ -403,7 +403,7 @@ fn factory_create(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
             caller: 0,
         });
     }
-    let object = State::make_com(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_SOUND, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(args[2], object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
         "dsound created at {object:#010x} by its class factory"
@@ -423,7 +423,7 @@ pub static DIRECT_SOUND: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        crate::com::RELEASE,
+        RELEASE,
         method("CreateSoundBuffer", 3, create_buffer),
         method("GetCaps", 1, caps),
         method("DuplicateSoundBuffer", 2, duplicate),
@@ -441,7 +441,7 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        method("Release", 0, release_buffer),
+        RELEASE,
         method("GetCaps", 1, caps),
         method("GetCurrentPosition", 2, position),
         wall("GetFormat", 3),
@@ -471,7 +471,7 @@ pub static DIRECT_SOUND_BUFFER: Interface = Interface {
         method("SetFormat", 1, set_format),
         method("SetVolume", 1, |ctx, this, args| {
             let vol = (args[0] as i32).clamp(-10_000, 0);
-            let identity = ctx.state.identity(this);
+            let identity = ctx.state.com.identity(this);
             if ctx.state.dmusic.is_bound_dsound_buffer(identity) {
                 let now_nanos = ctx.declared_millis().saturating_mul(1_000_000);
                 ctx.state.mixer.midi_volume(
@@ -505,7 +505,7 @@ pub static DIRECT_SOUND_3D_LISTENER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        method("Release", 0, release_buffer),
+        RELEASE,
         wall("GetAllParameters", 1),
         method("GetDistanceFactor", 1, |ctx, _, args| {
             let value = ctx.state.sound.listener.distance_factor;
@@ -604,7 +604,7 @@ pub static DIRECT_SOUND_3D_BUFFER: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        method("Release", 0, release_buffer),
+        RELEASE,
         wall("GetAllParameters", 1),
         wall("GetConeAngles", 2),
         wall("GetConeOrientation", 1),
@@ -793,7 +793,7 @@ impl Buffer {
 }
 
 fn buffer<'a>(ctx: &'a mut Ctx<'_>, this: u32) -> Option<&'a mut Buffer> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     ctx.state.sound.buffers.get_mut(&identity)
 }
 
@@ -871,7 +871,7 @@ fn create_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
         (false, at) => Some(read_format(ctx, at)?),
     };
     let store_bytes = bytes.max(4);
-    let (store, reused) = ctx.state.alloc_sound_store(store_bytes);
+    let (store, reused) = ctx.state.sound_pool.alloc(&mut ctx.state.heap, store_bytes);
     if store == 0 {
         return Ok(DSERR_OUTOFMEMORY);
     }
@@ -881,8 +881,7 @@ fn create_buffer(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
             .map_err(Stop::Fault)?
             .fill(0);
     }
-    let object =
-        State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     ctx.state.sound.buffers.insert(
         object,
@@ -901,8 +900,7 @@ fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(template) = buffer(ctx, args[0]).cloned() else {
         return Ok(DSERR_INVALIDCALL);
     };
-    let object =
-        State::make_com(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_SOUND_BUFFER, ComState::Sound).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     let copy = Buffer {
         started: None,
@@ -918,33 +916,27 @@ fn duplicate(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     Ok(S_OK)
 }
 
-fn release_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    // Once every face of the buffer reaches zero references, stop its voice,
-    // reclaim its COM faces, and return its sample memory to `sound_pool` when
-    // no duplicate buffer still shares that store (#385).
-    let identity = ctx.state.identity(this);
-    let left = ctx.state.com_ref(this, -1);
-    if left == 0 && !ctx.state.has_live_refs(identity) {
-        let nanos = ctx.clock_millis * 1_000_000;
-        ctx.state.mixer.stop(identity, nanos);
-        if ctx.state.dmusic.bound_dsound_buffer == identity {
-            ctx.state.dmusic.bound_dsound_buffer = 0;
-        }
-        if let Some(removed) = ctx.state.sound.buffers.remove(&identity) {
-            if !ctx
-                .state
-                .sound
-                .buffers
-                .values()
-                .any(|b| b.store == removed.store)
-            {
-                ctx.state.mixer.catch_up(nanos, &*ctx.mem);
-                ctx.state.free_sound_store(removed.store);
-            }
-        }
-        ctx.state.reclaim_com_faces(identity);
+/// Reclaim a DirectSound buffer's mixer voice and sample store once every COM
+/// face sharing `identity` reaches zero references (COM faces are reclaimed by
+/// `com::release_ref`, #385).
+pub(crate) fn reclaim_buffer(ctx: &mut Ctx<'_>, identity: u32) {
+    let nanos = ctx.clock_millis * 1_000_000;
+    ctx.state.mixer.stop(identity, nanos);
+    if ctx.state.dmusic.bound_dsound_buffer == identity {
+        ctx.state.dmusic.bound_dsound_buffer = 0;
     }
-    Ok(left)
+    if let Some(removed) = ctx.state.sound.buffers.remove(&identity) {
+        if !ctx
+            .state
+            .sound
+            .buffers
+            .values()
+            .any(|b| b.store == removed.store)
+        {
+            ctx.state.mixer.catch_up(nanos, &*ctx.mem);
+            ctx.state.sound_pool.free(&ctx.state.heap, removed.store);
+        }
+    }
 }
 
 fn position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -1113,7 +1105,7 @@ fn play(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
 /// title moving a 3D sound while it plays is heard where it last started; a
 /// sound moved while it plays wants the mixer to weigh it as it goes.
 fn start_voice(ctx: &mut Ctx<'_>, this: u32, go_on: bool) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let millis = ctx.clock_millis;
     let listener = ctx.state.sound.listener;
     let Some(b) = ctx.state.sound.buffers.get(&identity).cloned() else {
@@ -1143,7 +1135,7 @@ fn start_voice(ctx: &mut Ctx<'_>, this: u32, go_on: bool) -> Result<u32, Stop> {
 }
 
 fn stop_buffer(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let millis = ctx.clock_millis;
     if let Some(b) = buffer(ctx, this) {
         b.settle(millis);
@@ -1361,8 +1353,8 @@ mod tests {
 
     #[test]
     fn released_buffers_reuse_sound_pool_and_com_slots_without_small_block_hijacking() {
-        use super::{buffer, create_buffer, lock, make, play, release_buffer};
-        use crate::com::S_OK;
+        use super::{buffer, create_buffer, lock, make, play};
+        use crate::com::{release_ref, S_OK};
         use crate::guest::heap::HEAP_BASE;
         use crate::guest::GuestMem;
         use crate::win32::tests::with_test_ctx;
@@ -1384,8 +1376,8 @@ mod tests {
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let b180 = ctx.mem.read_u32(out_at).unwrap();
             let s180 = buffer(ctx, b180).unwrap().store;
-            assert_eq!(release_buffer(ctx, b16, &[]).unwrap(), 0);
-            assert_eq!(release_buffer(ctx, b180, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, b16), 0);
+            assert_eq!(release_ref(ctx, b180), 0);
 
             write_pcm_buffer_desc(ctx, fmt_at, desc_at, 11_432, 0xe0);
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
@@ -1399,20 +1391,20 @@ mod tests {
                 s180,
                 "tiny buffer must not hijack 180 KiB pooled buffer"
             );
-            assert_eq!(release_buffer(ctx, b11, &[]).unwrap(), 0);
-            assert_eq!(release_buffer(ctx, b1, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, b11), 0);
+            assert_eq!(release_ref(ctx, b1), 0);
 
             // Warm up peak SFX size classes before recording baseline.
             for &sz in &[34_472u32, 11_432, 9_640] {
                 write_pcm_buffer_desc(ctx, fmt_at, desc_at, sz, 0xe0);
                 assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
                 let b = ctx.mem.read_u32(out_at).unwrap();
-                assert_eq!(release_buffer(ctx, b, &[]).unwrap(), 0);
+                assert_eq!(release_ref(ctx, b), 0);
             }
 
             let base_live = ctx.state.heap.live_bytes();
             let base_extent = ctx.state.heap.extent();
-            let base_com = ctx.state.com_objects().count();
+            let base_com = ctx.state.com.primary_objects().count();
             let mut long_lived_small = Vec::new();
 
             let sizes = [34_472u32, 11_432, 9_640, 24_576, 16_384];
@@ -1454,13 +1446,13 @@ mod tests {
                     assert!(ctx.state.heap.free(tmp));
                 }
 
-                assert_eq!(release_buffer(ctx, buf, &[]).unwrap(), 0);
+                assert_eq!(release_ref(ctx, buf), 0);
             }
 
             let small_bytes = long_lived_small.len() as u32 * 16;
             assert_eq!(ctx.state.sound.buffer_count(), 0);
             assert_eq!(ctx.state.mixer.active_voice_count(), 0);
-            assert_eq!(ctx.state.com_objects().count(), base_com);
+            assert_eq!(ctx.state.com.primary_objects().count(), base_com);
             assert_eq!(
                 ctx.state.heap.live_bytes(),
                 base_live + small_bytes,
@@ -1477,10 +1469,10 @@ mod tests {
     #[test]
     fn duplicate_3d_faces_oom_and_snap_preserve_sound_buffer_lifetimes() {
         use super::{
-            buffer, create_buffer, duplicate, make, play, release_buffer, DIRECT_SOUND_3D_BUFFER,
+            buffer, create_buffer, duplicate, make, play, DIRECT_SOUND_3D_BUFFER,
             DIRECT_SOUND_3D_LISTENER, DSERR_INVALIDPARAM, DSERR_OUTOFMEMORY,
         };
-        use crate::com::S_OK;
+        use crate::com::{face, release_ref, S_OK};
         use crate::guest::heap::HEAP_BASE;
         use crate::guest::GuestMem;
         use crate::snap::{Reader, Snap, Visitor, Writer};
@@ -1532,7 +1524,7 @@ mod tests {
             ctx.clock_millis = 0;
             assert_eq!(play(ctx, orig, &[0, 0, 0]).unwrap(), S_OK);
             ctx.clock_millis = 50;
-            assert_eq!(release_buffer(ctx, orig, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, orig), 0);
 
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let other = ctx.mem.read_u32(out_at).unwrap();
@@ -1543,7 +1535,7 @@ mod tests {
             );
 
             ctx.clock_millis = 80;
-            assert_eq!(release_buffer(ctx, dup, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, dup), 0);
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let reused = ctx.mem.read_u32(out_at).unwrap();
             let reused_store = buffer(ctx, reused).unwrap().store;
@@ -1570,44 +1562,44 @@ mod tests {
                 !mixed.contains(&i16::from_le_bytes([0x77, 0x77])),
                 "overwritten reused store must not bleed into already-stopped voice"
             );
-            assert_eq!(release_buffer(ctx, other, &[]).unwrap(), 0);
-            assert_eq!(release_buffer(ctx, reused, &[]).unwrap(), 0);
-            assert_eq!(release_buffer(ctx, reused, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, other), 0);
+            assert_eq!(release_ref(ctx, reused), 0);
+            assert_eq!(release_ref(ctx, reused), 0);
 
             // Multi-face refcounting: IDirectSoundBuffer + IDirectSound3DBuffer
             // (both release orders) and primary + IDirectSound3DListener.
-            let com_before = ctx.state.com_objects().count();
+            let com_before = ctx.state.com.primary_objects().count();
             let rel3d = DIRECT_SOUND_3D_BUFFER.method(2).unwrap().run;
             let rel_listener = DIRECT_SOUND_3D_LISTENER.method(2).unwrap().run;
 
             write_pcm_buffer_desc(ctx, fmt_at, desc_at, 2_048, 0x10);
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let buf_a = ctx.mem.read_u32(out_at).unwrap();
-            let face_a = State::face(ctx, buf_a, &DIRECT_SOUND_3D_BUFFER).unwrap();
-            assert_eq!(release_buffer(ctx, buf_a, &[]).unwrap(), 0);
+            let face_a = face(ctx, buf_a, &DIRECT_SOUND_3D_BUFFER).unwrap();
+            assert_eq!(release_ref(ctx, buf_a), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 1);
             assert_eq!(rel3d(ctx, face_a, &[]).unwrap(), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 0);
-            assert_eq!(ctx.state.com_objects().count(), com_before);
+            assert_eq!(ctx.state.com.primary_objects().count(), com_before);
 
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let buf_b = ctx.mem.read_u32(out_at).unwrap();
-            let face_b = State::face(ctx, buf_b, &DIRECT_SOUND_3D_BUFFER).unwrap();
+            let face_b = face(ctx, buf_b, &DIRECT_SOUND_3D_BUFFER).unwrap();
             assert_eq!(rel3d(ctx, face_b, &[]).unwrap(), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 1);
-            assert_eq!(release_buffer(ctx, buf_b, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, buf_b), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 0);
-            assert_eq!(ctx.state.com_objects().count(), com_before);
+            assert_eq!(ctx.state.com.primary_objects().count(), com_before);
 
             write_pcm_buffer_desc(ctx, fmt_at, desc_at, 0, 0x1 | 0x10);
             assert_eq!(create_buffer(ctx, ds, &[desc_at, out_at, 0]).unwrap(), S_OK);
             let primary = ctx.mem.read_u32(out_at).unwrap();
-            let listener = State::face(ctx, primary, &DIRECT_SOUND_3D_LISTENER).unwrap();
-            assert_eq!(release_buffer(ctx, primary, &[]).unwrap(), 0);
+            let listener = face(ctx, primary, &DIRECT_SOUND_3D_LISTENER).unwrap();
+            assert_eq!(release_ref(ctx, primary), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 1);
             assert_eq!(rel_listener(ctx, listener, &[]).unwrap(), 0);
             assert_eq!(ctx.state.sound.buffer_count(), 0);
-            assert_eq!(ctx.state.com_objects().count(), com_before);
+            assert_eq!(ctx.state.com.primary_objects().count(), com_before);
 
             // LLSNAP v2 State::snap round-trip preserves sound_pool cleanly.
             let mut writer = Writer::new();
@@ -1618,8 +1610,8 @@ mod tests {
             assert!(!reader.failed(), "State::snap read failed");
             assert_eq!(reader.remaining(), 0, "State::snap must consume all bytes");
             assert_eq!(
-                restored.alloc_sound_store(2_048),
-                ctx.state.alloc_sound_store(2_048),
+                restored.sound_pool.alloc(&mut restored.heap, 2_048),
+                ctx.state.sound_pool.alloc(&mut ctx.state.heap, 2_048),
                 "restored sound_pool must hand back the exact same pooled store"
             );
         });

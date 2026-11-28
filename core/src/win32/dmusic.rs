@@ -9,9 +9,9 @@
 //! Strictly generic, zero title keying, deterministic on the declared clock,
 //! and exhaustively snapshotted in `LLSNAP v2`.
 
-use super::{ComState, Ctx, State};
+use super::{ComState, Ctx};
 use crate::com::{
-    iid_text, method, ok, read_iid, wall, Interface, ADD_REF, E_NOINTERFACE, QUERY_INTERFACE,
+    self, iid_text, method, ok, read_iid, wall, Interface, ADD_REF, E_NOINTERFACE, QUERY_INTERFACE,
     RELEASE, S_OK,
 };
 use crate::cpu::Stop;
@@ -808,7 +808,7 @@ fn dm_create_port(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
     if out == 0 {
         return Ok(E_POINTER);
     }
-    let port = State::make_com(ctx, &DIRECT_MUSIC_PORT, ComState::None).map_err(Stop::Fault)?;
+    let port = com::create(ctx, &DIRECT_MUSIC_PORT, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, port).map_err(Stop::Fault)?;
     ctx.log.line("dmusic: created software synthesizer port");
     Ok(S_OK)
@@ -816,7 +816,11 @@ fn dm_create_port(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, St
 
 fn port_set_direct_sound(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     let buf = args[1];
-    ctx.state.dmusic.bound_dsound_buffer = if buf != 0 { ctx.state.identity(buf) } else { 0 };
+    ctx.state.dmusic.bound_dsound_buffer = if buf != 0 {
+        ctx.state.com.identity(buf)
+    } else {
+        0
+    };
     Ok(S_OK)
 }
 
@@ -864,7 +868,7 @@ fn perf_init(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     if pp_dm != 0 {
         let existing = ctx.mem.read_u32(pp_dm).map_err(Stop::Fault)?;
         if existing == 0 {
-            let dm = State::make_com(ctx, &DIRECT_MUSIC, ComState::None).map_err(Stop::Fault)?;
+            let dm = com::create(ctx, &DIRECT_MUSIC, ComState::None).map_err(Stop::Fault)?;
             ctx.mem.write_u32(pp_dm, dm).map_err(Stop::Fault)?;
         }
     }
@@ -883,7 +887,7 @@ fn perf_play_segment(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32,
     if seg_ptr == 0 {
         return Ok(E_POINTER);
     }
-    let seg_id = ctx.state.identity(seg_ptr);
+    let seg_id = ctx.state.com.identity(seg_ptr);
     let now_nanos = ctx.declared_millis().saturating_mul(1_000_000);
     let seg_name = ctx
         .state
@@ -907,7 +911,7 @@ fn perf_play_segment(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32,
 
 fn perf_stop(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Stop> {
     // Stop(pSegment, pSegmentState, mtTime, dwFlags)
-    let filter_seg = (args[0] != 0).then(|| ctx.state.identity(args[0]));
+    let filter_seg = (args[0] != 0).then(|| ctx.state.com.identity(args[0]));
     let now_nanos = ctx.declared_millis().saturating_mul(1_000_000);
     let event = ctx
         .state
@@ -1222,7 +1226,7 @@ fn loader_get_object(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32,
                 seg.name = desc_name;
             }
             let obj =
-                State::make_com(ctx, &DIRECT_MUSIC_SEGMENT, ComState::None).map_err(Stop::Fault)?;
+                com::create(ctx, &DIRECT_MUSIC_SEGMENT, ComState::None).map_err(Stop::Fault)?;
             ctx.state.dmusic.segments.insert(obj, seg);
             ctx.mem.write_u32(out_at, obj).map_err(Stop::Fault)?;
             Ok(S_OK)
@@ -1244,8 +1248,7 @@ fn loader_get_object(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32,
             } else {
                 desc_name
             };
-            let obj =
-                State::make_com(ctx, &DIRECT_MUSIC_STYLE, ComState::None).map_err(Stop::Fault)?;
+            let obj = com::create(ctx, &DIRECT_MUSIC_STYLE, ComState::None).map_err(Stop::Fault)?;
             let raw_memory = if source_path.is_none() {
                 bytes
             } else {
@@ -1272,8 +1275,7 @@ fn loader_get_object(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32,
             if parse_band(&bytes).is_err() {
                 return Ok(DMUS_E_LOADER_FAILEDOPEN);
             }
-            let obj =
-                State::make_com(ctx, &DIRECT_MUSIC_BAND, ComState::None).map_err(Stop::Fault)?;
+            let obj = com::create(ctx, &DIRECT_MUSIC_BAND, ComState::None).map_err(Stop::Fault)?;
             ctx.mem.write_u32(out_at, obj).map_err(Stop::Fault)?;
             Ok(S_OK)
         }
@@ -1359,14 +1361,14 @@ fn seg_get_length(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Sto
     if args[0] == 0 {
         return Ok(E_POINTER);
     }
-    let id = ctx.state.identity(this);
+    let id = ctx.state.com.identity(this);
     let len = ctx.state.dmusic.segments.get(&id).map_or(0, |s| s.length);
     ctx.mem.write_u32(args[0], len).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn seg_set_length(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let id = ctx.state.identity(this);
+    let id = ctx.state.com.identity(this);
     if let Some(seg) = ctx.state.dmusic.segments.get_mut(&id) {
         seg.length = args[0];
     }
@@ -1377,14 +1379,14 @@ fn seg_get_repeats(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
     if args[0] == 0 {
         return Ok(E_POINTER);
     }
-    let id = ctx.state.identity(this);
+    let id = ctx.state.com.identity(this);
     let rep = ctx.state.dmusic.segments.get(&id).map_or(0, |s| s.repeats);
     ctx.mem.write_u32(args[0], rep).map_err(Stop::Fault)?;
     Ok(S_OK)
 }
 
 fn seg_set_repeats(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let id = ctx.state.identity(this);
+    let id = ctx.state.com.identity(this);
     if let Some(seg) = ctx.state.dmusic.segments.get_mut(&id) {
         seg.repeats = args[0];
     }
@@ -1598,7 +1600,7 @@ mod tests {
             assert_eq!(hr, S_OK);
             let perf = ctx.mem.read_u32(out_at).unwrap();
             assert_eq!(
-                ctx.state.interface_of(perf),
+                ctx.state.com.interface_of(perf),
                 Some("IDirectMusicPerformance")
             );
 
@@ -1645,7 +1647,7 @@ mod tests {
             assert!(ctx
                 .state
                 .dmusic
-                .is_bound_dsound_buffer(ctx.state.identity(dsbuf)));
+                .is_bound_dsound_buffer(ctx.state.com.identity(dsbuf)));
 
             let set_vol = crate::win32::com_method("IDirectSoundBuffer", 15).unwrap();
             assert_eq!(

@@ -5,8 +5,8 @@
 //! the device is a view of what was recorded, not of what a person is doing
 //! now.
 
-use super::{stdcall, ComState, Ctx, Shim, State};
-use crate::com::{method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
+use super::{stdcall, ComState, Ctx, Shim};
+use crate::com::{self, method, ok, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 
@@ -164,7 +164,7 @@ const KEYBOARD_KEYS: &[(u32, &str)] = &[
 fn create(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // DirectInputCreateA(hinst, version, out, outer).
     let out = args[2];
-    let object = State::make_com(ctx, &DIRECT_INPUT, ComState::None).map_err(Stop::Fault)?;
+    let object = com::create(ctx, &DIRECT_INPUT, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     ctx.log.line(&format!("dinput created at {object:#010x}"));
     Ok(DI_OK)
@@ -248,7 +248,7 @@ fn create_device(ctx: &mut Ctx<'_>, _this: u32, args: &[u32]) -> Result<u32, Sto
         ));
         return Ok(0x8004_0154);
     }
-    let object = State::make_com(
+    let object = com::create(
         ctx,
         &DIRECT_INPUT_DEVICE,
         ComState::Device {
@@ -278,7 +278,7 @@ fn device_status(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, S
 
 fn is_keyboard(ctx: &Ctx<'_>, this: u32) -> bool {
     matches!(
-        ctx.state.com(this).map(|o| &o.state),
+        ctx.state.com.get(this).map(|o| &o.state),
         Some(ComState::Device { keyboard: true, .. })
     )
 }
@@ -286,7 +286,8 @@ fn is_keyboard(ctx: &Ctx<'_>, this: u32) -> bool {
 /// Acquiring `GUID_SysMouse` with `DISCL_EXCLUSIVE` hides the Windows system
 /// cursor until `Unacquire` or final `Release` (#374).
 fn set_cooperative_level(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    if let Some(ComState::Device { exclusive, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state)
+    if let Some(ComState::Device { exclusive, .. }) =
+        ctx.state.com.get_mut(this).map(|o| &mut o.state)
     {
         *exclusive = args[1] & DISCL_EXCLUSIVE != 0;
     }
@@ -294,14 +295,18 @@ fn set_cooperative_level(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u
 }
 
 fn acquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    if let Some(ComState::Device { acquired, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+    if let Some(ComState::Device { acquired, .. }) =
+        ctx.state.com.get_mut(this).map(|o| &mut o.state)
+    {
         *acquired = true;
     }
     Ok(DI_OK)
 }
 
 fn unacquire(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    if let Some(ComState::Device { acquired, .. }) = ctx.state.com_mut(this).map(|o| &mut o.state) {
+    if let Some(ComState::Device { acquired, .. }) =
+        ctx.state.com.get_mut(this).map(|o| &mut o.state)
+    {
         *acquired = false;
     }
     Ok(DI_OK)
@@ -542,15 +547,16 @@ fn device_data(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
 #[cfg(test)]
 mod tests {
     use super::{device_data, DIRECT_INPUT_DEVICE, DI_OK};
+    use crate::com;
     use crate::cpu::Stop;
     use crate::guest::{Fault, GuestMem};
     use crate::win32::tests::with_test_ctx;
-    use crate::win32::{ComState, State};
+    use crate::win32::ComState;
 
     #[test]
     fn device_data_empty_fast_path_preserves_fault_checks_and_zero_count() {
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let kbd = State::make_com(
+            let kbd = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -597,7 +603,7 @@ mod tests {
         assert_eq!(poll.name, "Poll");
         assert_eq!(poll.args, 0);
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let mouse = State::make_com(
+            let mouse = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -619,7 +625,7 @@ mod tests {
             GUID_SYS_KEYBOARD, GUID_SYS_MOUSE, KEYBOARD_KEYS,
         };
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let mouse = State::make_com(
+            let mouse = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -629,7 +635,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let kbd = State::make_com(
+            let kbd = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -706,7 +712,7 @@ mod tests {
             DIERR_INVALIDPARAM, GUID_KEY, GUID_XAXIS,
         };
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let mouse = State::make_com(
+            let mouse = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -716,7 +722,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let kbd = State::make_com(
+            let kbd = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -795,7 +801,7 @@ mod tests {
         use crate::snap::{Reader, Snap, Writer};
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
-            let mouse = State::make_com(
+            let mouse = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -805,7 +811,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let kbd = State::make_com(
+            let kbd = com::create(
                 ctx,
                 &DIRECT_INPUT_DEVICE,
                 ComState::Device {
@@ -842,7 +848,7 @@ mod tests {
             assert_eq!(ctx.state.cursor_shown, 0);
 
             let mut w = Writer::new();
-            let mut dev = ctx.state.com(mouse).unwrap().state.clone();
+            let mut dev = ctx.state.com.get(mouse).unwrap().state.clone();
             dev.snap(&mut w);
             let mut r = Reader::new(&w.out);
             let mut restored = ComState::None;
@@ -861,7 +867,7 @@ mod tests {
 
             assert_eq!(acquire(ctx, mouse, &[]).unwrap(), DI_OK);
             assert!(!ctx.state.pointer_shown());
-            assert_eq!(ctx.state.com_ref(mouse, -1), 0);
+            assert_eq!(com::release_ref(ctx, mouse), 0);
             assert!(ctx.state.pointer_shown());
         });
     }

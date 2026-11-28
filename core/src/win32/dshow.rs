@@ -8,7 +8,7 @@
 
 use super::{ComState, Ctx, Object, Present, State};
 use crate::clock::FlipCost;
-use crate::com::{method, wall, Interface, ADD_REF, QUERY_INTERFACE, S_OK};
+use crate::com::{self, method, wall, Interface, ADD_REF, QUERY_INTERFACE, RELEASE, S_OK};
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
 use crate::movie::{MoviePlayer, OpenError, StartOutcome, StepError};
@@ -110,18 +110,13 @@ impl crate::snap::Snap for FilterGraph {
     }
 }
 
-/// `Release` shared across all five `CLSID_FilterGraph` faces: cleans up the
-/// graph, its event handle, mixer voice, and frame buffer once the last live
-/// reference across every face drops to zero.
-const RELEASE_GRAPH: crate::com::Method = method("Release", 0, release_graph);
-
 /// `IGraphBuilder` (inherits `IUnknown` [0..2], `IFilterGraph` [3..10], `IGraphBuilder` [11..17]).
 pub static GRAPH_BUILDER: Interface = Interface {
     name: "IGraphBuilder",
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE_GRAPH,
+        RELEASE,
         wall("AddFilter", 2),
         wall("RemoveFilter", 1),
         wall("EnumFilters", 1),
@@ -146,7 +141,7 @@ pub static MEDIA_CONTROL: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE_GRAPH,
+        RELEASE,
         wall("GetTypeInfoCount", 1),
         wall("GetTypeInfo", 3),
         wall("GetIDsOfNames", 5),
@@ -169,7 +164,7 @@ pub static MEDIA_EVENT: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE_GRAPH,
+        RELEASE,
         wall("GetTypeInfoCount", 1),
         wall("GetTypeInfo", 3),
         wall("GetIDsOfNames", 5),
@@ -189,7 +184,7 @@ pub static MEDIA_POSITION: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE_GRAPH,
+        RELEASE,
         wall("GetTypeInfoCount", 1),
         wall("GetTypeInfo", 3),
         wall("GetIDsOfNames", 5),
@@ -214,7 +209,7 @@ pub static VIDEO_WINDOW: Interface = Interface {
     methods: &[
         QUERY_INTERFACE,
         ADD_REF,
-        RELEASE_GRAPH,
+        RELEASE,
         wall("GetTypeInfoCount", 1),
         wall("GetTypeInfo", 3),
         wall("GetIDsOfNames", 5),
@@ -275,8 +270,7 @@ pub static INTERFACES: &[&Interface] = &[
 /// # Errors
 /// When guest memory faults.
 pub fn create(ctx: &mut Ctx<'_>, interface: &'static Interface) -> Result<u32, Stop> {
-    let identity =
-        State::make_com(ctx, &GRAPH_BUILDER, ComState::FilterGraph).map_err(Stop::Fault)?;
+    let identity = com::create(ctx, &GRAPH_BUILDER, ComState::FilterGraph).map_err(Stop::Fault)?;
     let event_handle = ctx.state.give(Object::Named {
         kind: "event",
         name: String::new(),
@@ -294,33 +288,31 @@ pub fn create(ctx: &mut Ctx<'_>, interface: &'static Interface) -> Result<u32, S
     if interface.name == GRAPH_BUILDER.name {
         return Ok(identity);
     }
-    let face = State::face(ctx, identity, interface).map_err(Stop::Fault)?;
+    let face = com::face(ctx, identity, interface).map_err(Stop::Fault)?;
     // Drop the bootstrap reference on `IGraphBuilder` so only the requested face holds a ref.
-    ctx.state.com_ref(identity, -1);
+    com::release_ref(ctx, identity);
     Ok(face)
 }
 
-fn release_graph(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
-    let left = ctx.state.com_ref(this, -1);
-    if left == 0 && !ctx.state.has_live_refs(identity) {
-        let now = ctx.declared_millis();
-        ctx.state.mixer.stop(identity, now * 1_000_000);
-        if let Some(graph) = ctx.state.filter_graphs.remove(&identity) {
-            if graph.event_handle != 0 {
-                ctx.state.close(graph.event_handle);
-            }
-            if graph.frame_buffer != 0 {
-                ctx.state.heap.free(graph.frame_buffer);
-            }
-            if let Some(movie) = graph.movie {
-                ctx.log.line(&format!("dshow {} released", movie.name()));
-                drop(movie);
-                ctx.state.movies.evict_unused();
-            }
+/// Reclaim a `CLSID_FilterGraph`'s mixer voice, event handle, frame buffer, and
+/// movie once every face sharing `identity` drops to zero references (COM faces
+/// are reclaimed by `com::release_ref`).
+pub(crate) fn reclaim_graph(ctx: &mut Ctx<'_>, identity: u32) {
+    let now = ctx.declared_millis();
+    ctx.state.mixer.stop(identity, now * 1_000_000);
+    if let Some(graph) = ctx.state.filter_graphs.remove(&identity) {
+        if graph.event_handle != 0 {
+            ctx.state.close(graph.event_handle);
+        }
+        if graph.frame_buffer != 0 {
+            ctx.state.heap.free(graph.frame_buffer);
+        }
+        if let Some(movie) = graph.movie {
+            ctx.log.line(&format!("dshow {} released", movie.name()));
+            drop(movie);
+            ctx.state.movies.evict_unused();
         }
     }
-    Ok(left)
 }
 
 fn set_event_signalled(state: &mut State, handle: u32, value: bool) {
@@ -395,7 +387,7 @@ fn render_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
             caller: 0,
         });
     }
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let now = ctx.declared_millis();
     ctx.state.mixer.stop(identity, now * 1_000_000);
     ctx.log.line(&format!(
@@ -500,7 +492,7 @@ fn decode_and_stage_frame(ctx: &mut Ctx<'_>, identity: u32) -> Result<(), Stop> 
 }
 
 fn run(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let now = ctx.declared_millis();
     let (outcome, name) = {
         let state = &mut *ctx.state;
@@ -537,7 +529,7 @@ fn run(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
 }
 
 fn stop(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let now = ctx.declared_millis();
     let stopped_name = {
         let state = &mut *ctx.state;
@@ -577,7 +569,7 @@ fn get_u32(
     if out == 0 {
         return Ok(E_POINTER);
     }
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let val = ctx.state.filter_graphs.get(&identity).map_or(default, read);
     ctx.mem.write_u32(out, val).map_err(Stop::Fault)?;
     Ok(S_OK)
@@ -588,7 +580,7 @@ fn set_graph(
     this: u32,
     write: impl FnOnce(&mut FilterGraph),
 ) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     if let Some(graph) = ctx.state.filter_graphs.get_mut(&identity) {
         write(graph);
     }
@@ -605,7 +597,7 @@ fn get_event(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     if ev_ptr == 0 || p1_ptr == 0 || p2_ptr == 0 {
         return Ok(E_POINTER);
     }
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let popped = {
         let Some(graph) = ctx.state.filter_graphs.get_mut(&identity) else {
             return Ok(E_ABORT);
@@ -634,7 +626,7 @@ fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     if args[0] == 0 {
         return Ok(E_POINTER);
     }
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let secs = ctx
         .state
         .filter_graphs
@@ -651,7 +643,7 @@ fn get_current_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
     if args[0] == 0 {
         return Ok(E_POINTER);
     }
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let now = ctx.declared_millis();
     let secs = ctx
         .state
@@ -669,7 +661,7 @@ fn put_current_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u3
     // REFTIME (64-bit IEEE double) passed by value across two x86 stack words.
     let bits = u64::from(args[0]) | (u64::from(args[1]) << 32);
     let secs = f64::from_bits(bits).max(0.0);
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let now = ctx.declared_millis();
     let (event_handle, stage_frame) = {
         let state = &mut *ctx.state;
@@ -758,7 +750,7 @@ fn set_window_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32
 }
 
 fn get_window_position(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    let identity = ctx.state.identity(this);
+    let identity = ctx.state.com.identity(this);
     let pos = ctx
         .state
         .filter_graphs
@@ -860,11 +852,11 @@ mod tests {
         advance_for_wait, create, get_current_position, get_duration, get_event, get_event_handle,
         get_fullscreen_mode, get_message_drain, get_owner, get_visible, get_window_position,
         get_window_style, hide_cursor, is_cursor_hidden, put_current_position, put_fullscreen_mode,
-        put_message_drain, put_owner, put_visible, put_window_style, release_graph, render_file,
-        run, set_window_position, stop, WaitStep, EC_COMPLETE, E_ABORT, GRAPH_BUILDER, OAFALSE,
-        OATRUE, VFW_E_NOT_FOUND,
+        put_message_drain, put_owner, put_visible, put_window_style, render_file, run,
+        set_window_position, stop, WaitStep, EC_COMPLETE, E_ABORT, GRAPH_BUILDER, OAFALSE, OATRUE,
+        VFW_E_NOT_FOUND,
     };
-    use crate::com::S_OK;
+    use crate::com::{release_ref, S_OK};
     use crate::guest::GuestMem;
     use crate::win32::tests::with_test_ctx;
 
@@ -1072,7 +1064,7 @@ mod tests {
             // Stop and final Release clean up graph, event handle, and frame buffer.
             assert_eq!(stop(ctx, graph, &[]).unwrap(), S_OK);
             assert!(!ctx.state.movie_running());
-            assert_eq!(release_graph(ctx, graph, &[]).unwrap(), 0);
+            assert_eq!(release_ref(ctx, graph), 0);
             assert!(ctx.state.filter_graphs.is_empty());
             assert!(ctx.state.object(h_event).is_none());
         });

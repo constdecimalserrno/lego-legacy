@@ -1042,7 +1042,10 @@ fn directx_5_makes_its_own_textures_and_materials() {
     // IDirect3DRM2::CreateTextureFromSurface(surface, out), at 18.
     assert_eq!(com(&mut m, "IDirect3DRM2", 18, 0, &[0, OUT]), Ok(0));
     let texture = m.arena.read_u32(OUT).expect("in the arena");
-    assert_eq!(m.state.interface_of(texture), Some("IDirect3DRMTexture2"));
+    assert_eq!(
+        m.state.com.interface_of(texture),
+        Some("IDirect3DRMTexture2")
+    );
     let changed = win32::com_method("IDirect3DRMTexture2", 14).expect("declared");
     assert_eq!((changed.name, changed.args), ("Changed", 2));
     assert_eq!(
@@ -1057,7 +1060,10 @@ fn directx_5_makes_its_own_textures_and_materials() {
         Ok(0)
     );
     let material = m.arena.read_u32(OUT).expect("in the arena");
-    assert_eq!(m.state.interface_of(material), Some("IDirect3DRMMaterial"));
+    assert_eq!(
+        m.state.com.interface_of(material),
+        Some("IDirect3DRMMaterial")
+    );
     assert_eq!(
         win32::com_method("IDirect3DRMMaterial", 16).map(|m| m.name),
         Some("GetEmissive")
@@ -1309,7 +1315,7 @@ fn a_mesh_has_a_box_round_its_vertices_and_clones_to_a_mesh_of_its_own() {
     );
     let clone = m.arena.read_u32(OUT).expect("in the arena");
     assert_ne!(clone, mesh);
-    assert_eq!(m.state.interface_of(clone), Some("IDirect3DRMMesh"));
+    assert_eq!(m.state.com.interface_of(clone), Some("IDirect3DRMMesh"));
     assert_eq!(
         com(&mut m, "IDirect3DRMMesh", 16, clone, &[0, 0xff12_3456]),
         Ok(0)
@@ -1412,7 +1418,7 @@ const TEXELS: u32 = 0x0052_8000;
 
 fn surface(m: &mut Machine, pixels: u32, width: u32, height: u32) -> u32 {
     with_ctx(m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             &win32::ddraw::DIRECT_DRAW_SURFACE,
             win32::ComState::Surface {
@@ -1452,7 +1458,7 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 fn stage(m: &mut Machine, quality: u32) -> (u32, u32) {
     let surface = surface(m, PIXELS, 64, 48);
     let immediate = with_ctx(m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             &win32::d3d::DEVICE2,
             win32::ComState::Device3D { surface },
@@ -1702,8 +1708,8 @@ fn a_texture_is_drawn_from_its_surface_as_the_surface_is_now() {
 
     // GetGroupTexture hands back DirectX 3's face of the same texture.
     let older = made(&mut m, "IDirect3DRMMesh", "GetGroupTexture", mesh, &[0]);
-    assert_eq!(m.state.interface_of(older), Some("IDirect3DRMTexture"));
-    assert_eq!(m.state.identity(older), m.state.identity(texture));
+    assert_eq!(m.state.com.interface_of(older), Some("IDirect3DRMTexture"));
+    assert_eq!(m.state.com.identity(older), m.state.com.identity(texture));
     let iid = [
         0xc0, 0x30, 0x0f, 0x12, 0x29, 0x16, 0xd0, 0x11, 0x94, 0x1c, 0x00, 0x80, 0xc8, 0x0c, 0xfa,
         0x7b,
@@ -1716,7 +1722,7 @@ fn a_texture_is_drawn_from_its_surface_as_the_surface_is_now() {
         older,
         &[DATA],
     );
-    assert_eq!(m.state.interface_of(newer), Some("IDirect3DRMTexture2"));
+    assert_eq!(m.state.com.interface_of(newer), Some("IDirect3DRMTexture2"));
 
     texels(&mut m, blue, red);
     assert_eq!(
@@ -2532,7 +2538,7 @@ fn direct3d_2_lists_its_texture_formats_in_surface_descriptions() {
 fn a_direct3d_2_viewport_is_one_its_device_takes() {
     let mut m = machine();
     let d3d2 = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3D2").expect("written"),
             win32::ComState::None,
@@ -2550,7 +2556,7 @@ fn a_direct3d_2_viewport_is_one_its_device_takes() {
     );
     let viewport = m.arena.read_u32(OUT).expect("in the arena");
     let device = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3DDevice2").expect("written"),
             win32::ComState::Device3D { surface: 0 },
@@ -3356,7 +3362,7 @@ fn a_surface_hands_out_one_dc_at_a_time() {
     }
     // Its DirectX 6 face is the same surface, with the same DC out.
     let face = with_ctx(&mut m, |ctx| {
-        win32::State::face(ctx, one, &win32::ddraw::DIRECT_DRAW_SURFACE4)
+        lego_legacy_core::com::face(ctx, one, &win32::ddraw::DIRECT_DRAW_SURFACE4)
     })
     .expect("a face");
     assert_eq!(
@@ -3407,7 +3413,7 @@ fn a_surface_hands_out_one_dc_at_a_time() {
     // A screen with no surface behind it has its frame when its DC is let go
     // of, as letting go of a lock of the whole of it does.
     let screen = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             &win32::ddraw::DIRECT_DRAW_SURFACE,
             win32::ComState::Surface {
@@ -4579,7 +4585,7 @@ fn a_texture_is_loaded_from_one_in_system_memory_and_has_one_handle() {
     assert_eq!(handle(&mut m, loaded), 1, "the same, asked again");
     assert_eq!(handle(&mut m, source), 2);
     let d3d2 = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3D2").expect("written"),
             win32::ComState::None,
@@ -4649,7 +4655,7 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     }
 
     let d3d2 = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3D2").expect("written"),
             win32::ComState::None,
@@ -4933,7 +4939,7 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     // DirectX 6's face of a device draws by its texture stages, and a texture
     // by handle there is still a wall.
     let dx6 = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3DDevice3").expect("written"),
             win32::ComState::Device3D { surface: target },
@@ -4959,7 +4965,7 @@ fn directx_5_draws_on_the_screen_with_a_texture_by_its_handle() {
     );
     assert_eq!((blend6, m.arena.read_u32(OUT)), (Ok(0), Ok(2)));
     let dx7 = with_ctx(&mut m, |ctx| {
-        win32::State::make_com(
+        lego_legacy_core::com::create(
             ctx,
             win32::interface_named("IDirect3DDevice7").expect("written"),
             win32::ComState::Device3D { surface: target },

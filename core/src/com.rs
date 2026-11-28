@@ -6,7 +6,851 @@
 //! it is an address on the boundary, so a call arrives here (ADR-0002).
 
 use crate::cpu::Stop;
+use crate::guest::heap::Heap;
+use crate::guest::{Fault, GuestMem};
 use crate::win32::Ctx;
+use std::collections::{BTreeMap, VecDeque};
+
+/// How many slots every interface's table is given.
+///
+/// Larger than any interface on the roster, so that a call past what is
+/// written lands on the boundary rather than in the heap.
+pub const SLOTS_PER_INTERFACE: usize = 128;
+
+/// One COM object the machine made.
+pub struct ComObject {
+    pub interface: &'static str,
+    pub refs: i32,
+    /// The object this is a face of: its own address for the object a call
+    /// made, and that object's for every face the guest asked it for. What an
+    /// object keeps on the side is kept under this, so every face sees it.
+    pub identity: u32,
+    /// What the guest hung on this object with `SetAppData`. Its own pointer,
+    /// which it expects to read back unchanged.
+    pub app_data: u32,
+    /// Whatever the interface keeps about this particular object.
+    pub state: ComState,
+}
+
+/// What an interface remembers about one of its objects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ComState {
+    #[default]
+    None,
+    Device {
+        keyboard: bool,
+        exclusive: bool,
+        acquired: bool,
+    },
+    /// A sound buffer, whose bytes and playing state DirectSound keeps
+    /// (`dsound::Sounds`).
+    Sound,
+    /// A drawing surface: guest memory, and how to read it.
+    Surface {
+        pixels: u32,
+        /// Whether DirectDraw allocated `pixels` from the guest heap (false
+        /// once `SetSurfaceDesc` installs client-owned memory).
+        owned_pixels: bool,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        /// How a pixel is laid out: what the title asked for, or the screen's.
+        format: crate::raster::PixelFormat,
+        primary: bool,
+        /// What `GetSurfaceDesc` says it is, its `DDSCAPS_*`: what the title
+        /// asked for, and where DirectDraw put it (#210).
+        caps: u32,
+        /// The surface behind this one, when it flips.
+        back: u32,
+        /// The palette an indexed surface's pixels are looked up in.
+        palette: u32,
+    },
+    /// A palette's own 256 entries, in guest memory.
+    Palette { store: u32 },
+    /// A multimedia stream: a movie player, whose state is in the players.
+    MultiMediaStream,
+    /// A DirectShow filter graph (`CLSID_FilterGraph`), whose state is in `State::filter_graphs` (#372).
+    FilterGraph,
+    /// One stream of a player's movie.
+    MediaStream { owner: u32, video: bool },
+    /// A sample that a player's video is updated into: the surface it wraps.
+    StreamSample { owner: u32, surface: u32 },
+    /// One stream of an AVIFile movie: the file object, and which stream.
+    AviStream { file: u32, stream: usize },
+    /// A three-dimensional device, and the surface it draws into.
+    Device3D { surface: u32 },
+    /// A buffer of vertices the title fills and then draws from (#57): where
+    /// they are, how they are laid out, and how many fit.
+    VertexBuffer { store: u32, fvf: u32, count: u32 },
+    /// A frame's children or its lights, as they were when a title asked for
+    /// them.
+    Array { items: Vec<u32> },
+    /// What a viewport's `Pick` found, nearest first: each visual, the array
+    /// of frames from its scene's root down to it, and its `D3DRMPICKDESC`
+    /// as the five words it is written as.
+    PickedArray { picks: Vec<(u32, u32, [u32; 5])> },
+    /// Something a title draws itself: its callback, and what to pass it.
+    UserVisual { callback: u32, argument: u32 },
+    /// Retained mode's device: its surface, and how many buffers the title
+    /// said it flips between.
+    RetainedDevice {
+        surface: u32,
+        buffers: u32,
+        /// The immediate-mode device underneath, once one has been asked for.
+        immediate: u32,
+    },
+    /// A viewport: which device, where on it, and what it clears to.
+    Viewport {
+        device: u32,
+        /// The frame it looks from, for a retained-mode viewport.
+        camera: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        background: u32,
+        /// The immediate-mode viewport underneath a retained-mode one, once
+        /// a title has asked for it.
+        immediate: u32,
+    },
+}
+
+/// Deep table of all guest COM objects, their interface faces, reclaimed
+/// 8-byte guest slots, and cached guest vtables.
+#[derive(Default)]
+pub struct ComTable {
+    /// COM objects and faces, by the guest pointer that names them.
+    objects: BTreeMap<u32, ComObject>,
+    /// Every face of every object, by `(identity, interface_name)`.
+    faces: BTreeMap<(u32, &'static str), u32>,
+    /// Freed 8-byte COM face slots reused by [`create`] and [`face`].
+    free_slots: VecDeque<u32>,
+    /// Which vtable an interface's methods live behind, once one is made.
+    vtables: BTreeMap<&'static str, u32>,
+}
+
+impl ComTable {
+    /// Remember a primary COM object at `at` with initial reference count 1.
+    pub fn insert(&mut self, at: u32, interface: &'static str, state: ComState) {
+        self.insert_entry(at, at, interface, state);
+    }
+
+    fn insert_entry(&mut self, identity: u32, at: u32, interface: &'static str, state: ComState) {
+        self.faces.insert((identity, interface), at);
+        self.objects.insert(
+            at,
+            ComObject {
+                interface,
+                refs: 1,
+                identity,
+                app_data: 0,
+                state,
+            },
+        );
+    }
+
+    fn alloc_slot(&mut self, heap: &mut Heap) -> u32 {
+        self.free_slots.pop_front().unwrap_or_else(|| heap.alloc(8))
+    }
+
+    /// The object a face belongs to.
+    #[must_use]
+    pub fn identity(&self, at: u32) -> u32 {
+        self.objects.get(&at).map_or(at, |o| o.identity)
+    }
+
+    /// The primary object a guest pointer is a face of: its state and app data,
+    /// whichever face the pointer is.
+    #[must_use]
+    pub fn get(&self, at: u32) -> Option<&ComObject> {
+        let object = self.objects.get(&at)?;
+        if object.identity == at {
+            Some(object)
+        } else {
+            self.objects.get(&object.identity)
+        }
+    }
+
+    pub fn get_mut(&mut self, at: u32) -> Option<&mut ComObject> {
+        let identity = {
+            let object = self.objects.get_mut(&at)?;
+            if object.identity == at {
+                // Safety: `object` is a unique mutable borrow from `self.objects`;
+                // we return immediately without touching `self.objects` again and
+                // tie the returned lifetime to `&mut self`.
+                let ptr: *mut ComObject = object;
+                return Some(unsafe { &mut *ptr });
+            }
+            object.identity
+        };
+        self.objects.get_mut(&identity)
+    }
+
+    /// Which interface a guest pointer is: the face itself, not the object.
+    #[must_use]
+    pub fn interface_of(&self, at: u32) -> Option<&'static str> {
+        self.objects.get(&at).map(|o| o.interface)
+    }
+
+    /// Read-only view of primary COM objects (where `obj.identity == addr`).
+    pub fn primary_objects(&self) -> impl Iterator<Item = (u32, &ComObject)> {
+        self.objects
+            .iter()
+            .filter(|(&addr, obj)| obj.identity == addr)
+            .map(|(&addr, obj)| (addr, obj))
+    }
+
+    /// Increment one reference on face `at` and return the new reference count.
+    pub fn add_ref(&mut self, at: u32) -> u32 {
+        let Some(object) = self.objects.get_mut(&at) else {
+            return 0;
+        };
+        object.refs = object.refs.saturating_add(1).max(0);
+        u32::try_from(object.refs).unwrap_or(0)
+    }
+
+    /// Decrement one reference on face `at` (clamped at 0), returning
+    /// `(remaining_refs, identity)`. Private to `com` so zero-ref drops can
+    /// never bypass [`release_ref`] reclamation.
+    fn dec_ref(&mut self, at: u32) -> Option<(u32, u32)> {
+        let object = self.objects.get_mut(&at)?;
+        object.refs = object.refs.saturating_sub(1).max(0);
+        let left = u32::try_from(object.refs).unwrap_or(0);
+        Some((left, object.identity))
+    }
+
+    fn face_entries(&self, identity: u32) -> impl Iterator<Item = ((u32, &'static str), u32)> + '_ {
+        use std::ops::Bound;
+        let end = match identity.checked_add(1) {
+            Some(next) => Bound::Excluded((next, "")),
+            None => Bound::Unbounded,
+        };
+        self.faces
+            .range((Bound::Included((identity, "")), end))
+            .map(|(&k, &v)| (k, v))
+    }
+
+    /// Whether any face sharing `identity` still holds a live reference.
+    #[must_use]
+    pub fn has_live_refs(&self, identity: u32) -> bool {
+        self.face_entries(identity)
+            .any(|(_, addr)| self.objects.get(&addr).is_some_and(|o| o.refs > 0))
+    }
+
+    /// Remove every COM face belonging to `identity` and return its 8-byte
+    /// guest slot to `free_slots` for reuse by [`create`] / [`face`].
+    fn reclaim_faces(&mut self, identity: u32) {
+        loop {
+            let Some((key, face_addr)) = self.face_entries(identity).next() else {
+                break;
+            };
+            self.faces.remove(&key);
+            if self.objects.remove(&face_addr).is_some() {
+                self.free_slots.push_back(face_addr);
+            }
+        }
+    }
+
+    /// The vtable an interface's objects share, once it has one.
+    #[must_use]
+    pub fn vtable(&self, interface: &'static str) -> Option<u32> {
+        self.vtables.get(interface).copied()
+    }
+
+    /// True if any live `GUID_SysMouse` holds a `DISCL_EXCLUSIVE` DirectInput acquisition.
+    #[must_use]
+    pub(crate) fn has_exclusive_acquired_mouse(&self) -> bool {
+        self.objects.values().any(|o| {
+            matches!(
+                o.state,
+                ComState::Device {
+                    keyboard: false,
+                    exclusive: true,
+                    acquired: true,
+                }
+            ) && self.has_live_refs(o.identity)
+        })
+    }
+
+    /// True if any live flipping-chain parent, `Device3D`, `RetainedDevice`, or
+    /// `StreamSample` still guards surface `identity`.
+    fn has_live_surface_holder(&self, identity: u32) -> bool {
+        self.objects.iter().any(|(&addr, o)| match o.state {
+            ComState::Surface { back: b, .. } => b != 0 && self.identity(b) == identity,
+            ComState::Device3D { surface }
+            | ComState::RetainedDevice { surface, .. }
+            | ComState::StreamSample { surface, .. } => {
+                surface != 0 && self.identity(surface) == identity && self.has_live_refs(addr)
+            }
+            _ => false,
+        })
+    }
+
+    fn has_surface_with_pixels(&self, pixels: u32) -> bool {
+        self.objects
+            .values()
+            .any(|o| matches!(o.state, ComState::Surface { pixels: p, .. } if p == pixels))
+    }
+}
+
+fn resolve_interface_name(s: &str) -> Option<&'static str> {
+    crate::win32::interface_named(s).map(|i| i.name)
+}
+
+fn ensure_vtable(ctx: &mut Ctx<'_>, interface: &'static Interface) -> Result<u32, Fault> {
+    if let Some(at) = ctx.state.com.vtable(interface.name) {
+        return Ok(at);
+    }
+    // The table is bound wider than the methods that are written, so a call
+    // into a slot nobody declared arrives at the boundary and stops with a
+    // name. A vtable that ended where the written methods end would have the
+    // guest read whatever is next in the heap and call it, which is a jump
+    // into nothing half a million instructions later.
+    let slots = interface.methods.len().max(SLOTS_PER_INTERFACE);
+    let addresses = ctx.boundary.bind_interface(interface.name, slots);
+    let at = ctx
+        .state
+        .heap
+        .alloc(u32::try_from(addresses.len() * 4).unwrap_or(4));
+    for (i, address) in addresses.iter().enumerate() {
+        ctx.mem.write_u32(at + (i as u32) * 4, *address)?;
+    }
+    ctx.state.com.vtables.insert(interface.name, at);
+    Ok(at)
+}
+
+/// Make a COM object the guest can call through.
+///
+/// The object is one word of guest memory pointing at the interface's table,
+/// which is itself guest memory full of boundary addresses.
+///
+/// # Errors
+/// When the heap is exhausted or the write faults.
+pub fn create(
+    ctx: &mut Ctx<'_>,
+    interface: &'static Interface,
+    state: ComState,
+) -> Result<u32, Fault> {
+    let vtable = ensure_vtable(ctx, interface)?;
+    let object = ctx.state.com.alloc_slot(&mut ctx.state.heap);
+    ctx.mem.write_u32(object, vtable)?;
+    ctx.state.com.insert(object, interface.name, state);
+    Ok(object)
+}
+
+/// Hand back an object's face as another interface: the same face again if
+/// the guest has had it before, as COM promises, and a new one sharing the
+/// object's state if not.
+///
+/// # Errors
+/// When the heap is exhausted or the write faults.
+pub fn face(ctx: &mut Ctx<'_>, of: u32, interface: &'static Interface) -> Result<u32, Fault> {
+    let identity = ctx.state.com.identity(of);
+    if let Some(at) = ctx
+        .state
+        .com
+        .faces
+        .get(&(identity, interface.name))
+        .copied()
+    {
+        ctx.state.com.add_ref(at);
+        return Ok(at);
+    }
+    // The face keeps nothing of its own: what the object keeps is found
+    // through its identity, so a change made through one face is seen through
+    // every other.
+    let vtable = ensure_vtable(ctx, interface)?;
+    let at = ctx.state.com.alloc_slot(&mut ctx.state.heap);
+    ctx.mem.write_u32(at, vtable)?;
+    ctx.state
+        .com
+        .insert_entry(identity, at, interface.name, ComState::None);
+    Ok(at)
+}
+
+enum ReclaimWork {
+    ReleaseFace(u32),
+    ReclaimSurface(u32),
+}
+
+/// Decrement one reference on COM face `at`, returning the face's remaining
+/// count and draining iterative-worklist reclamation whenever all faces of an
+/// object reach zero references.
+pub fn release_ref(ctx: &mut Ctx<'_>, at: u32) -> u32 {
+    let Some((left, identity)) = ctx.state.com.dec_ref(at) else {
+        return 0;
+    };
+    if left != 0 {
+        return left;
+    }
+    let mut work = Vec::new();
+    enqueue_reclaim_for_identity(ctx, identity, &mut work);
+    drain_reclaim_worklist(ctx, &mut work);
+    0
+}
+
+/// Reclaim a DirectDraw surface's pixel buffer, COM faces, and side-table
+/// entries once every face of `identity` has refcount 0 and no live flipping-
+/// chain parent, 3D device, or stream sample still holds it.
+pub(crate) fn reclaim_surface_if_unreferenced(ctx: &mut Ctx<'_>, identity: u32) {
+    let mut work = vec![ReclaimWork::ReclaimSurface(identity)];
+    drain_reclaim_worklist(ctx, &mut work);
+}
+
+fn enqueue_reclaim_for_identity(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec<ReclaimWork>) {
+    if ctx.state.com.has_live_refs(identity) {
+        return;
+    }
+    match ctx.state.com.get(identity).map(|o| &o.state) {
+        Some(ComState::Surface { .. }) => work.push(ReclaimWork::ReclaimSurface(identity)),
+        Some(&ComState::Device3D { surface }) => {
+            if surface != 0 {
+                let target = ctx.state.com.identity(surface);
+                work.push(ReclaimWork::ReclaimSurface(target));
+            }
+            for tex in ctx
+                .state
+                .immediate
+                .take_device_textures(identity)
+                .into_iter()
+                .rev()
+            {
+                work.push(ReclaimWork::ReleaseFace(tex));
+            }
+        }
+        Some(&ComState::RetainedDevice { surface, .. })
+        | Some(&ComState::StreamSample { surface, .. })
+            if surface != 0 =>
+        {
+            let target = ctx.state.com.identity(surface);
+            work.push(ReclaimWork::ReclaimSurface(target));
+        }
+        Some(ComState::Sound) => {
+            crate::win32::dsound::reclaim_buffer(ctx, identity);
+            ctx.state.com.reclaim_faces(identity);
+        }
+        Some(ComState::MultiMediaStream) => {
+            crate::win32::amstream::reclaim_stream(ctx, identity);
+        }
+        Some(ComState::FilterGraph) => {
+            crate::win32::dshow::reclaim_graph(ctx, identity);
+            ctx.state.com.reclaim_faces(identity);
+        }
+        _ => {}
+    }
+}
+
+fn drain_reclaim_worklist(ctx: &mut Ctx<'_>, work: &mut Vec<ReclaimWork>) {
+    while let Some(item) = work.pop() {
+        match item {
+            ReclaimWork::ReleaseFace(face) => {
+                if let Some((0, identity)) = ctx.state.com.dec_ref(face) {
+                    enqueue_reclaim_for_identity(ctx, identity, work);
+                }
+            }
+            ReclaimWork::ReclaimSurface(identity) => {
+                try_reclaim_surface(ctx, identity, work);
+            }
+        }
+    }
+}
+
+fn try_reclaim_surface(ctx: &mut Ctx<'_>, identity: u32, work: &mut Vec<ReclaimWork>) {
+    let Some(&ComState::Surface {
+        pixels,
+        owned_pixels,
+        back,
+        ..
+    }) = ctx.state.com.get(identity).map(|o| &o.state)
+    else {
+        return;
+    };
+    if ctx.state.com.has_live_refs(identity) || ctx.state.com.has_live_surface_holder(identity) {
+        return;
+    }
+
+    ctx.state.com.reclaim_faces(identity);
+
+    let gdi = &mut ctx.state.gdi;
+    ctx.state.surface_dcs.retain(|&dc, &mut s| {
+        if s == identity {
+            gdi.dcs.remove(&dc);
+            false
+        } else {
+            true
+        }
+    });
+    ctx.state.immediate.remove_handle_for(identity);
+
+    if pixels != 0
+        && (ctx.state.color_keys.contains_key(&pixels) || ctx.state.clipped.contains(&pixels))
+        && !ctx.state.com.has_surface_with_pixels(pixels)
+    {
+        ctx.state.color_keys.remove(&pixels);
+        ctx.state.clipped.remove(&pixels);
+    }
+
+    if owned_pixels && pixels != 0 {
+        ctx.state.surface_pool.free(&ctx.state.heap, pixels);
+    }
+
+    if back != 0 {
+        let back_id = ctx.state.com.identity(back);
+        work.push(ReclaimWork::ReclaimSurface(back_id));
+    }
+}
+
+impl crate::snap::Snap for ComState {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let mut tag = match self {
+            Self::None => 0u8,
+            Self::Device { .. } => 1u8,
+            Self::Sound => 2u8,
+            Self::Surface { .. } => 3u8,
+            Self::Palette { .. } => 4u8,
+            Self::MultiMediaStream => 5u8,
+            Self::MediaStream { .. } => 6u8,
+            Self::StreamSample { .. } => 7u8,
+            Self::AviStream { .. } => 8u8,
+            Self::Device3D { .. } => 9u8,
+            Self::VertexBuffer { .. } => 10u8,
+            Self::Array { .. } => 11u8,
+            Self::PickedArray { .. } => 12u8,
+            Self::UserVisual { .. } => 13u8,
+            Self::RetainedDevice { .. } => 14u8,
+            Self::Viewport { .. } => 15u8,
+            Self::FilterGraph => 16u8,
+        };
+        v.u8(&mut tag);
+        if v.is_reading() {
+            match tag {
+                0 => *self = Self::None,
+                1 => {
+                    let (mut keyboard, mut exclusive, mut acquired) = (false, false, false);
+                    v.bool(&mut keyboard);
+                    v.bool(&mut exclusive);
+                    v.bool(&mut acquired);
+                    *self = Self::Device {
+                        keyboard,
+                        exclusive,
+                        acquired,
+                    };
+                }
+                2 => *self = Self::Sound,
+                3 => {
+                    let (mut pixels, mut width, mut height, mut pitch) = (0u32, 0u32, 0u32, 0u32);
+                    let mut owned_pixels = false;
+                    let mut format = crate::raster::PixelFormat::RGB565;
+                    let (mut primary, mut caps, mut back, mut palette) = (false, 0u32, 0u32, 0u32);
+                    v.u32(&mut pixels);
+                    v.bool(&mut owned_pixels);
+                    v.u32(&mut width);
+                    v.u32(&mut height);
+                    v.u32(&mut pitch);
+                    format.snap(v);
+                    v.bool(&mut primary);
+                    v.u32(&mut caps);
+                    v.u32(&mut back);
+                    v.u32(&mut palette);
+                    *self = Self::Surface {
+                        pixels,
+                        owned_pixels,
+                        width,
+                        height,
+                        pitch,
+                        format,
+                        primary,
+                        caps,
+                        back,
+                        palette,
+                    };
+                }
+                4 => {
+                    let mut store = 0u32;
+                    v.u32(&mut store);
+                    *self = Self::Palette { store };
+                }
+                5 => *self = Self::MultiMediaStream,
+                6 => {
+                    let (mut owner, mut video) = (0u32, false);
+                    v.u32(&mut owner);
+                    v.bool(&mut video);
+                    *self = Self::MediaStream { owner, video };
+                }
+                7 => {
+                    let (mut owner, mut surface) = (0u32, 0u32);
+                    v.u32(&mut owner);
+                    v.u32(&mut surface);
+                    *self = Self::StreamSample { owner, surface };
+                }
+                8 => {
+                    let (mut file, mut stream) = (0u32, 0usize);
+                    v.u32(&mut file);
+                    v.usize(&mut stream);
+                    *self = Self::AviStream { file, stream };
+                }
+                9 => {
+                    let mut surface = 0u32;
+                    v.u32(&mut surface);
+                    *self = Self::Device3D { surface };
+                }
+                10 => {
+                    let (mut store, mut fvf, mut count) = (0u32, 0u32, 0u32);
+                    v.u32(&mut store);
+                    v.u32(&mut fvf);
+                    v.u32(&mut count);
+                    *self = Self::VertexBuffer { store, fvf, count };
+                }
+                11 => {
+                    let mut items = Vec::new();
+                    crate::snap::snap_u32_vec(v, &mut items);
+                    *self = Self::Array { items };
+                }
+                12 => {
+                    let mut picks = Vec::new();
+                    crate::snap::snap_vec(v, &mut picks, |(a, b, desc), v| {
+                        v.u32(a);
+                        v.u32(b);
+                        for w in desc {
+                            v.u32(w);
+                        }
+                    });
+                    *self = Self::PickedArray { picks };
+                }
+                13 => {
+                    let (mut callback, mut argument) = (0u32, 0u32);
+                    v.u32(&mut callback);
+                    v.u32(&mut argument);
+                    *self = Self::UserVisual { callback, argument };
+                }
+                14 => {
+                    let (mut surface, mut buffers, mut immediate) = (0u32, 0u32, 0u32);
+                    v.u32(&mut surface);
+                    v.u32(&mut buffers);
+                    v.u32(&mut immediate);
+                    *self = Self::RetainedDevice {
+                        surface,
+                        buffers,
+                        immediate,
+                    };
+                }
+                15 => {
+                    let (
+                        mut device,
+                        mut camera,
+                        mut x,
+                        mut y,
+                        mut width,
+                        mut height,
+                        mut background,
+                        mut immediate,
+                    ) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+                    v.u32(&mut device);
+                    v.u32(&mut camera);
+                    v.u32(&mut x);
+                    v.u32(&mut y);
+                    v.u32(&mut width);
+                    v.u32(&mut height);
+                    v.u32(&mut background);
+                    v.u32(&mut immediate);
+                    *self = Self::Viewport {
+                        device,
+                        camera,
+                        x,
+                        y,
+                        width,
+                        height,
+                        background,
+                        immediate,
+                    };
+                }
+                16 => *self = Self::FilterGraph,
+                _ => v.mark_corrupt("com::ComState tag"),
+            }
+        } else {
+            match self {
+                Self::None | Self::Sound | Self::MultiMediaStream | Self::FilterGraph => {}
+                Self::Device {
+                    keyboard,
+                    exclusive,
+                    acquired,
+                } => {
+                    v.bool(keyboard);
+                    v.bool(exclusive);
+                    v.bool(acquired);
+                }
+                Self::Surface {
+                    pixels,
+                    owned_pixels,
+                    width,
+                    height,
+                    pitch,
+                    format,
+                    primary,
+                    caps,
+                    back,
+                    palette,
+                } => {
+                    v.u32(pixels);
+                    v.bool(owned_pixels);
+                    v.u32(width);
+                    v.u32(height);
+                    v.u32(pitch);
+                    format.snap(v);
+                    v.bool(primary);
+                    v.u32(caps);
+                    v.u32(back);
+                    v.u32(palette);
+                }
+                Self::Palette { store } => v.u32(store),
+                Self::MediaStream { owner, video } => {
+                    v.u32(owner);
+                    v.bool(video);
+                }
+                Self::StreamSample { owner, surface } => {
+                    v.u32(owner);
+                    v.u32(surface);
+                }
+                Self::AviStream { file, stream } => {
+                    v.u32(file);
+                    v.usize(stream);
+                }
+                Self::Device3D { surface } => v.u32(surface),
+                Self::VertexBuffer { store, fvf, count } => {
+                    v.u32(store);
+                    v.u32(fvf);
+                    v.u32(count);
+                }
+                Self::Array { items } => crate::snap::snap_u32_vec(v, items),
+                Self::PickedArray { picks } => {
+                    crate::snap::snap_vec(v, picks, |(a, b, desc), v| {
+                        v.u32(a);
+                        v.u32(b);
+                        for w in desc {
+                            v.u32(w);
+                        }
+                    });
+                }
+                Self::UserVisual { callback, argument } => {
+                    v.u32(callback);
+                    v.u32(argument);
+                }
+                Self::RetainedDevice {
+                    surface,
+                    buffers,
+                    immediate,
+                } => {
+                    v.u32(surface);
+                    v.u32(buffers);
+                    v.u32(immediate);
+                }
+                Self::Viewport {
+                    device,
+                    camera,
+                    x,
+                    y,
+                    width,
+                    height,
+                    background,
+                    immediate,
+                } => {
+                    v.u32(device);
+                    v.u32(camera);
+                    v.u32(x);
+                    v.u32(y);
+                    v.u32(width);
+                    v.u32(height);
+                    v.u32(background);
+                    v.u32(immediate);
+                }
+            }
+        }
+    }
+}
+
+impl crate::snap::Snap for ComObject {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            interface,
+            refs,
+            identity,
+            app_data,
+            state,
+        } = self;
+        crate::snap::snap_static_str(v, interface, "ComObject interface", resolve_interface_name);
+        v.i32(refs);
+        v.u32(identity);
+        v.u32(app_data);
+        state.snap(v);
+    }
+}
+
+impl crate::snap::Snap for ComTable {
+    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
+        let Self {
+            objects,
+            faces,
+            free_slots,
+            vtables,
+        } = self;
+        crate::snap::snap_btree_map_with(
+            v,
+            objects,
+            u32::default,
+            || ComObject {
+                interface: "",
+                refs: 0,
+                identity: 0,
+                app_data: 0,
+                state: ComState::None,
+            },
+            |k, v| v.u32(k),
+            |obj, v| obj.snap(v),
+        );
+        crate::snap::snap_btree_map_with(
+            v,
+            faces,
+            || (0u32, ""),
+            u32::default,
+            |(id, iface), v| {
+                v.u32(id);
+                crate::snap::snap_static_str(v, iface, "faces interface", resolve_interface_name);
+            },
+            |val, v| v.u32(val),
+        );
+        crate::snap::snap_vec_deque(v, free_slots, |addr, v| v.u32(addr));
+        crate::snap::snap_btree_map_with(
+            v,
+            vtables,
+            || "",
+            u32::default,
+            |iface, v| {
+                crate::snap::snap_static_str(v, iface, "vtables interface", resolve_interface_name);
+            },
+            |val, v| v.u32(val),
+        );
+        if v.is_reading() && !v.failed() {
+            let mut seen_free = std::collections::BTreeSet::new();
+            let objects_valid = faces.len() == objects.len()
+                && objects.iter().all(|(&addr, obj)| {
+                    addr != 0
+                        && faces.get(&(obj.identity, obj.interface)) == Some(&addr)
+                        && objects
+                            .get(&obj.identity)
+                            .is_some_and(|p| p.identity == obj.identity)
+                });
+            let free_valid = free_slots
+                .iter()
+                .all(|&slot| slot != 0 && !objects.contains_key(&slot) && seen_free.insert(slot));
+            if !objects_valid || !free_valid {
+                objects.clear();
+                faces.clear();
+                free_slots.clear();
+                v.mark_corrupt("ComTable invariants");
+            }
+        }
+    }
+}
 
 /// One method of an interface.
 pub struct Method {
@@ -66,9 +910,11 @@ fn unwritten(_ctx: &mut Ctx<'_>, _this: u32, _args: &[u32]) -> Result<u32, Stop>
 
 /// What every COM object answers in its first three slots.
 ///
-/// Reference counting is real. DirectDraw surfaces (#338) and DirectSound
-/// buffers (#385) reclaim their guest-heap sample/pixel buffers, COM faces, and
-/// side-table entries once all faces reach zero references; other COM objects
+/// Reference counting is real. Once every face sharing an object's identity
+/// reaches zero references, [`release_ref`] reclaims DirectDraw surfaces
+/// (#338), DirectSound buffers (#385), DirectShow filter graphs (#372, #405),
+/// and `AMMultiMediaStream` players (along with draining `Device3D`,
+/// `RetainedDevice`, and `StreamSample` surface guards); other COM objects
 /// stay held until the run ends.
 pub const QUERY_INTERFACE: Method = method("QueryInterface", 2, query_interface);
 pub const ADD_REF: Method = method("AddRef", 0, add_ref);
@@ -629,7 +1475,7 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         ctx.mem.write_u32(out, 0).map_err(Stop::Fault)?;
     }
     let asked = read_iid(ctx, args[0]).ok();
-    let Some(have) = ctx.state.interface_of(this) else {
+    let Some(have) = ctx.state.com.interface_of(this) else {
         return Ok(E_NOINTERFACE);
     };
 
@@ -637,8 +1483,8 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
         // IUnknown is the object's identity, the same pointer whichever face is
         // asked: how COM says two pointers are one object.
         if asked == IUNKNOWN {
-            let identity = ctx.state.identity(this);
-            ctx.state.com_ref(identity, 1);
+            let identity = ctx.state.com.identity(this);
+            ctx.state.com.add_ref(identity);
             if out != 0 {
                 ctx.mem.write_u32(out, identity).map_err(Stop::Fault)?;
             }
@@ -647,7 +1493,7 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
 
         // Asked for what it already is: the same face, one more reference.
         if is_itself(have, &asked) {
-            ctx.state.com_ref(this, 1);
+            ctx.state.com.add_ref(this);
             if out != 0 {
                 ctx.mem.write_u32(out, this).map_err(Stop::Fault)?;
             }
@@ -667,8 +1513,7 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
             });
         if let Some(give) = target {
             if let Some(interface) = crate::win32::interface_named(give) {
-                let object =
-                    crate::win32::State::face(ctx, this, interface).map_err(Stop::Fault)?;
+                let object = face(ctx, this, interface).map_err(Stop::Fault)?;
                 if out != 0 {
                     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
                 }
@@ -707,25 +1552,22 @@ fn query_interface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, St
 }
 
 fn add_ref(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.com_ref(this, 1))
+    Ok(ctx.state.com.add_ref(this))
 }
 
 fn release(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, Stop> {
-    Ok(ctx.state.com_ref(this, -1))
+    Ok(release_ref(ctx, this))
 }
-
-use crate::guest::GuestMem;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        iid_text, is_itself, parse_iid, query_interface, E_NOINTERFACE, FACES, IUNKNOWN, OWN,
-        RM_OBJECT, RM_VISUAL, S_OK,
+        create, face, iid_text, is_itself, parse_iid, query_interface, ComState, E_NOINTERFACE,
+        FACES, IUNKNOWN, OWN, RM_OBJECT, RM_VISUAL, S_OK,
     };
     use crate::cpu::Stop;
     use crate::guest::GuestMem;
     use crate::win32::tests::with_test_ctx;
-    use crate::win32::{ComState, State};
 
     #[test]
     fn binary_guids_round_trip_with_iid_text() {
@@ -761,8 +1603,8 @@ mod tests {
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
             let iid_at = 0x1000u32;
             let out_at = 0x1040u32;
-            let dd = State::make_com(ctx, &crate::win32::ddraw::DIRECT_DRAW, ComState::None)
-                .expect("make_com");
+            let dd =
+                create(ctx, &crate::win32::ddraw::DIRECT_DRAW, ComState::None).expect("create");
 
             // 1. Face upgrade: IDirectDraw -> IDirectDraw4 and IDirect3D3.
             let dd4_iid = parse_iid("9c59509a-39bd-11d1-8c4a-00c04fd930c5");
@@ -770,13 +1612,13 @@ mod tests {
             assert_eq!(query_interface(ctx, dd, &[iid_at, out_at]).unwrap(), S_OK);
             let dd4 = ctx.mem.read_u32(out_at).unwrap();
             assert_ne!(dd4, dd);
-            assert_eq!(ctx.state.interface_of(dd4), Some("IDirectDraw4"));
+            assert_eq!(ctx.state.com.interface_of(dd4), Some("IDirectDraw4"));
 
             let d3d3_iid = parse_iid("bb223240-e72b-11d0-a9b4-00aa00c0993e");
             ctx.mem.write(iid_at, &d3d3_iid).unwrap();
             assert_eq!(query_interface(ctx, dd, &[iid_at, out_at]).unwrap(), S_OK);
             let d3d3 = ctx.mem.read_u32(out_at).unwrap();
-            assert_eq!(ctx.state.interface_of(d3d3), Some("IDirect3D3"));
+            assert_eq!(ctx.state.com.interface_of(d3d3), Some("IDirect3D3"));
 
             // 2. IUnknown on secondary face returns primary identity.
             ctx.mem.write(iid_at, &IUNKNOWN).unwrap();
@@ -853,10 +1695,10 @@ mod tests {
                     query_interface(ctx, graph, &[iid_at, out_at]).unwrap(),
                     S_OK
                 );
-                let face = ctx.mem.read_u32(out_at).unwrap();
-                assert_eq!(ctx.state.interface_of(face), Some(name));
-                assert_eq!(ctx.state.identity(face), graph);
-                ptrs.push((name, face));
+                let got_face = ctx.mem.read_u32(out_at).unwrap();
+                assert_eq!(ctx.state.com.interface_of(got_face), Some(name));
+                assert_eq!(ctx.state.com.identity(got_face), graph);
+                ptrs.push((name, got_face));
             }
             // Symmetric QI from every face to every other face and IUnknown.
             for &(_, from_face) in &ptrs {
@@ -873,9 +1715,43 @@ mod tests {
                         S_OK
                     );
                     let got = ctx.mem.read_u32(out_at).unwrap();
-                    assert_eq!(ctx.state.interface_of(got), Some(to_name));
+                    assert_eq!(ctx.state.com.interface_of(got), Some(to_name));
                 }
             }
+        });
+    }
+
+    #[test]
+    fn com_table_fast_path_and_secondary_face_lookup() {
+        with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
+            let dd = create(
+                ctx,
+                &crate::win32::ddraw::DIRECT_DRAW,
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
+            )
+            .expect("create");
+            let dd4 = face(ctx, dd, &crate::win32::ddraw::DIRECT_DRAW4).expect("face");
+            assert_ne!(dd, dd4);
+            assert_eq!(ctx.state.com.get(dd).map(|o| o.identity), Some(dd));
+            assert_eq!(ctx.state.com.get(dd4).map(|o| o.identity), Some(dd));
+            assert_eq!(
+                ctx.state.com.get(dd4).map(|o| &o.state),
+                Some(&ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                })
+            );
+            ctx.state.com.get_mut(dd4).expect("face").app_data = 0x1234;
+            assert_eq!(ctx.state.com.get(dd).expect("primary").app_data, 0x1234);
+            ctx.state.com.get_mut(dd).expect("primary").app_data = 0x5678;
+            assert_eq!(ctx.state.com.get(dd4).expect("face").app_data, 0x5678);
+            assert!(ctx.state.com.get(0xdead_beef).is_none());
+            assert!(ctx.state.com.get_mut(0xdead_beef).is_none());
         });
     }
 }
