@@ -1100,7 +1100,7 @@ fn the_adventure_mission_1_route_completes_m1010_saves_and_exits_cleanly() {
         return;
     };
     ran.assert_exited(0).assert_flips(4847);
-    assert_eq!(ran.finish.cursor, 14_885_345_496);
+    assert_eq!(ran.finish.cursor, 14_885_364_203);
     assert_eq!(ran.finish.declared_millis, 227_086);
 
     let pos = |needle: &str| {

@@ -464,3 +464,532 @@ fn com_release_ref_cascades_device3d_textures_and_backbuffer_in_dfs_order() {
         );
     });
 }
+
+fn method_run(
+    iface: &'static lego_legacy_core::com::Interface,
+    name: &str,
+) -> lego_legacy_core::com::ComFn {
+    iface.methods.iter().find(|m| m.name == name).unwrap().run
+}
+
+#[test]
+fn palette_churn_bounds_heap_and_zeros_reused_slab() {
+    use lego_legacy_core::com::{self, ComState, RELEASE, S_OK};
+    use lego_legacy_core::guest::GuestMem;
+
+    with_ctx(|ctx| {
+        let dd = com::create(ctx, &win32::ddraw::DIRECT_DRAW, ComState::None).unwrap();
+        let create_palette = method_run(&win32::ddraw::DIRECT_DRAW, "CreatePalette");
+        let get_entries = method_run(&win32::ddraw::DIRECT_DRAW_PALETTE, "GetEntries");
+
+        let src_entries = ctx.state.heap.alloc(256 * 4);
+        let dst_entries = ctx.state.heap.alloc(256 * 4);
+        let out_at = ctx.state.heap.alloc(8);
+        ctx.mem.write(src_entries, &[0x5au8; 256 * 4]).unwrap();
+
+        // Warm up once so vtables and initial pool/COM slot exist.
+        assert_eq!(
+            create_palette(ctx, dd, &[0x0000_0004, src_entries, out_at, 0]).unwrap(),
+            S_OK
+        );
+        let first = ctx.mem.read_u32(out_at).unwrap();
+        let first_store = match ctx.state.com.get(first).map(|o| &o.state) {
+            Some(ComState::Palette { store }) => *store,
+            other => panic!("expected Palette state, got {other:?}"),
+        };
+        assert_eq!((RELEASE.run)(ctx, first, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(first).is_none(),
+            "released unattached Palette must be reclaimed from ComTable"
+        );
+
+        let base_extent = ctx.state.heap.extent();
+        let base_live = ctx.state.heap.live_bytes();
+
+        // Creating a null-initialized palette must reuse the pooled 1 KiB store and zero it.
+        assert_eq!(
+            create_palette(ctx, dd, &[0x0000_0004, 0, out_at, 0]).unwrap(),
+            S_OK
+        );
+        let second = ctx.mem.read_u32(out_at).unwrap();
+        assert_eq!(second, first, "reclaimed Palette COM slot must be reused");
+        let second_store = match ctx.state.com.get(second).map(|o| &o.state) {
+            Some(ComState::Palette { store }) => *store,
+            other => panic!("expected Palette state, got {other:?}"),
+        };
+        assert_eq!(
+            second_store, first_store,
+            "1 KiB palette slab must be reused"
+        );
+        assert_eq!(
+            get_entries(ctx, second, &[0, 0, 256, dst_entries]).unwrap(),
+            S_OK
+        );
+        assert!(
+            ctx.mem
+                .slice(dst_entries, 256 * 4)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0),
+            "reused null-initialized Palette store must be zeroed"
+        );
+        assert_eq!((RELEASE.run)(ctx, second, &[]).unwrap(), 0);
+
+        for i in 0..1_200u32 {
+            let entries = if i % 2 == 0 { src_entries } else { 0 };
+            assert_eq!(
+                create_palette(ctx, dd, &[0x0000_0004, entries, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let pal = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!((RELEASE.run)(ctx, pal, &[]).unwrap(), 0);
+        }
+
+        let extent_growth = ctx.state.heap.extent() - base_extent;
+        let live_growth = ctx.state.heap.live_bytes().saturating_sub(base_live);
+        assert_eq!(
+            extent_growth, 0,
+            "steady-state Palette churn must not grow heap"
+        );
+        assert!(
+            live_growth <= 256 * 1024,
+            "1,200 CreatePalette/Release cycles grew heap.live_bytes() by {live_growth} bytes"
+        );
+
+        // Oversized block from `heap.free` must return to `heap.free` (not orphan in `palette_pool`).
+        let big = ctx.state.heap.alloc(4096);
+        ctx.mem.write(big, &[0x77u8; 4096]).unwrap();
+        assert!(ctx.state.heap.free(big));
+        assert_eq!(
+            create_palette(ctx, dd, &[0x0000_0004, 0, out_at, 0]).unwrap(),
+            S_OK
+        );
+        let pal_in_pool = ctx.mem.read_u32(out_at).unwrap();
+        assert_eq!(
+            create_palette(ctx, dd, &[0x0000_0004, 0, out_at, 0]).unwrap(),
+            S_OK
+        );
+        let pal_big = ctx.mem.read_u32(out_at).unwrap();
+        let big_store = match ctx.state.com.get(pal_big).map(|o| &o.state) {
+            Some(ComState::Palette { store }) => *store,
+            other => panic!("expected Palette state, got {other:?}"),
+        };
+        assert_eq!(big_store, big);
+        assert!(
+            ctx.mem
+                .slice(big_store, 256 * 4)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0),
+            "null-initialized Palette backed by recycled heap.free block must be zeroed"
+        );
+        assert_eq!((RELEASE.run)(ctx, pal_big, &[]).unwrap(), 0);
+        assert_eq!(
+            ctx.state.heap.alloc(4096),
+            big,
+            "oversized recycled heap block must return to heap.free rather than orphaning in palette_pool"
+        );
+        assert_eq!((RELEASE.run)(ctx, pal_in_pool, &[]).unwrap(), 0);
+    });
+}
+
+#[test]
+fn vertex_buffer_churn_bounds_heap_and_zeros_reused_slab() {
+    use lego_legacy_core::com::{self, ComState, RELEASE, S_OK};
+    use lego_legacy_core::guest::GuestMem;
+
+    with_ctx(|ctx| {
+        let d3d7 = com::create(ctx, &win32::d3d::D3D7, ComState::None).unwrap();
+        let create_vb = method_run(&win32::d3d::D3D7, "CreateVertexBuffer");
+        let lock_vb = method_run(&win32::d3d::VERTEX_BUFFER7, "Lock");
+
+        // D3DFVF_XYZ | D3DFVF_DIFFUSE = 0x42 (16 bytes/vertex).
+        let fvf = 0x42u32;
+        let desc_at = ctx.state.heap.alloc(16);
+        let out_at = ctx.state.heap.alloc(8);
+        let ptr_at = ctx.state.heap.alloc(8);
+        let size_at = ctx.state.heap.alloc(8);
+
+        let write_desc = |ctx: &mut win32::Ctx<'_>, count: u32| {
+            ctx.mem.write_u32(desc_at, 16).unwrap();
+            ctx.mem.write_u32(desc_at + 4, 0).unwrap();
+            ctx.mem.write_u32(desc_at + 8, fvf).unwrap();
+            ctx.mem.write_u32(desc_at + 12, count).unwrap();
+        };
+
+        // Warm up with a 128-vertex (2048-byte) VB and dirty its memory.
+        write_desc(ctx, 128);
+        assert_eq!(create_vb(ctx, d3d7, &[desc_at, out_at, 0]).unwrap(), S_OK);
+        let vb1 = ctx.mem.read_u32(out_at).unwrap();
+        assert_eq!(lock_vb(ctx, vb1, &[0, ptr_at, size_at]).unwrap(), S_OK);
+        let store1 = ctx.mem.read_u32(ptr_at).unwrap();
+        let size1 = ctx.mem.read_u32(size_at).unwrap();
+        assert_eq!(size1, 128 * 16);
+        ctx.mem
+            .write(store1, &vec![0xa5u8; size1 as usize])
+            .unwrap();
+        assert_eq!((RELEASE.run)(ctx, vb1, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(vb1).is_none(),
+            "released VertexBuffer must be reclaimed from ComTable"
+        );
+
+        let base_extent = ctx.state.heap.extent();
+        let base_live = ctx.state.heap.live_bytes();
+
+        // A 96-vertex (1536-byte) request is within 2x of the pooled 2048-byte slab and must reuse + zero it.
+        write_desc(ctx, 96);
+        assert_eq!(create_vb(ctx, d3d7, &[desc_at, out_at, 0]).unwrap(), S_OK);
+        let vb2 = ctx.mem.read_u32(out_at).unwrap();
+        assert_eq!(vb2, vb1, "reclaimed VertexBuffer COM slot must be reused");
+        assert_eq!(lock_vb(ctx, vb2, &[0, ptr_at, size_at]).unwrap(), S_OK);
+        let store2 = ctx.mem.read_u32(ptr_at).unwrap();
+        assert_eq!(
+            store2, store1,
+            "best-fit 2x vb_pool must reuse 2048-byte slab for 1536-byte VB"
+        );
+        assert!(
+            ctx.mem
+                .slice(store2, 96 * 16)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0),
+            "reused VertexBuffer store must be zeroed"
+        );
+        assert_eq!((RELEASE.run)(ctx, vb2, &[]).unwrap(), 0);
+
+        for i in 0..1_200u32 {
+            let count = if i % 2 == 0 { 128 } else { 96 };
+            write_desc(ctx, count);
+            assert_eq!(create_vb(ctx, d3d7, &[desc_at, out_at, 0]).unwrap(), S_OK);
+            let vb = ctx.mem.read_u32(out_at).unwrap();
+            assert_eq!((RELEASE.run)(ctx, vb, &[]).unwrap(), 0);
+        }
+
+        let extent_growth = ctx.state.heap.extent() - base_extent;
+        let live_growth = ctx.state.heap.live_bytes().saturating_sub(base_live);
+        assert_eq!(
+            extent_growth, 0,
+            "steady-state VertexBuffer churn must not grow heap"
+        );
+        assert!(
+            live_growth <= 256 * 1024,
+            "1,200 CreateVertexBuffer/Release cycles grew heap.live_bytes() by {live_growth} bytes"
+        );
+    });
+}
+
+#[test]
+fn palette_live_surface_holder_guard_defers_reclaim_until_surface_release_or_detach() {
+    use lego_legacy_core::com::{self, ComState, RELEASE, S_OK};
+    use lego_legacy_core::guest::GuestMem;
+    use lego_legacy_core::raster::PixelFormat;
+
+    with_ctx(|ctx| {
+        let dd = com::create(ctx, &win32::ddraw::DIRECT_DRAW, ComState::None).unwrap();
+        let create_palette = method_run(&win32::ddraw::DIRECT_DRAW, "CreatePalette");
+        let set_palette = method_run(&win32::ddraw::DIRECT_DRAW_SURFACE, "SetPalette");
+        let out_at = ctx.state.heap.alloc(8);
+
+        let make_surf = |ctx: &mut win32::Ctx<'_>, primary: bool| -> u32 {
+            let (pixels, _) = ctx.state.surface_pool.alloc(&mut ctx.state.heap, 256);
+            com::create(
+                ctx,
+                &win32::ddraw::DIRECT_DRAW_SURFACE,
+                ComState::Surface {
+                    pixels,
+                    owned_pixels: true,
+                    width: 16,
+                    height: 16,
+                    pitch: 16,
+                    format: PixelFormat {
+                        bits: 8,
+                        masks: [0; 4],
+                    },
+                    primary,
+                    caps: 0,
+                    back: 0,
+                    palette: 0,
+                },
+            )
+            .unwrap()
+        };
+        let make_pal = |ctx: &mut win32::Ctx<'_>| -> (u32, u32) {
+            assert_eq!(
+                create_palette(ctx, dd, &[0x0000_0004, 0, out_at, 0]).unwrap(),
+                S_OK
+            );
+            let pal = ctx.mem.read_u32(out_at).unwrap();
+            let store = match ctx.state.com.get(pal).map(|o| &o.state) {
+                Some(ComState::Palette { store }) => *store,
+                other => panic!("expected Palette, got {other:?}"),
+            };
+            (pal, store)
+        };
+
+        // 1. Offscreen surface holds palette at refcount 0 until surface releases.
+        let s1 = make_surf(ctx, false);
+        let (p1, store1) = make_pal(ctx);
+        assert_eq!(set_palette(ctx, s1, &[p1]).unwrap(), S_OK);
+        assert_eq!((RELEASE.run)(ctx, p1, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(p1).is_some(),
+            "palette bound to live surface must stay alive at refcount 0"
+        );
+        assert_eq!((RELEASE.run)(ctx, s1, &[]).unwrap(), 0);
+        assert!(ctx.state.com.get(s1).is_none());
+        assert!(
+            ctx.state.com.get(p1).is_none(),
+            "palette must reclaim once holding surface releases"
+        );
+        // Reclaimed 1 KiB store comes back on next CreatePalette.
+        let (p1_reused, store1_reused) = make_pal(ctx);
+        assert_eq!(store1_reused, store1);
+        assert_eq!((RELEASE.run)(ctx, p1_reused, &[]).unwrap(), 0);
+
+        // 2. Primary surface detaching via SetPalette(0) clears state.palette and reclaims palette.
+        let primary = make_surf(ctx, true);
+        let (p2, store2) = make_pal(ctx);
+        assert_eq!(set_palette(ctx, primary, &[p2]).unwrap(), S_OK);
+        assert_eq!(ctx.state.palette, store2);
+        assert_eq!((RELEASE.run)(ctx, p2, &[]).unwrap(), 0);
+        assert!(ctx.state.com.get(p2).is_some());
+        assert_eq!(set_palette(ctx, primary, &[0]).unwrap(), S_OK);
+        assert_eq!(ctx.state.palette, 0);
+        assert!(
+            ctx.state.com.get(p2).is_none(),
+            "palette must reclaim once detached via SetPalette(0)"
+        );
+
+        // 3. Replacing a primary surface's palette reclaims the old unreferenced palette immediately.
+        let (p3, store3) = make_pal(ctx);
+        let (p4, store4) = make_pal(ctx);
+        assert_eq!(store3, store2, "detached p2 slab reused for p3");
+        assert_eq!(set_palette(ctx, primary, &[p3]).unwrap(), S_OK);
+        assert_eq!(ctx.state.palette, store3);
+        assert_eq!((RELEASE.run)(ctx, p3, &[]).unwrap(), 0);
+        assert!(ctx.state.com.get(p3).is_some());
+        assert_eq!(set_palette(ctx, primary, &[p4]).unwrap(), S_OK);
+        assert_eq!(ctx.state.palette, store4);
+        assert!(
+            ctx.state.com.get(p3).is_none(),
+            "old palette must reclaim when replaced on surface"
+        );
+
+        // 4. Shared across primary + offscreen: releasing primary clears state.palette but keeps
+        //    palette alive until offscreen releases too.
+        let off = make_surf(ctx, false);
+        assert_eq!(set_palette(ctx, off, &[p4]).unwrap(), S_OK);
+        assert_eq!((RELEASE.run)(ctx, p4, &[]).unwrap(), 0);
+        assert_eq!((RELEASE.run)(ctx, primary, &[]).unwrap(), 0);
+        assert_eq!(ctx.state.palette, 0);
+        assert!(
+            ctx.state.com.get(p4).is_some(),
+            "palette must stay alive while offscreen surface still holds it"
+        );
+        assert_eq!((RELEASE.run)(ctx, off, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(p4).is_none(),
+            "palette must reclaim once last surface holder releases"
+        );
+    });
+}
+
+#[test]
+fn device3d_retained_device_stream_sample_dinput_and_d3drm_arrays_reclaim_com_slots() {
+    use lego_legacy_core::com::{self, ComState, RELEASE, S_OK};
+
+    with_ctx(|ctx| {
+        // Warm up vtables first.
+        let set_rs = method_run(&win32::d3d::DEVICE3, "SetRenderState");
+        let frame = com::create(ctx, &win32::d3drm::FRAME, ComState::None).unwrap();
+
+        let dev3d_warm =
+            com::create(ctx, &win32::d3d::DEVICE3, ComState::Device3D { surface: 0 }).unwrap();
+        assert_eq!(set_rs(ctx, dev3d_warm, &[22, 1]).unwrap(), S_OK);
+        assert_eq!(ctx.state.immediate.device_summaries().len(), 1);
+        assert_eq!((RELEASE.run)(ctx, dev3d_warm, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(dev3d_warm).is_none(),
+            "Device3D COM face must reclaim"
+        );
+        assert!(
+            ctx.state.immediate.device_summaries().is_empty(),
+            "Device3D entry in immediate.devices must be removed on Release"
+        );
+
+        // RetainedDevice clears `names` and `set_values` and defers reclaim while a live Viewport holds it.
+        let inner_dev =
+            com::create(ctx, &win32::d3d::DEVICE2, ComState::Device3D { surface: 0 }).unwrap();
+        let rm_dev = com::create(
+            ctx,
+            &win32::d3drm::DEVICE3,
+            ComState::RetainedDevice {
+                surface: 0,
+                buffers: 1,
+                immediate: inner_dev,
+            },
+        )
+        .unwrap();
+        ctx.state.names.insert(rm_dev, "rm-dev".to_owned());
+        ctx.state.set_values.insert((rm_dev, "quality"), 0x18);
+        let vp = com::create(
+            ctx,
+            &win32::d3drm::VIEWPORT2,
+            ComState::Viewport {
+                device: rm_dev,
+                camera: 0,
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+                background: 0,
+                immediate: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!((RELEASE.run)(ctx, rm_dev, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(rm_dev).is_some(),
+            "RetainedDevice held by live Viewport must stay alive at refcount 0"
+        );
+        assert_eq!((RELEASE.run)(ctx, vp, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(rm_dev).is_none(),
+            "RetainedDevice COM face must reclaim once Viewport releases"
+        );
+        assert!(
+            ctx.state.com.get(inner_dev).is_none(),
+            "RetainedDevice Release must release its owned immediate Device3D"
+        );
+        assert!(
+            !ctx.state.names.contains_key(&rm_dev),
+            "RetainedDevice name must be cleared"
+        );
+        assert!(
+            !ctx.state.set_values.contains_key(&(rm_dev, "quality")),
+            "RetainedDevice set_values must be cleared"
+        );
+
+        let sample = com::create(
+            ctx,
+            &win32::amstream::DIRECT_DRAW_STREAM_SAMPLE,
+            ComState::StreamSample {
+                owner: 0,
+                surface: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!((RELEASE.run)(ctx, sample, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(sample).is_none(),
+            "StreamSample COM face must reclaim"
+        );
+
+        let di_dev = com::create(
+            ctx,
+            &win32::dinput::DIRECT_INPUT_DEVICE,
+            ComState::Device {
+                keyboard: false,
+                exclusive: true,
+                acquired: true,
+            },
+        )
+        .unwrap();
+        assert_eq!((RELEASE.run)(ctx, di_dev, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(di_dev).is_none(),
+            "DirectInput Device COM face must reclaim"
+        );
+
+        // Array and PickedArray (including PickedArray's owned FRAME_ARRAY).
+        let frame_face = com::face(ctx, frame, &win32::d3drm::FRAME).unwrap();
+        let arr = com::create(
+            ctx,
+            &win32::d3drm::FRAME_ARRAY,
+            ComState::Array {
+                items: vec![frame_face],
+            },
+        )
+        .unwrap();
+        let picked = com::create(
+            ctx,
+            &win32::d3drm::PICKED_ARRAY,
+            ComState::PickedArray {
+                picks: vec![(frame, arr, [0; 5])],
+            },
+        )
+        .unwrap();
+        assert_eq!((RELEASE.run)(ctx, picked, &[]).unwrap(), 0);
+        assert!(
+            ctx.state.com.get(picked).is_none(),
+            "PickedArray COM face must reclaim"
+        );
+        assert!(
+            ctx.state.com.get(arr).is_none(),
+            "PickedArray Release must release and reclaim its owned FrameArray"
+        );
+        // Original frame keeps its creation refcount (1) after Array balanced the com::face ref.
+        assert_eq!(ctx.state.com.get(frame).map(|o| o.refs), Some(1));
+
+        // Steady-state churn across all of these COM types must reuse reclaimed slots with 0 heap growth.
+        let base_extent = ctx.state.heap.extent();
+        for _ in 0..200 {
+            let d =
+                com::create(ctx, &win32::d3d::DEVICE3, ComState::Device3D { surface: 0 }).unwrap();
+            assert_eq!((RELEASE.run)(ctx, d, &[]).unwrap(), 0);
+            let r = com::create(
+                ctx,
+                &win32::d3drm::DEVICE3,
+                ComState::RetainedDevice {
+                    surface: 0,
+                    buffers: 1,
+                    immediate: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!((RELEASE.run)(ctx, r, &[]).unwrap(), 0);
+            let s = com::create(
+                ctx,
+                &win32::amstream::DIRECT_DRAW_STREAM_SAMPLE,
+                ComState::StreamSample {
+                    owner: 0,
+                    surface: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!((RELEASE.run)(ctx, s, &[]).unwrap(), 0);
+            let di = com::create(
+                ctx,
+                &win32::dinput::DIRECT_INPUT_DEVICE,
+                ComState::Device {
+                    keyboard: true,
+                    exclusive: false,
+                    acquired: false,
+                },
+            )
+            .unwrap();
+            assert_eq!((RELEASE.run)(ctx, di, &[]).unwrap(), 0);
+            let a = com::create(
+                ctx,
+                &win32::d3drm::FRAME_ARRAY,
+                ComState::Array { items: Vec::new() },
+            )
+            .unwrap();
+            let p = com::create(
+                ctx,
+                &win32::d3drm::PICKED_ARRAY,
+                ComState::PickedArray {
+                    picks: vec![(frame, a, [0; 5])],
+                },
+            )
+            .unwrap();
+            assert_eq!((RELEASE.run)(ctx, p, &[]).unwrap(), 0);
+        }
+        assert_eq!(
+            ctx.state.heap.extent(),
+            base_extent,
+            "reclaimed COM slots must be reused without growing guest heap"
+        );
+    });
+}

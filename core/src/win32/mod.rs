@@ -464,6 +464,12 @@ pub struct State {
     /// segregated from `State::heap` so small guest `malloc`/COM allocations
     /// never hijack large PCM buffers (#385).
     pub sound_pool: SlabPool,
+    /// Freed DirectDraw palette stores (1 KiB) kept by exact rounded size,
+    /// segregated from `State::heap` (#406).
+    pub palette_pool: SlabPool,
+    /// Freed Direct3D vertex buffer stores kept by bounded best-fit (2x) size,
+    /// segregated from `State::heap` (#406).
+    pub vb_pool: SlabPool,
     /// The registry, as a flat map from a key's whole path to its values.
     ///
     /// Seeded with what a title's installer would have written, and added to
@@ -591,6 +597,8 @@ impl State {
             com: ComTable::default(),
             surface_pool: SlabPool::exact(),
             sound_pool: SlabPool::best_fit(2),
+            palette_pool: SlabPool::exact(),
+            vb_pool: SlabPool::best_fit(2),
             registry: BTreeMap::new(),
         }
     }
@@ -1836,6 +1844,8 @@ impl crate::snap::Snap for State {
             com,
             surface_pool,
             sound_pool,
+            palette_pool,
+            vb_pool,
             registry,
         } = self;
 
@@ -2085,6 +2095,8 @@ impl crate::snap::Snap for State {
         com.snap(v);
         surface_pool.snap(v);
         sound_pool.snap(v);
+        palette_pool.snap(v);
+        vb_pool.snap(v);
         crate::snap::snap_btree_map(
             v,
             registry,
