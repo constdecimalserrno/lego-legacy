@@ -1,10 +1,10 @@
 //! LEGOLAND, run headless from the player's rip: the launcher finding the
 //! Masterpiece pressing, its declared InstallShield 3 `main.z` tree and Joliet
-//! `.res` access, its unflagged first-light route through `lmi.avi` ->
-//! `Intro.avi` (`0x0011` IMA ADPCM) -> `Player Details` -> `"ADA"` ->
-//! `Title Screen` -> clean exit, media codecs (`IV32`, `0x0011` IMA ADPCM,
-//! `0x0002` MS ADPCM `Speech/*.wav`, `AD_*.avi` overlays), determinism, and
-//! `LLSNAP v2` cold snapshot restore parity (#393, #394, #395).
+//! `.res` access, its unflagged first-light, Tutorial 1, and Level 1 (San
+//! Francisco) routes, `profiles\1save1.sav` save/reload persistence, media
+//! codecs (`IV32`, `0x0011` IMA ADPCM, `0x0002` MS ADPCM `Speech/*.wav`,
+//! `AD_*.avi` overlays, DirectMusic `IMusic/`), determinism, and `LLSNAP v2`
+//! cold snapshot restore parity (#393, #394, #395, #396, #399).
 //!
 //! Disc tests need the player's own rip under `game-data/`. Without it the
 //! disc tests print a skip line and pass, which is a gate that did not run
@@ -28,6 +28,83 @@ use std::path::PathBuf;
 const ROOT: &str = LEGOLAND.install_dir;
 const UNFLAGGED_BOOT_BUDGET: u64 = 50_000_000;
 const FIRST_LIGHT_BUDGET: u64 = 3_000_000_000;
+const TUTORIAL_1_BUDGET: u64 = 15_000_000_000;
+const RELOAD_BUDGET: u64 = 6_000_000_000;
+const LEVEL_1_BUDGET: u64 = 400_000_000_000;
+
+const SAVE_HEADER: &[u8; 32] = b"00002 LEGOLAND Save Game V0.02 \x1a";
+const PROFILE_DIR_REL: &str = "profile/C/PROGRAM FILES/LEGO MEDIA/GAMES/LEGOLAND/PROFILES";
+
+const RELOAD_SAVE_ROUTE: &str = "\
+#lego-legacy-route 1
+flip 4 key LeftControl down
+flip 5 key Q down
+flip 7 key Q up
+flip 8 key LeftControl up
+flip 37 key Space down
+flip 39 key Space up
+flip 55 move 261 187
+flip 56 move 260 187
+flip 58 down
+flip 60 up
+flip 72 move 561 402
+flip 73 move 562 402
+flip 75 down
+flip 77 up
+flip 98 move 105 359
+flip 99 move 104 359
+flip 101 down
+flip 103 up
+flip 122 move 221 165
+flip 123 move 220 165
+flip 125 down
+flip 127 up
+flip 140 move 551 400
+flip 141 move 550 400
+flip 143 down
+flip 145 up
+flip 190 move 360 445
+flip 191 move 359 445
+flip 193 down
+flip 195 up
+flip 215 move 557 80
+flip 216 move 556 80
+flip 218 down
+flip 220 up
+flip 235 move 396 173
+flip 236 move 395 173
+flip 238 down
+flip 240 up
+flip 265 move 558 93
+flip 266 move 557 93
+flip 268 down
+flip 270 up
+flip 285 move 396 173
+flip 286 move 395 173
+flip 288 down
+flip 290 up
+";
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("legoland-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 fn route_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -565,24 +642,28 @@ fn open_gm16_if_present(machine: &mut Machine) {
     }
 }
 
-fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u64) {
-    let route = Route::load(&route_path("first-light.route")).expect("load first-light.route");
-    let data_root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("legoland-snap-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_root);
+fn assert_snapshot_round_trip(
+    baseline: &testkit::Ran,
+    route_name: &str,
+    budget: u64,
+    label: &str,
+    snap_flip: u64,
+) {
+    let route = Route::load(&route_path(route_name)).expect("load route");
+    let data_root = TempDir::new(&format!("snap-{label}"));
 
     let mut host_a = Headless::new();
     let mut machine_a = Machine::new(&LEGOLAND, &mut host_a).expect("machine");
     machine_a.load_title(&LEGOLAND).expect("load title");
     open_gm16_if_present(&mut machine_a);
     machine_a.route = Some(route.clone());
-    machine_a.tree.set_profile(data_root.join("a"));
+    machine_a.tree.set_profile(data_root.path().join("a"));
     let mut log_a = RunLog::create(&format!("legoland-snap-{label}-a"), Trace::Off).expect("log");
-    let dir_a = log_a.dir().to_path_buf();
+    let dir_a = TempDir(log_a.dir().to_path_buf());
     while machine_a.flips() < snap_flip {
         assert!(
             machine_a
-                .step(&mut host_a, &mut log_a, FIRST_LIGHT_BUDGET, true)
+                .step(&mut host_a, &mut log_a, budget, true)
                 .is_none(),
             "should reach {label} flip {snap_flip} without ending"
         );
@@ -591,8 +672,8 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
 
     // Copy any profile files written before the snapshot into B's isolated
     // profile directory (cold restore semantics: guest disk + snapshot state).
-    let prof_a = data_root.join("a");
-    let prof_b = data_root.join("b");
+    let prof_a = data_root.path().join("a");
+    let prof_b = data_root.path().join("b");
     if prof_a.exists() {
         copy_dir_all(&prof_a, &prof_b).expect("copy profile for cold restore");
     }
@@ -605,8 +686,8 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
     machine_b.tree.set_profile(prof_b);
     machine_b.restore_v2(&snap).expect("cold restore LLSNAP v2");
     let mut log_b = RunLog::create(&format!("legoland-snap-{label}-b"), Trace::Off).expect("log");
-    let dir_b = log_b.dir().to_path_buf();
-    let finish_b = machine_b.run(&mut host_b, &mut log_b, FIRST_LIGHT_BUDGET);
+    let dir_b = TempDir(log_b.dir().to_path_buf());
+    let finish_b = machine_b.run(&mut host_b, &mut log_b, budget);
 
     assert_eq!(finish_b.outcome, baseline.finish.outcome, "{label} outcome");
     assert_eq!(finish_b.cursor, baseline.finish.cursor, "{label} cursor");
@@ -624,9 +705,8 @@ fn assert_snapshot_round_trip(baseline: &testkit::Ran, label: &str, snap_flip: u
 
     drop(log_a);
     drop(log_b);
-    let _ = std::fs::remove_dir_all(dir_a);
-    let _ = std::fs::remove_dir_all(dir_b);
-    let _ = std::fs::remove_dir_all(&data_root);
+    drop(dir_a);
+    drop(dir_b);
 }
 
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
@@ -654,6 +734,197 @@ fn first_light_mid_movie_player_details_and_title_screen_snapshots_round_trip_bi
         ("player-details", 55u64),
         ("title-screen", 110u64),
     ] {
-        assert_snapshot_round_trip(baseline, label, snap_flip);
+        assert_snapshot_round_trip(
+            baseline,
+            "first-light.route",
+            FIRST_LIGHT_BUDGET,
+            label,
+            snap_flip,
+        );
     }
+}
+
+fn assert_frames_non_uniform<'a>(
+    ran: &'a testkit::Ran,
+    flips: &[(u64, &str)],
+) -> Vec<&'a lego_legacy_core::host::headless::Presented> {
+    flips
+        .iter()
+        .map(|&(flip, name)| {
+            let frame = ran
+                .host
+                .frame(flip)
+                .unwrap_or_else(|| panic!("{name} flip {flip} kept"));
+            assert_eq!((frame.width, frame.height), (640, 480), "{name} resolution");
+            assert!(!frame.is_uniform(), "{name} renders non-uniform pixels");
+            frame
+        })
+        .collect()
+}
+
+fn verify_saved_park(
+    data_root: &std::path::Path,
+    expected_sav_len: usize,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let prof_dir = data_root.join(PROFILE_DIR_REL);
+    let sav = std::fs::read(prof_dir.join("1SAVE1.SAV")).expect("1SAVE1.SAV persisted");
+    let sh = std::fs::read(prof_dir.join("1SAVE1.SH")).expect("1SAVE1.SH persisted");
+    let profile = std::fs::read(prof_dir.join("PROFILE1.TXT")).expect("PROFILE1.TXT persisted");
+    assert_eq!(sav.len(), expected_sav_len);
+    assert_eq!(&sav[..32], SAVE_HEADER);
+    assert_eq!(sh.len(), 272);
+    assert_eq!(profile.len(), 272);
+    (sav, sh, profile)
+}
+
+fn verify_cold_save_reload(data_root: &std::path::Path, label: &str) {
+    let reload_route = data_root.join(format!("reload-{label}.route"));
+    std::fs::write(&reload_route, RELOAD_SAVE_ROUTE).expect("write reload route");
+
+    let reload_run = testkit::run_on(
+        Headless::new().keeping(&[180]),
+        &LEGOLAND,
+        &Cli {
+            route: Some(reload_route),
+            data_root: Some(data_root.to_path_buf()),
+            ..Cli::default()
+        },
+        RELOAD_BUDGET,
+    );
+    reload_run.assert_exited(0).assert_flips(293);
+    for file in ["Profile1.txt", "1save1.sh", "1save1.sav"] {
+        assert!(
+            !reload_run
+                .log
+                .contains(&format!("file missing {ROOT}\\profiles\\{file}")),
+            "{label}: cold second boot should find persisted {file}"
+        );
+    }
+    assert_frames_non_uniform(&reload_run, &[(180, "reloaded park")]);
+}
+
+#[test]
+fn tutorial_1_completes_saves_reloads_and_replays_deterministically() {
+    if !scratch() {
+        return;
+    }
+    let data_root = TempDir::new("tut1");
+    let first = testkit::run_on(
+        Headless::new().keeping(&[260, 365, 620, 845]),
+        &LEGOLAND,
+        &Cli {
+            route: Some(route_path("tutorial-1.route")),
+            data_root: Some(data_root.path().to_path_buf()),
+            ..Cli::default()
+        },
+        TUTORIAL_1_BUDGET,
+    );
+    first
+        .assert_exited(0)
+        .assert_flips(946)
+        .assert_logged("profiles\\1save1.sav, 150734 bytes")
+        .assert_logged("profiles\\1save1.sh, 272 bytes");
+
+    let frames = assert_frames_non_uniform(
+        &first,
+        &[
+            (260, "active park"),
+            (365, "park map"),
+            (620, "objectives done"),
+            (845, "congrats"),
+        ],
+    );
+    assert_ne!(frames[0].pixels, frames[1].pixels, "Map differs from park");
+    assert_ne!(
+        frames[2].pixels, frames[3].pixels,
+        "Victory differs from park"
+    );
+
+    let park_rms = first.loudness(200, 700).into_iter().fold(0.0_f64, f64::max);
+    assert!(
+        park_rms > 50.0,
+        "Tutorial 1 active park audio should be non-silent (peak RMS={park_rms:.2})"
+    );
+
+    let saved_a = verify_saved_park(data_root.path(), 150_734);
+
+    let data_root_b = TempDir::new("tut1-b");
+    let second = testkit::run_headless(
+        &LEGOLAND,
+        &Cli {
+            route: Some(route_path("tutorial-1.route")),
+            data_root: Some(data_root_b.path().to_path_buf()),
+            ..Cli::default()
+        },
+        TUTORIAL_1_BUDGET,
+    );
+    first.assert_same_machine(&second);
+    assert_eq!(first.host.audio_blocks, second.host.audio_blocks);
+    assert_eq!(saved_a, verify_saved_park(data_root_b.path(), 150_734));
+
+    assert_snapshot_round_trip(
+        &first,
+        "tutorial-1.route",
+        TUTORIAL_1_BUDGET,
+        "tutorial-1-mid-park",
+        450,
+    );
+    verify_cold_save_reload(data_root.path(), "tut1");
+}
+
+#[test]
+fn level_1_san_francisco_passes_appraisal_saves_and_reloads_cleanly() {
+    if !scratch() {
+        return;
+    }
+    let data_root = TempDir::new("lvl1");
+    let ran = testkit::run_on(
+        Headless::new().keeping(&[5045, 9720, 10046, 15500, 31555, 31620]),
+        &LEGOLAND,
+        &Cli {
+            route: Some(route_path("level-1.route")),
+            data_root: Some(data_root.path().to_path_buf()),
+            ..Cli::default()
+        },
+        LEVEL_1_BUDGET,
+    );
+    ran.assert_exited(0)
+        .assert_flips(31_715)
+        .assert_logged("movie D:\\Spider.avi opened through AVIFile: 2 streams")
+        .assert_logged("movie D:\\Western.avi opened through AVIFile: 2 streams")
+        .assert_logged("profiles\\1save1.sav, 177797 bytes")
+        .assert_logged("profiles\\1save1.sh, 272 bytes")
+        .assert_logged("congrats game level one_01.wav");
+
+    let frames = assert_frames_non_uniform(
+        &ran,
+        &[
+            (5045, "Spider.avi"),
+            (9720, "Western.avi"),
+            (10046, "Progress Map"),
+            (15500, "San Francisco park"),
+            (31555, "Appraisal Report"),
+            (31620, "Level 1 victory"),
+        ],
+    );
+    assert_ne!(
+        frames[3].pixels, frames[4].pixels,
+        "Appraisal replaces park"
+    );
+    assert_ne!(
+        frames[4].pixels, frames[5].pixels,
+        "Victory differs from Appraisal"
+    );
+
+    let sf_rms = ran
+        .loudness(14_000, 16_000)
+        .into_iter()
+        .fold(0.0_f64, f64::max);
+    assert!(
+        sf_rms > 20.0,
+        "Level 1 San Francisco park audio should be non-silent (peak RMS={sf_rms:.2})"
+    );
+
+    verify_saved_park(data_root.path(), 177_797);
+    verify_cold_save_reload(data_root.path(), "lvl1");
 }

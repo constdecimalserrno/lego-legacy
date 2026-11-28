@@ -1,10 +1,10 @@
 # LEGOLAND (`legoland`)
 
-Agent playbook for driving `Legoland.exe` (Masterpiece pressing) via `lego-ctrl` or `lego-mcp`. For generic CLI/MCP commands and session setup, see [`docs/agent-play.md`](../../docs/agent-play.md). Controls, coordinates, hazards, and save paths below are verified from primary sources (`Legoland.exe` disassembly, `Graphics1.res`, `Graphics2.res`, `Legoland.res`, `strings/stab.str`, and `readme.txt`); live boot flip timings will be added once first-light bringup (#394) lands.
+Agent playbook for driving `Legoland.exe` (Masterpiece pressing) via `lego-ctrl` or `lego-mcp`. For generic CLI/MCP commands and session setup, see [`docs/agent-play.md`](../../docs/agent-play.md). Controls, coordinates, hazards, and save paths below are verified from primary sources (`Legoland.exe` disassembly, `Graphics1.res`, `Graphics2.res`, `Legoland.res`, `strings/stab.str`, `readme.txt`) and live gameplay (#394–#396).
 
 ## Runtime Facts
 
-- **Display:** `640×480`, 16bpp RGB565 (8bpp fallback), pure 2D software rasterizer + Z-buffer compositor over DirectDraw2 (`FlipFullscreen` / `FlipWindowed` spin on a `28 ms` / `~35.7 Hz` floor via `timeGetTime()`/`GetTickCount()`; declared at the roster baseline `FlipCost::Refresh(60)` until first-light timing is measured), declared Pentium II 450 MHz / Windows 98 SE.
+- **Display:** `640×480`, 16bpp RGB565 (8bpp fallback), pure 2D software rasterizer + Z-buffer compositor over DirectDraw2 (`FlipFullscreen` / `FlipWindowed` spin on a `28 ms` / `~35.7 Hz` floor via `timeGetTime()`/`GetTickCount()` at `0x4661d0`; declared at `FlipCost::Refresh(36)` / `27.78 ms` per flip matching the guest's `35.0–35.3` measured guest FPS), declared Pentium II 450 MHz / Windows 98 SE.
 - **Mouse regime:** `SoftwareRelative { virtual_span: (640, 480), start_pos: (320, 240) }` (`1.0×` scale, `recenter_every_flip: false`): `Legoland.exe` imports no `GetCursorPos`/`SetCursorPos`/`ClipCursor`, blanks the OS pointer via `SetCursor(NULL)` + `DISCL_EXCLUSIVE` DirectInput `GUID_SysMouse` acquisition, initializes its software pointer once at `(320, 240)` (`0x4589a0`), integrates relative `(lX, lY)` deltas clamped to `[0..639, 0..479]`, and blits software cursor sprites (`rab over icon.lls`, `yes/no build.lls`, `erase it.lls`, `question it.lls`) with a `(0, 0)` top-left hotspot.
 - **Intros & skipping:** Unflagged boot plays `lmi.avi` (`0x45956b`, skips only via `LControl+Q` or `RControl+Q`) followed by `Intro.avi` (`0x4595e7`, skips on `Space` or any mouse button). Committed routes must run unflagged (do not use `-nointro` / `-nomusic`).
 - **Cadence:** `PauseToThink { settle_ms: 800, settle_flips: 16 }` — isometric park management and release-edge UI menus respond best to settled clicks and `wait-change` / `wait-settled`.
@@ -47,8 +47,8 @@ Safe Click centers are listed only where both top-left `(x, y)` and sprite `[w×
 | --- | --- | --- | --- | --- |
 | **Title:** Player Details | `Reg_on_Title.lls` | `(24, 113)` | `158×145` | `(103, 185)` |
 | **Title:** Free Play | `Free_on_Title.lls` | `(154, 8)` | `158×148` | `(233, 82)` |
-| **Title:** Start Game *(needs active profile)* | `New_on_Title.lls` | `(202, 312)` | — | verify visually |
-| **Title:** Load Game | `Load_on_Title.lls` | `(25, 280)` | `158×158` | `(104, 359)` |
+| **Title:** Start Game *(needs active profile)* | `New_on_Title.lls` | `(202, 312)` | — | `(275, 385)` *(verified #396)* |
+| **Title:** Load Game | `Load_on_Title.lls` | `(25, 280)` | `158×158` | `(104, 359)` *(verified #396)* |
 | **Title:** Movie / Adverts | `MovieOn_On_Title.lls` | `(270, 161)` | `105×90` | `(322, 206)` |
 | **Title:** Exit Game | `Exit_On_Title.lls` | `(481, 19)` | `153×149` | `(557, 93)` |
 | **Profile Details:** Slot 1 (`EMPTY`) | `RegProfileON/Off_*.lls` | `(128, 172)` | — | `(260, 187)` *(verified #394)* |
@@ -56,16 +56,20 @@ Safe Click centers are listed only where both top-left `(x, y)` and sprite `[w×
 | **Exit Dialog:** Confirm Yes (green checkmark) | `InitExitCheckBox` | — | — | `(395, 173)` *(verified #394)* |
 | **Movie / Adverts:** California / Windsor / Billund | Park advert buttons | — | — | `(115, 75)`, `(320, 75)`, `(525, 75)` *(verified #395)* |
 | **Movie / Adverts:** Go Back | Purple orb | — | — | `(88, 395)` *(verified #395)* |
-| **Progress Map:** Tutorial Screen toggle | `Tutorial_On_Progress.lls` | `(372, 365)` | — | verify visually |
-| **Progress Map:** Accept / Play | `Accept_on_Progress.lls` | `(526, 367)` | `103×103` | `(577, 418)` |
+| **Progress Map:** Tutorial Screen toggle | `Tutorial_On_Progress.lls` | `(372, 365)` | — | `(430, 415)` *(verified #396)* |
+| **Progress Map:** Accept / Play | `Accept_on_Progress.lls` | `(526, 367)` | `103×103` | `(577, 419)` *(verified #396)* |
 | **Progress Map:** Go Back | `GoBack_on_Progress.lls` | `(520, 11)` | `112×112` | `(576, 67)` |
-| **Tutorial Screen:** Accept | `Accept_On_Report.lls` | `(522, 364)` | `110×110` | `(577, 419)` |
+| **Tutorial Screen:** Accept / Continue / Finish Door | `Accept_On_Report.lls` | `(522, 364)` | `110×110` | `(577, 419)` *(verified #396)* |
+| **Tutorial Screen:** Go Back (purple orb) | `GoBack` | — | — | `(577, 300)` *(verified #396)* |
 | **Options:** Exit | `Exit_on_Options.lls` | `(480, 6)` | `153×149` | `(556, 80)` |
-| **Options:** Save | `Save_on_Options.lls` | `(479, 189)` | `158×145` | `(558, 261)` |
+| **Options:** Save | `Save_on_Options.lls` | `(479, 189)` | `158×145` | `(558, 261)` *(verified #396)* |
+| **Save / Load Screen:** Slot 1 / Accept | `Save/Load` | — | — | `(220, 165)` / `(550, 400)` *(verified #396)* |
+| **New Object Popup:** Close `X` | `PopUpInfo` | — | — | `(558, 245)` *(verified #396)* |
 | **Certificate:** Go Back | `GoBack_On_Certificate.lls` | `(12, 14)` | `110×110` | `(67, 69)` |
 | **Certificate:** Print *(HAZARD)* | `Print_On_Certificate.lls` | `(519, 14)` | `110×110` | **DO NOT CLICK** |
 | **HUD Control Tools:** Path / Query / Erase / Map / Options | Bottom action buttons | `(12..332, 418)` step `80` | `54×54` | `(39,445)`, `(119,445)`, `(199,445)`, `(279,445)`, `(359,445)` |
-| **HUD Theme Tabs:** LEGOLAND / West / Castle / Adv | Bottom category tabs | `(8,379)`, `(105,379)`, `(202,379)`, `(299,379)` | — | verify visually |
+| **HUD Theme Tabs:** LEGOLAND / Wild West / Castle / Adv | Bottom category tabs | `(8,379)`, `(105,379)`, `(202,379)`, `(299,379)` | — | `(52,395)`, `(150,395)`, `(248,395)`, `(345,395)` *(first two verified #396)* |
+| **HUD Build Tray:** Up / Slots 1–4 / Down | Left slide-out tray | — | — | `(60,48)`, `(60,105)`, `(60,170)`, `(60,235)`, `(60,300)`, `(60,355)` *(verified #396)* |
 | **HUD Advisor:** Briefing Phone | `BriefIcon2.lls` | `(522, 378)` | `100×100` | `(572, 428)` |
 
 ## Input Hazards & Workarounds

@@ -993,6 +993,60 @@ fn a_library_the_machine_does_not_have_is_not_found() {
         ),
         "a wall"
     );
+    // Absent explicit paths outside C:\WINDOWS\ fail cleanly without searching System32.
+    m.state.last_error = 0;
+    assert_eq!(load(&mut m, ".\\dlls\\ENTRANCE.dll"), Ok(0));
+    assert_eq!(m.state.last_error, 1157);
+    m.arena
+        .write(OUT, b".\\dlls\\ENTRANCE\0")
+        .expect("in the arena");
+    m.state.last_error = 0;
+    assert_eq!(
+        call(&mut m, "KERNEL32", "LoadLibraryExA", &[OUT, 0, 0]),
+        Ok(0)
+    );
+    assert_eq!(m.state.last_error, 1157);
+    m.state.last_error = 0;
+    assert_eq!(load(&mut m, ".\\dlls\\"), Ok(0));
+    assert_eq!(m.state.last_error, 1157);
+
+    // Unwritten paths that canonicalize under C:\WINDOWS\ remain walls.
+    m.state.current_directory = "C:\\STUB\\SUB".to_owned();
+    for path in [
+        "C:\\WINDOWS\\SYSTEM\\UNWRITTEN.DLL",
+        "C:/WINDOWS/SYSTEM/UNWRITTEN.DLL",
+        "C:\\\\WINDOWS\\\\SYSTEM\\\\UNWRITTEN.DLL",
+        "..\\..\\WINDOWS\\SYSTEM\\UNWRITTEN.DLL",
+    ] {
+        assert!(
+            matches!(
+                load(&mut m, path),
+                Err(Stop::NotWritten { what, .. }) if what.contains("UNWRITTEN.DLL")
+            ),
+            "{path} must remain a wall"
+        );
+    }
+
+    // NT returns ERROR_MOD_NOT_FOUND (126) for an absent explicit non-Windows path.
+    const NT_TITLE: Title = Title {
+        declared: Declared {
+            windows: lego_legacy_core::title::Windows {
+                version: 0x0500_0005,
+                ..Title::STUB.declared.windows
+            },
+            ..Title::STUB.declared
+        },
+        ..Title::STUB
+    };
+    m.arena
+        .write(OUT, b".\\dlls\\ENTRANCE.dll\0")
+        .expect("in the arena");
+    m.state.last_error = 0;
+    assert_eq!(
+        call_as(&mut m, &NT_TITLE, "KERNEL32", "LoadLibraryA", &[OUT]),
+        Ok(0)
+    );
+    assert_eq!(m.state.last_error, 126);
 }
 
 /// A module with no table of keys among its resources has none to load, as
@@ -3445,6 +3499,45 @@ fn a_surface_hands_out_one_dc_at_a_time() {
         m.state.present.map(|p| (p.pixels, p.width)),
         Some((PIXELS, 4))
     );
+}
+
+/// Attaching a clipper whose clip list covers the entire surface enables
+/// whole-surface clipping; detaching clears it; strict sub-rectangles still wall (#396).
+#[test]
+fn set_clipper_accepts_covering_rect_and_walls_subrect() {
+    const RGN: u32 = DATA + 0x500;
+    let mut m = machine();
+    let surf = surface(&mut m, PIXELS, 640, 340);
+    assert_eq!(
+        call(&mut m, "DDRAW", "DirectDrawCreateClipper", &[0, OUT, 0]),
+        Ok(0)
+    );
+    let clipper = m.arena.read_u32(OUT).expect("in the arena");
+    let attach = |m: &mut Machine, rect: [i32; 4]| {
+        let mut buf = [0u32; 12];
+        buf[2] = 1;
+        for (i, v) in rect.into_iter().enumerate() {
+            buf[8 + i] = v as u32;
+        }
+        m.arena.write(RGN, &words(&buf)).expect("in the arena");
+        assert_eq!(
+            method(m, "IDirectDrawClipper", "SetClipList", clipper, &[RGN, 0]),
+            Ok(0)
+        );
+        method(m, "IDirectDrawSurface", "SetClipper", surf, &[clipper])
+    };
+
+    assert_eq!(attach(&mut m, [0, 0, 640, 480]), Ok(0));
+    assert!(m.state.clipped.contains(&PIXELS));
+    assert_eq!(
+        method(&mut m, "IDirectDrawSurface", "SetClipper", surf, &[0]),
+        Ok(0)
+    );
+    assert!(!m.state.clipped.contains(&PIXELS));
+    assert!(matches!(
+        attach(&mut m, [10, 0, 640, 340]),
+        Err(Stop::NotWritten { what, .. }) if what.contains("IDirectDrawSurface::SetClipper")
+    ));
 }
 
 /// The 4x4 sixteen-bit surface at `PIXELS`, as its 565 pixels, row by row.

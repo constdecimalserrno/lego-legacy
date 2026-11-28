@@ -1152,9 +1152,13 @@ fn set_clipper(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> 
         ctx.state.clipped.remove(&s.pixels);
         return Ok(S_OK);
     }
-    let whole = (0, 0, s.width as i32, s.height as i32);
     match ctx.state.clip_lists.get(&ctx.state.com.identity(args[0])) {
-        Some(list) if *list == whole => {
+        Some(&(l, t, r, b))
+            if i64::from(l) <= 0
+                && i64::from(t) <= 0
+                && i64::from(r) >= i64::from(s.width)
+                && i64::from(b) >= i64::from(s.height) =>
+        {
             ctx.state.clipped.insert(s.pixels);
             Ok(S_OK)
         }

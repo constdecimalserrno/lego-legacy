@@ -1,0 +1,165 @@
+#lego-legacy-route 1
+# LEGOLAND Tutorial 1 (ObjList1.txt, map "one") completion + save + clean exit (#396).
+# Unflagged boot from a fresh --data-root under FlipCost::Refresh(36):
+#   flips   4..39  : Skip D:\lmi.avi (LeftControl+Q) and D:\Intro.avi (Space)
+#   flips  55..93  : Player Details -> Slot 1 -> type "ada" -> Accept (writes profiles\Profile1.txt)
+#   flips 112..193 : Title -> Start Game -> Select Tutorial Level (Lesson 1) -> Briefing -> park
+#   flips 210..700 : Build Space Tower Ride -> Path tool + Map overview -> link LEGO Toy Shop ->
+#                    Erase LEGO Toy Shop -> "Well Done!" (all Lesson 1 objectives cleared)
+#   flips 710..805 : Options -> Save -> Slot 1 -> type "park" -> Accept (writes profiles\1save1.sav)
+#   flips 822..946 : Finish door -> Congratulations -> Select Tutorial Level (Lesson 2 unlocked) ->
+#                    Back -> Title Screen -> Exit Game -> Yes -> ExitProcess(0)
+flip 4 key LeftControl down
+flip 5 key Q down
+flip 7 key Q up
+flip 8 key LeftControl up
+flip 37 key Space down
+flip 39 key Space up
+flip 55 move 261 187
+flip 56 move 260 187
+flip 58 down
+flip 60 up
+flip 65 key A down
+flip 66 key A up
+flip 67 key D down
+flip 68 key D up
+flip 69 key A down
+flip 70 key A up
+flip 75 key Return down
+flip 77 key Return up
+flip 88 move 561 402
+flip 89 move 562 402
+flip 91 down
+flip 93 up
+flip 112 move 276 385
+flip 113 move 275 385
+flip 115 down
+flip 117 up
+flip 136 move 576 419
+flip 137 move 577 419
+flip 139 down
+flip 141 up
+flip 182 move 578 419
+flip 183 move 577 419
+flip 185 down
+flip 187 up
+flip 218 move 558 246
+flip 219 move 558 245
+flip 221 down
+flip 223 up
+flip 234 move 53 395
+flip 235 move 52 395
+flip 237 down
+flip 239 up
+flip 255 move 557 245
+flip 256 move 558 245
+flip 258 down
+flip 260 up
+flip 271 move 61 155
+flip 272 move 60 155
+flip 274 down
+flip 276 up
+flip 282 move 320 140
+flip 288 key Up down
+flip 303 key Up up
+flip 309 move 400 180
+flip 315 move 401 180
+flip 316 move 400 180
+flip 318 down
+flip 320 up
+flip 361 move 321 200
+flip 362 move 320 200
+flip 364 down right
+flip 366 up right
+flip 457 move 576 419
+flip 458 move 577 419
+flip 460 down
+flip 462 up
+flip 478 move 40 445
+flip 479 move 39 445
+flip 481 down
+flip 483 up
+flip 496 move 278 445
+flip 497 move 279 445
+flip 499 down
+flip 501 up
+flip 517 move 360 291
+flip 518 move 360 290
+flip 520 down
+flip 522 up
+flip 523 move 361 290
+flip 524 move 360 290
+flip 525 down
+flip 527 up
+flip 540 move 40 445
+flip 541 move 39 445
+flip 543 down
+flip 545 up
+flip 554 move 585 165
+flip 554 down
+flip 555 move 578 169
+flip 556 move 571 174
+flip 557 move 564 178
+flip 558 move 556 182
+flip 559 move 549 186
+flip 560 move 542 191
+flip 561 move 535 195
+flip 562 up
+flip 578 move 200 445
+flip 579 move 199 445
+flip 581 down
+flip 583 up
+flip 592 move 459 210
+flip 593 move 460 210
+flip 595 down
+flip 597 up
+flip 688 move 577 418
+flip 689 move 577 419
+flip 691 down
+flip 693 up
+flip 714 move 360 445
+flip 715 move 359 445
+flip 717 down
+flip 719 up
+flip 735 move 557 261
+flip 736 move 558 261
+flip 738 down
+flip 740 up
+flip 756 move 221 165
+flip 757 move 220 165
+flip 759 down
+flip 761 up
+flip 766 key P down
+flip 767 key P up
+flip 768 key A down
+flip 769 key A up
+flip 770 key R down
+flip 771 key R up
+flip 772 key K down
+flip 773 key K up
+flip 778 key Return down
+flip 780 key Return up
+flip 796 move 549 400
+flip 797 move 550 400
+flip 799 down
+flip 801 up
+flip 822 move 576 419
+flip 823 move 577 419
+flip 825 down
+flip 827 up
+flip 863 move 578 419
+flip 864 move 577 419
+flip 866 down
+flip 868 up
+flip 894 move 577 301
+flip 895 move 577 300
+flip 897 down
+flip 899 up
+flip 920 move 557 94
+flip 921 move 557 93
+flip 923 down
+flip 925 up
+flip 938 move 396 173
+flip 939 move 395 173
+flip 941 down
+flip 943 up

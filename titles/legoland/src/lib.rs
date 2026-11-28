@@ -23,19 +23,15 @@ const ARCHIVE: &str = match ENTRY.image.kept {
 pub const LEGOLAND: Title = Title {
     key: ENTRY.key,
     version: env!("CARGO_PKG_VERSION"),
-    // A flip waits for the declared display's next refresh, as DirectDraw's
-    // Flip does unless a title asks otherwise. Roster baseline sixty until
-    // first-light bringup (#394) empirically measures LEGOLAND's 28 ms
-    // `timeGetTime()` flip floor (`0x4660d3`) against FMV and audio sync.
-    flip_cost: FlipCost::Refresh(60),
+    // `Legoland.exe` paces frames with a 28 ms (~35.7 Hz) `timeGetTime()` floor
+    // (`0x4661d0`), matching 36 Hz (`27.78 ms`/flip) with zero over-budget drift (#396).
+    flip_cost: FlipCost::Refresh(36),
     image: ENTRY.image,
     red_book: ENTRY.red_book,
     declared: Declared {
         // The roster's baseline: LEGOLAND (2000) and its Masterpiece pressing
         // target Windows 98 SE and DirectX 6/7.
         windows: WINDOWS_98_SE,
-        // The roster's baseline Pentium II 450 MHz until gameplay timing is
-        // measured during bringup.
         hz: lego_legacy_core::clock::DECLARED_HZ,
         processor: Processor::PentiumII,
         megabytes: 128,
@@ -60,9 +56,9 @@ pub const LEGOLAND: Title = Title {
         // `GetLogicalDrives()` for `DRIVE_CDROM` (`"CDFS"`, `"LEGOLAND"`) and
         // needs no floppy drive.
         floppy: false,
-        why: "Windows 98 SE and Pentium II 450, 128 MB, 640x480x16 at the roster baseline \
-              60 Hz refresh, C:/D: with Joliet for .res/Speech/AVI long names and no floppy \
-              drive, and Ir50_32.dll absent (#393)",
+        why: "Windows 98 SE and Pentium II 450, 128 MB, 640x480x16 at 36 Hz matching the \
+              guest's 28 ms (~35.7 Hz) frame floor (0x4661d0), C:/D: with Joliet for \
+              .res/Speech/AVI long names and no floppy drive, and Ir50_32.dll absent (#393, #396)",
     },
     // `Legoland.exe` and its 330 companion files (`Lego.TTF`, `strings\stab.str`,
     // `IMusic\*`, `zbuffers\*`, `RollerCoaster\*`, `AD_*.avi`) live inside
@@ -86,7 +82,7 @@ pub const LEGOLAND: Title = Title {
 };
 
 /// Static playability metadata served via `/api/meta`, `/api/controls`, and
-/// `/api/goals` (#393).
+/// `/api/goals` (#393, #396).
 ///
 /// Controls, cursor calibration, hotspots, hazards, and progression goals are
 /// sourced from `Legoland.exe` disassembly, `Graphics1.res`, and `readme.txt`.
@@ -95,7 +91,7 @@ pub const GUIDE: TitleGuide = TitleGuide {
     summary: "Isometric 640x480 theme-park management sim across 5 tutorials, 10 Miniland levels, and Free Play: build themed attractions, link entrance paths, supply power, manage Mechanics and Gardeners, and pass Mr. Bimble's Park Inspector appraisals.",
     resolution: (640, 480),
     bpp: 16,
-    refresh_hz: 60,
+    refresh_hz: 36,
     mouse_mode: MouseMode::SoftwareRelative {
         virtual_span: (640, 480),
         start_pos: (320, 240),
@@ -205,6 +201,7 @@ mod tests {
     fn title_guide_serializes_valid_json_and_declares_initial_metadata() {
         assert!(!GUIDE.is_empty());
         const { assert!(!GUIDE.escape_quits) };
+        assert_eq!(GUIDE.refresh_hz, 36);
 
         let meta = parse_json(&format_meta_json(&LEGOLAND, &GUIDE)).expect("valid meta JSON");
         let meta_obj = meta.as_object().unwrap();
