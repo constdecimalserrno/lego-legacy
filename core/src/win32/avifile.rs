@@ -63,8 +63,8 @@ const STREAM_INFO_BYTES: u32 = 140;
 /// of the same file shares, its structure, and the streams handed out of it.
 pub struct File {
     name: String,
-    /// Normalized upper-case absolute guest path keying `State::movie_bytes`.
-    pub(crate) key: String,
+    /// Normalized upper-case absolute guest path keying `State::movies`.
+    key: String,
     bytes: std::rc::Rc<[u8]>,
     avi: crate::avi::Avi,
     /// Each stream's object, once `AVIFileGetStream` has handed it out: the
@@ -83,32 +83,47 @@ impl File {
         }
     }
 
-    pub(crate) fn set_bytes(&mut self, bytes: std::rc::Rc<[u8]>) {
-        self.bytes = bytes;
-    }
-
-    pub(crate) fn needs_bytes(&self) -> bool {
-        self.bytes.is_empty() && !self.key.is_empty()
+    pub(crate) fn rehydrate(
+        &mut self,
+        store: &mut crate::movie::MovieStore,
+        tree: &mut crate::install::Tree,
+    ) -> Result<(), crate::snap::SnapError> {
+        if self.bytes.is_empty() {
+            let bytes = store.resolve_for_restore(&self.key, tree)?;
+            if let Err(err) = crate::movie::validate_chunk_bounds(&self.avi, bytes.len()) {
+                drop(bytes);
+                store.evict_unused();
+                return Err(err);
+            }
+            self.bytes = bytes;
+        }
+        Ok(())
     }
 }
 
 impl crate::snap::Snap for File {
     fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
-        // `bytes` is an immutable `Rc<[u8]>` backed by `State::movie_bytes` / `Tree`
+        // `bytes` is an immutable `Rc<[u8]>` backed by `State::movies` / `Tree`
         // and is rehydrated by `key` on restore to avoid copying 172 MB of AVI data.
         let Self {
             name,
             key,
-            bytes: _,
+            bytes,
             avi,
             streams,
         } = self;
+        if v.is_reading() {
+            *bytes = std::rc::Rc::from([]);
+        }
         v.string(name);
         v.string(key);
         avi.snap(v);
         crate::snap::snap_vec(v, streams, |s, v| {
             crate::snap::snap_option(v, s, |id, v| v.u32(id));
         });
+        if v.is_reading() && !v.failed() && key.trim().is_empty() {
+            v.mark_corrupt("avifile::File empty key");
+        }
     }
 }
 
@@ -321,49 +336,47 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     if ctx.refuse_on_empty_floppy(&name)? {
         return Ok(AVIERR_FILEOPEN);
     }
-    // ponytail: one copy of each movie file is held for the run, shared by
-    // every open of it, as LEGO Chess never lets go of a file (its close
-    // releases the streams and not the file): its 22 movies come to 172 MB in
-    // a run that plays them all. Let a copy go once no open file holds it,
-    // when `AVIFileRelease` is written.
-    let path = ctx.absolute(&name).to_uppercase();
-    let bytes: std::rc::Rc<[u8]> = if let Some(bytes) = ctx.state.movie_bytes.get(&path) {
-        bytes.clone()
-    } else {
-        let Some(bytes) = ctx.open_guest_file(&name) else {
-            ctx.log.line(&format!("movie {name} missing"));
-            return Ok(AVIERR_FILEOPEN);
-        };
-        bytes.into()
+    // One copy of each movie file is shared through `State::movies` by every
+    // open of it (LEGO Chess opens movies repeatedly without calling
+    // `AVIFileRelease`); `MovieStore::evict_unused` drops the entry once the
+    // last live holder releases.
+    let abs = ctx.absolute(&name);
+    let Some((key, bytes)) = ctx.state.movies.load(&abs, ctx.tree) else {
+        ctx.log.line(&format!("movie {name} missing"));
+        return Ok(AVIERR_FILEOPEN);
     };
     // One that is there and is not a movie is a damaged rip, which stops the
     // run at its name as a damaged archive member does (#169, #190).
-    let mut avi = crate::avi::parse(&bytes).map_err(|e| Stop::NotWritten {
-        what: format!("AVIFIL32.dll!AVIFileOpenA: {name}: {e}"),
-        caller: 0,
-    })?;
+    let mut avi = match crate::avi::parse(&bytes) {
+        Ok(avi) => avi,
+        Err(e) => {
+            drop(bytes);
+            ctx.state.movies.evict_unused();
+            return Err(Stop::NotWritten {
+                what: format!("AVIFIL32.dll!AVIFileOpenA: {name}: {e}"),
+                caller: 0,
+            });
+        }
+    };
     // So does one that holds fewer streams than its header says, which Wine's
     // `avifile.c` fails to load. One that holds more is read as Wine reads
     // it: the streams its header counts, the rest kept as chunks nobody asks
     // for.
     let counted = avi.header.streams as usize;
     if avi.streams.len() < counted {
+        let actual = avi.streams.len();
+        drop(bytes);
+        ctx.state.movies.evict_unused();
         return Err(Stop::NotWritten {
             what: format!(
                 "AVIFIL32.dll!AVIFileOpenA: {name}: its header says {counted} streams and it holds \
-                 {}",
-                avi.streams.len()
+                 {actual}"
             ),
             caller: 0,
         });
     }
     avi.streams.truncate(counted);
     name_streams(&mut avi, &name);
-    // Only a movie that opens is kept.
-    ctx.state
-        .movie_bytes
-        .entry(path.clone())
-        .or_insert_with(|| bytes.clone());
     let object = State::make_com(ctx, &AVI_FILE, ComState::None).map_err(Stop::Fault)?;
     ctx.mem.write_u32(out, object).map_err(Stop::Fault)?;
     ctx.log.line(&format!(
@@ -375,7 +388,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
         object,
         File {
             name,
-            key: path,
+            key,
             bytes,
             avi,
             streams,
@@ -385,7 +398,7 @@ fn open(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
 }
 
 /// Reclaim an `IAVIFile` once its own refcount and every stream/frame getter
-/// referencing it are released, evicting `movie_bytes` if unused elsewhere.
+/// referencing it are released, evicting `State::movies` if unused elsewhere.
 fn maybe_reclaim_avi_file(ctx: &mut Ctx<'_>, file_obj: u32) {
     if ctx.state.com(file_obj).is_some_and(|o| o.refs > 0) {
         return;
@@ -401,27 +414,15 @@ fn maybe_reclaim_avi_file(ctx: &mut Ctx<'_>, file_obj: u32) {
     if streams_live || getters_live {
         return;
     }
-    if let Some(removed) = ctx.state.avi_files.remove(&file_obj) {
-        let still_used = ctx
-            .state
-            .avi_files
-            .values()
-            .any(|other| other.key == removed.key)
-            || ctx
-                .state
-                .filter_graphs
-                .values()
-                .any(|g| g.movie_key() == Some(removed.key.as_str()));
-        if !still_used {
-            ctx.state.movie_bytes.remove(&removed.key);
-        }
+    if ctx.state.avi_files.remove(&file_obj).is_some() {
+        ctx.state.movies.evict_unused();
     }
 }
 
 fn file_release(ctx: &mut Ctx<'_>, args: &[u32]) -> Result<u32, Stop> {
     // AVIFileRelease(pfile): decrements the file's reference count. When no
     // reference, live stream, or frame getter remains, drops the file entry
-    // and evicts its cached bytes from `movie_bytes` if unused elsewhere.
+    // and evicts its cached bytes from `State::movies` if unused elsewhere.
     if args[0] == 0 {
         return Ok(0);
     }
@@ -1379,9 +1380,12 @@ mod tests {
 
         with_test_ctx(crate::guest::heap::HEAP_BASE as usize + 0x10_0000, |ctx| {
             let obj = State::make_com(ctx, &AVI_FILE, ComState::None).unwrap();
-            let key = "D:\\TEST.AVI".to_owned();
-            let bytes: std::rc::Rc<[u8]> = vec![1u8, 2, 3, 4].into();
-            ctx.state.movie_bytes.insert(key.clone(), bytes.clone());
+            ctx.tree.declare("D:\\TEST.AVI", vec![1u8, 2, 3, 4]);
+            let (key, bytes) = ctx
+                .state
+                .movies
+                .load("D:\\TEST.AVI", ctx.tree)
+                .expect("cached");
             ctx.state.avi_files.insert(
                 obj,
                 File {
@@ -1392,10 +1396,11 @@ mod tests {
                     streams: Vec::new(),
                 },
             );
+            assert!(ctx.state.movies.contains(&key));
             assert_eq!(file_release(ctx, &[0]).unwrap(), 0);
             assert_eq!(file_release(ctx, &[obj]).unwrap(), 0);
             assert!(!ctx.state.avi_files.contains_key(&obj));
-            assert!(!ctx.state.movie_bytes.contains_key(&key));
+            assert!(!ctx.state.movies.contains(&key));
         });
     }
 }

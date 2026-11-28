@@ -556,46 +556,11 @@ fn win32_guest_args_env_window_extra_and_mm_timers_round_trip_through_llsnap_v2(
 
 #[test]
 fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_bytes() {
-    use lego_legacy_core::avi;
-    use lego_legacy_core::win32::dshow::{FilterGraph, GraphMovie, EC_COMPLETE};
+    use lego_legacy_core::movie::MoviePlayer;
+    use lego_legacy_core::win32::dshow::{FilterGraph, EC_COMPLETE};
     use lego_legacy_core::win32::Object;
 
-    let mut strh = vec![0u8; 56];
-    strh[0..4].copy_from_slice(b"vids");
-    strh[4..8].copy_from_slice(b"IV50");
-    strh[20..24].copy_from_slice(&1u32.to_le_bytes());
-    strh[24..28].copy_from_slice(&15u32.to_le_bytes());
-    let mut strf = vec![0u8; 40];
-    strf[0..4].copy_from_slice(&40u32.to_le_bytes());
-    strf[4..8].copy_from_slice(&16u32.to_le_bytes());
-    strf[8..12].copy_from_slice(&16u32.to_le_bytes());
-    strf[16..20].copy_from_slice(b"IV50");
-    let mut avi_bytes = Vec::new();
-    let chunk = |id: &[u8; 4], body: &[u8]| {
-        let mut out = id.to_vec();
-        out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
-        out.extend_from_slice(body);
-        if body.len() % 2 == 1 {
-            out.push(0);
-        }
-        out
-    };
-    let list = |kind: &[u8; 4], parts: &[Vec<u8>]| {
-        let mut body = kind.to_vec();
-        for p in parts {
-            body.extend_from_slice(p);
-        }
-        chunk(b"LIST", &body)
-    };
-    let strl = list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)]);
-    let hdrl = list(b"hdrl", &[strl]);
-    let movi = list(b"movi", &[chunk(b"00dc", &[])]);
-    let mut riff = b"AVI ".to_vec();
-    riff.extend_from_slice(&hdrl);
-    riff.extend_from_slice(&movi);
-    avi_bytes.extend_from_slice(&chunk(b"RIFF", &riff));
-    let parsed = avi::parse(&avi_bytes).expect("valid synthetic avi");
-
+    let avi_bytes = synthetic_iv50_avi_with_payload(4, 262_144);
     let (mut m, _host) = machine_at(4);
     m.tree.declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
     let ev = m.state.give(Object::Named {
@@ -605,15 +570,20 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
         manual: true,
         held: None,
     });
-    let mut movie = GraphMovie::new(
+    let mut movie = MoviePlayer::open(
         "intro.avi".to_owned(),
-        "C:\\GAME\\INTRO.AVI".to_owned(),
-        std::rc::Rc::from(avi_bytes.clone()),
-        parsed,
-        0,
-    );
-    movie.next = 1;
-    movie.running_since = Some(66);
+        "C:\\GAME\\INTRO.AVI",
+        &mut m.state.movies,
+        &mut m.tree,
+    )
+    .expect("open movie");
+    movie
+        .start(0x2000_0000, 66, &mut m.state.mixer)
+        .expect("start");
+    let buf = m.state.heap.alloc(16 * 16 * 2);
+    movie
+        .step_rgb565(&mut m.arena, buf, 16, 16, 32)
+        .expect("step 0");
     let mut graph = FilterGraph {
         event_handle: ev,
         window_style: 0x0603_0000,
@@ -623,7 +593,7 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
         fullscreen: true,
         cursor_hidden: true,
         position: [0, 0, 640, 480],
-        frame_buffer: 0,
+        frame_buffer: buf,
         movie: Some(movie),
         ..FilterGraph::default()
     };
@@ -631,6 +601,14 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
     m.state.filter_graphs.insert(0x2000_0000, graph);
 
     let snap = m.snapshot_v2().expect("snapshot v2");
+    assert!(
+        snap.len() < avi_bytes.len(),
+        "dshow snapshot must omit raw AVI bytes: snap={} >= raw_avi={}",
+        snap.len(),
+        avi_bytes.len()
+    );
+    let digest_0 = m.state_digest();
+
     let mut host = Headless::new();
     let mut restored = Machine::new(&STUB, &mut host).expect("machine");
     restored.load_stub().expect("stub");
@@ -638,6 +616,7 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
         .tree
         .declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
     restored.restore_v2(&snap).expect("cold restore v2");
+    assert_eq!(restored.state_digest(), digest_0);
 
     let rg = restored
         .state
@@ -652,17 +631,20 @@ fn directshow_filter_graph_round_trips_through_llsnap_v2_and_rehydrates_movie_by
     assert_eq!(rg.position, [0, 0, 640, 480]);
     assert_eq!(rg.events.front(), Some(&(EC_COMPLETE, 0, 0)));
     let rm = rg.movie.as_ref().expect("movie restored");
-    assert_eq!(rm.name, "intro.avi");
-    assert_eq!(rm.next, 1);
-    assert_eq!(rm.running_since, Some(66));
-    assert!(!rm.completed);
+    assert_eq!(rm.name(), "intro.avi");
+    assert_eq!(rm.next_frame(), 1);
+    assert_eq!(rm.running_since(), Some(66));
+    assert!(rm.is_running());
     assert!(
-        restored
-            .state
-            .movie_bytes
-            .contains_key("C:\\GAME\\INTRO.AVI"),
+        restored.state.movies.contains("C:\\GAME\\INTRO.AVI"),
         "cold restore rehydrates immutable AVI bytes from Tree"
     );
+
+    // Cold restore without the AVI in Tree must fail cleanly as corrupt.
+    let mut host_missing = Headless::new();
+    let mut missing = Machine::new(&STUB, &mut host_missing).expect("missing machine");
+    missing.load_stub().expect("stub");
+    assert!(missing.restore_v2(&snap).is_err());
 }
 
 #[test]
@@ -962,5 +944,240 @@ fn directmusic_state_and_file_backed_styles_round_trip_through_llsnap_v2() {
     let mut missing = Machine::new(&STUB, &mut host_missing).expect("machine");
     missing.load_stub().expect("stub");
     missing.state.mixer.open_synth(Synth::new(bank));
+    assert!(missing.restore_v2(&snap).is_err());
+}
+
+fn synthetic_iv50_avi_with_payload(frames: usize, junk_bytes: usize) -> Vec<u8> {
+    let chunk = |id: &[u8; 4], body: &[u8]| {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    };
+    let list = |kind: &[u8; 4], parts: &[Vec<u8>]| {
+        let mut body = kind.to_vec();
+        for p in parts {
+            body.extend_from_slice(p);
+        }
+        chunk(b"LIST", &body)
+    };
+
+    let mut strh_v = vec![0u8; 56];
+    strh_v[0..4].copy_from_slice(b"vids");
+    strh_v[4..8].copy_from_slice(b"IV50");
+    strh_v[20..24].copy_from_slice(&1u32.to_le_bytes());
+    strh_v[24..28].copy_from_slice(&15u32.to_le_bytes());
+    strh_v[32..36].copy_from_slice(&(frames as u32).to_le_bytes());
+    let mut strf_v = vec![0u8; 40];
+    strf_v[0..4].copy_from_slice(&40u32.to_le_bytes());
+    strf_v[4..8].copy_from_slice(&16u32.to_le_bytes());
+    strf_v[8..12].copy_from_slice(&16u32.to_le_bytes());
+    strf_v[14..16].copy_from_slice(&24u16.to_le_bytes());
+    strf_v[16..20].copy_from_slice(b"IV50");
+    let strl_v = list(b"strl", &[chunk(b"strh", &strh_v), chunk(b"strf", &strf_v)]);
+
+    let mut strh_a = vec![0u8; 56];
+    strh_a[0..4].copy_from_slice(b"auds");
+    strh_a[20..24].copy_from_slice(&4u32.to_le_bytes());
+    strh_a[24..28].copy_from_slice(&(22_050u32 * 4).to_le_bytes());
+    strh_a[44..48].copy_from_slice(&4u32.to_le_bytes());
+    let mut strf_a = vec![0u8; 16];
+    strf_a[0..2].copy_from_slice(&1u16.to_le_bytes());
+    strf_a[2..4].copy_from_slice(&2u16.to_le_bytes());
+    strf_a[4..8].copy_from_slice(&22_050u32.to_le_bytes());
+    strf_a[8..12].copy_from_slice(&(22_050u32 * 4).to_le_bytes());
+    strf_a[12..14].copy_from_slice(&4u16.to_le_bytes());
+    strf_a[14..16].copy_from_slice(&16u16.to_le_bytes());
+    let strl_a = list(b"strl", &[chunk(b"strh", &strh_a), chunk(b"strf", &strf_a)]);
+
+    let hdrl = list(b"hdrl", &[strl_v, strl_a]);
+    let mut movi_parts = Vec::new();
+    let pcm: Vec<u8> = (0..400usize).map(|i| ((i * 37) ^ 0x5a) as u8).collect();
+    movi_parts.push(chunk(b"01wb", &pcm));
+    for _ in 0..frames {
+        movi_parts.push(chunk(b"00dc", &[]));
+    }
+    let movi = list(b"movi", &movi_parts);
+    let mut riff = b"AVI ".to_vec();
+    riff.extend_from_slice(&hdrl);
+    if junk_bytes > 0 {
+        let junk: Vec<u8> = (0..junk_bytes).map(|i| ((i * 19) ^ 0xa5) as u8).collect();
+        riff.extend_from_slice(&chunk(b"JUNK", &junk));
+    }
+    riff.extend_from_slice(&movi);
+    chunk(b"RIFF", &riff)
+}
+
+#[test]
+fn amstream_movie_snapshot_omits_raw_bytes_and_cold_restores_bit_exact() {
+    use lego_legacy_core::com::S_OK;
+    use lego_legacy_core::guest::GuestMem;
+    use lego_legacy_core::win32::amstream::{
+        self, DIRECT_DRAW_MEDIA_STREAM, DIRECT_DRAW_STREAM_SAMPLE, MULTI_MEDIA_STREAM,
+    };
+    use lego_legacy_core::win32::Ctx;
+
+    let avi_bytes = synthetic_iv50_avi_with_payload(4, 262_144);
+    let (mut m, _host) = machine_at(4);
+    m.state.current_directory = "C:\\Game".to_owned();
+    m.tree.declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
+
+    let with_ctx = |m: &mut Machine, f: &dyn Fn(&mut Ctx<'_>) -> u32| -> u32 {
+        let mut log = lego_legacy_core::runlog::RunLog::create(
+            "amstream-snap",
+            lego_legacy_core::cli::Trace::Off,
+        )
+        .expect("log");
+        let dir = log.dir().to_path_buf();
+        let mut ctx = Ctx {
+            cpu: &mut m.cpu,
+            mem: &mut m.arena,
+            state: &mut m.state,
+            title: &STUB,
+            log: &mut log,
+            tree: &mut m.tree,
+            modules: &mut m.modules,
+            clock_millis: m.clock.millis(),
+            boundary: &mut m.boundary,
+            call_guest: None,
+            float_answer: None,
+            answer_is_the_call_s: false,
+        };
+        let res = f(&mut ctx);
+        drop(log);
+        let _ = std::fs::remove_dir_all(dir);
+        res
+    };
+    let call_com = |m: &mut Machine,
+                    iface: &'static lego_legacy_core::com::Interface,
+                    slot: usize,
+                    this: u32,
+                    args: &[u32]|
+     -> u32 {
+        let f = iface.method(slot).expect("method").run;
+        with_ctx(m, &|ctx| f(ctx, this, args).expect("com call"))
+    };
+    let player = with_ctx(&mut m, &|ctx| amstream::create(ctx).expect("create player"));
+
+    // Write MSPID_PrimaryVideo GUID (a35ff56a-9fda-11d0-8fdf-00c04fd9189d) and wide path.
+    let guid_at = m.state.heap.alloc(16);
+    let mspid_video: [u8; 16] = [
+        0x6a, 0xf5, 0x5f, 0xa3, 0xda, 0x9f, 0xd0, 0x11, 0x8f, 0xdf, 0x00, 0xc0, 0x4f, 0xd9, 0x18,
+        0x9d,
+    ];
+    m.arena.write(guid_at, &mspid_video).unwrap();
+    let out_at = m.state.heap.alloc(16);
+    let name_at = m.state.heap.alloc(64);
+    let wide: Vec<u8> = "intro.avi\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    m.arena.write(name_at, &wide).unwrap();
+
+    // AddMediaStream (slot 15), OpenFile (slot 16), CreateSample (slot 13), SetState(RUN) (slot 7), Update (slot 6).
+    assert_eq!(
+        call_com(
+            &mut m,
+            &MULTI_MEDIA_STREAM,
+            15,
+            player,
+            &[0, guid_at, 0, out_at]
+        ),
+        S_OK
+    );
+    let video_stream = m.arena.read_u32(out_at).unwrap();
+    assert_eq!(
+        call_com(&mut m, &MULTI_MEDIA_STREAM, 16, player, &[name_at, 0]),
+        S_OK
+    );
+    assert_eq!(
+        call_com(
+            &mut m,
+            &DIRECT_DRAW_MEDIA_STREAM,
+            13,
+            video_stream,
+            &[0, 0, 0, out_at]
+        ),
+        S_OK
+    );
+    let sample = m.arena.read_u32(out_at).unwrap();
+    assert_eq!(call_com(&mut m, &MULTI_MEDIA_STREAM, 7, player, &[1]), S_OK);
+    assert_eq!(
+        call_com(&mut m, &DIRECT_DRAW_STREAM_SAMPLE, 6, sample, &[0, 0, 0, 0]),
+        S_OK
+    );
+
+    let snap = m.snapshot_v2().expect("snapshot v2");
+    assert!(
+        snap.len() < avi_bytes.len(),
+        "amstream snapshot must omit raw AVI bytes: snap={} bytes >= raw_avi={} bytes",
+        snap.len(),
+        avi_bytes.len()
+    );
+
+    let digest_at_snap = m.state_digest();
+    let mut host2 = Headless::new();
+    let mut restored = Machine::new(&STUB, &mut host2).expect("cold machine");
+    restored.load_stub().expect("stub");
+    restored
+        .tree
+        .declare("C:\\GAME\\INTRO.AVI", avi_bytes.clone());
+    restored.restore_v2(&snap).expect("cold restore v2");
+    assert_eq!(restored.state_digest(), digest_at_snap);
+    assert!(
+        restored.state.movies.contains("C:\\GAME\\INTRO.AVI"),
+        "cold restore rehydrates amstream movie bytes via MovieStore"
+    );
+
+    // Stepping frame 1 on both original and cold-restored machines must remain bit-exact.
+    assert_eq!(
+        call_com(&mut m, &DIRECT_DRAW_STREAM_SAMPLE, 6, sample, &[0, 0, 0, 0]),
+        S_OK
+    );
+    assert_eq!(
+        call_com(
+            &mut restored,
+            &DIRECT_DRAW_STREAM_SAMPLE,
+            6,
+            sample,
+            &[0, 0, 0, 0]
+        ),
+        S_OK
+    );
+    assert_eq!(restored.state_digest(), m.state_digest());
+
+    // Live restore sweeps movies opened after the snapshot while keeping cached pre-snapshot ones.
+    let extra_avi = synthetic_iv50_avi_with_payload(2, 4096);
+    m.tree.declare("C:\\GAME\\EXTRA.AVI", extra_avi);
+    let extra_player = with_ctx(&mut m, &|ctx| amstream::create(ctx).expect("extra player"));
+    let extra_name_at = m.state.heap.alloc(64);
+    let extra_wide: Vec<u8> = "extra.avi\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    m.arena.write(extra_name_at, &extra_wide).unwrap();
+    assert_eq!(
+        call_com(
+            &mut m,
+            &MULTI_MEDIA_STREAM,
+            16,
+            extra_player,
+            &[extra_name_at, 0]
+        ),
+        S_OK
+    );
+    assert!(m.state.movies.contains("C:\\GAME\\EXTRA.AVI"));
+    m.restore_v2_live(&snap).expect("live restore");
+    assert!(!m.state.movies.contains("C:\\GAME\\EXTRA.AVI"));
+    assert!(m.state.movies.contains("C:\\GAME\\INTRO.AVI"));
+    assert_eq!(m.state_digest(), digest_at_snap);
+
+    // Cold restore without the AVI in Tree must fail cleanly as corrupt.
+    let mut host_missing = Headless::new();
+    let mut missing = Machine::new(&STUB, &mut host_missing).expect("missing machine");
+    missing.load_stub().expect("stub");
     assert!(missing.restore_v2(&snap).is_err());
 }

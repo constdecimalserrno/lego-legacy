@@ -5,6 +5,11 @@ One heading per version, newest first. What each part of core's version means is
 
 ## 1.2.0 — 2026-10-21
 
+Shared `core::movie` extraction (`MovieStore` + `MoviePlayer`) eliminating `amstream`/`dshow` duplication and `amstream` `LLSNAP v2` snapshot bloat (`core/src/{lib,movie,machine}.rs`, `core/src/win32/{mod,amstream,dshow,avifile}.rs`, `core/tests/{shims,snapshots}.rs`, #404), preserving every wall/log string verbatim with zero guest drift:
+
+- **`MovieStore` (`core/src/movie.rs`, `core/src/win32/{mod,avifile}.rs`, `core/src/machine.rs`):** Replaces raw `State::movie_bytes` and `machine.rs`'s manual per-subsystem rehydration loops with a deduplicated `Rc<[u8]>` cache keyed by canonicalized upper-case guest path, single `resolve_for_restore` rehydration path, `Rc::strong_count`-based `evict_unused`, and unified `State::rehydrate_movies(&mut self.tree)` covering `avi_files`, `filter_graphs`, and `players` (with chunk-bounds validation on restore).
+- **`MoviePlayer` (`core/src/movie.rs`, `core/src/win32/{amstream,dshow}.rs`):** Unifies Indeo 5 (`IV50`) decoding, declared-clock timing, `Mixer` PCM sync, RGB565 blitting (removing `dshow`'s sideways call into `amstream::write_rgb565`), and key-rehydrated `LLSNAP v2` `Snap` (storing the guest path key and playback/decoder state while omitting raw AVI bytes, eliminating `amstream::Movie`'s raw `bytes: Vec<u8>` snapshot bloat) + `rehydrate`, thinning `amstream.rs` and `dshow.rs` to COM adapters over `core::movie`.
+
 Single-source `CursorModel` extraction & capability-driven `/watch` (`core/src/control/{cursor,mod,timeline,bus,snapshot,observe,ws,json,meta,spectator,watch.html}`, #409), strictly outside guest state with zero `LLSNAP v2` or guest determinism changes:
 
 - **Dedicated `CursorModel` (`core/src/control/cursor.rs`):** Extracts `hw_pointer`, `visual_cursor`, `pointer_shown`, `cursor_blank`, `mouse_mode`, `pointer_speed`, `frame_size`, and `owed_delta` plus coordinate clamping/translation, `SoftwareRelative` hover-arrival click-move planning, owed-delta payback, and unified `reconcile_flip`/`reconcile_restore` out of `Timeline`, `bus.rs`, and `snapshot.rs` so `Timeline` remains a pure discrete action scheduler.

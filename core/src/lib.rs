@@ -25,6 +25,7 @@ pub mod iv32;
 pub mod iv50;
 pub mod loader;
 pub mod machine;
+pub mod movie;
 pub mod msv1;
 pub mod pe;
 pub mod png;

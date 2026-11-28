@@ -367,9 +367,9 @@ pub struct State {
     /// The movies a title has opened through AVIFile, by the file object it
     /// holds (#151).
     pub avi_files: BTreeMap<u32, avifile::File>,
-    /// The bytes of each movie file a title has opened through AVIFile, by its
-    /// path as the machine reads it: one copy, however often it is opened.
-    pub movie_bytes: BTreeMap<String, std::rc::Rc<[u8]>>,
+    /// Deduplicated cache of open movie file bytes shared across `amstream`,
+    /// `dshow`, and `avifile`, rehydrated from `Tree` on snapshot restore.
+    pub movies: crate::movie::MovieStore,
     /// The frame getters a title has opened on their streams, by the getter
     /// it holds.
     pub frame_getters: BTreeMap<u32, avifile::Getter>,
@@ -527,7 +527,7 @@ impl State {
             players: BTreeMap::new(),
             filter_graphs: BTreeMap::new(),
             avi_files: BTreeMap::new(),
-            movie_bytes: BTreeMap::new(),
+            movies: crate::movie::MovieStore::default(),
             frame_getters: BTreeMap::new(),
             cd: winmm::CdAudio::default(),
             midi: None,
@@ -1193,6 +1193,41 @@ impl State {
     /// Seed a declared key, as a title's installer would have left it.
     pub fn declare_registry(&mut self, path: &str, name: &str, kind: u32, bytes: Vec<u8>) {
         self.set_registry_value(path, name, kind, bytes);
+    }
+
+    /// Whether one of this title's own movies is playing right now.
+    #[must_use]
+    pub fn movie_running(&self) -> bool {
+        self.players.values().any(amstream::Player::is_running)
+            || self
+                .filter_graphs
+                .values()
+                .any(dshow::FilterGraph::is_running)
+    }
+
+    /// Rehydrate all open AVIFile, DirectShow, and AMMultiMediaStream movie
+    /// buffers from `self.movies` / `tree` after an `LLSNAP v2` restore, and
+    /// sweep any cached entries no longer referenced by restored state.
+    pub(crate) fn rehydrate_movies(
+        &mut self,
+        tree: &mut crate::install::Tree,
+    ) -> Result<(), crate::snap::SnapError> {
+        let store = &mut self.movies;
+        for file in self.avi_files.values_mut() {
+            file.rehydrate(store, tree)?;
+        }
+        for graph in self.filter_graphs.values_mut() {
+            if let Some(movie) = &mut graph.movie {
+                movie.rehydrate(store, tree)?;
+            }
+        }
+        for player in self.players.values_mut() {
+            if let Some(movie) = &mut player.movie {
+                movie.rehydrate(store, tree)?;
+            }
+        }
+        store.evict_unused();
+        Ok(())
     }
 
     /// The handle a module already has, if it has one.
@@ -2517,7 +2552,7 @@ impl crate::snap::Snap for State {
             players,
             filter_graphs,
             avi_files,
-            movie_bytes: _,
+            movies: _,
             frame_getters,
             cd,
             midi,

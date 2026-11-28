@@ -3,10 +3,8 @@
 //!
 //! Rock Raiders makes an `AMMultiMediaStream`, opens its movie, and asks for
 //! each frame in turn by updating a sample that wraps a surface of its own
-//! (#9). The filter graph a real system would build underneath is not here:
-//! the file is read by [`crate::avi`], its pictures by [`crate::iv50`], and
-//! each one lands in the guest's surface when the declared clock says it is
-//! due.
+//! (#9). Playback, Indeo 5 decoding, declared-clock timing, and `Mixer` PCM
+//! sync live in [`crate::movie::MoviePlayer`]; this module is the COM adapter.
 
 use super::{ComState, Ctx, State};
 use crate::com::{
@@ -14,6 +12,7 @@ use crate::com::{
 };
 use crate::cpu::Stop;
 use crate::guest::GuestMem;
+use crate::movie::{MoviePlayer, OpenError, StepError};
 
 const MSPID_PRIMARY_VIDEO: &str = "a35ff56a-9fda-11d0-8fdf-00c04fd9189d";
 const MSPID_PRIMARY_AUDIO: &str = "a35ff56b-9fda-11d0-8fdf-00c04fd9189d";
@@ -32,43 +31,16 @@ const E_POINTER: u32 = 0x8000_4003;
 pub struct Player {
     video_stream: u32,
     audio_stream: u32,
-    pub movie: Option<Movie>,
+    pub movie: Option<MoviePlayer>,
 }
 
-/// One movie a title has opened.
-pub struct Movie {
-    pub name: String,
-    bytes: Vec<u8>,
-    avi: crate::avi::Avi,
-    video: usize,
-    decoder: crate::iv50::Decoder,
-    picture: crate::iv50::Picture,
-    /// The next video chunk a sample update will show.
-    next: usize,
-    /// The declared millisecond the stream was set running, while it runs.
-    running_since: Option<u64>,
-}
-
-impl crate::snap::Snap for Movie {
-    fn snap(&mut self, v: &mut dyn crate::snap::Visitor) {
-        let Self {
-            name,
-            bytes,
-            avi,
-            video,
-            decoder,
-            picture,
-            next,
-            running_since,
-        } = self;
-        v.string(name);
-        v.byte_vec(bytes);
-        avi.snap(v);
-        v.usize(video);
-        decoder.snap(v);
-        picture.snap(v);
-        v.usize(next);
-        crate::snap::snap_option(v, running_since, |r, v| v.u64(r));
+impl Player {
+    /// Whether this player currently has a running movie.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.movie
+            .as_ref()
+            .is_some_and(|m| m.running_since().is_some())
     }
 }
 
@@ -81,42 +53,7 @@ impl crate::snap::Snap for Player {
         } = self;
         v.u32(video_stream);
         v.u32(audio_stream);
-        crate::snap::snap_option_with(
-            v,
-            movie,
-            || Movie {
-                name: String::new(),
-                bytes: Vec::new(),
-                avi: crate::avi::Avi::default(),
-                video: 0,
-                decoder: crate::iv50::Decoder::new(),
-                picture: crate::iv50::Picture::default(),
-                next: 0,
-                running_since: None,
-            },
-            |m, v| m.snap(v),
-        );
-    }
-}
-
-impl Movie {
-    /// When frame `n` is due, in declared milliseconds after the start.
-    fn due(&self, n: usize) -> u64 {
-        self.avi.streams[self.video].due_millis(n)
-    }
-
-    fn frames(&self) -> usize {
-        self.avi.streams[self.video].chunks.len()
-    }
-
-    /// The movie's sound track, decoded for the mix, if it has one.
-    fn sound(&self) -> Result<Option<Vec<i16>>, Stop> {
-        self.avi
-            .decode_audio(&self.bytes)
-            .map_err(|e| Stop::NotWritten {
-                what: format!("IAMMultiMediaStream::SetState: {}: {e}", self.name),
-                caller: 0,
-            })
+        crate::snap::snap_option_with(v, movie, MoviePlayer::empty_for_snap, |m, v| m.snap(v));
     }
 }
 
@@ -215,14 +152,14 @@ pub fn create(ctx: &mut Ctx<'_>) -> Result<u32, Stop> {
     Ok(object)
 }
 
-fn movie<'a>(ctx: &'a Ctx<'_>, player: u32) -> Option<&'a Movie> {
+fn movie<'a>(ctx: &'a Ctx<'_>, player: u32) -> Option<&'a MoviePlayer> {
     ctx.state.players.get(&player)?.movie.as_ref()
 }
 
 fn movie_mut(
     players: &mut std::collections::BTreeMap<u32, Player>,
     player: u32,
-) -> Option<&mut Movie> {
+) -> Option<&mut MoviePlayer> {
     players.get_mut(&player)?.movie.as_mut()
 }
 
@@ -293,51 +230,47 @@ fn open_file(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
         // carries a Win32 one.
         return Ok(0x8007_0015);
     }
-    let Some(bytes) = ctx.open_guest_file(&name) else {
-        ctx.log.line(&format!("movie {name} missing"));
-        // VFW_E_NOT_FOUND.
-        return Ok(0x8004_0216);
+    let abs = ctx.absolute(&name);
+    let movie = match MoviePlayer::open(name.clone(), &abs, &mut ctx.state.movies, ctx.tree) {
+        Ok(movie) => movie,
+        Err(OpenError::Missing) => {
+            ctx.log.line(&format!("movie {name} missing"));
+            // VFW_E_NOT_FOUND.
+            return Ok(0x8004_0216);
+        }
+        Err(OpenError::Parse(e)) => {
+            return Err(Stop::NotWritten {
+                what: format!("IAMMultiMediaStream::OpenFile: {name}: {e}"),
+                caller: 0,
+            });
+        }
+        Err(OpenError::NoVideo) => {
+            return Err(Stop::NotWritten {
+                what: format!("IAMMultiMediaStream::OpenFile: {name} has no video"),
+                caller: 0,
+            });
+        }
+        Err(OpenError::UnsupportedCodec(codec)) => {
+            return Err(Stop::NotWritten {
+                what: format!(
+                    "IAMMultiMediaStream::OpenFile: {name} is {}, which nothing here decodes",
+                    String::from_utf8_lossy(&codec)
+                ),
+                caller: 0,
+            });
+        }
     };
-    let avi = crate::avi::parse(&bytes).map_err(|e| Stop::NotWritten {
-        what: format!("IAMMultiMediaStream::OpenFile: {name}: {e}"),
-        caller: 0,
-    })?;
-    let video = avi
-        .streams
-        .iter()
-        .position(crate::avi::Stream::is_video)
-        .ok_or_else(|| Stop::NotWritten {
-            what: format!("IAMMultiMediaStream::OpenFile: {name} has no video"),
-            caller: 0,
-        })?;
-    let codec = avi.streams[video].compression();
-    if !codec.eq_ignore_ascii_case(b"IV50") {
-        return Err(Stop::NotWritten {
-            what: format!(
-                "IAMMultiMediaStream::OpenFile: {name} is {}, which nothing here decodes",
-                String::from_utf8_lossy(&codec)
-            ),
-            caller: 0,
-        });
-    }
-    let (width, height) = avi.streams[video].picture_size();
-    let movie = Movie {
-        name: name.clone(),
-        bytes,
-        avi,
-        video,
-        decoder: crate::iv50::Decoder::new(),
-        picture: crate::iv50::Picture::default(),
-        next: 0,
-        running_since: None,
-    };
+    let (width, height) = movie.picture_size();
     ctx.log.line(&format!(
         "movie {name} opened: {width}x{height} IV50, {} frames",
         movie.frames()
     ));
     if let Some(player) = ctx.state.players.get_mut(&this) {
         player.movie = Some(movie);
+    } else {
+        drop(movie);
     }
+    ctx.state.movies.evict_unused();
     Ok(S_OK)
 }
 
@@ -372,7 +305,9 @@ fn release_stream(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, St
         let now = ctx.declared_millis();
         ctx.state.mixer.stop(this, now * 1_000_000);
         if let Some(movie) = ctx.state.players.remove(&this).and_then(|p| p.movie) {
-            ctx.log.line(&format!("movie {} let go of", movie.name));
+            ctx.log.line(&format!("movie {} let go of", movie.name()));
+            drop(movie);
+            ctx.state.movies.evict_unused();
         }
     }
     Ok(left)
@@ -381,28 +316,25 @@ fn release_stream(ctx: &mut Ctx<'_>, this: u32, _args: &[u32]) -> Result<u32, St
 fn set_state(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let now = ctx.declared_millis();
     let running = args[0] == 1;
-    let Some(movie) = movie_mut(&mut ctx.state.players, this) else {
+    let state = &mut *ctx.state;
+    let Some(movie) = movie_mut(&mut state.players, this) else {
         return Ok(S_OK);
     };
-    let starting = running && movie.running_since.is_none();
-    // A stream set running again carries on from the frame it stopped at, so
-    // its start is put back by however far it had got.
-    let since = now.saturating_sub(movie.due(movie.next));
-    movie.running_since = running.then_some(movie.running_since.unwrap_or(since));
-    let line = format!(
-        "movie {} {}",
-        movie.name,
-        if running { "running" } else { "stopped" }
-    );
-    // The movie's sound starts with it, through the machine's one mix, and
-    // stops when it is stopped.
-    let sound = if starting { movie.sound()? } else { None };
-    ctx.log.line(&line);
-    if let Some(samples) = sound {
-        ctx.state.mixer.play(this, samples, since * 1_000_000);
-    } else if !running {
-        ctx.state.mixer.stop(this, now * 1_000_000);
+    if running {
+        movie
+            .start(this, now, &mut state.mixer)
+            .map_err(|e| Stop::NotWritten {
+                what: format!("IAMMultiMediaStream::SetState: {}: {e}", movie.name()),
+                caller: 0,
+            })?;
+    } else {
+        movie.stop(this, now, &mut state.mixer);
     }
+    ctx.log.line(&format!(
+        "movie {} {}",
+        movie.name(),
+        if running { "running" } else { "stopped" }
+    ));
     Ok(S_OK)
 }
 
@@ -414,7 +346,7 @@ fn get_format(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(movie) = movie(ctx, owner) else {
         return Ok(MS_E_NOSTREAM);
     };
-    let (width, height) = movie.avi.streams[movie.video].picture_size();
+    let (width, height) = movie.picture_size();
     let depth = ctx.state.display_mode.2;
     for at in [args[0], args[2]] {
         if at != 0 {
@@ -451,8 +383,7 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     if args[1] != 0 {
         let read = |o: u32| ctx.mem.read_u32(args[1] + o).map_err(Stop::Fault);
         let (left, top, right, bottom) = (read(0)?, read(4)?, read(8)?, read(12)?);
-        let size = movie(ctx, owner).map(|m| m.avi.streams[m.video].picture_size());
-        let (width, height) = size.unwrap_or((0, 0));
+        let (width, height) = movie(ctx, owner).map_or((0, 0), MoviePlayer::picture_size);
         if left != 0 || top != 0 || right < width || bottom < height {
             return Err(Stop::NotWritten {
                 what: format!(
@@ -468,7 +399,7 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
         let Some(movie) = movie(ctx, owner) else {
             return Ok(MS_E_NOSTREAM);
         };
-        let (width, height) = movie.avi.streams[movie.video].picture_size();
+        let (width, height) = movie.picture_size();
         let depth = ctx.state.display_mode.2;
         let surface = super::ddraw::make_surface(ctx, width, height, depth)?.0;
         // The stream sample owns this implicitly created surface; `GetSurface`
@@ -491,90 +422,7 @@ fn create_sample(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop
     Ok(S_OK)
 }
 
-fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
-    // Update(flags, event, apc, apc data). Only the blocking form: the call
-    // returns once the next frame is in the surface.
-    if args[0] != 0 {
-        return Err(Stop::NotWritten {
-            what: format!("IDirectDrawStreamSample::Update: flags {:#x}", args[0]),
-            caller: 0,
-        });
-    }
-    let Some(ComState::StreamSample { owner, surface }) =
-        ctx.state.com(this).map(|o| o.state.clone())
-    else {
-        return Ok(MS_E_NOSTREAM);
-    };
-    let now = ctx.declared_millis();
-    let Some(movie) = movie_mut(&mut ctx.state.players, owner) else {
-        return Ok(MS_E_NOSTREAM);
-    };
-    let Some(since) = movie.running_since else {
-        return Ok(MS_E_NOTRUNNING);
-    };
-    if movie.next >= movie.frames() {
-        return Ok(MS_S_ENDOFSTREAM);
-    }
-    // A blocking update waits for its frame, and on the declared machine
-    // waiting is declared time passing.
-    let due = since + movie.due(movie.next);
-    if due > now {
-        ctx.state.waited_millis += due - now;
-    }
-    let (at, len) = movie.avi.streams[movie.video].chunks[movie.next];
-    let index = movie.next;
-    movie.next += 1;
-    if len > 0 {
-        movie
-            .decoder
-            .decode(&movie.bytes[at..at + len], &mut movie.picture)
-            .map_err(|e| Stop::NotWritten {
-                what: format!(
-                    "IDirectDrawStreamSample::Update: {} frame {index}: {e}",
-                    movie.name
-                ),
-                caller: 0,
-            })?;
-    }
-    let picture = std::mem::take(&mut movie.picture);
-    let result = put_picture(ctx, &picture, surface);
-    if let Some(movie) = movie_mut(&mut ctx.state.players, owner) {
-        movie.picture = picture;
-    }
-    result?;
-    Ok(S_OK)
-}
-
-/// Write a decoded `iv50::Picture` into a guest RGB565 surface buffer.
-pub(super) fn write_rgb565(
-    mem: &mut crate::guest::Arena,
-    picture: &crate::iv50::Picture,
-    pixels: u32,
-    width: u32,
-    height: u32,
-    pitch: u32,
-) -> Result<(), Stop> {
-    let w = (width as usize).min(picture.width);
-    let h = (height as usize).min(picture.height);
-    let mut row = vec![0u8; w * 2];
-    for y in 0..h {
-        for x in 0..w {
-            let (r, g, b) = picture.rgb(x, y);
-            let pixel = (u16::from(r >> 3) << 11) | (u16::from(g >> 2) << 5) | u16::from(b >> 3);
-            row[x * 2..x * 2 + 2].copy_from_slice(&pixel.to_le_bytes());
-        }
-        mem.write(pixels + y as u32 * pitch, &row)
-            .map_err(Stop::Fault)?;
-    }
-    Ok(())
-}
-
-/// Write a decoded picture into a guest surface, in the surface's format.
-fn put_picture(
-    ctx: &mut Ctx<'_>,
-    picture: &crate::iv50::Picture,
-    surface: u32,
-) -> Result<(), Stop> {
+fn surface_rgb565_target(ctx: &Ctx<'_>, surface: u32) -> Result<(u32, u32, u32, u32), Stop> {
     let Some(ComState::Surface {
         pixels,
         width,
@@ -596,7 +444,56 @@ fn put_picture(
             caller: 0,
         });
     }
-    write_rgb565(ctx.mem, picture, pixels, width, height, pitch)
+    Ok((pixels, width, height, pitch))
+}
+
+fn update(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
+    // Update(flags, event, apc, apc data). Only the blocking form: the call
+    // returns once the next frame is in the surface.
+    if args[0] != 0 {
+        return Err(Stop::NotWritten {
+            what: format!("IDirectDrawStreamSample::Update: flags {:#x}", args[0]),
+            caller: 0,
+        });
+    }
+    let Some(ComState::StreamSample { owner, surface }) =
+        ctx.state.com(this).map(|o| o.state.clone())
+    else {
+        return Ok(MS_E_NOSTREAM);
+    };
+    let now = ctx.declared_millis();
+    let wait_ms = {
+        let Some(movie) = movie(ctx, owner) else {
+            return Ok(MS_E_NOSTREAM);
+        };
+        let Some(deadline) = movie.next_deadline_millis(0) else {
+            return Ok(MS_E_NOTRUNNING);
+        };
+        if !movie.has_next() {
+            return Ok(MS_S_ENDOFSTREAM);
+        }
+        deadline.saturating_sub(now)
+    };
+    // A blocking update waits for its frame, and on the declared machine
+    // waiting is declared time passing.
+    ctx.state.waited_millis += wait_ms;
+    let (pixels, width, height, pitch) = surface_rgb565_target(ctx, surface)?;
+    let Some(movie) = movie_mut(&mut ctx.state.players, owner) else {
+        return Ok(MS_E_NOSTREAM);
+    };
+    movie
+        .step_rgb565(ctx.mem, pixels, width, height, pitch)
+        .map_err(|e| match e {
+            StepError::Decode { index, error } => Stop::NotWritten {
+                what: format!(
+                    "IDirectDrawStreamSample::Update: {} frame {index}: {error}",
+                    movie.name()
+                ),
+                caller: 0,
+            },
+            StepError::Fault(fault) => Stop::Fault(fault),
+        })?;
+    Ok(S_OK)
 }
 
 fn get_surface(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -637,23 +534,9 @@ fn get_duration(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop>
     let Some(movie) = movie(ctx, this) else {
         return Ok(MS_E_NOSTREAM);
     };
-    let millis = movie.due(movie.frames());
+    let millis = movie.duration_millis();
     write_stream_time(ctx, args[0], millis)?;
     Ok(S_OK)
-}
-
-impl State {
-    /// Whether one of this title's own movies is playing right now.
-    #[must_use]
-    pub fn movie_running(&self) -> bool {
-        self.players
-            .values()
-            .any(|p| p.movie.as_ref().is_some_and(|m| m.running_since.is_some()))
-            || self
-                .filter_graphs
-                .values()
-                .any(super::dshow::FilterGraph::is_running)
-    }
 }
 
 fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
@@ -662,9 +545,7 @@ fn get_time(ctx: &mut Ctx<'_>, this: u32, args: &[u32]) -> Result<u32, Stop> {
     let Some(movie) = movie(ctx, this) else {
         return Ok(MS_E_NOSTREAM);
     };
-    let millis = movie
-        .running_since
-        .map_or(0, |since| now.saturating_sub(since));
+    let millis = movie.elapsed_millis(now);
     write_stream_time(ctx, args[0], millis)?;
     Ok(S_OK)
 }

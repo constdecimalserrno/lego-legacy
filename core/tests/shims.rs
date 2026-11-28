@@ -3195,8 +3195,8 @@ fn a_movie_opened_again_is_held_once_and_a_huge_picture_is_a_wall() {
             Ok(0)
         );
     }
-    assert_eq!(m.state.movie_bytes.len(), 1);
-    let bytes = m.state.movie_bytes.values().next().expect("one copy");
+    assert_eq!(m.state.movies.len(), 1);
+    let bytes = m.state.movies.get(MOVIE).expect("one copy");
     assert_eq!(
         std::rc::Rc::strong_count(bytes),
         3,
